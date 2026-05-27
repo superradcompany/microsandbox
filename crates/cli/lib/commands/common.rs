@@ -12,7 +12,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct SandboxOpts {
     /// Name for the sandbox. Auto-generated if omitted.
     #[arg(short, long)]
@@ -46,11 +46,13 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
-    /// Grace period the existing sandbox gets after SIGTERM before it
-    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
-    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    /// Timeout the existing sandbox gets after SIGTERM before it is
+    /// SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its
+    /// own. An expired timeout force-kills the prior sandbox; the
+    /// `create` call still proceeds.
     #[arg(long, value_name = "DURATION")]
-    pub replace_with_grace: Option<String>,
+    pub replace_with_timeout: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -61,14 +63,22 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
-    /// Register an inline script in the sandbox (NAME=BODY). The body is
-    /// taken literally as the script content. Available at `/.msb/scripts/<name>`
-    /// and on `PATH`.
+    /// Register a shell snippet as a named script (NAME=BODY). The body
+    /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
+    /// are preserved verbatim. The snippet is wrapped with a shebang derived
+    /// from `--shell` (default `/bin/sh`) and made executable at
+    /// `/.msb/scripts/<name>`; the directory is on `PATH`.
     #[arg(long, value_name = "NAME=BODY")]
     pub script: Vec<String>,
 
+    /// Register exact inline script contents (NAME=BODY). No escape decoding
+    /// or shebang is added, so the caller must include a `#!` line if the
+    /// script should be directly executable.
+    #[arg(long, value_name = "NAME=BODY")]
+    pub script_raw: Vec<String>,
+
     /// Register a script from a host file (NAME:PATH). Same destination as
-    /// `--script`; the file's contents are read at launch time.
+    /// `--script`; the file's contents are read verbatim at launch time.
     #[arg(long, value_name = "NAME:PATH")]
     pub script_path: Vec<String>,
 
@@ -114,6 +124,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
+    /// Writable overlay upper size for OCI images (e.g. 4G, 8192M).
+    #[arg(long = "oci-upper-size", value_name = "SIZE")]
+    pub oci_upper_size: Option<String>,
+
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long)]
     pub log_level: Option<String>,
@@ -128,29 +142,20 @@ pub struct SandboxOpts {
     pub idle_timeout: Option<String>,
 
     // --- Networking (requires "net" feature) ---
-    /// Forward a host port to the sandbox (HOST:GUEST or HOST:GUEST/udp).
+    /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
 
-    /// Disable all network access. Sugar for `--net-default-egress deny`
-    /// with no rules.
+    /// Disable all network access by default. Sugar for `--net-default deny`.
+    /// Combine with `--net-rule allow@<target>` entries to build an
+    /// allowlist; without rules, the guest has no network reachability.
     #[cfg(feature = "net")]
-    #[arg(long = "no-net")]
+    #[arg(
+        long = "no-net",
+        conflicts_with_all = ["net_default", "net_default_egress", "net_default_ingress"]
+    )]
     pub no_net: bool,
-
-    /// Deny egress to a domain. Equivalent to a `deny Domain("...")`
-    /// policy rule appended after any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain", value_name = "NAME")]
-    pub deny_domain: Vec<String>,
-
-    /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
-    /// Equivalent to a `deny DomainSuffix("...")` rule appended after
-    /// any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
-    pub deny_domain_suffix: Vec<String>,
 
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
@@ -169,18 +174,45 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
 
+    /// IPv4 pool used for per-sandbox /30 guest subnets. Default: 172.16.0.0/12.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv4-pool", value_name = "CIDR")]
+    pub net_ipv4_pool: Option<String>,
+
+    /// IPv6 pool used for per-sandbox /64 guest prefixes. Default: fd42:6d73:62::/48.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
+    pub net_ipv6_pool: Option<String>,
+
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
-    /// Examples:
-    ///   --net-rule "allow@public"
-    ///   --net-rule "deny@198.51.100.5,allow@public"
-    ///   --net-rule "allow:ingress@private"
-    ///   --net-rule "allow@example.com:tcp:443"
+    /// Target kinds: IPs/CIDRs, domains (`example.com`), domain suffixes
+    /// (`*.example.com` shorthand or `suffix=example.com`), and groups
+    /// (`public`, `private`, `multicast`, ...). Suffixes must be at
+    /// least two labels (e.g. `*.example.com`, not `*.com`).
+    ///
+    /// Examples: --net-rule "allow@public"
+    /// --net-rule "deny@198.51.100.5,allow@public"
+    /// --net-rule "allow:ingress@private"
+    /// --net-rule "allow@example.com:tcp:443"
+    /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
     #[arg(long = "net-rule", value_name = "TOKENS")]
     pub net_rule: Vec<String>,
+
+    /// Default action for traffic in both directions that doesn't match
+    /// any `--net-rule`. Sets egress and ingress symmetrically; use
+    /// `--net-default-egress` / `--net-default-ingress` to set them
+    /// independently.
+    #[cfg(feature = "net")]
+    #[arg(
+        long = "net-default",
+        value_name = "ACTION",
+        conflicts_with_all = ["net_default_egress", "net_default_ingress"],
+    )]
+    pub net_default: Option<String>,
 
     /// Default action for egress traffic that doesn't match any
     /// `--net-rule`. Default: deny (with an implicit allow@public rule
@@ -252,7 +284,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate).
+    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
     #[cfg(feature = "net")]
     #[arg(long)]
     pub on_secret_violation: Option<String>,
@@ -273,6 +305,7 @@ impl SandboxOpts {
             || !self.env.is_empty()
             || !self.tmpfs.is_empty()
             || !self.script.is_empty()
+            || !self.script_raw.is_empty()
             || !self.script_path.is_empty()
             || self.entrypoint.is_some()
             || self.init.is_some()
@@ -281,6 +314,7 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
+            || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some();
@@ -288,12 +322,11 @@ impl SandboxOpts {
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
             || self.no_net
-            || !self.deny_domain.is_empty()
-            || !self.deny_domain_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
             || !self.net_rule.is_empty()
+            || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
             || self.max_connections.is_some()
@@ -335,11 +368,13 @@ pub fn apply_sandbox_opts(
         builder = builder.workdir(workdir);
     }
     if let Some(ref shell) = opts.shell {
+        validate_shell(shell)?;
         builder = builder.shell(shell);
     }
-    if let Some(ref grace) = opts.replace_with_grace {
-        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
-        builder = builder.replace_with_grace(d);
+    if let Some(ref timeout) = opts.replace_with_timeout {
+        let d =
+            parse_duration(timeout).map_err(|e| anyhow::anyhow!("--replace-with-timeout: {e}"))?;
+        builder = builder.replace_with_timeout(d);
     } else if opts.replace {
         builder = builder.replace();
     }
@@ -366,7 +401,12 @@ pub fn apply_sandbox_opts(
     }
 
     // --- Scripts ---
-    for (name, content) in collect_scripts(&opts.script, &opts.script_path)? {
+    for (name, content) in collect_scripts(
+        opts.shell.as_deref(),
+        &opts.script,
+        &opts.script_raw,
+        &opts.script_path,
+    )? {
         builder = builder.script(name, content);
     }
 
@@ -382,6 +422,10 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
+    }
+    if let Some(ref size) = opts.oci_upper_size {
+        let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
+        builder = builder.oci_upper_size(size_mib);
     }
 
     // --- Handoff init ---
@@ -432,16 +476,106 @@ pub fn apply_sandbox_opts(
 }
 
 /// Parse a volume spec and apply it to the builder.
+///
+/// Accepts: `SRC:DST[,ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
+///
+/// SRC and DST may contain commas — the parser splits on `:` first to
+/// separate `SRC` from `DST[,opts]`, and only then treats commas inside the
+/// DST portion as option separators. Duplicate option keys are rejected.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let (source, guest) = spec
+    use microsandbox::sandbox::{HostPermissions, StatVirtualization};
+
+    let (source, guest_and_opts) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest"))?;
 
-    if source.starts_with('/') || source.starts_with("./") || source.starts_with("../") {
-        Ok(builder.volume(guest, |m| m.bind(source)))
-    } else {
-        Ok(builder.volume(guest, |m| m.named(source)))
+    let (guest, options) = match guest_and_opts.split_once(',') {
+        Some((g, o)) => (g, Some(o)),
+        None => (guest_and_opts, None),
+    };
+
+    let mut readonly = false;
+    let mut stat_virt: Option<StatVirtualization> = None;
+    let mut host_perms: Option<HostPermissions> = None;
+    let mut seen_ro = false;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            match opt {
+                "ro" | "rw" => {
+                    if seen_ro {
+                        anyhow::bail!("volume option `ro`/`rw` specified more than once");
+                    }
+                    seen_ro = true;
+                    readonly = opt == "ro";
+                }
+                _ => {
+                    let (key, value) = opt.split_once('=').ok_or_else(|| {
+                        anyhow::anyhow!("volume option {opt:?} must be key=value")
+                    })?;
+                    match key {
+                        "stat-virt" => {
+                            if seen_stat_virt {
+                                anyhow::bail!("volume option `stat-virt` specified more than once");
+                            }
+                            seen_stat_virt = true;
+                            stat_virt = Some(match value {
+                                "strict" => StatVirtualization::Strict,
+                                "relaxed" => StatVirtualization::Relaxed,
+                                "off" => StatVirtualization::Off,
+                                other => anyhow::bail!(
+                                    "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                                ),
+                            });
+                        }
+                        "host-perms" => {
+                            if seen_host_perms {
+                                anyhow::bail!(
+                                    "volume option `host-perms` specified more than once"
+                                );
+                            }
+                            seen_host_perms = true;
+                            host_perms = Some(match value {
+                                "private" => HostPermissions::Private,
+                                "mirror" => HostPermissions::Mirror,
+                                other => anyhow::bail!(
+                                    "invalid host-perms {other:?} (expected private|mirror)"
+                                ),
+                            });
+                        }
+                        other => anyhow::bail!("unknown volume option {other:?}"),
+                    }
+                }
+            }
+        }
     }
+
+    let is_path = microsandbox_utils::looks_like_local_path_text(source);
+    let source = source.to_string();
+    let guest = guest.to_string();
+    Ok(builder.volume(guest, move |mut m| {
+        m = if is_path {
+            m.bind(&source)
+        } else {
+            m.named(&source)
+        };
+        if readonly {
+            m = m.readonly();
+        }
+        if let Some(sv) = stat_virt {
+            m = m.stat_virtualization(sv);
+        }
+        if let Some(hp) = host_perms {
+            m = m.host_permissions(hp);
+        }
+        m
+    }))
 }
 
 /// Apply network-related options to the builder (requires "net" feature).
@@ -454,37 +588,12 @@ fn apply_network_opts(
 
     // Port mappings.
     for port_str in &opts.port {
-        let (host, guest, udp) = parse_port(port_str)?;
+        let (bind, host, guest, udp) = parse_port_mapping(port_str)?;
         builder = if udp {
-            builder.port_udp(host, guest)
+            builder.port_udp_bind(bind, host, guest)
         } else {
-            builder.port(host, guest)
+            builder.port_bind(bind, host, guest)
         };
-    }
-
-    // Disable networking. `--no-net` is mutually exclusive with the
-    // policy-shaping flags: it kills the guest's network interface
-    // entirely, so any rule or default action would be dead code and
-    // is almost certainly a user mistake. Reject the combination at
-    // parse time with a helpful migration hint.
-    if opts.no_net {
-        let mut conflicts: Vec<&'static str> = Vec::new();
-        if !opts.net_rule.is_empty() {
-            conflicts.push("--net-rule");
-        }
-        if opts.net_default_egress.is_some() {
-            conflicts.push("--net-default-egress");
-        }
-        if opts.net_default_ingress.is_some() {
-            conflicts.push("--net-default-ingress");
-        }
-        if !conflicts.is_empty() {
-            anyhow::bail!(
-                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
-                conflicts.join(" / "),
-            );
-        }
-        builder = builder.disable_network();
     }
 
     // Secrets.
@@ -494,14 +603,16 @@ fn apply_network_opts(
     }
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = !opts.deny_domain.is_empty()
-        || !opts.deny_domain_suffix.is_empty()
-        || opts.no_dns_rebind_protection
+    let has_network_config = opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
         || !opts.net_rule.is_empty()
+        || opts.no_net
+        || opts.net_default.is_some()
         || opts.net_default_egress.is_some()
         || opts.net_default_ingress.is_some()
+        || opts.net_ipv4_pool.is_some()
+        || opts.net_ipv6_pool.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -523,12 +634,28 @@ fn apply_network_opts(
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = build_network_policy(
             &opts.net_rule,
+            opts.no_net,
+            opts.net_default.as_deref(),
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
-            &opts.deny_domain,
-            &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
+        let ipv4_pool = opts
+            .net_ipv4_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv4Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let ipv6_pool = opts
+            .net_ipv6_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
         let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
@@ -558,11 +685,19 @@ fn apply_network_opts(
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
             }
+            if let Some(pool) = ipv4_pool {
+                n = n.ipv4_pool(pool);
+            }
+            if let Some(pool) = ipv6_pool {
+                n = n.ipv6_pool(pool);
+            }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(action);
+                n = n.on_secret_violation(|_| {
+                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+                });
             }
 
             // TLS configuration.
@@ -648,43 +783,35 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     }
 }
 
-/// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
-/// and the bulk-deny flags. Returns `None` when no flag is set.
-/// Multiple `--net-rule` invocations concatenate in argv order.
+/// Assemble a [`NetworkPolicy`] from `--net-rule`, `--net-default*`,
+/// and `--no-net`. Returns `None` when no flag is set. Multiple
+/// `--net-rule` invocations concatenate in argv order.
+///
+/// `--no-net` desugars to `--net-default deny`; clap rejects combining
+/// it with the explicit defaults, so the four default-source params are
+/// mutually exclusive on the caller side.
 #[cfg(feature = "net")]
 fn build_network_policy(
     rule_args: &[String],
+    no_net: bool,
+    default_both: Option<&str>,
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
-    deny_domains: &[String],
-    deny_domain_suffixes: &[String],
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use anyhow::Context;
-    use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
+    use microsandbox_network::policy::{Action, NetworkPolicy};
 
     use crate::net_rule::parse_rule_list;
 
-    let no_rule_flags =
-        rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none();
-    let no_block_flags = deny_domains.is_empty() && deny_domain_suffixes.is_empty();
-    if no_rule_flags && no_block_flags {
+    let no_flags = rule_args.is_empty()
+        && !no_net
+        && default_both.is_none()
+        && default_egress.is_none()
+        && default_ingress.is_none();
+    if no_flags {
         return Ok(None);
     }
 
     let mut rules = Vec::new();
-
-    // Prepend bulk-deny flags so they outrank later allow rules.
-    for d in deny_domains {
-        let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
-        rules.push(Rule::deny_egress(Destination::Domain(domain)));
-    }
-    for s in deny_domain_suffixes {
-        let suffix: DomainName = s
-            .parse()
-            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
-        rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
-    }
-
     for arg in rule_args {
         let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
         rules.extend(parsed);
@@ -698,23 +825,31 @@ fn build_network_policy(
         }
     };
 
+    // `--no-net` and `--net-default` are siblings: both set egress and
+    // ingress symmetrically. clap enforces they're mutex with each
+    // other and with `--net-default-{egress,ingress}`, so at most one
+    // source resolves here.
+    let symmetric = if no_net {
+        Some(Action::Deny)
+    } else if let Some(raw) = default_both {
+        Some(parse_action("--net-default", raw)?)
+    } else {
+        None
+    };
+
     // When the user sets no defaults explicitly, fall through to
     // NetworkPolicy::public_only's defaults so behaviour stays in sync
     // with the preset.
-    //
-    // Exception: if only --deny-domain / --deny-domain-suffix were set
-    // (no --net-rule, no --net-default-*), default egress flips to
-    // Allow so the rest of the network keeps working — these flags
-    // add deny entries on top of permissive defaults.
     let preset = NetworkPolicy::public_only();
-    let default_egress = match default_egress {
-        Some(raw) => parse_action("--net-default-egress", raw)?,
-        None if no_rule_flags => Action::Allow,
-        None => preset.default_egress,
+    let default_egress = match (symmetric, default_egress) {
+        (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
+        (Some(action), None) => action,
+        (None, None) => preset.default_egress,
     };
-    let default_ingress = match default_ingress {
-        Some(raw) => parse_action("--net-default-ingress", raw)?,
-        None => preset.default_ingress,
+    let default_ingress = match (symmetric, default_ingress) {
+        (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
+        (Some(action), None) => action,
+        (None, None) => preset.default_ingress,
     };
 
     Ok(Some(NetworkPolicy {
@@ -724,9 +859,17 @@ fn build_network_policy(
     }))
 }
 
-/// Parse a port spec: `HOST:GUEST` or `HOST:GUEST/udp` or `HOST:GUEST/tcp`.
+/// Parse a port spec:
+/// - `HOST:GUEST`
+/// - `BIND_ADDR:HOST:GUEST`
+/// - `HOST:GUEST/udp`
+/// - `BIND_ADDR:HOST:GUEST/udp`
+///
+/// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
 #[cfg(feature = "net")]
-fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
+fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+    use std::net::{IpAddr, Ipv4Addr};
+
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
         (p, true)
     } else if let Some(p) = spec.strip_suffix("/tcp") {
@@ -735,9 +878,34 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         (spec, false)
     };
 
-    let (host_str, guest_str) = port_part
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("port must be in format HOST:GUEST[/udp]"))?;
+    let (bind, host_str, guest_str) = if let Some(rest) = port_part.strip_prefix('[') {
+        let (bind_str, after_bracket) = rest.split_once("]:").ok_or_else(|| {
+            anyhow::anyhow!("IPv6 port bind must be in format [ADDR]:HOST:GUEST[/udp]")
+        })?;
+        let (host_str, guest_str) = after_bracket
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("port must be in format [ADDR]:HOST:GUEST[/udp]"))?;
+        let bind = bind_str
+            .parse::<IpAddr>()
+            .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+        (bind, host_str, guest_str)
+    } else {
+        let parts: Vec<_> = port_part.split(':').collect();
+        match parts.as_slice() {
+            [host_str, guest_str] => (IpAddr::V4(Ipv4Addr::LOCALHOST), *host_str, *guest_str),
+            [bind_str, host_str, guest_str] => {
+                let bind = bind_str
+                    .parse::<IpAddr>()
+                    .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+                (bind, *host_str, *guest_str)
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "port must be in format HOST:GUEST[/udp] or BIND_ADDR:HOST:GUEST[/udp]"
+                ));
+            }
+        }
+    };
 
     let host: u16 = host_str
         .trim()
@@ -748,7 +916,7 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid guest port: {guest_str}"))?;
 
-    Ok((host, guest, udp))
+    Ok((bind, host, guest, udp))
 }
 
 /// Parse a secret spec: `ENV=VALUE@HOST`.
@@ -778,14 +946,15 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
 fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::ViolationAction;
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s.as_deref() {
         None => Ok(None),
         Some("block") => Ok(Some(ViolationAction::Block)),
         Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
         Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
+        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
         ),
     }
 }
@@ -800,22 +969,36 @@ fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>)> {
     }
 }
 
-/// Resolve `--script` / `--script-path` specs into a deduped list of
-/// `(name, content)` pairs preserving argv order. Inline entries are
-/// processed first, then path entries; duplicate names across either
-/// flag are rejected.
-fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+/// Resolve `--script` / `--script-raw` / `--script-path` specs into a
+/// deduped list of `(name, content)` pairs preserving argv order:
+/// inline shell snippets first, then raw inline, then path-backed.
+/// Duplicate names across any source are rejected. `shell` is used to
+/// generate the shebang for `--script` entries only.
+fn collect_scripts(
+    shell: Option<&str>,
+    scripts: &[String],
+    raw_scripts: &[String],
+    paths: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
     use std::collections::HashSet;
 
-    let mut out = Vec::with_capacity(inline.len() + paths.len());
+    let mut out = Vec::with_capacity(scripts.len() + raw_scripts.len() + paths.len());
     let mut seen: HashSet<String> = HashSet::new();
 
-    for spec in inline {
-        let (name, content) = parse_script_inline(spec)?;
+    for spec in scripts {
+        let (name, body) = parse_script_spec(spec, "script")?;
         if !seen.insert(name.clone()) {
             anyhow::bail!("script name '{name}' specified more than once");
         }
-        out.push((name, content));
+        let decoded = decode_script_escapes(&body);
+        out.push((name, wrap_shell_script(shell, &decoded)));
+    }
+    for spec in raw_scripts {
+        let (name, body) = parse_script_spec(spec, "script-raw")?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, body));
     }
     for spec in paths {
         let (name, content) = parse_script_path(spec)?;
@@ -827,16 +1010,89 @@ fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(S
     Ok(out)
 }
 
-/// Parse an inline script spec: `NAME=BODY`. Splits on the first `=` so
-/// bodies may freely contain `=`.
-fn parse_script_inline(spec: &str) -> anyhow::Result<(String, String)> {
+/// Parse a `NAME=BODY` spec for `--script` / `--script-raw`. Splits on
+/// the first `=` so bodies may freely contain `=`. `flag` is used in
+/// the error message.
+fn parse_script_spec(spec: &str, flag: &str) -> anyhow::Result<(String, String)> {
     let (name, body) = spec
         .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME=BODY"))?;
+        .ok_or_else(|| anyhow::anyhow!("{flag} must be in format NAME=BODY"))?;
     if name.is_empty() {
         anyhow::bail!("script name must not be empty (NAME=BODY)");
     }
     Ok((name.to_string(), body.to_string()))
+}
+
+/// Reject `--shell` values that would corrupt the generated shebang
+/// line or fail to exec interactively. Whitespace (including newlines)
+/// and NUL break shebang parsing; an empty string or `/` leave no
+/// interpreter for the kernel to run.
+fn validate_shell(shell: &str) -> anyhow::Result<()> {
+    if shell.is_empty() {
+        anyhow::bail!("--shell must not be empty");
+    }
+    if shell.chars().any(|c| c.is_whitespace() || c == '\0') {
+        anyhow::bail!(
+            "--shell must not contain whitespace or NUL (got {shell:?}); \
+             use --script-raw or --script-path if you need a custom shebang"
+        );
+    }
+    if shell == "/" {
+        anyhow::bail!("--shell {shell:?} is not a valid interpreter");
+    }
+    Ok(())
+}
+
+/// Build the shebang line for a `--script` snippet. Absolute paths
+/// (`/bin/bash`) are used directly; bare names (`bash`) go through
+/// `/usr/bin/env`.
+fn script_shebang(shell: Option<&str>) -> String {
+    let shell = shell.unwrap_or("/bin/sh");
+    if shell.contains('/') {
+        format!("#!{shell}")
+    } else {
+        format!("#!/usr/bin/env {shell}")
+    }
+}
+
+/// Decode the small set of backslash escapes supported by `--script`.
+/// Unknown escapes (e.g. `\d`) are preserved verbatim so regexes and
+/// paths survive untouched.
+fn decode_script_escapes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Wrap a decoded shell snippet with the generated shebang and ensure
+/// a trailing newline so the file is well-formed.
+fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
+    let mut script = script_shebang(shell);
+    script.push('\n');
+    script.push_str(body);
+    if !script.ends_with('\n') {
+        script.push('\n');
+    }
+    script
 }
 
 /// Parse a script-from-file spec: `NAME:PATH` and read file content.
@@ -979,7 +1235,207 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use microsandbox::sandbox::{HostPermissions, RootfsSource, StatVirtualization, VolumeMount};
+
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_violation_action_accepts_passthrough() {
+        let action = parse_violation_action(&Some("passthrough".to_string()))
+            .expect("passthrough should parse")
+            .expect("action should be present");
+
+        assert!(matches!(
+            action,
+            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_oci_upper_size() {
+        let opts = SandboxOpts {
+            oci_upper_size: Some("8G".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        match config.image {
+            RootfsSource::Oci(oci) => assert_eq!(oci.upper_size_mib, Some(8192)),
+            other => panic!("expected Oci, got {other:?}"),
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: apply_volume / -v parser
+    //----------------------------------------------------------------------------------------------
+
+    /// Apply a single `-v` spec to a fresh builder and return the resulting mount.
+    async fn build_one(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, spec).unwrap();
+        let config = builder.build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_bind_defaults_to_strict_private() {
+        let mount = build_one("/host:/guest").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Strict));
+                assert!(matches!(host_permissions, HostPermissions::Private));
+                assert!(!readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_ro_flag() {
+        let mount = build_one("/host:/guest,ro").await;
+        match mount {
+            VolumeMount::Bind { readonly, .. } => assert!(readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_stat_virt_relaxed() {
+        let mount = build_one("/host:/guest,ro,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_host_perms_mirror() {
+        let mount = build_one("./project:/work,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                host_permissions, ..
+            } => {
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_combined_policies() {
+        // Off + Mirror is rejected at build; use Relaxed + Mirror instead.
+        let mount = build_one("/mnt:/host,ro,stat-virt=relaxed,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_off_plus_mirror_at_sandbox_build() {
+        // The Off+Mirror conflict surfaces at SandboxBuilder.build() time
+        // because MountBuilder.build() is deferred inside the volume closure.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, "/mnt:/host,stat-virt=off,host-perms=mirror")
+            .expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_named() {
+        let mount = build_one("mycache:/data,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Named {
+                name,
+                stat_virtualization,
+                ..
+            } => {
+                assert_eq!(name, "mycache");
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    fn expect_apply_volume_err(spec: &str) -> String {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        match apply_volume(builder, spec) {
+            Ok(_) => panic!("expected error for spec {spec:?}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=bogus");
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_host_perms() {
+        let err = expect_apply_volume_err("/host:/guest,host-perms=public");
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_option_key() {
+        let err = expect_apply_volume_err("/host:/guest,bogus=1");
+        assert!(err.contains("unknown volume option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_duplicate_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=strict,stat-virt=off");
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_comma_in_source_path() {
+        // Embedded commas in host paths could silently inject mount options
+        // through the spawn → VM wire format. The SDK rejects them at build
+        // time with a clear error; the CLI surfaces that error verbatim.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        // apply_volume itself defers to MountBuilder which only validates at
+        // SandboxBuilder::build() — so the parse step succeeds and the
+        // rejection comes from the subsequent build.
+        let builder =
+            apply_volume(builder, "/path/with,comma:/dst").expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain ','"),
+            "got: {err}"
+        );
+    }
 
     /// Write a temp file with unique name, return its path.
     fn write_temp(content: &str) -> PathBuf {
@@ -992,39 +1448,213 @@ mod tests {
         path
     }
 
-    // --- parse_script_inline ---
+    async fn build_volume(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    // --- apply_volume ---
+
+    #[tokio::test]
+    async fn apply_volume_dot_source_is_bind_mount() {
+        match build_volume(".:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from("."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_dot_dot_source_is_bind_mount() {
+        match build_volume("..:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from(".."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_plain_source_is_named_mount() {
+        match build_volume("data:/mnt").await {
+            VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "data");
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_rejects_path_like_named_source() {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let err = apply_volume(builder, "data/../../secrets:/mnt")
+            .unwrap()
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("volume name"));
+    }
+
+    // --- parse_script_spec ---
 
     #[test]
-    fn inline_basic() {
-        let (name, body) = parse_script_inline("greet=echo hi").unwrap();
+    fn spec_basic() {
+        let (name, body) = parse_script_spec("greet=echo hi", "script").unwrap();
         assert_eq!(name, "greet");
         assert_eq!(body, "echo hi");
     }
 
     #[test]
-    fn inline_body_may_contain_equals() {
-        let (name, body) = parse_script_inline("kv=K=V test: a=b=c").unwrap();
+    fn spec_body_may_contain_equals() {
+        let (name, body) = parse_script_spec("kv=K=V test: a=b=c", "script").unwrap();
         assert_eq!(name, "kv");
         assert_eq!(body, "K=V test: a=b=c");
     }
 
     #[test]
-    fn inline_empty_body_is_allowed() {
-        let (name, body) = parse_script_inline("noop=").unwrap();
+    fn spec_empty_body_is_allowed() {
+        let (name, body) = parse_script_spec("noop=", "script").unwrap();
         assert_eq!(name, "noop");
         assert_eq!(body, "");
     }
 
     #[test]
-    fn inline_missing_equals_errors() {
-        let err = parse_script_inline("noequals").unwrap_err();
+    fn spec_missing_equals_errors() {
+        let err = parse_script_spec("noequals", "script").unwrap_err();
         assert!(err.to_string().contains("NAME=BODY"), "got: {err}");
+        assert!(err.to_string().starts_with("script "), "got: {err}");
     }
 
     #[test]
-    fn inline_empty_name_errors() {
-        let err = parse_script_inline("=echo hi").unwrap_err();
+    fn spec_empty_name_errors() {
+        let err = parse_script_spec("=echo hi", "script").unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn spec_flag_label_propagates() {
+        let err = parse_script_spec("noequals", "script-raw").unwrap_err();
+        assert!(err.to_string().starts_with("script-raw "), "got: {err}");
+    }
+
+    // --- escape decoding / shebang / wrapping ---
+
+    #[test]
+    fn decode_known_escapes() {
+        assert_eq!(decode_script_escapes(r"a\nb"), "a\nb");
+        assert_eq!(decode_script_escapes(r"a\tb"), "a\tb");
+        assert_eq!(decode_script_escapes(r"a\rb"), "a\rb");
+        assert_eq!(decode_script_escapes(r"a\\b"), "a\\b");
+        assert_eq!(decode_script_escapes(r#"a\"b"#), "a\"b");
+        assert_eq!(decode_script_escapes(r"a\'b"), "a'b");
+    }
+
+    #[test]
+    fn decode_unknown_escapes_preserved() {
+        assert_eq!(decode_script_escapes(r"a\db"), r"a\db");
+        assert_eq!(decode_script_escapes(r"\x \y \z"), r"\x \y \z");
+    }
+
+    #[test]
+    fn decode_trailing_backslash_preserved() {
+        assert_eq!(decode_script_escapes(r"foo\"), r"foo\");
+    }
+
+    #[test]
+    fn shebang_absolute_path_used_directly() {
+        assert_eq!(script_shebang(Some("/bin/bash")), "#!/bin/bash");
+        assert_eq!(
+            script_shebang(Some("/usr/local/bin/zsh")),
+            "#!/usr/local/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn shebang_bare_name_goes_through_env() {
+        assert_eq!(script_shebang(Some("bash")), "#!/usr/bin/env bash");
+        assert_eq!(script_shebang(Some("zsh")), "#!/usr/bin/env zsh");
+    }
+
+    #[test]
+    fn shebang_defaults_to_bin_sh() {
+        assert_eq!(script_shebang(None), "#!/bin/sh");
+    }
+
+    #[test]
+    fn wrap_appends_trailing_newline() {
+        assert_eq!(
+            wrap_shell_script(None, "echo hello"),
+            "#!/bin/sh\necho hello\n"
+        );
+    }
+
+    #[test]
+    fn validate_shell_rejects_bad_shapes() {
+        assert!(validate_shell("").is_err());
+        assert!(validate_shell("/").is_err());
+        assert!(validate_shell("bash -x").is_err());
+        assert!(validate_shell("bash\nrm -rf /").is_err());
+        assert!(validate_shell("bash\trm").is_err());
+        assert!(validate_shell("bash\0").is_err());
+        assert!(validate_shell(" bash").is_err());
+        assert!(validate_shell("bash ").is_err());
+    }
+
+    #[test]
+    fn validate_shell_accepts_valid_shapes() {
+        assert!(validate_shell("bash").is_ok());
+        assert!(validate_shell("sh").is_ok());
+        assert!(validate_shell("/bin/sh").is_ok());
+        assert!(validate_shell("/bin/bash").is_ok());
+        assert!(validate_shell("/usr/local/bin/zsh").is_ok());
+    }
+
+    #[test]
+    fn wrap_does_not_double_trailing_newline() {
+        assert_eq!(
+            wrap_shell_script(None, "echo hello\n"),
+            "#!/bin/sh\necho hello\n"
+        );
+    }
+
+    // --- collect_scripts (duplicate logic) ---
+
+    // --- parse_port_mapping ---
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_without_bind_defaults_to_loopback() {
+        let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_ipv4_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
+        assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_bracketed_ipv6_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("[::]:8080:80/tcp").unwrap();
+        assert_eq!(bind, "::".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
     }
 
     // --- parse_script_path ---
@@ -1062,34 +1692,94 @@ mod tests {
     // --- collect_scripts (duplicate logic) ---
 
     #[test]
-    fn collect_inline_only_preserves_order() {
-        let inline = vec!["a=echo a".to_string(), "b=echo b".to_string()];
-        let out = collect_scripts(&inline, &[]).unwrap();
+    fn collect_script_wraps_with_default_shebang() {
+        let scripts = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
         assert_eq!(
             out,
-            vec![
-                ("a".to_string(), "echo a".to_string()),
-                ("b".to_string(), "echo b".to_string()),
-            ]
+            vec![("start".to_string(), "#!/bin/sh\necho hello\n".to_string())]
         );
     }
 
     #[test]
-    fn collect_combines_inline_then_paths() {
-        let p = write_temp("from-file");
-        let inline = vec!["a=echo a".to_string()];
-        let paths = vec![format!("b:{}", p.display())];
-        let out = collect_scripts(&inline, &paths).unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0], ("a".to_string(), "echo a".to_string()));
-        assert_eq!(out[1], ("b".to_string(), "from-file".to_string()));
+    fn collect_script_decodes_newlines_in_body() {
+        let scripts = vec![r#"start=echo hello\npython -c "print(123)""#.to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert_eq!(
+            out[0].1,
+            "#!/bin/sh\necho hello\npython -c \"print(123)\"\n"
+        );
+    }
+
+    #[test]
+    fn collect_script_uses_absolute_shell_path() {
+        let scripts = vec!["start=echo hi".to_string()];
+        let out = collect_scripts(Some("/bin/bash"), &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/bin/bash\necho hi\n");
+    }
+
+    #[test]
+    fn collect_script_uses_env_for_bare_shell() {
+        let scripts = vec!["start=echo $BASH_VERSION".to_string()];
+        let out = collect_scripts(Some("bash"), &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/usr/bin/env bash\necho $BASH_VERSION\n");
+    }
+
+    #[test]
+    fn collect_script_raw_is_exact() {
+        let raw = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        assert_eq!(out, vec![("start".to_string(), "echo hello".to_string())]);
+    }
+
+    #[test]
+    fn collect_script_raw_preserves_escapes_literally() {
+        let raw = vec![r"start=echo hello\nworld".to_string()];
+        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        assert_eq!(out[0].1, r"echo hello\nworld");
+    }
+
+    #[test]
+    fn collect_script_path_is_exact_file_contents() {
+        let p = write_temp("#!/bin/sh\necho from-file\n");
+        let paths = vec![format!("start:{}", p.display())];
+        let out = collect_scripts(None, &[], &[], &paths).unwrap();
+        assert_eq!(out[0].1, "#!/bin/sh\necho from-file\n");
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
-    fn collect_rejects_duplicate_within_inline() {
-        let inline = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
-        let err = collect_scripts(&inline, &[]).unwrap_err();
+    fn collect_script_preserves_unknown_escapes() {
+        let scripts = vec![r"re=grep '\d\+' file".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/bin/sh\ngrep '\\d\\+' file\n");
+    }
+
+    #[test]
+    fn collect_script_always_ends_with_newline() {
+        let scripts = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert!(out[0].1.ends_with('\n'));
+    }
+
+    #[test]
+    fn collect_preserves_order_across_all_three_sources() {
+        let p = write_temp("from-file");
+        let scripts = vec!["a=echo a".to_string()];
+        let raw = vec!["b=echo b".to_string()];
+        let paths = vec![format!("c:{}", p.display())];
+        let out = collect_scripts(None, &scripts, &raw, &paths).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, "a");
+        assert_eq!(out[1], ("b".to_string(), "echo b".to_string()));
+        assert_eq!(out[2], ("c".to_string(), "from-file".to_string()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_script() {
+        let scripts = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
+        let err = collect_scripts(None, &scripts, &[], &[]).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -1103,7 +1793,7 @@ mod tests {
             format!("foo:{}", p.display()),
             format!("foo:{}", p.display()),
         ];
-        let err = collect_scripts(&[], &paths).unwrap_err();
+        let err = collect_scripts(None, &[], &[], &paths).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -1112,21 +1802,118 @@ mod tests {
     }
 
     #[test]
-    fn collect_rejects_duplicate_across_flags() {
+    fn collect_rejects_duplicate_across_all_three_sources() {
         let p = write_temp("x");
-        let inline = vec!["foo=echo a".to_string()];
+        let scripts = vec!["foo=echo a".to_string()];
+        let raw = vec!["foo=echo b".to_string()];
         let paths = vec![format!("foo:{}", p.display())];
-        let err = collect_scripts(&inline, &paths).unwrap_err();
+
+        let err = collect_scripts(None, &scripts, &raw, &[]).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
-            "got: {err}"
+            "script vs script-raw: {err}"
         );
+
+        let err = collect_scripts(None, &scripts, &[], &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "script vs script-path: {err}"
+        );
+
+        let err = collect_scripts(None, &[], &raw, &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "script-raw vs script-path: {err}"
+        );
+
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn collect_empty_inputs_ok() {
-        let out = collect_scripts(&[], &[]).unwrap();
+        let out = collect_scripts(None, &[], &[], &[]).unwrap();
         assert!(out.is_empty());
+    }
+
+    // --- build_network_policy: --net-default / --no-net ---
+
+    #[cfg(feature = "net")]
+    use microsandbox_network::policy::Action;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_flags_returns_none() {
+        let p = build_network_policy(&[], false, None, None, None).unwrap();
+        assert!(p.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_deny_sets_both_directions() {
+        let p = build_network_policy(&[], false, Some("deny"), None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+        assert!(p.rules.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_allow_sets_both_directions() {
+        let p = build_network_policy(&[], false, Some("allow"), None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Allow);
+        assert_eq!(p.default_ingress, Action::Allow);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_net_desugars_to_deny_both() {
+        let p = build_network_policy(&[], true, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_net_with_allow_rule_yields_allowlist() {
+        let rules = vec!["allow@example.com".to_string()];
+        let p = build_network_policy(&rules, true, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+        assert_eq!(p.rules.len(), 1);
+        assert_eq!(p.rules[0].action, Action::Allow);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_rejects_unknown_action() {
+        let err = build_network_policy(&[], false, Some("maybe"), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("--net-default"),
+            "expected --net-default in error, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_rule_only_uses_preset_defaults() {
+        // Without any --net-default* flag, rules apply on top of the
+        // public_only preset (deny egress, allow ingress). Verifies the
+        // "rules alone keep the preset's defaults" path now that the
+        // --deny-domain* flip-to-allow exception is gone.
+        let rules = vec!["allow@example.com".to_string()];
+        let p = build_network_policy(&rules, false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        let preset = microsandbox_network::policy::NetworkPolicy::public_only();
+        assert_eq!(p.default_egress, preset.default_egress);
+        assert_eq!(p.default_ingress, preset.default_ingress);
     }
 }

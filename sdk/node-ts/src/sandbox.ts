@@ -14,14 +14,18 @@ import { SandboxFs } from "./fs.js";
 import type { ExitStatus } from "./exit-status.js";
 import {
   LogEntry,
+  LogStream,
   type LogReadOptions,
+  type LogStreamOptions,
   logEntryFromNapi,
   logReadOptionsToNapi,
+  logStreamOptionsToNapi,
 } from "./logs.js";
 import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
+import { SandboxSsh } from "./ssh.js";
 
 /**
  * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
@@ -250,6 +254,12 @@ export class Sandbox implements AsyncDisposable {
     return new SandboxFs(this.inner.fs());
   }
 
+  // -- ssh ----------------------------------------------------------------
+
+  ssh(): SandboxSsh {
+    return new SandboxSsh(this.inner);
+  }
+
   // -- config -------------------------------------------------------------
 
   /**
@@ -275,6 +285,23 @@ export class Sandbox implements AsyncDisposable {
     const napiOpts = logReadOptionsToNapi(opts);
     const raw = await withMappedErrors(() => this.inner.logs(napiOpts));
     return raw.map(logEntryFromNapi);
+  }
+
+  /**
+   * Stream captured output as it appears, with optional follow.
+   *
+   * Backed by the same on-disk `exec.log` as {@link logs}, but
+   * yields entries lazily. Pass `{ follow: true }` to keep the
+   * stream open past current EOF and pick up new entries as they
+   * are written; otherwise the stream drains the current contents
+   * and ends. Each yielded {@link LogEntry} carries an opaque
+   * `cursor` that can be passed back via
+   * {@link LogStreamOptions.fromCursor} to resume.
+   */
+  async logStream(opts?: LogStreamOptions): Promise<LogStream> {
+    const napiOpts = logStreamOptionsToNapi(opts);
+    const raw = await withMappedErrors(() => this.inner.logStream(napiOpts));
+    return new LogStream(raw);
   }
 
   // -- metrics ------------------------------------------------------------

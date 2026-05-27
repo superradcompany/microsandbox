@@ -8,42 +8,45 @@ import "time"
 // SandboxConfig is exported for callers that prefer to build a config value
 // directly and pass it via WithConfig.
 type SandboxConfig struct {
-	Image       string
-	ImageFstype string
-	Snapshot    string
-	MemoryMiB   uint32
-	CPUs        uint8
-	Workdir     string
-	Shell       string
-	Hostname    string
+	Image           string
+	ImageFstype     string
+	OCIUpperSizeMiB uint32
+	ociUpperSizeSet bool
+	Snapshot        string
+	MemoryMiB       uint32
+	CPUs            uint8
+	Workdir         string
+	Shell           string
+	Hostname        string
 	// LibkrunfwPath overrides the host-side libkrunfw shared library used to
 	// boot this sandbox. It is a host path, not a guest path.
 	LibkrunfwPath string
 	User          string
 	Replace       bool
-	// ReplaceWithGrace, if non-nil, sets a specific grace period
-	// between SIGTERM and SIGKILL when replacing an existing sandbox.
-	// nil means "use the runtime default" (10s when Replace is set).
-	// Setting this implies Replace=true. Zero is honored — it skips
-	// SIGTERM and SIGKILLs immediately. Use WithReplaceWithGrace.
-	ReplaceWithGrace *time.Duration
-	Env              map[string]string
-	Detached         bool
-	Entrypoint       []string
-	Init             *InitConfig
-	LogLevel         LogLevel
-	QuietLogs        bool
-	Scripts          map[string]string
-	PullPolicy       PullPolicy
-	MaxDuration      time.Duration
-	IdleTimeout      time.Duration
-	RegistryAuth     *RegistryAuth
-	Ports            map[uint16]uint16 // host port → guest port (TCP)
-	PortsUDP         map[uint16]uint16 // host port → guest port (UDP)
-	Network          *NetworkConfig
-	Secrets          []SecretEntry
-	Patches          []PatchConfig
-	Volumes          map[string]MountConfig // guest path → mount config
+	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
+	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
+	// "use the runtime default" (10s when Replace is set). Setting this
+	// implies Replace=true. Zero is honored — it skips SIGTERM and
+	// SIGKILLs immediately. Use WithReplaceWithTimeout.
+	ReplaceWithTimeout *time.Duration
+	Env                map[string]string
+	Detached           bool
+	Entrypoint         []string
+	Init               *InitConfig
+	LogLevel           LogLevel
+	QuietLogs          bool
+	Scripts            map[string]string
+	PullPolicy         PullPolicy
+	MaxDuration        time.Duration
+	IdleTimeout        time.Duration
+	RegistryAuth       *RegistryAuth
+	Ports              map[uint16]uint16 // host port → guest port (TCP)
+	PortsUDP           map[uint16]uint16 // host port → guest port (UDP)
+	PortBindings       []PortBinding     // explicit bind address host→guest ports
+	Network            *NetworkConfig
+	Secrets            []SecretEntry
+	Patches            []PatchConfig
+	Volumes            map[string]MountConfig // guest path → mount config
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -52,6 +55,15 @@ type SandboxOption func(*SandboxConfig)
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
+}
+
+// WithOCIUpperSize sets the writable overlay upper size for an OCI image, in MiB.
+// It is valid only with WithImage when the image resolves to an OCI reference.
+func WithOCIUpperSize(mebibytes uint32) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.OCIUpperSizeMiB = mebibytes
+		o.ociUpperSizeSet = true
+	}
 }
 
 // WithImageDisk sets a disk image as the sandbox root filesystem and provides
@@ -70,12 +82,12 @@ func WithSnapshot(pathOrName string) SandboxOption {
 	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
 }
 
-// WithMemory sets the memory limit in MiB.
+// WithMemory sets the memory limit in MiB (default 512MiB).
 func WithMemory(mebibytes uint32) SandboxOption {
 	return func(o *SandboxConfig) { o.MemoryMiB = mebibytes }
 }
 
-// WithCPUs sets the CPU limit in whole cores.
+// WithCPUs sets the CPU limit in whole cores (default 1).
 func WithCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.CPUs = cpus }
 }
@@ -123,21 +135,21 @@ func WithUser(user string) SandboxOption {
 
 // WithReplace stops any existing sandbox with the same name before
 // creating. Sends SIGTERM, waits up to 10s for graceful exit, then
-// escalates to SIGKILL. Use WithReplaceWithGrace to set a different
-// grace period or skip SIGTERM entirely.
+// escalates to SIGKILL. Use WithReplaceWithTimeout to set a different
+// timeout or skip SIGTERM entirely.
 func WithReplace() SandboxOption {
 	return func(o *SandboxConfig) { o.Replace = true }
 }
 
-// WithReplaceWithGrace is like WithReplace but with a caller-specified
-// grace period between SIGTERM and SIGKILL. Implies WithReplace —
-// calling this alone is enough. A zero duration skips SIGTERM and
-// SIGKILLs immediately.
-func WithReplaceWithGrace(grace time.Duration) SandboxOption {
+// WithReplaceWithTimeout is like WithReplace but with a caller-specified
+// timeout between SIGTERM and SIGKILL. Implies WithReplace — calling
+// this alone is enough. A zero duration skips SIGTERM and SIGKILLs
+// immediately.
+func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.Replace = true
-		g := grace
-		o.ReplaceWithGrace = &g
+		t := timeout
+		o.ReplaceWithTimeout = &t
 	}
 }
 
@@ -236,6 +248,31 @@ func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 		for h, g := range ports {
 			o.PortsUDP[h] = g
 		}
+	}
+}
+
+// PortBinding publishes a host port on a specific host bind address.
+// Protocol defaults to TCP when empty. Use Bind "0.0.0.0" to expose the
+// published port on all IPv4 interfaces.
+type PortBinding struct {
+	Bind      string
+	HostPort  uint16
+	GuestPort uint16
+	Protocol  PortProtocol
+}
+
+// PortProtocol identifies the protocol for a published port binding.
+type PortProtocol string
+
+const (
+	PortProtocolTCP PortProtocol = "tcp"
+	PortProtocolUDP PortProtocol = "udp"
+)
+
+// WithPortBindings publishes explicit bind-address host ports into the sandbox.
+func WithPortBindings(bindings ...PortBinding) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.PortBindings = append(o.PortBindings, bindings...)
 	}
 }
 
@@ -341,6 +378,17 @@ type NetworkConfig struct {
 
 	// Ports publishes host TCP ports into the sandbox (host→guest).
 	Ports map[uint16]uint16
+
+	// PortBindings publishes host ports on explicit host bind addresses.
+	PortBindings []PortBinding
+
+	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
+	// Defaults to "172.16.0.0/12".
+	IPv4Pool string
+
+	// IPv6Pool is used to derive per-sandbox /64 guest prefixes.
+	// Defaults to "fd42:6d73:62::/48".
+	IPv6Pool string
 
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
@@ -664,6 +712,16 @@ type MountConfig struct {
 	Fstype   string
 	Readonly bool
 	SizeMiB  uint32
+
+	// StatVirtualization is the per-mount stat-virtualization policy. Only
+	// meaningful for Bind and Named mounts. Zero value preserves the
+	// conservative default (Strict).
+	StatVirtualization StatVirtualization
+
+	// HostPermissions is the per-mount host-permission propagation policy.
+	// Only meaningful for Bind and Named mounts. Zero value preserves the
+	// conservative default (Private).
+	HostPermissions HostPermissions
 }
 
 // MountKind discriminates between the four mount flavours.
@@ -684,8 +742,14 @@ const (
 func (m MountConfig) Kind() MountKind { return m.kind }
 
 // MountOptions tunes bind and named mount factories.
+//
+// StatVirtualization and HostPermissions are virtiofs-only and rejected at
+// build time if combined with a tmpfs or disk-image mount. The zero values
+// preserve the conservative defaults (Strict + Private).
 type MountOptions struct {
-	Readonly bool
+	Readonly           bool
+	StatVirtualization StatVirtualization
+	HostPermissions    HostPermissions
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -717,12 +781,24 @@ var Mount mountFactory
 
 // Bind returns a MountConfig that bind-mounts a host directory into the sandbox.
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
-	return MountConfig{kind: MountKindBind, Bind: hostPath, Readonly: opts.Readonly}
+	return MountConfig{
+		kind:               MountKindBind,
+		Bind:               hostPath,
+		Readonly:           opts.Readonly,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
 }
 
 // Named returns a MountConfig that mounts a named persistent volume.
 func (mountFactory) Named(name string, opts MountOptions) MountConfig {
-	return MountConfig{kind: MountKindNamed, Named: name, Readonly: opts.Readonly}
+	return MountConfig{
+		kind:               MountKindNamed,
+		Named:              name,
+		Readonly:           opts.Readonly,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
 }
 
 // Tmpfs returns a MountConfig that mounts an ephemeral in-memory filesystem.

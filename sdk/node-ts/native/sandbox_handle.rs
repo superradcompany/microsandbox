@@ -88,10 +88,45 @@ impl JsSandboxHandle {
         Ok(Sandbox::from_rust(inner))
     }
 
-    /// Stop the sandbox (SIGTERM).
+    /// Connect with an explicit timeout in milliseconds.
+    ///
+    /// If the sandbox doesn't respond within this window, the call
+    /// returns a typed error instead of blocking. `connect()` uses
+    /// 10_000 ms by default.
+    #[napi]
+    pub async fn connect_with_timeout(&self, timeout_ms: u32) -> Result<Sandbox> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
+        let inner = self
+            .inner
+            .connect_with_timeout(timeout)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(inner))
+    }
+
+    /// Stop the sandbox gracefully.
+    ///
+    /// Lets the sandbox finish writing any pending data to disk before
+    /// it exits, so files written inside the sandbox aren't lost across
+    /// a later restart. Waits 10_000 ms by default before force-kill;
+    /// override with `stopWithTimeout(timeoutMs)`.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await.map_err(to_napi_error)
+    }
+
+    /// Stop the sandbox gracefully with an explicit timeout in
+    /// milliseconds. If the sandbox is still running after this window,
+    /// it is force-killed. `timeoutMs == 0` force-kills immediately.
+    /// The call resolves successfully either way — it does not throw
+    /// on timeout expiry.
+    #[napi]
+    pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
+        self.inner
+            .stop_with_timeout(timeout)
+            .await
+            .map_err(to_napi_error)
     }
 
     /// Kill the sandbox (SIGKILL).
@@ -115,11 +150,26 @@ impl JsSandboxHandle {
     pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
         let rust_opts =
             crate::sandbox::log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries = self.inner.logs(&rust_opts).map_err(to_napi_error)?;
+        let entries = self.inner.logs(&rust_opts).await.map_err(to_napi_error)?;
         Ok(entries
             .into_iter()
             .map(crate::sandbox::log_entry_to_js)
             .collect())
+    }
+
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Works without starting the sandbox; with `follow: true`, the
+    /// stream picks up new entries the moment they land in
+    /// `exec.log`.
+    #[napi]
+    pub async fn log_stream(
+        &self,
+        opts: Option<LogStreamOptions>,
+    ) -> Result<crate::sandbox::JsLogStream> {
+        let rust_opts =
+            crate::sandbox::log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        crate::sandbox::spawn_log_stream(self.inner.name(), rust_opts).await
     }
 
     /// Snapshot this (stopped) sandbox under a bare name.

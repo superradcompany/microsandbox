@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
+use microsandbox_metrics::{MetricsRegistry, ReleaseMode, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
@@ -31,8 +32,18 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{DiskImageFormat, Rlimit, RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{
+        DiskImageFormat, HostPermissions, Rlimit, RootfsSource, SandboxConfig, StatVirtualization,
+        VolumeMount,
+    },
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -121,8 +132,19 @@ pub async fn spawn_sandbox(
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
-    // exposing adjacent files on the host.
+    // exposing adjacent files on the host. Done BEFORE the metrics
+    // reservation so that a staging failure does not leak a slot.
     let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
+
+    // Reserve a metrics slot before spawning. Only do this when metrics are
+    // enabled so disabled sandboxes don't pay for an entry. Failures here are
+    // surfaced as warnings — the runtime will skip the sampler if no slot is
+    // present, but the sandbox itself should still boot.
+    let metrics_reservation = if config.effective_metrics_interval().is_some() {
+        reserve_metrics_slot(config, sandbox_id)
+    } else {
+        None
+    };
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
@@ -136,6 +158,7 @@ pub async fn spawn_sandbox(
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
+        metrics_reservation.as_ref(),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -153,18 +176,39 @@ pub async fn spawn_sandbox(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Spawn the sandbox process.
-    let mut child = cmd.spawn()?;
+    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
-    let _pid = child.id().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("sandbox process exited immediately".into())
-    })?;
+    // Spawn the sandbox process. On failure, release the metrics reservation
+    // so the slot does not leak.
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(e.into());
+        }
+    };
+
+    let _pid = match child.id() {
+        Some(pid) => pid,
+        None => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(crate::MicrosandboxError::Runtime(
+                "sandbox process exited immediately".into(),
+            ));
+        }
+    };
     tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
 
     // Read the startup JSON from stdout.
-    let stdout = child.stdout.take().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
-    })?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(crate::MicrosandboxError::Runtime(
+                "failed to capture sandbox stdout".into(),
+            ));
+        }
+    };
 
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
@@ -177,10 +221,12 @@ pub async fn spawn_sandbox(
         Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             return Err(err.into());
         }
         Err(_) => {
             terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             return Err(crate::MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
@@ -191,6 +237,7 @@ pub async fn spawn_sandbox(
         Ok(info) => info,
         Err(_) => {
             let status = terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             tracing::debug!(
                 raw_line = ?line,
                 exit_status = ?status,
@@ -215,8 +262,135 @@ pub async fn spawn_sandbox(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Metrics reservation
+//--------------------------------------------------------------------------------------------------
+
+/// Slot reservation handed off to the spawned sandbox process.
+struct MetricsReservation {
+    shm_name: String,
+    slot: u32,
+    generation: u64,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Open the registry and reserve a slot for an upcoming sandbox spawn.
+///
+/// Logs and returns `None` on any failure: the spawn should still succeed
+/// (the sandbox just runs without live metrics) so a registry hiccup does
+/// not block sandbox creation.
+fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<MetricsReservation> {
+    let shm_name = config::config().metrics_registry_shm_name();
+    let capacity = config::config().metrics_registry_capacity();
+    let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::warn!(error = %err, sandbox = %config.name, "failed to open metrics registry");
+            return None;
+        }
+    };
+    let memory_limit_bytes = u64::from(config.memory_mib) * 1024 * 1024;
+    match registry.reserve(ReserveSlot {
+        sandbox_id,
+        name: &config.name,
+        memory_limit_bytes,
+    }) {
+        Ok(SlotReservation { slot, generation }) => Some(MetricsReservation {
+            shm_name,
+            slot,
+            generation,
+        }),
+        Err(err) => {
+            tracing::warn!(error = %err, sandbox = %config.name, "failed to reserve metrics slot");
+            None
+        }
+    }
+}
+
+/// Best-effort release of a reservation when spawn cannot continue.
+fn release_metrics_reservation(
+    config: &SandboxConfig,
+    reservation: Option<&MetricsReservation>,
+    mode: ReleaseMode,
+) {
+    let Some(reservation) = reservation else {
+        return;
+    };
+    let registry = match MetricsRegistry::open(&reservation.shm_name) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::debug!(error = %err, sandbox = %config.name, "release: failed to open metrics registry");
+            return;
+        }
+    };
+    if let Err(err) = registry.release(reservation.slot, reservation.generation, mode) {
+        tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    SIGCHLD_ALT_STACK_INIT
+        .get_or_try_init(|| async {
+            install_tokio_sigchld_handler()?;
+            patch_sigchld_handler_uses_alt_stack();
+            Ok::<(), crate::MicrosandboxError>(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let _ = Box::leak(Box::new(signal));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn patch_sigchld_handler_uses_alt_stack() {
+    // Go's cgo runtime requires non-Go signal handlers to use SA_ONSTACK.
+    // The caller initializes Tokio's SIGCHLD handler first, before spawning
+    // sandbox children, then this preserves the handler while adding the flag.
+    //
+    // SAFETY: sigaction is called with valid pointers to read and then rewrite
+    // the current SIGCHLD action, preserving the existing handler and mask.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return;
+        }
+
+        let mut action = action.assume_init();
+        if action.sa_flags & libc::SA_ONSTACK != 0 {
+            return;
+        }
+
+        action.sa_flags |= libc::SA_ONSTACK;
+        let _ = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn sigchld_handler_uses_alt_stack() -> bool {
+    // SAFETY: sigaction is called with a valid output pointer and a null new
+    // action pointer, which only reads the current process handler state.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return false;
+        }
+
+        action.assume_init().sa_flags & libc::SA_ONSTACK != 0
+    }
+}
 
 async fn terminate_startup_process(
     child: &mut tokio::process::Child,
@@ -244,7 +418,15 @@ async fn stage_file_mounts(
                 host,
                 guest,
                 readonly,
-            } if host.is_file() => Some((host, guest, *readonly)),
+                stat_virtualization,
+                host_permissions,
+            } if host.is_file() => Some((
+                host,
+                guest,
+                *readonly,
+                *stat_virtualization,
+                *host_permissions,
+            )),
             _ => None,
         })
         .collect();
@@ -256,7 +438,7 @@ async fn stage_file_mounts(
     let tempdir = tempfile::tempdir()?;
     let mut staged = HashMap::new();
 
-    for (host, guest, readonly) in file_mounts {
+    for (host, guest, readonly, _stat_virt, _host_perms) in file_mounts {
         // Generate a random tag to avoid collisions.
         let id: u32 = rand::rng().random();
         let tag = format!("fm_{id:08x}");
@@ -324,20 +506,41 @@ async fn stage_file_mounts(
     Ok((staged, Some(tempdir)))
 }
 
-/// Push a `--mount tag:host_path[:ro]` arg pair.
+/// Push a `--mount tag:host_path[:ro][,stat-virt=...][,host-perms=...]` arg pair.
 fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
     guest: &str,
     host_display: &impl std::fmt::Display,
     readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
+}
+
+/// Append `,stat-virt=...,host-perms=...` to a `--mount` arg when the policies
+/// deviate from the runtime defaults. Defaults are omitted to keep args tidy.
+fn append_policy_options(
+    arg: &mut String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => arg.push_str(",stat-virt=relaxed"),
+        StatVirtualization::Off => arg.push_str(",stat-virt=off"),
+    }
+    match host_permissions {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => arg.push_str(",host-perms=mirror"),
+    }
 }
 
 /// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
@@ -354,12 +557,20 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
     }
 }
 
-/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
-fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Path, readonly: bool) {
+/// Push a `--mount fm_tag:file_mount_dir[:ro][,stat-virt=...][,host-perms=...]` arg pair.
+fn push_file_mount_arg(
+    args: &mut Vec<OsString>,
+    tag: &str,
+    file_mount_dir: &Path,
+    readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
 }
@@ -497,6 +708,7 @@ fn sandbox_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    metrics_reservation: Option<&MetricsReservation>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -541,6 +753,15 @@ fn sandbox_cli_args(
             args.push(OsString::from(ms.get().to_string()));
         }
         None => args.push(OsString::from("--disable-metrics-sample")),
+    }
+
+    if let Some(reservation) = metrics_reservation {
+        args.push(OsString::from("--metrics-shm-name"));
+        args.push(OsString::from(&reservation.shm_name));
+        args.push(OsString::from("--metrics-slot"));
+        args.push(OsString::from(reservation.slot.to_string()));
+        args.push(OsString::from("--metrics-generation"));
+        args.push(OsString::from(reservation.generation.to_string()));
     }
 
     match &config.image {
@@ -611,12 +832,28 @@ fn sandbox_cli_args(
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
-                    push_file_mount_arg(&mut args, tag, file_mount_dir, *readonly);
+                    push_file_mount_arg(
+                        &mut args,
+                        tag,
+                        file_mount_dir,
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *readonly);
                 } else {
-                    push_dir_mount_arg(&mut args, guest, &host.display(), *readonly);
+                    push_dir_mount_arg(
+                        &mut args,
+                        guest,
+                        &host.display(),
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
                 }
             }
@@ -624,9 +861,18 @@ fn sandbox_cli_args(
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 let vol_path = config::config().volumes_dir().join(name);
-                push_dir_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
+                push_dir_mount_arg(
+                    &mut args,
+                    guest,
+                    &vol_path.display(),
+                    *readonly,
+                    *stat_virtualization,
+                    *host_permissions,
+                );
                 push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
             VolumeMount::Tmpfs {
@@ -803,6 +1049,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -823,10 +1070,142 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
+        super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
+            .await
+            .unwrap();
+
+        assert!(super::sigchld_handler_uses_alt_stack());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: stat-virt + host-perms encoding in --mount args
+    //----------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_omits_defaults() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        // Default Strict + Private must not show up in the wire format.
+        let mount_args: Vec<&String> = rendered
+            .windows(2)
+            .filter(|p| p[0] == "--mount")
+            .map(|p| &p[1])
+            .collect();
+        assert!(!mount_args.is_empty());
+        let m = mount_args[0];
+        assert!(
+            !m.contains("stat-virt") && !m.contains("host-perms"),
+            "default-policy mount leaked policy options into wire format: {m}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_relaxed_stat_virt() {
+        use crate::sandbox::StatVirtualization;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host-tmp", |m| {
+                m.bind("/tmp")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Relaxed)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(":ro"), "expected ro flag: {m}");
+        assert!(m.contains(",stat-virt=relaxed"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_mirror_host_perms() {
+        use crate::sandbox::HostPermissions;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/work", |m| {
+                m.bind("./project")
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",host-perms=mirror"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_both_policies_off_plus_private() {
+        // `Off + Mirror` is rejected at build time; combine `Off` with the
+        // explicit (matching default) `Private` to verify both encoders fire.
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Private)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",stat-virt=off"));
+        // host-perms=private is the default and is omitted from the wire format.
+        assert!(!m.contains("host-perms"));
+    }
+
+    #[tokio::test]
+    async fn test_off_plus_mirror_rejected_at_build_time() {
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -897,6 +1276,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         );
 
         let rendered = args
@@ -1001,6 +1381,70 @@ mod tests {
                 .any(|arg| arg == "--metrics-sample-interval-ms"),
             "should not also emit interval flag; got {rendered:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_metrics_handoff_when_provided() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(500))
+            .build()
+            .await
+            .unwrap();
+
+        let reservation = super::MetricsReservation {
+            shm_name: "/msb-met-deadbeef-v1".to_string(),
+            slot: 17,
+            generation: 99,
+        };
+
+        let rendered = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            Some(&reservation),
+        )
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|p| p == ["--metrics-shm-name", "/msb-met-deadbeef-v1"]),
+            "missing --metrics-shm-name in {rendered:?}"
+        );
+        assert!(
+            rendered.windows(2).any(|p| p == ["--metrics-slot", "17"]),
+            "missing --metrics-slot in {rendered:?}"
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|p| p == ["--metrics-generation", "99"]),
+            "missing --metrics-generation in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_omit_metrics_handoff_when_absent() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(!rendered.iter().any(|a| a == "--metrics-shm-name"));
+        assert!(!rendered.iter().any(|a| a == "--metrics-slot"));
+        assert!(!rendered.iter().any(|a| a == "--metrics-generation"));
     }
 
     #[tokio::test]
@@ -1109,7 +1553,7 @@ mod tests {
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
-            image: RootfsSource::Oci("alpine".into()),
+            image: RootfsSource::oci("alpine"),
             memory_mib: 1024,
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

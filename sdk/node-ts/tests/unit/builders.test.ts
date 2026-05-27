@@ -9,6 +9,7 @@ import {
   NetworkBuilder,
   PatchBuilder,
   Sandbox,
+  SecretBuilder,
   Stdin,
 } from "../../dist/index.js";
 
@@ -61,11 +62,17 @@ describe("MountBuilder", () => {
       host: "/host/data",
       guest: "/data",
       readonly: false,
+      statVirtualization: "strict",
+      hostPermissions: "private",
     });
   });
 
   it("builds a tmpfs mount with size and uniform readonly", () => {
-    const m = new MountBuilder("/scratch").tmpfs().size(MiB(64)).readonly().build();
+    const m = new MountBuilder("/scratch")
+      .tmpfs()
+      .size(MiB(64))
+      .readonly()
+      .build();
     expect(m).toEqual({
       kind: "tmpfs",
       guest: "/scratch",
@@ -95,16 +102,12 @@ describe("MountBuilder", () => {
   });
 
   it("rejects .format() on a non-disk mount", () => {
-    const builder = new MountBuilder("/data")
-      .bind("/host")
-      .format("qcow2");
+    const builder = new MountBuilder("/data").bind("/host").format("qcow2");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
   it("rejects .fstype() on a non-disk mount", () => {
-    const builder = new MountBuilder("/data")
-      .bind("/host")
-      .fstype("ext4");
+    const builder = new MountBuilder("/data").bind("/host").fstype("ext4");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
@@ -113,7 +116,9 @@ describe("MountBuilder", () => {
   });
 
   it("rejects fstypes containing forbidden separators", () => {
-    const builder = new MountBuilder("/data").disk("./d.raw").fstype("ext4,foo");
+    const builder = new MountBuilder("/data")
+      .disk("./d.raw")
+      .fstype("ext4,foo");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
@@ -125,6 +130,77 @@ describe("MountBuilder", () => {
   it("rejects guest paths containing : or ;", () => {
     const builder = new MountBuilder("/foo:bar").bind("/host");
     expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("defaults bind mount to strict + private when policies are not set", () => {
+    const m = new MountBuilder("/data").bind("/host/data").build();
+    expect(m.statVirtualization).toBe("strict");
+    expect(m.hostPermissions).toBe("private");
+  });
+
+  it("propagates explicit stat-virt and host-perms on a bind mount", () => {
+    const m = new MountBuilder("/work")
+      .bind("./project")
+      .statVirtualization("relaxed")
+      .hostPermissions("mirror")
+      .build();
+    expect(m).toMatchObject({
+      kind: "bind",
+      statVirtualization: "relaxed",
+      hostPermissions: "mirror",
+    });
+  });
+
+  it("propagates stat-virt + host-perms on a named volume", () => {
+    const m = new MountBuilder("/cache")
+      .named("my-cache")
+      .statVirtualization("off")
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "my-cache",
+      statVirtualization: "off",
+      hostPermissions: "private",
+    });
+  });
+
+  it("rejects unknown stat-virt strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").statVirtualization("bogus"),
+    ).toThrow(/invalid stat_virtualization/);
+  });
+
+  it("rejects unknown host-perms strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").hostPermissions("public"),
+    ).toThrow(/invalid host_permissions/);
+  });
+
+  it("rejects stat-virt on a tmpfs mount at build time", () => {
+    const builder = new MountBuilder("/scratch")
+      .tmpfs()
+      .statVirtualization("relaxed");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects host-perms on a disk mount at build time", () => {
+    const builder = new MountBuilder("/data")
+      .disk("./d.raw")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects Off + Mirror at build time", () => {
+    const builder = new MountBuilder("/data")
+      .bind("/host")
+      .statVirtualization("off")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(/Off cannot be combined with/);
+  });
+
+  it("rejects commas in bind host paths at build time", () => {
+    const builder = new MountBuilder("/data").bind("/host/with,comma");
+    expect(() => builder.build()).toThrow(/must not contain ','/);
   });
 });
 
@@ -144,11 +220,16 @@ describe("PatchBuilder", () => {
 
 describe("SandboxBuilder.build", () => {
   it("requires .image()", async () => {
-    await expect(Sandbox.builder("x").build()).rejects.toThrow(InvalidConfigError);
+    await expect(Sandbox.builder("x").build()).rejects.toThrow(
+      InvalidConfigError,
+    );
   });
 
   it("renders branded sizes back to plain numbers", async () => {
-    const cfg = await Sandbox.builder("x").image("alpine").memory(GiB(2)).build();
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .memory(GiB(2))
+      .build();
     expect(cfg.memoryMib).toBe(2048);
   });
 
@@ -215,7 +296,7 @@ describe("InterfaceOverridesBuilder", () => {
   it("constructs cleanly and accepts MTU + IPv4 + IPv6 + MAC", () => {
     const b = new InterfaceOverridesBuilder()
       .mtu(9000)
-      .ipv4("100.96.0.5")
+      .ipv4("172.16.0.5")
       .ipv6("fd42:6d73:62::5")
       .mac("aa:bb:cc:dd:ee:ff");
     expect(b).toBeInstanceOf(InterfaceOverridesBuilder);
@@ -239,10 +320,21 @@ describe("InterfaceOverridesBuilder", () => {
 
   it("valid overrides flow through NetworkBuilder.build()", () => {
     const cfg = new NetworkBuilder()
-      .interface((io) => io.mtu(9000).ipv4("100.96.0.5"))
-      .build() as { interface: { mtu: number; ipv4Address: string } };
+      .interface((io) => io.mtu(9000).ipv4("172.16.0.5"))
+      .ipv4Pool("172.31.240.0/24")
+      .ipv6Pool("fd7a:115c:a1e0:100::/56")
+      .build() as {
+      interface: {
+        mtu: number;
+        ipv4Address: string;
+        ipv4Pool: string;
+        ipv6Pool: string;
+      };
+    };
     expect(cfg.interface.mtu).toBe(9000);
-    expect(cfg.interface.ipv4Address).toBe("100.96.0.5");
+    expect(cfg.interface.ipv4Address).toBe("172.16.0.5");
+    expect(cfg.interface.ipv4Pool).toBe("172.31.240.0/24");
+    expect(cfg.interface.ipv6Pool).toBe("fd7a:115c:a1e0:100::/56");
   });
 });
 
@@ -251,12 +343,92 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     const cfg = new NetworkBuilder()
       .secretEnvSimple("API_KEY", "sk-abc", "api.example.com")
       .build() as {
-        secrets: { secrets: ReadonlyArray<{ envVar: string; placeholder: string }> };
+      secrets: {
+        secrets: ReadonlyArray<{ envVar: string; placeholder: string }>;
       };
+    };
     expect(cfg.secrets.secrets).toHaveLength(1);
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
     // Placeholder defaults to the value when omitted.
     expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
+  });
+});
+
+describe("NetworkBuilder secret passthrough", () => {
+  it("builds global passthrough violation policy", () => {
+    const cfg = new NetworkBuilder()
+      .onSecretViolation((v) =>
+        v
+          .blockAndTerminate()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
+      .build() as {
+      secrets: {
+        onViolation: {
+          passthrough: unknown[];
+        };
+      };
+    };
+
+    expect(cfg.secrets.onViolation).toEqual({
+      passthrough: [
+        { exact: "api.anthropic.com" },
+        { wildcard: "*.anthropic.com" },
+      ],
+    });
+  });
+
+  it("builds per-secret passthrough violation policy", () => {
+    const secret = new SecretBuilder()
+      .env("API_KEY")
+      .value("sk-abc")
+      .allowHost("api.github.com")
+      .onViolation((v) =>
+        v
+          .blockAndLog()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
+      .build();
+
+    expect(secret.allowedHosts).toEqual(["api.github.com"]);
+  });
+});
+
+describe("NetworkBuilder ports", () => {
+  it("keeps loopback default and supports explicit bind addresses", () => {
+    const cfg = new NetworkBuilder()
+      .port(8080, 80)
+      .portBind("0.0.0.0", 8081, 81)
+      .portUdpBind("::", 5353, 53)
+      .build() as {
+        ports: ReadonlyArray<{
+          hostBind: string;
+          hostPort: number;
+          guestPort: number;
+          protocol: "tcp" | "udp";
+        }>;
+      };
+
+    expect(cfg.ports[0]).toMatchObject({
+      hostBind: "127.0.0.1",
+      hostPort: 8080,
+      guestPort: 80,
+      protocol: "tcp",
+    });
+    expect(cfg.ports[1]).toMatchObject({
+      hostBind: "0.0.0.0",
+      hostPort: 8081,
+      guestPort: 81,
+      protocol: "tcp",
+    });
+    expect(cfg.ports[2]).toMatchObject({
+      hostBind: "::",
+      hostPort: 5353,
+      guestPort: 53,
+      protocol: "udp",
+    });
   });
 });
 

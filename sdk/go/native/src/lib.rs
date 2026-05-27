@@ -38,6 +38,7 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    net::IpAddr,
     os::raw::{c_char, c_uchar},
     path::PathBuf,
     sync::{
@@ -49,17 +50,19 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
-        logs,
+        ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
 };
-use microsandbox_network::secrets::config::ViolationAction;
+use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
+use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
@@ -93,6 +96,10 @@ type Handle = u64;
 // surprising readers who assume a single namespace.
 static NEXT_SANDBOX_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_EXEC_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_AGENT_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SSH_SERVER_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SSH_CLIENT_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SFTP_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_CANCEL_ID: AtomicU64 = AtomicU64::new(1);
 
 fn registry() -> &'static RwLock<HashMap<Handle, std::sync::Arc<Sandbox>>> {
@@ -206,6 +213,152 @@ fn remove_exec(handle: Handle) -> Result<Option<ExecEntry>, FfiError> {
 }
 
 // ---------------------------------------------------------------------------
+// Agent client registry
+// ---------------------------------------------------------------------------
+
+type AgentEntry = std::sync::Arc<AgentBridge>;
+
+fn agent_registry() -> &'static RwLock<HashMap<Handle, AgentEntry>> {
+    static AGENT_REG: OnceLock<RwLock<HashMap<Handle, AgentEntry>>> = OnceLock::new();
+    AGENT_REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_agent(agent: AgentBridge) -> Result<Handle, FfiError> {
+    let h = NEXT_AGENT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    agent_registry()
+        .write()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
+        .insert(h, std::sync::Arc::new(agent));
+    Ok(h)
+}
+
+fn get_agent(handle: Handle) -> Result<AgentEntry, FfiError> {
+    agent_registry()
+        .read()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_agent(handle: Handle) -> Result<Option<AgentEntry>, FfiError> {
+    Ok(agent_registry()
+        .write()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
+        .remove(&handle))
+}
+
+// ---------------------------------------------------------------------------
+// SSH handle registry
+// ---------------------------------------------------------------------------
+
+type SshServerEntry = std::sync::Arc<tokio::sync::Mutex<Option<SshServer>>>;
+type SshClientEntry = std::sync::Arc<tokio::sync::Mutex<Option<SshClient>>>;
+type SftpClientEntry = std::sync::Arc<tokio::sync::Mutex<Option<SftpClient>>>;
+
+fn ssh_server_registry() -> &'static RwLock<HashMap<Handle, SshServerEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SshServerEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn ssh_client_registry() -> &'static RwLock<HashMap<Handle, SshClientEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SshClientEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn sftp_client_registry() -> &'static RwLock<HashMap<Handle, SftpClientEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SftpClientEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_ssh_server(server: SshServer) -> Result<Handle, FfiError> {
+    let h = NEXT_SSH_SERVER_HANDLE.fetch_add(1, Ordering::Relaxed);
+    ssh_server_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(server))),
+        );
+    Ok(h)
+}
+
+fn remove_ssh_server(handle: Handle) -> Result<SshServerEntry, FfiError> {
+    ssh_server_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn get_ssh_server(handle: Handle) -> Result<SshServerEntry, FfiError> {
+    ssh_server_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn register_ssh_client(client: SshClient) -> Result<Handle, FfiError> {
+    let h = NEXT_SSH_CLIENT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    ssh_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(client))),
+        );
+    Ok(h)
+}
+
+fn get_ssh_client(handle: Handle) -> Result<SshClientEntry, FfiError> {
+    ssh_client_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_ssh_client(handle: Handle) -> Result<SshClientEntry, FfiError> {
+    ssh_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn register_sftp_client(client: SftpClient) -> Result<Handle, FfiError> {
+    let h = NEXT_SFTP_HANDLE.fetch_add(1, Ordering::Relaxed);
+    sftp_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(client))),
+        );
+    Ok(h)
+}
+
+fn get_sftp_client(handle: Handle) -> Result<SftpClientEntry, FfiError> {
+    sftp_client_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_sftp_client(handle: Handle) -> Result<SftpClientEntry, FfiError> {
+    sftp_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+// ---------------------------------------------------------------------------
 // Cancellation token registry
 //
 // Go allocates a cancel_id before each blocking call and registers a
@@ -296,6 +449,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
+    pub const PRE05_SANDBOX_RESTART_REQUIRED: &str = "pre05_sandbox_restart_required";
     pub const IO: &str = "io";
 }
 
@@ -353,6 +507,13 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
+            MicrosandboxError::AgentClient(
+                microsandbox::AgentClientError::Pre05SandboxRestartRequired,
+            ) => {
+                // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+                // compatibility for versions before 0.5 is no longer supported.
+                error_kind::PRE05_SANDBOX_RESTART_REQUIRED
+            }
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -377,6 +538,46 @@ unsafe fn cstr(ptr: *const c_char) -> Result<String, FfiError> {
         .to_str()
         .map(|s| s.to_owned())
         .map_err(|e| FfiError::invalid_argument(format!("invalid UTF-8: {e}")))
+}
+
+/// SAFETY: when `len > 0`, `ptr` must point to `len` readable bytes owned by
+/// the caller for the duration of this call.
+unsafe fn bytes(ptr: *const c_uchar, len: usize) -> Result<Vec<u8>, FfiError> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(FfiError::invalid_argument("null byte pointer argument"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
+}
+
+/// Heap-allocate bytes for Go. The caller owns the result and must release it
+/// with `msb_agent_free_bytes(ptr, len)`.
+fn write_agent_bytes(
+    data: Vec<u8>,
+    out_ptr: *mut *mut c_uchar,
+    out_len: *mut usize,
+) -> Result<(), FfiError> {
+    if out_ptr.is_null() || out_len.is_null() {
+        return Err(FfiError::invalid_argument("null output pointer argument"));
+    }
+    if data.is_empty() {
+        unsafe {
+            *out_ptr = std::ptr::null_mut();
+            *out_len = 0;
+        }
+        return Ok(());
+    }
+    let len = data.len();
+    let mut boxed = data.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    unsafe {
+        *out_ptr = ptr;
+        *out_len = len;
+    }
+    Ok(())
 }
 
 /// Copy `json` (plus a trailing NUL) into the caller-provided buffer.
@@ -580,6 +781,14 @@ fn default_egress() -> String {
     "egress".into()
 }
 
+fn default_host_bind() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port_protocol() -> String {
+    "tcp".into()
+}
+
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
 /// deny egress / allow ingress (matching upstream `public_only`).
@@ -632,6 +841,13 @@ struct NetworkOpts {
     /// Ports nested inside network: {host_port: guest_port}.
     #[serde(default)]
     ports: HashMap<u16, u16>,
+    /// Ports nested inside network with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
+    /// IPv4 pool used to derive per-sandbox /30 guest subnets.
+    ipv4_pool: Option<String>,
+    /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
+    ipv6_pool: Option<String>,
     max_connections: Option<usize>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
@@ -691,6 +907,7 @@ struct RegistryAuthOpts {
 struct SandboxCreateOpts {
     image: Option<String>,
     image_fstype: Option<String>,
+    oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
@@ -704,10 +921,10 @@ struct SandboxCreateOpts {
     user: Option<String>,
     #[serde(default)]
     replace: bool,
-    /// Grace period in milliseconds between SIGTERM and SIGKILL when
+    /// Timeout in milliseconds between SIGTERM and SIGKILL when
     /// replacing an existing sandbox. `Some(0)` skips SIGTERM. `None`
     /// uses the Rust SDK default when `replace` is set.
-    replace_with_grace_ms: Option<u64>,
+    replace_with_timeout_ms: Option<u64>,
     /// User-workload entrypoint override (separate from `init`, which is
     /// guest PID 1). Sent across as an array of strings.
     #[serde(default)]
@@ -736,6 +953,9 @@ struct SandboxCreateOpts {
     /// Top-level UDP ports shorthand: {host_port: guest_port}.
     #[serde(default)]
     ports_udp: HashMap<u16, u16>,
+    /// Top-level port bindings with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
     #[serde(default)]
     secrets: Vec<SecretOpts>,
     #[serde(default)]
@@ -745,6 +965,16 @@ struct SandboxCreateOpts {
     volumes: HashMap<String, MountSpec>,
 }
 
+#[derive(serde::Deserialize, Clone)]
+struct PortBindingOpts {
+    #[serde(default = "default_host_bind")]
+    bind: String,
+    host_port: u16,
+    guest_port: u16,
+    #[serde(default = "default_port_protocol")]
+    protocol: String,
+}
+
 #[derive(serde::Deserialize, Default)]
 struct LogReadOpts {
     tail: Option<usize>,
@@ -752,6 +982,17 @@ struct LogReadOpts {
     until_ms: Option<i64>,
     #[serde(default)]
     sources: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LogStreamOpts {
+    #[serde(default)]
+    sources: Vec<String>,
+    since_ms: Option<i64>,
+    from_cursor: Option<String>,
+    until_ms: Option<i64>,
+    #[serde(default)]
+    follow: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -791,6 +1032,12 @@ struct MountSpec {
     #[serde(default)]
     readonly: bool,
     size_mib: Option<u32>,
+    /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
+    /// Only valid for bind / named mounts.
+    stat_virtualization: Option<String>,
+    /// Per-mount host-permission policy ("private" | "mirror").
+    /// Only valid for bind / named mounts.
+    host_permissions: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +1146,19 @@ fn apply_network(
         builder = builder.network(|n| n.policy(policy));
     }
 
+    if let Some(ref raw) = net.ipv4_pool {
+        let pool: ipnetwork::Ipv4Network = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("ipv4_pool {raw:?}: {e}")))?;
+        builder = builder.network(|n| n.ipv4_pool(pool));
+    }
+    if let Some(ref raw) = net.ipv6_pool {
+        let pool: ipnetwork::Ipv6Network = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
+        builder = builder.network(|n| n.ipv6_pool(pool));
+    }
+
     // DNS configuration. Either nested `dns: {...}` or the legacy flat
     // `dns_rebind_protection` field. The nested form wins.
     let dns_rebind = net
@@ -986,15 +1246,43 @@ fn apply_network(
     // Sandbox-wide secret violation action.
     if let Some(ref violation) = net.on_secret_violation {
         let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| n.on_secret_violation(action));
+        builder = builder.network(move |n| {
+            n.on_secret_violation(move |_| ViolationActionBuilder::from_action(action))
+        });
     }
 
     // Ports nested inside network object.
     for (host, guest) in &net.ports {
         builder = builder.port(*host, *guest);
     }
+    for port in &net.port_bindings {
+        builder = apply_port_binding(builder, port)?;
+    }
 
     Ok(builder)
+}
+
+fn apply_port_binding(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    port: &PortBindingOpts,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    let bind = port.bind.parse::<IpAddr>().map_err(|_| {
+        FfiError::new(
+            error_kind::INVALID_CONFIG,
+            format!("invalid bind address: {}", port.bind),
+        )
+    })?;
+
+    Ok(match port.protocol.as_str() {
+        "" | "tcp" => builder.port_bind(bind, port.host_port, port.guest_port),
+        "udp" => builder.port_udp_bind(bind, port.host_port, port.guest_port),
+        other => {
+            return Err(FfiError::new(
+                error_kind::INVALID_CONFIG,
+                format!("invalid port protocol: {other}"),
+            ));
+        }
+    })
 }
 
 /// Resolve a JSON destination string into the typed enum. Supports the
@@ -1158,6 +1446,12 @@ fn apply_secret(
     let allow_host_patterns = s.allow_host_patterns.clone();
     let placeholder = s.placeholder.clone();
     let require_tls = s.require_tls;
+    let on_violation = s
+        .on_violation
+        .as_ref()
+        .map(|violation| parse_violation_action(violation))
+        .transpose()?;
+
     builder = builder.secret(move |mut sb| {
         sb = sb.env(&env_var).value(value.clone());
         for h in &allow_hosts {
@@ -1172,12 +1466,11 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
+        if let Some(action) = on_violation {
+            sb = sb.on_violation(move |_| ViolationActionBuilder::from_action(action));
+        }
         sb
     });
-    if let Some(ref violation) = s.on_violation {
-        let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| n.on_secret_violation(action));
-    }
     Ok(builder)
 }
 
@@ -1274,6 +1567,20 @@ fn apply_volume(
         None
     };
 
+    // Pre-parse the policy strings so FFI errors fire before we touch the
+    // builder. Combo validation (e.g. `Off + Mirror`, policies on tmpfs)
+    // happens later inside `MountBuilder::build()`.
+    let stat_virt = m
+        .stat_virtualization
+        .as_deref()
+        .map(parse_stat_virt)
+        .transpose()?;
+    let host_perms = m
+        .host_permissions
+        .as_deref()
+        .map(parse_host_perms)
+        .transpose()?;
+
     let bind = m.bind.clone();
     let named = m.named.clone();
     let tmpfs = m.tmpfs;
@@ -1314,8 +1621,35 @@ fn apply_volume(
         if let Some(siz) = size_mib {
             mb = mb.size(siz);
         }
+        if let Some(p) = stat_virt {
+            mb = mb.stat_virtualization(p);
+        }
+        if let Some(p) = host_perms {
+            mb = mb.host_permissions(p);
+        }
         mb
     }))
+}
+
+fn parse_stat_virt(s: &str) -> Result<microsandbox::sandbox::StatVirtualization, FfiError> {
+    match s {
+        "strict" => Ok(microsandbox::sandbox::StatVirtualization::Strict),
+        "relaxed" => Ok(microsandbox::sandbox::StatVirtualization::Relaxed),
+        "off" => Ok(microsandbox::sandbox::StatVirtualization::Off),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid stat_virtualization {other:?} (expected strict|relaxed|off)"
+        ))),
+    }
+}
+
+fn parse_host_perms(s: &str) -> Result<microsandbox::sandbox::HostPermissions, FfiError> {
+    match s {
+        "private" => Ok(microsandbox::sandbox::HostPermissions::Private),
+        "mirror" => Ok(microsandbox::sandbox::HostPermissions::Mirror),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid host_permissions {other:?} (expected private|mirror)"
+        ))),
+    }
 }
 
 fn parse_action(s: &str) -> Result<microsandbox_network::policy::Action, FfiError> {
@@ -1382,12 +1716,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     "image and snapshot are mutually exclusive",
                 ));
             }
+            if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "oci_upper_size_mib is not valid when booting from a snapshot",
+                ));
+            }
             if let Some(img) = opts.image {
                 if let Some(fstype) = opts.image_fstype {
                     builder = builder.image_with(|i| i.disk(img).fstype(fstype));
                 } else {
                     builder = builder.image(img.as_str());
                 }
+            }
+            if let Some(size_mib) = opts.oci_upper_size_mib {
+                builder = builder.oci_upper_size(size_mib);
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
@@ -1413,8 +1755,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(u) = opts.user {
                 builder = builder.user(u);
             }
-            if let Some(grace_ms) = opts.replace_with_grace_ms {
-                builder = builder.replace_with_grace(std::time::Duration::from_millis(grace_ms));
+            if let Some(timeout_ms) = opts.replace_with_timeout_ms {
+                builder =
+                    builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
             } else if opts.replace {
                 builder = builder.replace();
             }
@@ -1465,6 +1808,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for (host, guest) in &opts.ports_udp {
                 builder = builder.port_udp(*host, *guest);
+            }
+            for port in &opts.port_bindings {
+                builder = apply_port_binding(builder, port)?;
             }
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
@@ -1927,16 +2273,69 @@ fn parse_log_options(opts_json: *const c_char) -> Result<LogOptions, FfiError> {
     })
 }
 
-fn log_entries_json(entries: Vec<microsandbox::sandbox::LogEntry>) -> Result<String, FfiError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        out.push(serde_json::json!({
-            "source": log_source_str(entry.source),
-            "session_id": entry.session_id,
-            "timestamp_ms": entry.timestamp.timestamp_millis(),
-            "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
-        }));
+fn parse_log_stream_options(
+    opts_json: *const c_char,
+) -> Result<microsandbox::logs::LogStreamOptions, FfiError> {
+    use microsandbox::logs::{LogCursor, LogCursorParseError, LogStreamStart};
+
+    let raw = if opts_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe { cstr(opts_json) }?.to_string()
+    };
+    let opts: LogStreamOpts = serde_json::from_str(&raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid log stream opts JSON: {e}")))?;
+    if opts.since_ms.is_some() && opts.from_cursor.is_some() {
+        return Err(FfiError::invalid_argument(
+            "since_ms and from_cursor are mutually exclusive",
+        ));
     }
+    let start = if let Some(ms) = opts.since_ms {
+        let ts = chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+            FfiError::invalid_argument(format!("invalid since_ms timestamp: {ms}"))
+        })?;
+        LogStreamStart::Since(ts)
+    } else if let Some(token) = opts.from_cursor.as_deref() {
+        let cursor: LogCursor = token.parse().map_err(|e: LogCursorParseError| {
+            FfiError::invalid_argument(format!("invalid from_cursor: {e}"))
+        })?;
+        LogStreamStart::From(cursor)
+    } else {
+        LogStreamStart::Beginning
+    };
+    let until = opts
+        .until_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid until_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let sources = opts
+        .sources
+        .iter()
+        .map(|s| parse_log_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(microsandbox::logs::LogStreamOptions {
+        sources,
+        start,
+        until,
+        follow: opts.follow,
+    })
+}
+
+fn log_entry_json(entry: microsandbox::logs::LogEntry) -> serde_json::Value {
+    serde_json::json!({
+        "source": log_source_str(entry.source),
+        "session_id": entry.session_id,
+        "timestamp_ms": entry.timestamp.timestamp_millis(),
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
+        "cursor": entry.cursor.to_string(),
+    })
+}
+
+fn log_entries_json(entries: Vec<microsandbox::logs::LogEntry>) -> Result<String, FfiError> {
+    let out: Vec<serde_json::Value> = entries.into_iter().map(log_entry_json).collect();
     serde_json::to_string(&out).map_err(|e| FfiError::internal(format!("serialise logs: {e}")))
 }
 
@@ -1952,7 +2351,7 @@ pub unsafe extern "C" fn msb_sandbox_logs(
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
             let sb = get(handle)?;
-            let entries = sb.logs(&opts).map_err(FfiError::from)?;
+            let entries = sb.logs(&opts).await.map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -1970,7 +2369,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_logs(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
-            let entries = logs::read_logs(&name, &opts).map_err(FfiError::from)?;
+            let entries = logs::read_logs(&name, &opts)
+                .await
+                .map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -1991,6 +2392,550 @@ pub unsafe extern "C" fn msb_sandbox_remove(
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
             Sandbox::remove(&name).await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox — SSH
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Default)]
+struct SshClientOpts {
+    user: Option<String>,
+    term: Option<String>,
+    sftp: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshServerOpts {
+    host_key_path: Option<PathBuf>,
+    authorized_keys_path: Option<PathBuf>,
+    user: Option<String>,
+    sftp: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshExecOpts {
+    tty: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshAttachOpts {
+    term: Option<String>,
+    detach_keys: Option<String>,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ssh_connect(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshClientOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH client opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let client = sb
+                .ssh()
+                .connect_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(user) = opts.user {
+                        builder = builder.user(user);
+                    }
+                    if let Some(term) = opts.term {
+                        builder = builder.term(term);
+                    }
+                    if let Some(sftp) = opts.sftp {
+                        builder = builder.sftp(sftp);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            let client_handle = register_ssh_client(client)?;
+            Ok(serde_json::json!({
+                "client_handle": client_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ssh_server(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshServerOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH server opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let server = sb
+                .ssh()
+                .server_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(path) = opts.host_key_path {
+                        builder = builder.host_key_path(path);
+                    }
+                    if let Some(path) = opts.authorized_keys_path {
+                        builder = builder.authorized_keys_path(path);
+                    }
+                    if let Some(user) = opts.user {
+                        builder = builder.user(user);
+                    }
+                    if let Some(sftp) = opts.sftp {
+                        builder = builder.sftp(sftp);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            let server_handle = register_ssh_server(server)?;
+            Ok(serde_json::json!({
+                "server_handle": server_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_server_close(
+    cancel_id: u64,
+    server_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_ssh_server(server_handle)?;
+        Ok(Box::pin(async move {
+            entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(server_handle))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
+    cancel_id: u64,
+    server_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = get_ssh_server(server_handle)?;
+        Ok(Box::pin(async move {
+            let server = {
+                let guard = entry.lock().await;
+                guard
+                    .as_ref()
+                    .ok_or_else(|| FfiError::invalid_handle(server_handle))?
+                    .clone()
+            };
+            server
+                .serve(SshStdioStream::new())
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_exec(
+    cancel_id: u64,
+    client_handle: Handle,
+    command: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        let command = unsafe { cstr(command) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshExecOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH exec opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let output = client
+                .exec_with(command, |builder| {
+                    let mut builder = builder;
+                    if let Some(tty) = opts.tty {
+                        builder = builder.tty(tty);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            Ok(serde_json::json!({
+                "status": output.status,
+                "stdout": base64::engine::general_purpose::STANDARD.encode(output.stdout.as_ref()),
+                "stderr": base64::engine::general_purpose::STANDARD.encode(output.stderr.as_ref()),
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_attach(
+    cancel_id: u64,
+    client_handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshAttachOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH attach opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let status = client
+                .attach_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(term) = opts.term {
+                        builder = builder.term(term);
+                    }
+                    if let Some(detach_keys) = opts.detach_keys {
+                        builder = builder.detach_keys(detach_keys);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            Ok(serde_json::json!({
+                "status": status,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_close(
+    cancel_id: u64,
+    client_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_ssh_client(client_handle)?;
+        Ok(Box::pin(async move {
+            let client = entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            client.close().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_sftp(
+    cancel_id: u64,
+    client_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let sftp = client.sftp().await.map_err(FfiError::from)?;
+            let sftp_handle = register_sftp_client(sftp)?;
+            Ok(serde_json::json!({
+                "sftp_handle": sftp_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_read(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let data = sftp
+                .read(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP read: {e}")))?;
+            Ok(serde_json::json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_write(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    data_b64: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        let data_b64 = unsafe { cstr(data_b64) }?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(data_b64.as_bytes())
+            .map_err(|e| FfiError::invalid_argument(format!("invalid base64 data: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let mut file = sftp
+                .create(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP create: {e}")))?;
+            file.write_all(&data)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP write: {e}")))?;
+            file.shutdown()
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP close file: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_mkdir(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.create_dir(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP mkdir: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_remove_file(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.remove_file(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP remove file: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_remove_dir(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.remove_dir(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP remove dir: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_rename(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    old_path: *const c_char,
+    new_path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let old_path = unsafe { cstr(old_path) }?;
+        let new_path = unsafe { cstr(new_path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.rename(old_path, new_path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP rename: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_real_path(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let path = sftp
+                .canonicalize(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP realpath: {e}")))?;
+            Ok(serde_json::json!({ "path": path }).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_read_link(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let target = sftp
+                .read_link(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP readlink: {e}")))?;
+            Ok(serde_json::json!({ "target": target }).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_symlink(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    target: *const c_char,
+    link_path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let target = unsafe { cstr(target) }?;
+        let link_path = unsafe { cstr(link_path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.symlink(target, link_path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP symlink: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_close(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_sftp_client(sftp_handle)?;
+        Ok(Box::pin(async move {
+            let sftp = entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.close()
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP close: {e}")))?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2609,6 +3554,164 @@ pub unsafe extern "C" fn msb_metrics_close(
 ) -> *mut c_char {
     run(buf, buf_len, || {
         remove_metrics(stream_handle);
+        Ok(r#"{"ok":true}"#.into())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Log streaming
+//
+// msb_sandbox_log_stream         — start; returns a stream_handle u64
+// msb_sandbox_handle_log_stream  — start by name; same return shape
+// msb_log_recv                   — block for next entry (or {"done":true})
+// msb_log_close                  — drop the stream
+// ---------------------------------------------------------------------------
+
+static NEXT_LOG_STREAM_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+type LogStreamItem = Result<microsandbox::logs::LogEntry, microsandbox::MicrosandboxError>;
+type LogStreamEntry =
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<LogStreamItem>>>;
+
+fn log_stream_registry() -> &'static RwLock<HashMap<Handle, LogStreamEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, LogStreamEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_log_stream(rx: tokio::sync::mpsc::Receiver<LogStreamItem>) -> Result<Handle, FfiError> {
+    let h = NEXT_LOG_STREAM_HANDLE.fetch_add(1, Ordering::Relaxed);
+    log_stream_registry()
+        .write()
+        .map_err(|_| FfiError::internal("log stream registry lock poisoned"))?
+        .insert(h, std::sync::Arc::new(tokio::sync::Mutex::new(rx)));
+    Ok(h)
+}
+
+fn get_log_stream(handle: Handle) -> Result<LogStreamEntry, FfiError> {
+    log_stream_registry()
+        .read()
+        .map_err(|_| FfiError::internal("log stream registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_log_stream(handle: Handle) {
+    let _ = log_stream_registry().write().map(|mut r| r.remove(&handle));
+}
+
+/// Spawn a forwarder that drives the engine stream into an unbounded mpsc
+/// channel, register the receiver, and return the handle.
+async fn start_log_stream_for(
+    log_dir_name: &str,
+    opts: microsandbox::logs::LogStreamOptions,
+) -> Result<Handle, FfiError> {
+    let stream = microsandbox::logs::log_stream(log_dir_name, &opts)
+        .await
+        .map_err(FfiError::from)?;
+    let mut stream = Box::pin(stream);
+    let (tx, rx) = tokio::sync::mpsc::channel::<LogStreamItem>(16);
+    // The forwarder task is moved off the foreground future so the caller
+    // can return the stream handle immediately. The task stops naturally
+    // when the receiver is dropped (msb_log_close).
+    tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    register_log_stream(rx)
+}
+
+/// Start a log stream against a live sandbox handle. Returns
+/// `{"stream_handle":<u64>}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_log_stream(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_log_stream_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sb = get(handle)?;
+            let name = sb.name().to_string();
+            let sh = start_log_stream_for(&name, opts).await?;
+            Ok(format!(r#"{{"stream_handle":{sh}}}"#))
+        }))
+    })
+}
+
+/// Start a log stream against a sandbox identified by name (no live handle
+/// required). Returns `{"stream_handle":<u64>}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_log_stream(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?.to_owned();
+        let opts = parse_log_stream_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sh = start_log_stream_for(&name, opts).await?;
+            Ok(format!(r#"{{"stream_handle":{sh}}}"#))
+        }))
+    })
+}
+
+/// Block for the next log entry on this stream. Returns a single log-entry
+/// JSON object, or `{"done":true}` when the stream has ended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_log_recv(
+    cancel_id: u64,
+    stream_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let entry = get_log_stream(stream_handle)?;
+        let mut recv = entry
+            .try_lock()
+            .map_err(|_| FfiError::internal("log stream mutex busy"))?;
+        let json = rt().block_on(async {
+            tokio::select! {
+                item = recv.recv() => {
+                    match item {
+                        None => Ok(r#"{"done":true}"#.to_string()),
+                        Some(Ok(e)) => serde_json::to_string(&log_entry_json(e))
+                            .map_err(|e| FfiError::internal(format!("serialise log entry: {e}"))),
+                        Some(Err(e)) => Err(FfiError::from(e)),
+                    }
+                }
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        write_output(buf, buf_len, &json)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+/// Close (drop) a log stream. The background driver task exits when the
+/// channel receiver is dropped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_log_close(
+    stream_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        remove_log_stream(stream_handle);
         Ok(r#"{"ok":true}"#.into())
     })
 }
@@ -3851,6 +4954,317 @@ pub unsafe extern "C" fn msb_fs_write_stream_close(
 }
 
 // ---------------------------------------------------------------------------
+// Agent client — raw protocol frames
+// ---------------------------------------------------------------------------
+
+async fn connect_agent_sandbox(
+    name: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_sandbox_with_timeout(name, timeout).await,
+        None => AgentBridge::connect_sandbox(name).await,
+    }
+}
+
+async fn connect_agent_path(
+    path: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_path_with_timeout(path, timeout).await,
+        None => AgentBridge::connect_path(path).await,
+    }
+}
+
+fn agent_timeout(timeout_ms: u64) -> Option<Duration> {
+    (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_open_sandbox(
+    cancel_id: u64,
+    name: *const c_char,
+    timeout_ms: u64,
+    out_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_handle.is_null() {
+            return Err(FfiError::invalid_argument("null output handle argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let name = unsafe { cstr(name) }?;
+        let agent = rt().block_on(async {
+            tokio::select! {
+                r = connect_agent_sandbox(&name, timeout_ms) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        let handle = register_agent(agent)?;
+        unsafe {
+            *out_handle = handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_open_path(
+    cancel_id: u64,
+    path: *const c_char,
+    timeout_ms: u64,
+    out_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_handle.is_null() {
+            return Err(FfiError::invalid_argument("null output handle argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let path = unsafe { cstr(path) }?;
+        let agent = rt().block_on(async {
+            tokio::select! {
+                r = connect_agent_path(&path, timeout_ms) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        let handle = register_agent(agent)?;
+        unsafe {
+            *out_handle = handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_request(
+    cancel_id: u64,
+    agent_handle: Handle,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+    out_id: *mut u32,
+    out_flags: *mut c_uchar,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_id.is_null() || out_flags.is_null() {
+            return Err(FfiError::invalid_argument("null frame output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        let frame = rt().block_on(async {
+            tokio::select! {
+                r = agent.request(flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        unsafe {
+            *out_id = frame.id;
+            *out_flags = frame.flags;
+        }
+        write_agent_bytes(frame.body, out_body_ptr, out_body_len)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_open(
+    cancel_id: u64,
+    agent_handle: Handle,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+    out_id: *mut u32,
+    out_stream_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_id.is_null() || out_stream_handle.is_null() {
+            return Err(FfiError::invalid_argument("null stream output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        let (id, stream_handle) = rt().block_on(async {
+            tokio::select! {
+                r = agent.stream_open(flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        unsafe {
+            *out_id = id;
+            *out_stream_handle = stream_handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_next(
+    cancel_id: u64,
+    agent_handle: Handle,
+    stream_handle: Handle,
+    out_present: *mut bool,
+    out_id: *mut u32,
+    out_flags: *mut c_uchar,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_present.is_null() || out_id.is_null() || out_flags.is_null() {
+            return Err(FfiError::invalid_argument("null frame output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let frame = rt().block_on(async {
+            tokio::select! {
+                r = agent.stream_next(stream_handle) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        match frame {
+            Some(frame) => {
+                unsafe {
+                    *out_present = true;
+                    *out_id = frame.id;
+                    *out_flags = frame.flags;
+                }
+                write_agent_bytes(frame.body, out_body_ptr, out_body_len)
+            }
+            None => {
+                unsafe {
+                    *out_present = false;
+                    *out_id = 0;
+                    *out_flags = 0;
+                }
+                write_agent_bytes(Vec::new(), out_body_ptr, out_body_len)
+            }
+        }
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_close(
+    cancel_id: u64,
+    agent_handle: Handle,
+    stream_handle: Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        rt().block_on(async {
+            tokio::select! {
+                _ = agent.stream_close(stream_handle) => Ok(()),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_send(
+    cancel_id: u64,
+    agent_handle: Handle,
+    id: u32,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        rt().block_on(async {
+            tokio::select! {
+                r = agent.send(id, flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_ready_bytes(
+    agent_handle: Handle,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    match get_agent(agent_handle).and_then(|agent| {
+        let body = agent.ready_bytes().map_err(agent_error)?;
+        write_agent_bytes(body, out_body_ptr, out_body_len)
+    }) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_close(cancel_id: u64, agent_handle: Handle) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent =
+            remove_agent(agent_handle)?.ok_or_else(|| FfiError::invalid_handle(agent_handle))?;
+        rt().block_on(async {
+            tokio::select! {
+                _ = agent.close() => Ok(()),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
+    unsafe {
+        drop(Box::from_raw(slice));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Attach / AttachShell — interactive PTY sessions
 //
 // These block the calling thread until the guest process exits.
@@ -3940,5 +5354,33 @@ fn kind_str(kind: FsEntryKind) -> &'static str {
         FsEntryKind::Directory => "directory",
         FsEntryKind::Symlink => "symlink",
         FsEntryKind::Other => "other",
+    }
+}
+
+fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
+    FfiError::from(MicrosandboxError::AgentClient(err))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_create_opts_preserves_explicit_zero_oci_upper_size() {
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn sandbox_create_opts_distinguishes_absent_oci_upper_size() {
+        let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, None);
     }
 }

@@ -101,7 +101,7 @@ jobs:
           rustup target add --toolchain stable aarch64-unknown-linux-musl
           cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+          cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@v4
@@ -164,7 +164,7 @@ jobs:
           rustup target add --toolchain stable ${{ matrix.agentd_target }}
           cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
           mkdir -p build
-          cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
+          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
@@ -214,7 +214,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net -p microsandbox-cli
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -227,14 +227,14 @@ jobs:
         run: cargo +stable fmt --all -- --check
 
       - name: Clippy
-        run: cargo +stable clippy --workspace -- -D warnings
+        run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
 
       - name: Docs
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo +stable doc --workspace --no-deps
+        run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
 
-      # -- Checks (agentd — excluded from workspace, Linux-only) --
+      # -- Checks (agentd — Linux-only) --
       - name: Format agentd
         if: matrix.os == 'linux'
         run: cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
@@ -372,6 +372,37 @@ jobs:
           npm run build
 
   # ---------------------------------------------------------------------------
+  # CLI smoke tests (requires KVM)
+  #
+  # Runs black-box CLI user flows against the freshly-built msb artifact.
+  # Keep these below the SDK layer so runtime/libkrun regressions fail with a
+  # direct signal before SDK packaging enters the picture.
+  # ---------------------------------------------------------------------------
+  cli-smoke-test:
+    name: CLI Smoke Tests
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: |
+          rm -rf "${{ github.workspace }}"/build
+          rm -rf ~/.microsandbox
+
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Run CLI smoke tests
+        run: |
+          chmod +x build/msb
+          scripts/smoke/cli/split-irqchip-bind-net.sh
+
+  # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
   # ---------------------------------------------------------------------------
   integration-test:
@@ -422,19 +453,21 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl
           cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
-          cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
       # (see crates/test-utils), so nextest can run tests in parallel without
       # sqlite/image-cache contention.
+      # Keep real microVM/network concurrency bounded even on large self-hosted
+      # runners; num-cpus fan-out can overwhelm guest package installs.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only
+          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 4
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
@@ -482,20 +515,49 @@ jobs:
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
+      # Release-bump PRs can reference platform package versions that are not
+      # published yet, so synthesize the package layout before patching it.
       - name: Use fresh runtime binaries in platform package
         working-directory: sdk/node-ts
         run: |
           PKG=node_modules/@superradcompany/microsandbox-linux-x64-gnu
+          mkdir -p "$PKG/bin" "$PKG/lib"
+          node - <<'NODE'
+          const fs = require("node:fs");
+
+          const pkgName = "@superradcompany/microsandbox-linux-x64-gnu";
+          const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const version = root.optionalDependencies?.[pkgName] ?? root.version;
+
+          fs.writeFileSync(
+            "node_modules/@superradcompany/microsandbox-linux-x64-gnu/package.json",
+            `${JSON.stringify({
+              name: pkgName,
+              version,
+              main: "microsandbox.linux-x64-gnu.node",
+              os: ["linux"],
+              cpu: ["x64"],
+              libc: ["glibc"],
+              license: "Apache-2.0",
+              engines: { node: ">= 22" },
+            }, null, 2)}\n`,
+          );
+          NODE
+          cp native/microsandbox.linux-x64-gnu.node "$PKG/"
           chmod +x ${{ github.workspace }}/build/msb
-          install -m755 ${{ github.workspace }}/build/msb $PKG/bin/msb
-          rm -f $PKG/lib/libkrunfw*
-          cp -P ${{ github.workspace }}/build/libkrunfw.so* $PKG/lib/
+          install -m755 ${{ github.workspace }}/build/msb "$PKG/bin/msb"
+          rm -f "$PKG"/lib/libkrunfw*
+          cp -P ${{ github.workspace }}/build/libkrunfw.so* "$PKG/lib/"
 
       - name: Run SDK tests (Node)
         working-directory: sdk/node-ts
-        env:
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-node
-        run: npm test
+        # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
+        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          npm test
 
       # setup-bun downloads a zipped release; unzip isn't preinstalled on
       # the self-hosted runner.
@@ -506,9 +568,80 @@ jobs:
 
       - name: Run SDK tests (Bun)
         working-directory: sdk/node-ts
+        # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
+        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          bunx --bun vitest run
+
+  # ---------------------------------------------------------------------------
+  # Python SDK integration tests (requires KVM)
+  #
+  # Downloads the pre-built msb + libkrunfw from the `check` job, then builds
+  # the Python extension locally and runs the integration suite against those
+  # fresh runtime binaries.
+  # ---------------------------------------------------------------------------
+  python-sdk-test:
+    name: Python SDK Tests
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: |
+          rm -rf "${{ github.workspace }}"/{build}
+          rm -rf ~/.microsandbox
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Stage runtime bundle
+        run: |
+          chmod +x build/msb
+          mkdir -p sdk/python/microsandbox/_bundled/bin
+          mkdir -p sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Sync Python dev environment
+        working-directory: sdk/python
+        run: uv sync --group dev
+
+      - name: Build Python SDK (editable)
+        working-directory: sdk/python
+        run: uv run maturin develop --release
+
+      - name: Run Python integration tests
+        working-directory: sdk/python
         env:
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-bun
-        run: bunx --bun vitest run
+          MSB_PATH: ${{ github.workspace }}/build/msb
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build:${{ github.workspace }}/sdk/python/microsandbox/_bundled/lib
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          uv run pytest integration
 
   # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
@@ -588,8 +721,10 @@ jobs:
       - build-kernel
       - build-agentd-aarch64
       - check
+      - cli-smoke-test
       - integration-test
       - node-sdk-test
+      - python-sdk-test
       - go-sdk-test
     runs-on: ubuntu-latest
     steps:

@@ -20,13 +20,9 @@ use super::config::{SecretsConfig, ViolationAction};
 /// secrets are eligible for this connection based on host matching.
 pub struct SecretsHandler {
     /// Secrets eligible for substitution on this connection.
-    eligible: Vec<EligibleSecret>,
-    /// All placeholder strings (for violation detection on disallowed hosts).
-    all_placeholders: Vec<String>,
-    /// Violation action.
-    on_violation: ViolationAction,
-    /// Whether any ineligible secrets exist (pre-computed for fast-path skip).
-    has_ineligible: bool,
+    eligible_for_substitution: Vec<EligibleSecret>,
+    /// Secret placeholders that should trigger an effective blocking action.
+    ineligible_for_substitution: Vec<IneligibleSecret>,
     /// Whether this connection is TLS-intercepted (not bypass).
     tls_intercepted: bool,
     /// Longest placeholder length. Sizes the sliding-window tail.
@@ -48,6 +44,21 @@ struct EligibleSecret {
     require_tls_identity: bool,
 }
 
+/// A secret that did not pass substitution or passthrough host matching.
+struct IneligibleSecret {
+    placeholder: String,
+    action: BlockingAction,
+}
+
+/// Blocking action to take when an ineligible placeholder is detected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum BlockingAction {
+    Block,
+    #[default]
+    BlockAndLog,
+    BlockAndTerminate,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -57,6 +68,29 @@ impl EligibleSecret {
     /// (`headers`, `basic_auth`, or `query_params`).
     fn wants_header_injection(&self) -> bool {
         self.inject_headers || self.inject_basic_auth || self.inject_query_params
+    }
+
+    /// Returns true when the current header bytes contain this secret's
+    /// placeholder in a header-substitution scope.
+    fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
+        if !self.wants_header_injection() {
+            return false;
+        }
+
+        let needle = self.placeholder.as_bytes();
+        if (self.inject_headers || self.inject_query_params) && contains_bytes(headers, needle) {
+            return true;
+        }
+
+        // Search decoded Basic auth credentials, not the raw header value.
+        if self.inject_basic_auth {
+            return basic_auth_decoded_contains(
+                String::from_utf8_lossy(headers).as_ref(),
+                &self.placeholder,
+            );
+        }
+
+        false
     }
 
     /// Substitute this secret's placeholder in the headers portion, scoped by
@@ -113,6 +147,25 @@ impl EligibleSecret {
     }
 }
 
+impl BlockingAction {
+    fn from_violation_action(action: &ViolationAction) -> Option<Self> {
+        match action {
+            ViolationAction::Block => Some(Self::Block),
+            ViolationAction::BlockAndLog => Some(Self::BlockAndLog),
+            ViolationAction::BlockAndTerminate => Some(Self::BlockAndTerminate),
+            ViolationAction::Passthrough(_) => None,
+        }
+    }
+
+    fn into_violation_action(self) -> ViolationAction {
+        match self {
+            Self::Block => ViolationAction::Block,
+            Self::BlockAndLog => ViolationAction::BlockAndLog,
+            Self::BlockAndTerminate => ViolationAction::BlockAndTerminate,
+        }
+    }
+}
+
 impl SecretsHandler {
     /// Create a handler for a specific connection.
     ///
@@ -121,17 +174,20 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
-        let mut eligible = Vec::new();
-        let mut all_placeholders = Vec::new();
+        let mut eligible_for_substitution = Vec::new();
+        let mut ineligible_for_substitution = Vec::new();
+        let mut max_placeholder_len = 0;
 
         for secret in &config.secrets {
-            all_placeholders.push(secret.placeholder.clone());
+            max_placeholder_len = max_placeholder_len.max(secret.placeholder.len());
 
             let host_allowed = secret.allowed_hosts.is_empty()
                 || secret.allowed_hosts.iter().any(|p| p.matches(sni));
 
+            // If the SNI matches an allowed host for this secret, add it to the
+            // eligible list for substitution, and skip violation checks for this secret.
             if host_allowed {
-                eligible.push(EligibleSecret {
+                eligible_for_substitution.push(EligibleSecret {
                     placeholder: secret.placeholder.clone(),
                     value: secret.value.clone(),
                     inject_headers: secret.injection.headers,
@@ -140,17 +196,29 @@ impl SecretsHandler {
                     inject_body: secret.injection.body,
                     require_tls_identity: secret.require_tls_identity,
                 });
+
+                continue;
             }
+
+            let action = secret.on_violation.as_ref().unwrap_or(&config.on_violation);
+
+            // Passthrough means the placeholder can be forwarded unchanged to this SNI.
+            if let ViolationAction::Passthrough(hosts) = action
+                && hosts.iter().any(|p| p.matches(sni))
+            {
+                continue;
+            }
+
+            // Non-matching passthrough policies fall back to the default blocking action.
+            ineligible_for_substitution.push(IneligibleSecret {
+                placeholder: secret.placeholder.clone(),
+                action: BlockingAction::from_violation_action(action).unwrap_or_default(),
+            });
         }
 
-        let has_ineligible = eligible.len() < all_placeholders.len();
-        let max_placeholder_len = all_placeholders.iter().map(String::len).max().unwrap_or(0);
-
         Self {
-            eligible,
-            all_placeholders,
-            on_violation: config.on_violation.clone(),
-            has_ineligible,
+            eligible_for_substitution,
+            ineligible_for_substitution,
             tls_intercepted,
             max_placeholder_len,
             prev_tail: Vec::new(),
@@ -165,9 +233,9 @@ impl SecretsHandler {
     /// - `query_params`: substitutes in the request line (first line, query portion)
     /// - `body`: substitutes in the body portion (after boundary)
     ///
-    /// Returns `None` if a violation is detected (placeholder going to a
-    /// disallowed host) or `BlockAndTerminate` is triggered.
-    pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Option<Cow<'a, [u8]>> {
+    /// Returns the violation action if a placeholder is detected going to a
+    /// disallowed host.
+    pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
         // Split raw bytes at the header boundary BEFORE converting to owned strings.
         // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
@@ -175,80 +243,114 @@ impl SecretsHandler {
             Some(pos) => (&data[..pos], &data[pos..]),
             None => (data, &[] as &[u8]),
         };
-        let mut header_str = String::from_utf8_lossy(header_bytes).into_owned();
-        let mut body_str = if boundary.is_some() {
-            String::from_utf8_lossy(body_bytes).into_owned()
-        } else {
-            String::new()
-        };
 
-        // Fast path: skip violation check when no ineligible secrets exist.
-        if self.has_ineligible && self.has_violation(data, &header_str) {
-            self.update_tail(data);
-            match self.on_violation {
-                ViolationAction::Block => return None,
-                ViolationAction::BlockAndLog => {
+        // Check for disallowed placeholders before forwarding or substituting data.
+        if let Some(action) =
+            self.detect_blocking_action(data, String::from_utf8_lossy(header_bytes).as_ref())
+        {
+            match action {
+                BlockingAction::Block => return Err(action.into_violation_action()),
+                BlockingAction::BlockAndLog => {
                     tracing::warn!("secret violation: placeholder detected for disallowed host");
-                    return None;
+                    return Err(action.into_violation_action());
                 }
-                ViolationAction::BlockAndTerminate => {
+                BlockingAction::BlockAndTerminate => {
                     tracing::error!(
                         "secret violation: placeholder detected for disallowed host — terminating"
                     );
-                    return None;
+                    return Err(action.into_violation_action());
                 }
             }
         }
         self.update_tail(data);
 
-        if self.eligible.is_empty() {
+        if self.eligible_for_substitution.is_empty() {
             // No substitution needed. Return borrowed slice (zero-copy).
-            return Some(Cow::Borrowed(data));
+            return Ok(Cow::Borrowed(data));
         }
 
-        for secret in &self.eligible {
+        // Start with borrowed bytes; allocate only when a substitution is needed.
+        let mut header_str = None;
+        let mut body = None;
+
+        for secret in &self.eligible_for_substitution {
             // Skip secrets that require TLS identity on non-intercepted connections.
             if secret.require_tls_identity && !self.tls_intercepted {
                 continue;
             }
-            if secret.wants_header_injection() {
-                header_str = secret.substitute_in_headers(&header_str);
+
+            // Header substitution still uses string helpers after a scoped match.
+            if secret.may_substitute_in_headers(header_bytes) {
+                let current = header_str
+                    .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
+                *current = secret.substitute_in_headers(current);
             }
-            if boundary.is_some() && secret.inject_body && body_str.contains(&secret.placeholder) {
-                body_str = body_str.replace(&secret.placeholder, &secret.value);
+
+            // Body substitution works on bytes so encoded payloads stay valid.
+            if boundary.is_some() && secret.inject_body {
+                let source = body.as_deref().unwrap_or(body_bytes);
+                if let Some(replaced) = replace_bytes(
+                    source,
+                    secret.placeholder.as_bytes(),
+                    secret.value.as_bytes(),
+                ) {
+                    body = Some(replaced);
+                }
             }
         }
 
-        // If body substitution changed the length, update Content-Length.
-        if boundary.is_some() && body_str.len() != body_bytes.len() {
-            header_str = update_content_length(&header_str, body_str.len());
+        let header_changed = header_str
+            .as_ref()
+            .is_some_and(|headers| headers.as_bytes() != header_bytes);
+        let body_changed = body.is_some();
+
+        // No header or body replacement was produced. Return original bytes.
+        if !header_changed && !body_changed {
+            return Ok(Cow::Borrowed(data));
         }
 
-        let mut output = header_str;
-        output.push_str(&body_str);
-        Some(Cow::Owned(output.into_bytes()))
+        let header_len = header_str
+            .as_ref()
+            .map_or(header_bytes.len(), |headers| headers.len());
+        let body_len = body.as_ref().map_or(body_bytes.len(), Vec::len);
+        let mut output = Vec::with_capacity(header_len + body_len);
+
+        let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
+        // Update Content-Length only when body substitution changed the size.
+        if body_changed && body_bytes_out.len() != body_bytes.len() {
+            let headers = match header_str {
+                Some(headers) => update_content_length(&headers, body_bytes_out.len()),
+                None => update_content_length(
+                    String::from_utf8_lossy(header_bytes).as_ref(),
+                    body_bytes_out.len(),
+                ),
+            };
+            output.extend_from_slice(headers.as_bytes());
+        } else if let Some(headers) = header_str {
+            output.extend_from_slice(headers.as_bytes());
+        } else {
+            output.extend_from_slice(header_bytes);
+        }
+
+        output.extend_from_slice(body_bytes_out);
+        Ok(Cow::Owned(output))
     }
 
-    /// Returns true if no secrets are configured.
+    /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
-        self.all_placeholders.is_empty()
+        self.eligible_for_substitution.is_empty() && self.ineligible_for_substitution.is_empty()
     }
 
-    /// Returns true if a violation should terminate the sandbox.
-    pub fn terminates_on_violation(&self) -> bool {
-        matches!(self.on_violation, ViolationAction::BlockAndTerminate)
-    }
-
-    /// Check if any placeholder appears in data for a host that isn't allowed.
+    /// Returns the strongest blocking action for any placeholder appearing in data
+    /// for a host that isn't allowed to receive either the real secret or the placeholder.
+    ///
     /// Scans the raw bytes (stitched with the previous call's tail for
     /// cross-write detection), plus URL- and JSON-decoded variants for
     /// encoded-placeholder bypass attempts, plus base64-decoded Basic auth
     /// credentials.
-    fn has_violation(&self, data: &[u8], headers: &str) -> bool {
-        // Fast path: if all placeholders have matching eligible entries, no
-        // violation is possible (every secret is allowed for this host).
-        if self.eligible.len() == self.all_placeholders.len() {
-            return false;
+    fn detect_blocking_action(&self, data: &[u8], headers: &str) -> Option<BlockingAction> {
+        if self.ineligible_for_substitution.is_empty() {
+            return None;
         }
 
         let scan_buf: Cow<[u8]> = if self.prev_tail.is_empty() {
@@ -261,21 +363,19 @@ impl SecretsHandler {
         };
         let scan = scan_buf.as_ref();
 
-        for placeholder in &self.all_placeholders {
-            if self.eligible.iter().any(|s| s.placeholder == *placeholder) {
-                continue;
-            }
-            let needle = placeholder.as_bytes();
+        let mut detected = None;
+        for secret in &self.ineligible_for_substitution {
+            let needle = secret.placeholder.as_bytes();
             if contains_bytes(scan, needle)
                 || url_decoded_contains(scan, needle)
                 || json_escaped_contains(scan, needle)
-                || basic_auth_decoded_contains(headers, placeholder)
+                || basic_auth_decoded_contains(headers, &secret.placeholder)
             {
-                return true;
+                detected = Some(strictest_violation_action(detected, secret.action));
             }
         }
 
-        false
+        detected
     }
 
     /// Update the sliding-window tail with the trailing bytes of `data`, so
@@ -351,6 +451,29 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Replace all occurrences of `needle` in `haystack`.
+///
+/// Returns `None` when no replacement is needed so callers can preserve the
+/// original byte slice without rebuilding arbitrary binary payloads.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    if !contains_bytes(haystack, needle) {
+        return None;
+    }
+
+    let mut result = Vec::with_capacity(haystack.len());
+    let mut cursor = 0;
+    while cursor < haystack.len() {
+        if haystack[cursor..].starts_with(needle) {
+            result.extend_from_slice(replacement);
+            cursor += needle.len();
+        } else {
+            result.push(haystack[cursor]);
+            cursor += 1;
+        }
+    }
+    Some(result)
+}
+
 /// Returns true if `haystack`, after URL percent-decoding, contains `needle`.
 fn url_decoded_contains(haystack: &[u8], needle: &[u8]) -> bool {
     let decoded: Vec<u8> = percent_decode(haystack).collect();
@@ -422,6 +545,23 @@ fn find_header_boundary(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
+/// Returns the stricter of two blocking actions, where
+/// `BlockAndTerminate` > `BlockAndLog` > `Block`.
+fn strictest_violation_action(
+    current: Option<BlockingAction>,
+    candidate: BlockingAction,
+) -> BlockingAction {
+    match (current, candidate) {
+        (Some(BlockingAction::BlockAndTerminate), _) | (_, BlockingAction::BlockAndTerminate) => {
+            BlockingAction::BlockAndTerminate
+        }
+        (Some(BlockingAction::BlockAndLog), _) | (_, BlockingAction::BlockAndLog) => {
+            BlockingAction::BlockAndLog
+        }
+        (Some(BlockingAction::Block), _) | (None, BlockingAction::Block) => BlockingAction::Block,
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -445,6 +585,7 @@ mod tests {
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(host.into())],
             injection: SecretInjection::default(),
+            on_violation: None,
             require_tls_identity: true,
         }
     }
@@ -477,7 +618,146 @@ mod tests {
         let mut handler = SecretsHandler::new(&config, "evil.com", true);
 
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
-        assert!(handler.substitute(input).is_none());
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn allowed_placeholder_substitutes_when_another_secret_is_ineligible() {
+        let allowed = make_secret("$ALLOWED", "allowed-secret", "api.openai.com");
+        let blocked = make_secret("$BLOCKED", "blocked-secret", "api.github.com");
+        let config = make_config(vec![allowed, blocked]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $ALLOWED\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nAuthorization: Bearer allowed-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn global_passthrough_host_forwards_placeholder_unchanged() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation =
+            ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())]);
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
+    fn per_secret_passthrough_host_forwards_placeholder_unchanged() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.on_violation = Some(ViolationAction::Passthrough(vec![HostPattern::Exact(
+            "api.anthropic.com".into(),
+        )]));
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
+    fn global_passthrough_action_forwards_disallowed_placeholder_unchanged() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation = ViolationAction::Passthrough(vec![HostPattern::Any]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
+    fn passthrough_only_connection_has_no_handler_work() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation = ViolationAction::Passthrough(vec![HostPattern::Any]);
+        let handler = SecretsHandler::new(&config, "evil.com", true);
+
+        assert!(handler.is_empty());
+    }
+
+    #[test]
+    fn passthrough_host_does_not_allow_other_disallowed_placeholders() {
+        let mut passthrough = make_secret("$PASSTHROUGH", "real-secret-a", "api.openai.com");
+        passthrough.on_violation = Some(ViolationAction::Passthrough(vec![HostPattern::Exact(
+            "api.anthropic.com".into(),
+        )]));
+        let blocked = make_secret("$BLOCKED", "real-secret-b", "api.github.com");
+        let config = make_config(vec![passthrough, blocked]);
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-A: $PASSTHROUGH\r\nX-B: $BLOCKED\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn per_secret_passthrough_blocks_for_non_matching_host() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.on_violation = Some(ViolationAction::Passthrough(vec![HostPattern::Exact(
+            "api.anthropic.com".into(),
+        )]));
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::BlockAndLog
+        );
+    }
+
+    #[test]
+    fn global_passthrough_blocks_for_non_matching_host() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation =
+            ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::BlockAndLog
+        );
+    }
+
+    #[test]
+    fn global_block_and_terminate_marks_violation_as_terminating() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation = ViolationAction::BlockAndTerminate;
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::BlockAndTerminate
+        );
+    }
+
+    #[test]
+    fn per_secret_block_and_terminate_marks_violation_as_terminating() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.on_violation = Some(ViolationAction::BlockAndTerminate);
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::BlockAndTerminate
+        );
     }
 
     #[test]
@@ -560,6 +840,60 @@ mod tests {
     }
 
     #[test]
+    fn eligible_secret_preserves_binary_body_without_placeholder() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = vec![0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0x80, 0xfe];
+        let mut input = format!(
+            "POST /git-upload-pack HTTP/1.1\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap();
+        assert_eq!(&*output, input.as_slice());
+    }
+
+    #[test]
+    fn eligible_secret_preserves_binary_chunk_without_placeholder() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = [0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0x80, 0xfe];
+        let output = handler.substitute(&input).unwrap();
+        assert_eq!(&*output, input.as_slice());
+    }
+
+    #[test]
+    fn body_injection_preserves_non_utf8_bytes() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = [0xff, b'$', b'K', b'E', b'Y', 0xfe];
+        let mut input =
+            format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap().into_owned();
+        let expected_body = [b"\xffreal-secret".as_slice(), &[0xfe]].concat();
+        let expected = [
+            format!(
+                "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                expected_body.len()
+            )
+            .as_bytes(),
+            expected_body.as_slice(),
+        ]
+        .concat();
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn no_secrets_passthrough() {
         let config = make_config(vec![]);
         let mut handler = SecretsHandler::new(&config, "anything.com", true);
@@ -634,7 +968,10 @@ mod tests {
         let encoded = BASE64.encode(b"user:$MSB_PASSWORD");
         let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
 
-        assert!(handler.substitute(input.as_bytes()).is_none());
+        assert_eq!(
+            handler.substitute(input.as_bytes()).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -683,7 +1020,10 @@ mod tests {
 
         // `%24KEY` is the URL-encoded form of `$KEY`.
         let input = b"GET /api?token=%24KEY HTTP/1.1\r\nHost: evil.com\r\n\r\n";
-        assert!(handler.substitute(input).is_none());
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -692,7 +1032,10 @@ mod tests {
         let mut handler = SecretsHandler::new(&config, "evil.com", true);
 
         let input = b"POST / HTTP/1.1\r\nContent-Length: 13\r\n\r\nkey=%24KEY&x=1";
-        assert!(handler.substitute(input).is_none());
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -703,7 +1046,10 @@ mod tests {
         // `$KEY` is the JSON unicode-escape form of `$KEY`.
         let input =
             b"POST / HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"k\":\"\\u0024KEY\"}";
-        assert!(handler.substitute(input).is_none());
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -716,9 +1062,12 @@ mod tests {
         let second = b"EY\r\nHost: evil.com\r\n\r\n";
 
         // The first chunk doesn't contain the full placeholder, so it forwards.
-        assert!(handler.substitute(first).is_some());
+        assert!(handler.substitute(first).is_ok());
         // The second chunk completes the placeholder when stitched with the tail.
-        assert!(handler.substitute(second).is_none());
+        assert_eq!(
+            handler.substitute(second).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]

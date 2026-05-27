@@ -51,6 +51,7 @@ func (e *ExecOutput) Success() bool { return e.exitCode == 0 }
 // Exec runs a command in the sandbox and returns its collected output.
 // The returned error is non-nil only on transport/runtime failures; a
 // non-zero exit code is reported via ExecOutput.ExitCode, not as an error.
+// This call blocks until the command exits.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error) {
 	o := ExecConfig{}
 	for _, opt := range opts {
@@ -73,7 +74,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 	}, nil
 }
 
-// Shell runs `/bin/sh -c command` in the sandbox.
+// Shell runs `/bin/sh -c command` in the sandbox. This call blocks until the command exits.
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error) {
 	return s.Exec(ctx, "/bin/sh", []string{"-c", command}, opts...)
 }
@@ -228,6 +229,9 @@ func (h *ExecHandle) Close() error {
 //
 // ctx controls only the start handshake; individual Recv calls take their
 // own ctx. Non-zero exit codes are NOT errors — inspect ExecEventExited.
+//
+// This call is nonblocking, the handle returns immediately and the stream starts
+// in the background.
 func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error) {
 	o := ExecConfig{}
 	for _, opt := range opts {
@@ -245,6 +249,9 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opt
 }
 
 // ShellStream runs `/bin/sh -c command` with streaming output.
+//
+// This call is nonblocking, the handle returns immediately and the stream starts
+// in the background.
 func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error) {
 	return s.ExecStream(ctx, "/bin/sh", []string{"-c", command}, opts...)
 }

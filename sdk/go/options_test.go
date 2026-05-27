@@ -14,6 +14,28 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestWithOCIUpperSize(t *testing.T) {
+	o := SandboxConfig{}
+	WithOCIUpperSize(8192)(&o)
+	if o.OCIUpperSizeMiB != 8192 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
+	}
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
+	}
+}
+
+func TestWithOCIUpperSizeZeroIsExplicit(t *testing.T) {
+	o := SandboxConfig{}
+	WithOCIUpperSize(0)(&o)
+	if o.OCIUpperSizeMiB != 0 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 0", o.OCIUpperSizeMiB)
+	}
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
+	}
+}
+
 func TestWithImageDisk(t *testing.T) {
 	o := SandboxConfig{}
 	WithImageDisk("./alpine.raw", "ext4")(&o)
@@ -128,15 +150,15 @@ func TestWithReplace(t *testing.T) {
 	if !o.Replace {
 		t.Error("WithReplace should set Replace to true")
 	}
-	if o.ReplaceWithGrace != nil {
-		t.Errorf("WithReplace should leave ReplaceWithGrace nil, got %v", *o.ReplaceWithGrace)
+	if o.ReplaceWithTimeout != nil {
+		t.Errorf("WithReplace should leave ReplaceWithTimeout nil, got %v", *o.ReplaceWithTimeout)
 	}
 }
 
-func TestWithReplaceWithGrace(t *testing.T) {
+func TestWithReplaceWithTimeout(t *testing.T) {
 	cases := []struct {
-		name  string
-		grace time.Duration
+		name    string
+		timeout time.Duration
 	}{
 		{"five seconds", 5 * time.Second},
 		{"zero (immediate SIGKILL)", 0},
@@ -144,15 +166,15 @@ func TestWithReplaceWithGrace(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			o := SandboxConfig{}
-			WithReplaceWithGrace(tc.grace)(&o)
+			WithReplaceWithTimeout(tc.timeout)(&o)
 			if !o.Replace {
-				t.Error("WithReplaceWithGrace should imply Replace")
+				t.Error("WithReplaceWithTimeout should imply Replace")
 			}
-			if o.ReplaceWithGrace == nil {
-				t.Fatal("ReplaceWithGrace should be set")
+			if o.ReplaceWithTimeout == nil {
+				t.Fatal("ReplaceWithTimeout should be set")
 			}
-			if *o.ReplaceWithGrace != tc.grace {
-				t.Errorf("ReplaceWithGrace: got %v, want %v", *o.ReplaceWithGrace, tc.grace)
+			if *o.ReplaceWithTimeout != tc.timeout {
+				t.Errorf("ReplaceWithTimeout: got %v, want %v", *o.ReplaceWithTimeout, tc.timeout)
 			}
 		})
 	}
@@ -178,6 +200,24 @@ func TestWithPortsNilInitial(t *testing.T) {
 	WithPorts(map[uint16]uint16{3000: 3000})(&o)
 	if o.Ports[3000] != 3000 {
 		t.Error("WithPorts should initialise map when Ports is nil")
+	}
+}
+
+func TestWithPortBindings(t *testing.T) {
+	o := SandboxConfig{}
+	WithPortBindings(
+		PortBinding{Bind: "0.0.0.0", HostPort: 8080, GuestPort: 80},
+		PortBinding{Bind: "::", HostPort: 5353, GuestPort: 53, Protocol: PortProtocolUDP},
+	)(&o)
+
+	if len(o.PortBindings) != 2 {
+		t.Fatalf("PortBindings len = %d, want 2", len(o.PortBindings))
+	}
+	if o.PortBindings[0].Bind != "0.0.0.0" || o.PortBindings[0].HostPort != 8080 || o.PortBindings[0].GuestPort != 80 {
+		t.Fatalf("PortBindings[0] = %#v", o.PortBindings[0])
+	}
+	if o.PortBindings[1].Protocol != PortProtocolUDP {
+		t.Fatalf("PortBindings[1].Protocol = %q, want udp", o.PortBindings[1].Protocol)
 	}
 }
 
@@ -549,6 +589,73 @@ func TestMountReadonlyOption(t *testing.T) {
 	d := Mount.Disk("/host/img", DiskOptions{Readonly: true, Fstype: "xfs"})
 	if !d.Readonly || d.Fstype != "xfs" {
 		t.Errorf("Disk: got %+v", d)
+	}
+}
+
+func TestMountBindDefaultsLeavePoliciesEmpty(t *testing.T) {
+	m := Mount.Bind("/host/data", MountOptions{})
+	if m.StatVirtualization != "" {
+		t.Errorf("StatVirtualization: want empty, got %q", m.StatVirtualization)
+	}
+	if m.HostPermissions != "" {
+		t.Errorf("HostPermissions: want empty, got %q", m.HostPermissions)
+	}
+}
+
+func TestMountBindPropagatesPolicies(t *testing.T) {
+	m := Mount.Bind("/host/data", MountOptions{
+		Readonly:           true,
+		StatVirtualization: StatVirtualizationRelaxed,
+		HostPermissions:    HostPermissionsMirror,
+	})
+	if m.StatVirtualization != StatVirtualizationRelaxed {
+		t.Errorf("StatVirtualization: got %q, want relaxed", m.StatVirtualization)
+	}
+	if m.HostPermissions != HostPermissionsMirror {
+		t.Errorf("HostPermissions: got %q, want mirror", m.HostPermissions)
+	}
+	if !m.Readonly {
+		t.Error("Readonly: want true")
+	}
+}
+
+func TestMountNamedPropagatesPolicies(t *testing.T) {
+	m := Mount.Named("cache", MountOptions{
+		StatVirtualization: StatVirtualizationOff,
+	})
+	if m.StatVirtualization != StatVirtualizationOff {
+		t.Errorf("StatVirtualization: got %q, want off", m.StatVirtualization)
+	}
+	// Host permissions defaults to empty (i.e. runtime default Private).
+	if m.HostPermissions != "" {
+		t.Errorf("HostPermissions: want empty, got %q", m.HostPermissions)
+	}
+}
+
+func TestStatVirtualizationConstants(t *testing.T) {
+	cases := map[StatVirtualization]string{
+		StatVirtualizationDefault: "",
+		StatVirtualizationStrict:  "strict",
+		StatVirtualizationRelaxed: "relaxed",
+		StatVirtualizationOff:     "off",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Errorf("StatVirtualization: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestHostPermissionsConstants(t *testing.T) {
+	cases := map[HostPermissions]string{
+		HostPermissionsDefault: "",
+		HostPermissionsPrivate: "private",
+		HostPermissionsMirror:  "mirror",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Errorf("HostPermissions: got %q, want %q", got, want)
+		}
 	}
 }
 

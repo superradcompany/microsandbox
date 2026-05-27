@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -77,6 +77,9 @@ pub enum MessageType {
 
     /// Host requests shutdown.
     Shutdown,
+
+    /// Host relay reports that one SDK client disconnected.
+    RelayClientDisconnected,
 
     /// Host requests command execution.
     ExecRequest,
@@ -180,6 +183,7 @@ impl MessageType {
         match self {
             Self::Ready => "core.ready",
             Self::Shutdown => "core.shutdown",
+            Self::RelayClientDisconnected => "core.relay.client.disconnected",
             Self::ExecRequest => "core.exec.request",
             Self::ExecStarted => "core.exec.started",
             Self::ExecStdin => "core.exec.stdin",
@@ -201,6 +205,7 @@ impl MessageType {
         match s {
             "core.ready" => Some(Self::Ready),
             "core.shutdown" => Some(Self::Shutdown),
+            "core.relay.client.disconnected" => Some(Self::RelayClientDisconnected),
             "core.exec.request" => Some(Self::ExecRequest),
             "core.exec.started" => Some(Self::ExecStarted),
             "core.exec.stdin" => Some(Self::ExecStdin),

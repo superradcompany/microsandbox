@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use smoltcp::iface::{SocketHandle, SocketSet};
@@ -74,6 +76,13 @@ struct Connection {
     proxy_channels: Option<ProxyChannels>,
     /// Whether a proxy task has been spawned for this connection.
     proxy_spawned: bool,
+    /// Set `true` by the proxy task once its `TcpStream::connect` to
+    /// the upstream succeeds. If the task exits with this still
+    /// `false`, the smoltcp socket is aborted (RST) so the guest
+    /// client gets ECONNREFUSED and happy-eyeballs clients fall back
+    /// to another address family, instead of being stuck on a
+    /// half-open connection that closed cleanly with FIN.
+    upstream_connected: Arc<AtomicBool>,
     /// Partial data from proxy that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
     /// Data read from smoltcp socket that couldn't be sent to proxy (channel full).
@@ -103,6 +112,10 @@ pub struct NewConnection {
     pub from_smoltcp: mpsc::Receiver<Bytes>,
     /// Send data to smoltcp socket (proxy task → guest).
     pub to_smoltcp: mpsc::Sender<Bytes>,
+    /// Flag the proxy task flips to `true` after a successful upstream
+    /// connect. Read by the connection tracker on proxy exit to decide
+    /// between FIN (clean close) and RST (upstream never reached).
+    pub upstream_connected: Arc<AtomicBool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -182,6 +195,7 @@ impl ConnectionTracker {
                     to_smoltcp: from_proxy_tx,
                 }),
                 proxy_spawned: false,
+                upstream_connected: Arc::new(AtomicBool::new(false)),
                 write_buf: None,
                 read_buf: None,
                 close_attempts: 0,
@@ -206,9 +220,29 @@ impl ConnectionTracker {
 
             let socket = sockets.get_mut::<tcp::Socket>(handle);
 
+            // Already torn down (e.g. abort fired on a previous pass).
+            // Leave it for `cleanup_closed` to evict.
+            if matches!(socket.state(), tcp::State::Closed) {
+                continue;
+            }
+
             // Detect proxy task exit: when the proxy drops its channel
             // ends, close the smoltcp socket so the guest gets a FIN.
+            //
+            // If the proxy never successfully reached the upstream,
+            // an RST via `abort()` is instead sent so happy-eyeballs
+            // clients fall back to another family instead of committing
+            // to this half-open connection.
             if conn.to_proxy.is_closed() {
+                if !conn.upstream_connected.load(Ordering::Acquire) {
+                    tracing::debug!(
+                        src = %conn.src,
+                        dst = %conn.dst,
+                        "upstream never connected; aborting smoltcp socket (RST to guest)"
+                    );
+                    socket.abort();
+                    continue;
+                }
                 write_proxy_data(socket, conn);
                 if conn.write_buf.is_none() {
                     socket.close();
@@ -271,6 +305,7 @@ impl ConnectionTracker {
                         dst: conn.dst,
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
+                        upstream_connected: conn.upstream_connected.clone(),
                     });
                 }
             }

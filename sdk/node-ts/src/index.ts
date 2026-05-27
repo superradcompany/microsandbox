@@ -1,6 +1,17 @@
 import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
+// Low-level agent client (raw transport to agentd).
+export {
+  AgentClient,
+  AgentStream,
+  FLAG_SESSION_START,
+  FLAG_SHUTDOWN,
+  FLAG_TERMINAL,
+  type AgentConnectOptions,
+  type RawFrame,
+} from "./agent.js";
+
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
@@ -18,6 +29,16 @@ export const SandboxBuilder = function SandboxBuilder(
 export type SandboxBuilder = _SBT;
 export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
+
+// SSH
+export { SandboxSsh, SftpClient, SshClient, SshServer } from "./ssh.js";
+export type {
+  SshAttachOptions,
+  SshClientOptions,
+  SshExecOptions,
+  SshOutput,
+  SshServerOptions,
+} from "./ssh.js";
 
 // Filesystem
 export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
@@ -69,8 +90,13 @@ export type {
 } from "./image.js";
 
 // Logs
-export { LogEntry } from "./logs.js";
-export type { LogReadOptions, LogReadSource, LogSource } from "./logs.js";
+export { LogEntry, LogStream } from "./logs.js";
+export type {
+  LogReadOptions,
+  LogReadSource,
+  LogSource,
+  LogStreamOptions,
+} from "./logs.js";
 
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";
@@ -345,6 +371,7 @@ export {
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
+  Pre05SandboxRestartRequiredError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";
@@ -394,6 +421,19 @@ export const VolumeMountKinds: readonly VolumeMountKind[] = [
   "named",
   "tmpfs",
   "disk",
+] as const;
+/** Per-mount stat-virtualization policy for virtiofs-backed mounts. */
+export type StatVirtualization = "strict" | "relaxed" | "off";
+export const StatVirtualizations: readonly StatVirtualization[] = [
+  "strict",
+  "relaxed",
+  "off",
+] as const;
+/** Per-mount host-permission policy for virtiofs-backed mounts. */
+export type HostPermissions = "private" | "mirror";
+export const HostPermissionsList: readonly HostPermissions[] = [
+  "private",
+  "mirror",
 ] as const;
 export type PatchKind =
   | "text"

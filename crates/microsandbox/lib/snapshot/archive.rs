@@ -1,7 +1,7 @@
 //! Snapshot export / import via `.tar.zst` bundles.
 //!
 //! Default archive format is zstd-compressed tar — sparse files
-//! collapse cleanly under zstd, and `tar_ingest.rs` already handles
+//! collapse cleanly under zstd, and the image tar ingest module already handles
 //! gzip/zstd detection on the read side. Plain `.tar` archives are
 //! also accepted on import.
 

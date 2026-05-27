@@ -55,21 +55,11 @@ pub enum Relation {
     /// A sandbox has many runs.
     #[sea_orm(has_many = "super::run::Entity")]
     Run,
-
-    /// A sandbox has many metrics.
-    #[sea_orm(has_many = "super::sandbox_metric::Entity")]
-    SandboxMetric,
 }
 
 impl Related<super::run::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Run.def()
-    }
-}
-
-impl Related<super::sandbox_metric::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::SandboxMetric.def()
     }
 }
 

@@ -8,6 +8,7 @@ pub(crate) mod builder;
 mod create_ops;
 mod dir_ops;
 mod file_ops;
+mod host_mode;
 pub(crate) mod inode;
 mod metadata;
 mod remove_ops;
@@ -55,17 +56,74 @@ pub enum CachePolicy {
     Always,
 }
 
+/// Stat virtualization policy for the passthrough filesystem.
+///
+/// Controls how the guest-visible `stat` is derived from the host filesystem
+/// via the `user.containers.override_stat` extended attribute.
+///
+/// See `design/filesystems/stat-virtualization.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatVirtualization {
+    /// Fail-closed: require xattr support; eager probe at mount time.
+    ///
+    /// Reads and writes the override xattr. Mount fails if the host
+    /// filesystem cannot store `user.*` xattrs on the bind root.
+    Strict,
+
+    /// Opportunistic: apply the overlay if present; tolerate missing xattr support.
+    ///
+    /// Reads/writes the override xattr when possible, but does not probe
+    /// the root and does not fail on unsupported-xattr reads. Corrupt
+    /// override values still fail with `EIO`.
+    Relaxed,
+
+    /// Literal host metadata: do not read or apply the override xattr.
+    ///
+    /// Guest sees the real host uid/gid/mode/type. Metadata-changing
+    /// operations that require xattr-only virtualization
+    /// (`mknod` for special types, file-backed symlinks on Linux,
+    /// guest-side chown) are rejected with a clear errno. `chmod`
+    /// operates directly on the host inode.
+    Off,
+}
+
+/// Host permission propagation policy for the passthrough filesystem.
+///
+/// Controls whether guest `chmod`/create permission bits mutate the real
+/// host inode. Independent of [`StatVirtualization`].
+///
+/// See `design/filesystems/stat-virtualization.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostPermissions {
+    /// Guest permission changes live in the metadata overlay only.
+    ///
+    /// Host inodes keep a conservative mode (owner rw for files, owner rwx
+    /// for directories).
+    Private,
+
+    /// Mirror ordinary rwx bits for regular files and directories to the host.
+    ///
+    /// Only `0o777` perm bits are mirrored — never uid/gid, file type,
+    /// device ids, setuid, or setgid. An owner-access floor is always
+    /// applied so the host process keeps access to its own inodes.
+    Mirror,
+}
+
 /// Configuration for the passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
     /// Path to the root directory on the host.
     pub root_dir: PathBuf,
 
-    /// Whether to use xattr-based stat virtualization.
-    pub xattr: bool,
+    /// Stat virtualization policy.
+    ///
+    /// Default: [`StatVirtualization::Strict`].
+    pub stat_virtualization: StatVirtualization,
 
-    /// Whether to fail mount if xattr support is unavailable.
-    pub strict: bool,
+    /// Host permission propagation policy.
+    ///
+    /// Default: [`HostPermissions::Private`].
+    pub host_permissions: HostPermissions,
 
     /// FUSE entry cache timeout.
     pub entry_timeout: Duration,
@@ -192,12 +250,12 @@ impl PassthroughFs {
         let root_fd = unsafe { File::from_raw_fd(root_fd_raw) };
 
         // Probe xattr support if strict mode is enabled.
-        if cfg.strict && cfg.xattr {
+        if cfg.strict_enabled() && cfg.xattr_enabled() {
             let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
             if !supported {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and strict mode is enabled",
+                    "xattr not supported on root filesystem and stat_virtualization is Strict",
                 ));
             }
         }
@@ -335,12 +393,35 @@ impl PassthroughFs {
     }
 }
 
+impl PassthroughConfig {
+    /// Whether the override xattr is read/applied to stat results.
+    ///
+    /// True for [`StatVirtualization::Strict`] and [`StatVirtualization::Relaxed`].
+    /// False for [`StatVirtualization::Off`].
+    pub(crate) fn xattr_enabled(&self) -> bool {
+        !matches!(self.stat_virtualization, StatVirtualization::Off)
+    }
+
+    /// Whether xattr support is required at mount time (eager probe + hard errors).
+    ///
+    /// True only for [`StatVirtualization::Strict`]. Relaxed/Off skip the probe
+    /// and tolerate `EOPNOTSUPP` on reads.
+    pub(crate) fn strict_enabled(&self) -> bool {
+        matches!(self.stat_virtualization, StatVirtualization::Strict)
+    }
+
+    /// Whether guest chmod/create perm bits should be mirrored to the host inode.
+    pub(crate) fn mirror_host_permissions(&self) -> bool {
+        matches!(self.host_permissions, HostPermissions::Mirror)
+    }
+}
+
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
             root_dir: PathBuf::new(),
-            xattr: true,
-            strict: true,
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,

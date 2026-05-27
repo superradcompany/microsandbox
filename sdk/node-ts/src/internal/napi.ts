@@ -34,6 +34,7 @@ export interface NativeBindings {
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
+  readonly ViolationActionBuilder: NapiBuilderCtor<NapiViolationActionBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
   readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
@@ -55,6 +56,37 @@ export interface NativeBindings {
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
+  readonly AgentClient: NapiAgentClientStatic;
+}
+
+export interface NapiAgentClientStatic {
+  connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+}
+
+export interface AgentConnectOptions {
+  timeoutMs?: number;
+}
+
+export interface NapiRawFrame {
+  id: number;
+  flags: number;
+  body: Buffer;
+}
+
+export interface NapiStreamOpenResult {
+  id: number;
+  handle: bigint;
+}
+
+export interface NapiAgentClient {
+  request(flags: number, body: Buffer): Promise<NapiRawFrame>;
+  streamOpen(flags: number, body: Buffer): Promise<NapiStreamOpenResult>;
+  streamNext(handle: bigint): Promise<NapiRawFrame | null>;
+  streamClose(handle: bigint): Promise<void>;
+  send(id: number, flags: number, body: Buffer): Promise<void>;
+  readyBytes(): Buffer;
+  close(): Promise<void>;
 }
 
 export type NapiBuilderCtor<T> = new () => T;
@@ -96,7 +128,7 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
-  replaceWithGrace(graceMs: number): this;
+  replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -109,7 +141,9 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
   port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;
@@ -144,6 +178,8 @@ export interface NapiSandbox {
   shell(script: string): Promise<NapiExecOutput>;
   shellStream(script: string): Promise<NapiExecHandle>;
   fs(): NapiSandboxFs;
+  sshConnect(opts?: NapiSshClientOptions): Promise<NapiSshClient>;
+  sshServer(opts?: NapiSshServerOptions): Promise<NapiSshServer>;
   metrics(): Promise<NapiSandboxMetrics>;
   metricsStream(intervalMs: number): Promise<NapiMetricsStream>;
   attach(cmd: string, args?: string[]): Promise<number>;
@@ -157,6 +193,7 @@ export interface NapiSandbox {
   detach(): Promise<void>;
   removePersisted(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
+  logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
 }
 
 export interface NapiSandboxHandle {
@@ -169,10 +206,13 @@ export interface NapiSandboxHandle {
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
+  connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
+  logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
   snapshot(name: string): Promise<NapiSnapshot>;
   snapshotTo(path: string): Promise<NapiSnapshot>;
 }
@@ -183,6 +223,7 @@ export interface LogEntry {
   readonly source: string;
   readonly sessionId: number | null;
   readonly data: Buffer;
+  readonly cursor: string;
 }
 
 /** Native filter object accepted by `logs()`. */
@@ -191,6 +232,73 @@ export interface LogOptions {
   sinceMs?: number;
   untilMs?: number;
   sources?: string[];
+}
+
+/** Native option object accepted by `logStream()`. */
+export interface LogStreamOptions {
+  sources?: string[];
+  sinceMs?: number;
+  fromCursor?: string;
+  untilMs?: number;
+  follow?: boolean;
+}
+
+/** Native stream returned by `logStream()`. */
+export interface NapiLogStream extends AsyncIterable<LogEntry> {
+  recv(): Promise<LogEntry | null>;
+}
+
+export interface NapiSshOutput {
+  readonly status: number;
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+}
+
+export interface NapiSshClientOptions {
+  user?: string;
+  term?: string;
+  sftp?: boolean;
+}
+
+export interface NapiSshExecOptions {
+  tty?: boolean;
+}
+
+export interface NapiSshAttachOptions {
+  term?: string;
+  detachKeys?: string;
+}
+
+export interface NapiSshServerOptions {
+  hostKeyPath?: string;
+  authorizedKeysPath?: string;
+  user?: string;
+  sftp?: boolean;
+}
+
+export interface NapiSshClient {
+  exec(command: string, opts?: NapiSshExecOptions): Promise<NapiSshOutput>;
+  attach(opts?: NapiSshAttachOptions): Promise<number>;
+  sftp(): Promise<NapiSftpClient>;
+  close(): Promise<void>;
+}
+
+export interface NapiSftpClient {
+  read(path: string): Promise<Buffer>;
+  write(path: string, data: Buffer): Promise<void>;
+  mkdir(path: string): Promise<void>;
+  removeFile(path: string): Promise<void>;
+  removeDir(path: string): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
+  realPath(path: string): Promise<string>;
+  readLink(path: string): Promise<string>;
+  symlink(target: string, linkPath: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface NapiSshServer {
+  serveStdio(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface NapiSandboxInfo {
@@ -596,6 +704,9 @@ export interface NapiSecretBuilder {
   injectBasicAuth(enabled: boolean): this;
   injectQuery(enabled: boolean): this;
   injectBody(enabled: boolean): this;
+  onViolation(
+    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
+  ): this;
   build(): NapiSecretEntry;
 }
 
@@ -620,7 +731,9 @@ export interface NapiSecretInjection {
 export interface NapiNetworkBuilder {
   enabled(enabled: boolean): this;
   port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
   policyJson(json: string): this;
   policyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
   dns(configure: (b: NapiDnsBuilder) => NapiDnsBuilder): this;
@@ -631,8 +744,12 @@ export interface NapiNetworkBuilder {
   interface(
     configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
   ): this;
-  onSecretViolation(action: string): this;
+  onSecretViolation(
+    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
+  ): this;
   maxConnections(max: number): this;
+  ipv4Pool(pool: string): this;
+  ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
 }
 
@@ -641,6 +758,15 @@ export interface NapiInterfaceOverridesBuilder {
   mtu(mtu: number): this;
   ipv4(address: string): this;
   ipv6(address: string): this;
+}
+
+export interface NapiViolationActionBuilder {
+  block(): this;
+  blockAndLog(): this;
+  blockAndTerminate(): this;
+  passthroughHost(host: string): this;
+  passthroughHostPattern(pattern: string): this;
+  passthroughAllHosts(iUnderstand: boolean): this;
 }
 
 export interface NapiPullProgressEvent {
@@ -757,6 +883,8 @@ export interface NapiMountBuilder {
   fstype(fstype: string): this;
   readonly(): this;
   size(mib: number): this;
+  statVirtualization(policy: string): this;
+  hostPermissions(policy: string): this;
 }
 
 export interface NapiPatchBuilder {
@@ -791,6 +919,8 @@ export interface NapiRegistryConfigBuilder {
 }
 
 export interface NapiImageBuilder {
+  oci(reference: string): this;
+  upperSize(sizeMiB: number): this;
   disk(path: string): this;
   fstype(fstype: string): this;
 }

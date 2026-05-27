@@ -106,6 +106,53 @@ const (
 	LogLevelError   LogLevel = "error"
 )
 
+// StatVirtualization is the per-mount stat-virtualization policy for
+// virtiofs-backed mounts (bind directories, bind files, and named
+// directory/file volumes). Tmpfs and disk-image mounts ignore it.
+//
+// The zero value is the empty string, which the FFI treats as "use the
+// runtime default" (StatVirtualizationStrict).
+type StatVirtualization string
+
+const (
+	// StatVirtualizationDefault leaves the runtime default in place
+	// (currently equivalent to StatVirtualizationStrict).
+	StatVirtualizationDefault StatVirtualization = ""
+	// StatVirtualizationStrict fails closed: probe the host backing path
+	// at mount time and refuse to start if the xattr overlay is unavailable.
+	StatVirtualizationStrict StatVirtualization = "strict"
+	// StatVirtualizationRelaxed applies the xattr overlay opportunistically.
+	// Skips the eager probe and falls back to real host stat when the
+	// overlay is absent. Corrupt overlay still fails with EIO.
+	StatVirtualizationRelaxed StatVirtualization = "relaxed"
+	// StatVirtualizationOff exposes literal host metadata. The override
+	// xattr is never read or written; guest chown / mknod-special / Linux
+	// file-backed symlinks are rejected with clear errnos.
+	StatVirtualizationOff StatVirtualization = "off"
+)
+
+// HostPermissions is the per-mount policy for whether guest chmod bits
+// propagate to the real host inode. Mirror is rejected when combined with
+// StatVirtualizationOff (there is no overlay for Mirror to keep private).
+//
+// The zero value is the empty string, which the FFI treats as "use the
+// runtime default" (HostPermissionsPrivate).
+type HostPermissions string
+
+const (
+	// HostPermissionsDefault leaves the runtime default in place
+	// (currently equivalent to HostPermissionsPrivate).
+	HostPermissionsDefault HostPermissions = ""
+	// HostPermissionsPrivate keeps guest chmod inside the metadata overlay
+	// only; host inodes retain conservative 0o600/0o700 modes.
+	HostPermissionsPrivate HostPermissions = "private"
+	// HostPermissionsMirror propagates ordinary rwx bits for regular files
+	// and directories to the host inode. Setuid/setgid are stripped; uid,
+	// gid, file type, and device ids are never mirrored. An owner-access
+	// floor (0o600 files, 0o700 dirs) is always applied.
+	HostPermissionsMirror HostPermissions = "mirror"
+)
+
 // ViolationAction selects what happens when a secret placeholder is detected
 // going to a host the secret isn't allowed to talk to.
 type ViolationAction string

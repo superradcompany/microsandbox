@@ -139,6 +139,110 @@ char *msb_sandbox_remove(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+char *msb_sandbox_ssh_connect(uint64_t cancel_id,
+                              Handle handle,
+                              const char *opts_json,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_ssh_server(uint64_t cancel_id,
+                             Handle handle,
+                             const char *opts_json,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+char *msb_ssh_server_close(uint64_t cancel_id,
+                           Handle server_handle,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_ssh_server_serve_stdio(uint64_t cancel_id,
+                                 Handle server_handle,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
+
+char *msb_ssh_client_exec(uint64_t cancel_id,
+                          Handle client_handle,
+                          const char *command,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_ssh_client_attach(uint64_t cancel_id,
+                            Handle client_handle,
+                            const char *opts_json,
+                            unsigned char *buf,
+                            uintptr_t buf_len);
+
+char *msb_ssh_client_close(uint64_t cancel_id,
+                           Handle client_handle,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_ssh_client_sftp(uint64_t cancel_id,
+                          Handle client_handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_sftp_read(uint64_t cancel_id,
+                    Handle sftp_handle,
+                    const char *path,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_sftp_write(uint64_t cancel_id,
+                     Handle sftp_handle,
+                     const char *path,
+                     const char *data_b64,
+                     unsigned char *buf,
+                     uintptr_t buf_len);
+
+char *msb_sftp_mkdir(uint64_t cancel_id,
+                     Handle sftp_handle,
+                     const char *path,
+                     unsigned char *buf,
+                     uintptr_t buf_len);
+
+char *msb_sftp_remove_file(uint64_t cancel_id,
+                           Handle sftp_handle,
+                           const char *path,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_sftp_remove_dir(uint64_t cancel_id,
+                          Handle sftp_handle,
+                          const char *path,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_sftp_rename(uint64_t cancel_id,
+                      Handle sftp_handle,
+                      const char *old_path,
+                      const char *new_path,
+                      unsigned char *buf,
+                      uintptr_t buf_len);
+
+char *msb_sftp_real_path(uint64_t cancel_id,
+                         Handle sftp_handle,
+                         const char *path,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sftp_read_link(uint64_t cancel_id,
+                         Handle sftp_handle,
+                         const char *path,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sftp_symlink(uint64_t cancel_id,
+                       Handle sftp_handle,
+                       const char *target,
+                       const char *link_path,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_sftp_close(uint64_t cancel_id, Handle sftp_handle, unsigned char *buf, uintptr_t buf_len);
+
 char *msb_sandbox_exec(uint64_t cancel_id,
                        Handle handle,
                        const char *cmd,
@@ -262,6 +366,38 @@ char *msb_metrics_recv(uint64_t cancel_id,
  * channel receiver is dropped.
  */
 char *msb_metrics_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Start a log stream against a live sandbox handle. Returns
+ * `{"stream_handle":<u64>}`.
+ */
+char *msb_sandbox_log_stream(uint64_t cancel_id,
+                             Handle handle,
+                             const char *opts_json,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+/**
+ * Start a log stream against a sandbox identified by name (no live handle
+ * required). Returns `{"stream_handle":<u64>}`.
+ */
+char *msb_sandbox_handle_log_stream(uint64_t cancel_id,
+                                    const char *name,
+                                    const char *opts_json,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
+
+/**
+ * Block for the next log entry on this stream. Returns a single log-entry
+ * JSON object, or `{"done":true}` when the stream has ended.
+ */
+char *msb_log_recv(uint64_t cancel_id, Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Close (drop) a log stream. The background driver task exits when the
+ * channel receiver is dropped.
+ */
+char *msb_log_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
  * Start a streaming exec session. Returns `{"exec_handle":<u64>}`.
@@ -519,6 +655,60 @@ char *msb_fs_write_stream_close(uint64_t cancel_id,
                                 Handle stream_handle,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
+
+char *msb_agent_open_sandbox(uint64_t cancel_id,
+                             const char *name,
+                             uint64_t timeout_ms,
+                             Handle *out_handle);
+
+char *msb_agent_open_path(uint64_t cancel_id,
+                          const char *path,
+                          uint64_t timeout_ms,
+                          Handle *out_handle);
+
+char *msb_agent_request(uint64_t cancel_id,
+                        Handle agent_handle,
+                        unsigned char flags,
+                        const unsigned char *body_ptr,
+                        uintptr_t body_len,
+                        uint32_t *out_id,
+                        unsigned char *out_flags,
+                        unsigned char **out_body_ptr,
+                        uintptr_t *out_body_len);
+
+char *msb_agent_stream_open(uint64_t cancel_id,
+                            Handle agent_handle,
+                            unsigned char flags,
+                            const unsigned char *body_ptr,
+                            uintptr_t body_len,
+                            uint32_t *out_id,
+                            Handle *out_stream_handle);
+
+char *msb_agent_stream_next(uint64_t cancel_id,
+                            Handle agent_handle,
+                            Handle stream_handle,
+                            bool *out_present,
+                            uint32_t *out_id,
+                            unsigned char *out_flags,
+                            unsigned char **out_body_ptr,
+                            uintptr_t *out_body_len);
+
+char *msb_agent_stream_close(uint64_t cancel_id, Handle agent_handle, Handle stream_handle);
+
+char *msb_agent_send(uint64_t cancel_id,
+                     Handle agent_handle,
+                     uint32_t id,
+                     unsigned char flags,
+                     const unsigned char *body_ptr,
+                     uintptr_t body_len);
+
+char *msb_agent_ready_bytes(Handle agent_handle,
+                            unsigned char **out_body_ptr,
+                            uintptr_t *out_body_len);
+
+char *msb_agent_close(uint64_t cancel_id, Handle agent_handle);
+
+void msb_agent_free_bytes(unsigned char *ptr, uintptr_t len);
 
 /**
  * Attach to a sandbox with an interactive PTY session.

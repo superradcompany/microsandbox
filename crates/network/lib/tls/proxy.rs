@@ -8,6 +8,7 @@
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use rustls::pki_types::ServerName;
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 use super::sni;
 use super::state::TlsState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 
@@ -36,6 +38,11 @@ const RELAY_BUF_SIZE: usize = 16384;
 //--------------------------------------------------------------------------------------------------
 
 /// Spawn a TLS proxy task for a connection to an intercepted port.
+///
+/// See [`crate::proxy::spawn_tcp_proxy`] for the `upstream_connected`
+/// contract — this task flips the flag after its upstream
+/// `TcpStream::connect` succeeds (in either bypass or intercept mode).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tls_proxy(
     handle: &tokio::runtime::Handle,
     dst: SocketAddr,
@@ -44,6 +51,7 @@ pub fn spawn_tls_proxy(
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
+    upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
         if let Err(e) = tls_proxy_task(
@@ -53,6 +61,7 @@ pub fn spawn_tls_proxy(
             shared,
             tls_state,
             network_policy,
+            upstream_connected,
         )
         .await
         {
@@ -69,6 +78,7 @@ async fn tls_proxy_task(
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
     // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
@@ -97,7 +107,15 @@ async fn tls_proxy_task(
 
     if tls_state.should_bypass(&sni_name) {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
-        bypass_relay(dst, initial_buf, from_smoltcp, to_smoltcp, shared).await
+        bypass_relay(
+            dst,
+            initial_buf,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            upstream_connected,
+        )
+        .await
     } else {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS intercept");
         intercept_relay(
@@ -108,6 +126,7 @@ async fn tls_proxy_task(
             to_smoltcp,
             shared,
             tls_state,
+            upstream_connected,
         )
         .await
     }
@@ -120,8 +139,10 @@ async fn bypass_relay(
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut server = TcpStream::connect(dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     server.write_all(&initial_buf).await?;
 
     let (mut server_rx, mut server_tx) = server.into_split();
@@ -154,6 +175,7 @@ async fn bypass_relay(
 }
 
 /// Intercept mode: MITM with guest-facing rustls + server-facing tokio_rustls.
+#[allow(clippy::too_many_arguments)]
 async fn intercept_relay(
     dst: SocketAddr,
     sni_name: &str,
@@ -162,6 +184,7 @@ async fn intercept_relay(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Create secrets handler for this connection (filters by SNI).
     // tls_intercepted = true because we're in intercept_relay (not bypass).
@@ -214,6 +237,7 @@ async fn intercept_relay(
 
     // Connect to real server with TLS.
     let server_stream = TcpStream::connect(dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut server_tls = tls_state
@@ -335,20 +359,21 @@ async fn forward_plaintext(
             continue;
         }
 
-        let substituted = secrets_handler.substitute(&buf[..n]);
-        if let Some(data) = substituted {
-            server_tls.write_all(&data).await?;
-            continue;
+        match secrets_handler.substitute(&buf[..n]) {
+            Ok(data) => {
+                server_tls.write_all(&data).await?;
+            }
+            Err(action) => {
+                // Violation: placeholder going to disallowed host. Drop the connection.
+                if matches!(action, ViolationAction::BlockAndTerminate) {
+                    shared.trigger_termination();
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "secret violation: placeholder sent to disallowed host",
+                ));
+            }
         }
-
-        // Violation: placeholder going to disallowed host. Drop the connection.
-        if secrets_handler.terminates_on_violation() {
-            shared.trigger_termination();
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "secret violation: placeholder sent to disallowed host",
-        ));
     }
     Ok(())
 }

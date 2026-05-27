@@ -5,6 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -80,13 +81,21 @@ pub struct InterfaceOverrides {
     #[serde(default)]
     pub mtu: Option<u16>,
 
-    /// Guest IPv4 address. Default: derived from slot (100.96.0.0/11 pool).
+    /// Guest IPv4 address. Default: derived from slot within `ipv4_pool`.
     #[serde(default)]
     pub ipv4_address: Option<Ipv4Addr>,
 
-    /// Guest IPv6 address. Default: derived from slot (fd42:6d73:62::/48 pool).
+    /// Guest IPv4 pool. Default: derived from slot (172.16.0.0/12 pool).
+    #[serde(default)]
+    pub ipv4_pool: Option<Ipv4Network>,
+
+    /// Guest IPv6 address. Default: derived from slot within `ipv6_pool`.
     #[serde(default)]
     pub ipv6_address: Option<Ipv6Addr>,
+
+    /// Guest IPv6 pool. Default: derived from slot (fd42:6d73:62::/48 pool).
+    #[serde(default)]
+    pub ipv6_pool: Option<Ipv6Network>,
 }
 
 /// DNS interception settings for the sandbox.
@@ -133,9 +142,11 @@ pub struct PublishedPort {
 pub enum PortProtocol {
     /// TCP (default).
     #[default]
+    #[serde(rename = "tcp", alias = "Tcp")]
     Tcp,
 
     /// UDP.
+    #[serde(rename = "udp", alias = "Udp")]
     Udp,
 }
 
@@ -183,4 +194,29 @@ fn default_host_bind() -> IpAddr {
 
 fn default_query_timeout_ms() -> u64 {
     5000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PortProtocol;
+
+    #[test]
+    fn port_protocol_serializes_lowercase_and_accepts_legacy_case() {
+        assert_eq!(
+            serde_json::to_string(&PortProtocol::Tcp).unwrap(),
+            "\"tcp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PortProtocol::Udp).unwrap(),
+            "\"udp\""
+        );
+        assert_eq!(
+            serde_json::from_str::<PortProtocol>("\"Tcp\"").unwrap(),
+            PortProtocol::Tcp
+        );
+        assert_eq!(
+            serde_json::from_str::<PortProtocol>("\"Udp\"").unwrap(),
+            PortProtocol::Udp
+        );
+    }
 }

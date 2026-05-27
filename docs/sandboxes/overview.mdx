@@ -309,7 +309,7 @@ use std::time::Duration;
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .replace_with_grace(Duration::from_secs(30))
+    .replace_with_timeout(Duration::from_secs(30))
     .create()
     .await?;
 ```
@@ -317,29 +317,29 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
     .image("python")
-    .replaceWithGrace(30_000)  // milliseconds
+    .replaceWithTimeout(30_000)  // milliseconds
     .create();
 ```
 
 ```python Python
-sb = await Sandbox.create("worker", image="python", replace_with_grace=30)  # seconds
+sb = await Sandbox.create("worker", image="python", replace_with_timeout=30)  # seconds
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
-    m.WithReplaceWithGrace(30*time.Second),
+    m.WithReplaceWithTimeout(30*time.Second),
 )
 ```
 
 ```bash CLI
-msb create --replace-with-grace 30s python --name worker
-msb create --replace-with-grace 0 python --name worker  # SIGKILL immediately
+msb create --replace-with-timeout 30s python --name worker
+msb create --replace-with-timeout 0 python --name worker  # SIGKILL immediately
 ```
 
 </CodeGroup>
 
-`replace_with_grace` / `--replace-with-grace` implies `replace` / `--replace`, so you don't need to pass both.
+`replace_with_timeout` / `--replace-with-timeout` implies `replace` / `--replace`, so you don't need to pass both.
 
 ## Private registry
 
@@ -449,7 +449,7 @@ config = Sandbox.build_config(
 )
 
 print(json.dumps(config, indent=2))
-sb = await Sandbox.create(config)
+sb = await Sandbox.create(**config)
 ```
 
 ```go Go

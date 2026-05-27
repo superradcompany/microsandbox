@@ -5,6 +5,8 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use ipnetwork::{Ipv4Network, Ipv6Network};
+
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -47,7 +49,14 @@ pub struct SecretBuilder {
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
     injection: SecretInjection,
+    on_violation: Option<ViolationAction>,
     require_tls_identity: bool,
+}
+
+/// Fluent builder for a [`ViolationAction`].
+#[derive(Default)]
+pub struct ViolationActionBuilder {
+    action: ViolationAction,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -79,20 +88,44 @@ impl NetworkBuilder {
 
     /// Publish a TCP port: `host_port` on the host maps to `guest_port` in the guest.
     pub fn port(self, host_port: u16, guest_port: u16) -> Self {
-        self.add_port(host_port, guest_port, PortProtocol::Tcp)
+        self.port_bind(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port,
+            guest_port,
+        )
     }
 
     /// Publish a UDP port.
     pub fn port_udp(self, host_port: u16, guest_port: u16) -> Self {
-        self.add_port(host_port, guest_port, PortProtocol::Udp)
+        self.port_udp_bind(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port,
+            guest_port,
+        )
     }
 
-    fn add_port(mut self, host_port: u16, guest_port: u16, protocol: PortProtocol) -> Self {
+    /// Publish a TCP port on a specific host bind address.
+    pub fn port_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_bind, host_port, guest_port, PortProtocol::Tcp)
+    }
+
+    /// Publish a UDP port on a specific host bind address.
+    pub fn port_udp_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_bind, host_port, guest_port, PortProtocol::Udp)
+    }
+
+    fn add_port(
+        mut self,
+        host_bind: IpAddr,
+        host_port: u16,
+        guest_port: u16,
+        protocol: PortProtocol,
+    ) -> Self {
         self.config.ports.push(PublishedPort {
             host_port,
             guest_port,
             protocol,
-            host_bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_bind,
         });
         self
     }
@@ -153,14 +186,18 @@ impl NetworkBuilder {
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
             injection: SecretInjection::default(),
+            on_violation: None,
             require_tls_identity: true,
         });
         self
     }
 
     /// Set the violation action for secrets.
-    pub fn on_secret_violation(mut self, action: ViolationAction) -> Self {
-        self.config.secrets.on_violation = action;
+    pub fn on_secret_violation(
+        mut self,
+        f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
+    ) -> Self {
+        self.config.secrets.on_violation = f(ViolationActionBuilder::default()).build();
         self
     }
 
@@ -173,6 +210,34 @@ impl NetworkBuilder {
     /// Set guest interface overrides.
     pub fn interface(mut self, overrides: InterfaceOverrides) -> Self {
         self.config.interface = overrides;
+        self
+    }
+
+    /// Set the IPv4 pool used to derive per-sandbox `/30` guest subnets.
+    ///
+    /// The default is `172.16.0.0/12`. Pools must be at least `/30`.
+    pub fn ipv4_pool(mut self, pool: Ipv4Network) -> Self {
+        if pool.prefix() > 30 {
+            self.errors.push(BuildError::InvalidIpv4Pool {
+                raw: pool.to_string(),
+            });
+        } else {
+            self.config.interface.ipv4_pool = Some(pool);
+        }
+        self
+    }
+
+    /// Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes.
+    ///
+    /// The default is `fd42:6d73:62::/48`. Pools must be at least `/64`.
+    pub fn ipv6_pool(mut self, pool: Ipv6Network) -> Self {
+        if pool.prefix() > 64 {
+            self.errors.push(BuildError::InvalidIpv6Pool {
+                raw: pool.to_string(),
+            });
+        } else {
+            self.config.interface.ipv6_pool = Some(pool);
+        }
         self
     }
 
@@ -317,6 +382,7 @@ impl SecretBuilder {
             placeholder: None,
             allowed_hosts: Vec::new(),
             injection: SecretInjection::default(),
+            on_violation: None,
             require_tls_identity: true,
         }
     }
@@ -359,6 +425,15 @@ impl SecretBuilder {
         if i_understand_the_risk {
             self.allowed_hosts.push(HostPattern::Any);
         }
+        self
+    }
+
+    /// Set the violation action for this secret.
+    pub fn on_violation(
+        mut self,
+        f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
+    ) -> Self {
+        self.on_violation = Some(f(ViolationActionBuilder::default()).build());
         self
     }
 
@@ -409,8 +484,72 @@ impl SecretBuilder {
             placeholder,
             allowed_hosts: self.allowed_hosts,
             injection: self.injection,
+            on_violation: self.on_violation,
             require_tls_identity: self.require_tls_identity,
         }
+    }
+}
+
+impl ViolationActionBuilder {
+    /// Start building a violation action.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start building from an existing action.
+    pub fn from_action(action: ViolationAction) -> Self {
+        action.into()
+    }
+
+    /// Block the request silently.
+    pub fn block(mut self) -> Self {
+        self.action = ViolationAction::Block;
+        self
+    }
+
+    /// Block the request and emit a warning log.
+    pub fn block_and_log(mut self) -> Self {
+        self.action = ViolationAction::BlockAndLog;
+        self
+    }
+
+    /// Block the request and terminate the sandbox.
+    pub fn block_and_terminate(mut self) -> Self {
+        self.action = ViolationAction::BlockAndTerminate;
+        self
+    }
+
+    /// Allow a host to receive secret placeholders without substitution.
+    pub fn passthrough_host(mut self, host: impl Into<String>) -> Self {
+        self.push_passthrough_host(HostPattern::Exact(host.into()));
+        self
+    }
+
+    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
+    pub fn passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.push_passthrough_host(HostPattern::Wildcard(pattern.into()));
+        self
+    }
+
+    /// Allow any host to receive secret placeholders without substitution.
+    pub fn passthrough_all_hosts(mut self, i_understand_the_risk: bool) -> Self {
+        if i_understand_the_risk {
+            self.push_passthrough_host(HostPattern::Any);
+        }
+        self
+    }
+
+    /// Helper to accumulate passthrough hosts into the current action.
+    fn push_passthrough_host(&mut self, host: HostPattern) {
+        match self.action {
+            ViolationAction::Passthrough(ref mut hosts) => hosts.push(host),
+            _ => self.action = ViolationAction::Passthrough(vec![host]),
+        }
+    }
+
+    /// Consume the builder and return the action.
+    pub fn build(self) -> ViolationAction {
+        self.action
     }
 }
 
@@ -435,6 +574,11 @@ impl Default for SecretBuilder {
         Self::new()
     }
 }
+impl From<ViolationAction> for ViolationActionBuilder {
+    fn from(action: ViolationAction) -> Self {
+        Self { action }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -452,5 +596,93 @@ mod tests {
             .build()
             .unwrap();
         assert!(!cfg.dns.rebind_protection);
+    }
+
+    #[test]
+    fn port_bind_sets_host_bind() {
+        let bind = "0.0.0.0".parse().unwrap();
+        let cfg = NetworkBuilder::new()
+            .port_bind(bind, 8080, 80)
+            .port_udp_bind(bind, 5353, 53)
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.ports[0].host_bind, bind);
+        assert_eq!(cfg.ports[0].host_port, 8080);
+        assert_eq!(cfg.ports[0].guest_port, 80);
+        assert_eq!(cfg.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(cfg.ports[1].host_bind, bind);
+        assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
+    }
+
+    #[test]
+    fn network_builder_sets_global_passthrough_action() {
+        let cfg = NetworkBuilder::new()
+            .on_secret_violation(|v| {
+                v.passthrough_host("api.anthropic.com")
+                    .passthrough_host_pattern("*.anthropic.com")
+            })
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            cfg.secrets.on_violation,
+            ViolationAction::Passthrough(vec![
+                HostPattern::Exact("api.anthropic.com".into()),
+                HostPattern::Wildcard("*.anthropic.com".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn secret_builder_sets_violation_action() {
+        let secret = SecretBuilder::new()
+            .env("TOKEN")
+            .value("secret-value")
+            .allow_host("api.github.com")
+            .on_violation(|v| {
+                v.passthrough_host("api.anthropic.com")
+                    .passthrough_host_pattern("*.anthropic.com")
+            })
+            .build();
+
+        assert_eq!(
+            secret.on_violation,
+            Some(ViolationAction::Passthrough(vec![
+                HostPattern::Exact("api.anthropic.com".into()),
+                HostPattern::Wildcard("*.anthropic.com".into()),
+            ])),
+        );
+    }
+
+    #[test]
+    fn violation_action_builder_blocking_call_replaces_passthrough_policy() {
+        let action = ViolationActionBuilder::default()
+            .passthrough_host("google.com")
+            .block_and_terminate()
+            .passthrough_host("facebook.com")
+            .build();
+
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(vec![HostPattern::Exact("facebook.com".into())])
+        );
+    }
+
+    #[test]
+    fn violation_action_builder_accumulates_passthrough_hosts() {
+        let action = ViolationActionBuilder::default()
+            .block()
+            .passthrough_host("google.com")
+            .passthrough_host("facebook.com")
+            .build();
+
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(vec![
+                HostPattern::Exact("google.com".into()),
+                HostPattern::Exact("facebook.com".into()),
+            ]),
+        );
     }
 }

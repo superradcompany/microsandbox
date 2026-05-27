@@ -38,6 +38,10 @@ pub struct SecretEntry {
     #[serde(default)]
     pub injection: SecretInjection,
 
+    /// Action on secret violation for this secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_violation: Option<ViolationAction>,
+
     /// Require verified TLS identity before substituting (default: true).
     /// When true, secret is only substituted if the connection uses TLS
     /// interception (not bypass) and the SNI matches an allowed host.
@@ -46,13 +50,17 @@ pub struct SecretEntry {
 }
 
 /// Host pattern for secret allowlist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum HostPattern {
     /// Exact hostname match.
+    #[serde(alias = "Exact")]
     Exact(String),
     /// Wildcard match (e.g., `*.openai.com`).
+    #[serde(alias = "Wildcard")]
     Wildcard(String),
     /// Any host (dangerous — secret can be exfiltrated).
+    #[serde(alias = "Any")]
     Any,
 }
 
@@ -77,15 +85,22 @@ pub struct SecretInjection {
 }
 
 /// Action when a secret placeholder is detected going to a disallowed host.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ViolationAction {
     /// Block the request silently.
+    #[serde(alias = "Block")]
     Block,
     /// Block and log (default).
     #[default]
+    #[serde(alias = "BlockAndLog", alias = "block_and_log")]
     BlockAndLog,
     /// Block and terminate the sandbox.
+    #[serde(alias = "BlockAndTerminate", alias = "block_and_terminate")]
     BlockAndTerminate,
+    /// Forward the request with the placeholder unchanged for matching hosts.
+    #[serde(alias = "Passthrough")]
+    Passthrough(Vec<HostPattern>),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -100,6 +115,7 @@ impl std::fmt::Debug for SecretEntry {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .field("injection", &self.injection)
+            .field("on_violation", &self.on_violation)
             .field("require_tls_identity", &self.require_tls_identity)
             .finish()
     }
@@ -199,8 +215,46 @@ mod tests {
             placeholder: "$K".into(),
             allowed_hosts: vec![],
             injection: SecretInjection::default(),
+            on_violation: None,
             require_tls_identity: true,
         };
         assert!(entry.require_tls_identity);
+    }
+
+    #[test]
+    fn violation_action_serializes_with_sdk_casing() {
+        let action = ViolationAction::Passthrough(vec![
+            HostPattern::Exact("api.anthropic.com".into()),
+            HostPattern::Wildcard("*.anthropic.com".into()),
+            HostPattern::Any,
+        ]);
+
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            r#"{"passthrough":[{"exact":"api.anthropic.com"},{"wildcard":"*.anthropic.com"},"any"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationAction::BlockAndLog).unwrap(),
+            r#""block-and-log""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationAction::BlockAndTerminate).unwrap(),
+            r#""block-and-terminate""#
+        );
+    }
+
+    #[test]
+    fn violation_action_accepts_legacy_pascal_case() {
+        let action: ViolationAction =
+            serde_json::from_str(r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#).unwrap();
+
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())])
+        );
+        assert_eq!(
+            serde_json::from_str::<ViolationAction>(r#""BlockAndTerminate""#).unwrap(),
+            ViolationAction::BlockAndTerminate
+        );
     }
 }

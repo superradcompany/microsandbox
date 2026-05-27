@@ -20,6 +20,7 @@ import {
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
+  Pre05SandboxRestartRequiredError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "../errors.js";
@@ -49,6 +50,9 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["Image", (m, c) => new ImageError(m, { cause: c })],
   ["PatchFailed", (m, c) => new PatchFailedError(m, { cause: c })],
   ["MetricsDisabled", (m, c) => new MetricsDisabledError(m, { cause: c })],
+  // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+  // compatibility for versions before 0.5 is no longer supported.
+  ["Pre05SandboxRestartRequired", (m, c) => new Pre05SandboxRestartRequiredError(m, { cause: c })],
   ["Custom", (m, c) => new CustomError(m, { cause: c })],
 ]);
 

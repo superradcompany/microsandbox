@@ -91,6 +91,31 @@ pub struct GlobalConfig {
 
     /// Registry authentication configuration.
     pub registries: RegistriesConfig,
+
+    /// Live metrics registry configuration.
+    pub metrics: MetricsConfig,
+}
+
+/// Live metrics registry configuration.
+///
+/// Controls the host-side shared-memory registry that backs
+/// `Sandbox::metrics()` and `all_sandbox_metrics()`. The capacity here
+/// determines how many concurrent sandboxes can have a live metrics slot.
+///
+/// The capacity is locked when the registry is first created for a given
+/// `MSB_HOME`; processes that subsequently supply a different value are
+/// rejected at open time. To change the capacity, stop all sandboxes for
+/// the same home and `shm_unlink` the registry segment before the next
+/// host process boots.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Number of slots reserved in the metrics shared-memory segment.
+    /// A value of `0` (the default) falls back to the built-in default at
+    /// read time via [`GlobalConfig::metrics_registry_capacity`]. The
+    /// derived `Default` therefore avoids pinning serialized configs to a
+    /// particular release's default capacity.
+    pub capacity: u32,
 }
 
 /// Database configuration.
@@ -153,6 +178,9 @@ pub struct SandboxDefaults {
     /// Default guest memory in MiB.
     pub memory_mib: u32,
 
+    /// Default OCI rootfs settings.
+    pub oci: OciSandboxDefaults,
+
     /// Default shell for interactive sessions and scripts.
     pub shell: String,
 
@@ -169,6 +197,16 @@ pub struct SandboxDefaults {
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     #[serde(default)]
     pub disable_metrics_sample: bool,
+}
+
+/// Default values applied to OCI-rooted sandboxes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OciSandboxDefaults {
+    /// Default writable overlay upper size in MiB.
+    ///
+    /// `None` uses microsandbox's built-in formatter default.
+    pub upper_size_mib: Option<u32>,
 }
 
 /// Registry configuration.
@@ -306,6 +344,46 @@ impl GlobalConfig {
             .secrets
             .clone()
             .unwrap_or_else(|| self.home().join(microsandbox_utils::SECRETS_SUBDIR))
+    }
+
+    /// Resolve the `ssh` directory used for host-side SSH state.
+    pub fn ssh_dir(&self) -> PathBuf {
+        self.home().join(microsandbox_utils::SSH_SUBDIR)
+    }
+
+    /// Resolve the `run` directory used for ephemeral runtime artifacts.
+    pub fn run_dir(&self) -> PathBuf {
+        self.home().join(microsandbox_utils::RUN_SUBDIR)
+    }
+
+    /// Resolve the optional diagnostic file under `run/metrics` that records
+    /// the derived shared-memory registry name and capacity.
+    pub fn metrics_registry_name_path(&self) -> PathBuf {
+        self.run_dir()
+            .join(microsandbox_utils::METRICS_RUN_SUBDIR)
+            .join(microsandbox_utils::METRICS_REGISTRY_NAME_FILENAME)
+    }
+
+    /// Deterministic POSIX shared-memory object name for the live metrics
+    /// registry. Hashes the resolved home directory so concurrent
+    /// `MSB_HOME`-isolated environments do not collide.
+    pub fn metrics_registry_shm_name(&self) -> String {
+        let home_hash = microsandbox_utils::stable_hash_path(&self.home());
+        format!(
+            "{}-{}-v1",
+            microsandbox_utils::METRICS_SHM_PREFIX,
+            home_hash
+        )
+    }
+
+    /// Resolved capacity for the live metrics registry. Falls back to the
+    /// built-in default when `metrics.capacity` is zero or unset.
+    pub fn metrics_registry_capacity(&self) -> u32 {
+        if self.metrics.capacity == 0 {
+            microsandbox_metrics::default_capacity()
+        } else {
+            self.metrics.capacity
+        }
     }
 
     /// Resolve registry transport for a given hostname from the global config.
@@ -461,6 +539,7 @@ impl Default for SandboxDefaults {
         Self {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
+            oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
@@ -980,6 +1059,7 @@ mod tests {
         let cfg = GlobalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+        assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
@@ -1044,6 +1124,34 @@ mod tests {
         );
         let round: GlobalConfig = serde_json::from_str(&json).unwrap();
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_metrics_capacity_default_uses_crate_default() {
+        let cfg = GlobalConfig::default();
+        assert_eq!(
+            cfg.metrics_registry_capacity(),
+            microsandbox_metrics::default_capacity()
+        );
+    }
+
+    #[test]
+    fn test_metrics_capacity_zero_falls_back_to_default() {
+        let json = r#"{"metrics": {"capacity": 0}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.metrics.capacity, 0);
+        assert_eq!(
+            cfg.metrics_registry_capacity(),
+            microsandbox_metrics::default_capacity()
+        );
+    }
+
+    #[test]
+    fn test_metrics_capacity_explicit_value_overrides_default() {
+        let json = r#"{"metrics": {"capacity": 2048}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.metrics.capacity, 2048);
+        assert_eq!(cfg.metrics_registry_capacity(), 2048);
     }
 
     #[test]

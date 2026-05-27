@@ -10,14 +10,21 @@ from microsandbox._microsandbox import (
     FsMetadata,
     FsReadStream,
     FsWriteSink,
+    LogEntry,
+    LogStream,
     MetricsStream,
     PullSession,
     Sandbox,
     SandboxFs,
     SandboxHandle,
     SandboxMetrics,
+    SandboxSsh,
+    SftpClient,
     Snapshot,
     SnapshotHandle,
+    SshClient,
+    SshOutput,
+    SshServer,
     Volume,
     VolumeHandle,
     all_sandbox_metrics,
@@ -29,6 +36,13 @@ from microsandbox._microsandbox import (
     set_runtime_msb_path as _set_runtime_msb_path,
 )
 from microsandbox._runtime import msb_path as _msb_path
+from microsandbox.agent import (
+    FLAG_SESSION_START,
+    FLAG_SHUTDOWN,
+    FLAG_TERMINAL,
+    AgentClient,
+    AgentStream,
+)
 from microsandbox.errors import (
     ExecFailedError,
     ExecTimeoutError,
@@ -41,6 +55,7 @@ from microsandbox.errors import (
     MicrosandboxError,
     NetworkPolicyError,
     PathNotFoundError,
+    Pre05SandboxRestartRequiredError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
@@ -69,14 +84,13 @@ from microsandbox.events import (
 )
 from microsandbox.types import (
     Action,
-    AttachOptions,
     DestGroup,
     Direction,
     DiskImageFormat,
-    ExecOptions,
     ExitStatus,
     FsEntryKind,
     GiB,
+    HostPermissions,
     Image,
     ImageSource,
     InitConfig,
@@ -90,6 +104,7 @@ from microsandbox.types import (
     NetworkPolicy,
     Patch,
     PatchConfig,
+    PortBinding,
     PortProtocol,
     Protocol,
     PullPolicy,
@@ -102,9 +117,11 @@ from microsandbox.types import (
     SecretEntry,
     SecretInjection,
     Size,
+    StatVirtualization,
     Stdin,
     TlsConfig,
     ViolationAction,
+    ViolationPolicy,
 )
 
 # Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
@@ -120,12 +137,24 @@ __all__ = [
     "SandboxHandle",
     "PullSession",
     "SandboxStatus",
+    "SandboxSsh",
+    "SftpClient",
+    "SshClient",
+    "SshOutput",
+    "SshServer",
+    # Low-level agent client
+    "AgentClient",
+    "AgentStream",
+    "FLAG_TERMINAL",
+    "FLAG_SESSION_START",
+    "FLAG_SHUTDOWN",
     # Execution (native)
     "ExecHandle",
     "ExecOutput",
     "ExecSink",
+    "LogEntry",
+    "LogStream",
     "MetricsStream",
-    "ExecOptions",
     "ExitStatus",
     "Stdin",
     "Rlimit",
@@ -161,6 +190,8 @@ __all__ = [
     "VolumeHandle",
     "MountConfig",
     "MountKind",
+    "StatVirtualization",
+    "HostPermissions",
     # Snapshots
     "Snapshot",
     "SnapshotHandle",
@@ -171,6 +202,7 @@ __all__ = [
     "Action",
     "Direction",
     "Protocol",
+    "PortBinding",
     "PortProtocol",
     "DestGroup",
     # Secrets & TLS
@@ -179,6 +211,7 @@ __all__ = [
     "SecretInjection",
     "TlsConfig",
     "ViolationAction",
+    "ViolationPolicy",
     # Images / rootfs
     "Image",
     "ImageSource",
@@ -191,7 +224,6 @@ __all__ = [
     # Patches
     "Patch",
     "PatchConfig",
-    "AttachOptions",
     # Init handoff
     "InitConfig",
     # Metrics
@@ -220,6 +252,7 @@ __all__ = [
     "TlsError",
     "IoError",
     "MetricsDisabledError",
+    "Pre05SandboxRestartRequiredError",
     # Setup
     "install",
     "is_installed",

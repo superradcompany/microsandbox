@@ -4,6 +4,8 @@ Lightweight VM sandboxes for Go — run AI agents and untrusted code with hardwa
 
 The `microsandbox` Go module provides native bindings to the [microsandbox](https://github.com/superradcompany/microsandbox) runtime. It spins up real microVMs (not containers) in under 100ms, runs standard OCI (Docker) images, and gives you full control over execution, filesystem, networking, and secrets — all from a simple, idiomatic Go API.
 
+The API documentation can be found on [pkg.go.dev](https://pkg.go.dev/github.com/superradcompany/microsandbox/sdk/go) and [docs.microsandbox.dev](https://docs.microsandbox.dev/sdk/go).
+
 ## Features
 
 - **Hardware isolation** — Each sandbox is a real VM with its own Linux kernel
@@ -544,6 +546,7 @@ sb, err := h.Connect(ctx)
 | Option | Description |
 |--------|-------------|
 | `WithImage(image)` | OCI image to run (e.g. `"python:3.12"`) |
+| `WithOCIUpperSize(mib)` | Writable overlay upper size for OCI images |
 | `WithImageDisk(path, fstype)` | Disk-image rootfs with optional filesystem hint |
 | `WithMemory(mib)` | Memory limit in MiB |
 | `WithCPUs(n)` | CPU core limit |

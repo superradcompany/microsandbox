@@ -68,12 +68,75 @@ class ViolationAction(enum.StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
+    PASSTHROUGH = "passthrough"
+
+@dataclass(frozen=True, slots=True)
+class ViolationPolicy:
+    """Secret violation behavior, including optional passthrough hosts."""
+    fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    passthrough_hosts: tuple[str, ...] = ()
+    passthrough_host_patterns: tuple[str, ...] = ()
+    passthrough_all_hosts: bool = False
+
+    @classmethod
+    def block(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK)
+
+    @classmethod
+    def block_and_log(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK_AND_LOG)
+
+    @classmethod
+    def block_and_terminate(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK_AND_TERMINATE)
+
+    @classmethod
+    def passthrough(
+        cls,
+        *,
+        hosts: Sequence[str] = (),
+        host_patterns: Sequence[str] = (),
+        all_hosts: bool = False,
+    ) -> ViolationPolicy:
+        return cls(
+            passthrough_hosts=tuple(hosts),
+            passthrough_host_patterns=tuple(host_patterns),
+            passthrough_all_hosts=all_hosts,
+        )
+
+    def _to_dict(self) -> str | dict:
+        if (
+            not self.passthrough_hosts
+            and not self.passthrough_host_patterns
+            and not self.passthrough_all_hosts
+        ):
+            return str(self.fallback)
+
+        passthrough: dict = {}
+        if self.passthrough_hosts:
+            passthrough["hosts"] = list(self.passthrough_hosts)
+        if self.passthrough_host_patterns:
+            passthrough["host_patterns"] = list(self.passthrough_host_patterns)
+        if self.passthrough_all_hosts:
+            passthrough["all_hosts"] = True
+        return {"passthrough": passthrough}
 
 class MountKind(enum.StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
     DISK = "disk"
+
+class StatVirtualization(enum.StrEnum):
+    """Per-mount stat-virtualization policy for virtiofs-backed mounts."""
+    STRICT = "strict"
+    RELAXED = "relaxed"
+    OFF = "off"
+
+class HostPermissions(enum.StrEnum):
+    """Per-mount host-permission policy for virtiofs-backed mounts."""
+    PRIVATE = "private"
+    MIRROR = "mirror"
 
 class FsEntryKind(enum.StrEnum):
     FILE = "file"
@@ -177,6 +240,9 @@ class Rlimit:
     def stack(cls, limit: int) -> Rlimit:
         return cls(RlimitResource.STACK, limit, limit)
 
+    def _to_dict(self) -> dict:
+        return {"resource": str(self.resource), "soft": self.soft, "hard": self.hard}
+
 #--------------------------------------------------------------------------------------------------
 # Types: Stdin
 #--------------------------------------------------------------------------------------------------
@@ -198,45 +264,6 @@ class Stdin:
     @classmethod
     def bytes(cls, data: bytes) -> Stdin:
         return cls("bytes", data)
-
-#--------------------------------------------------------------------------------------------------
-# Types: Exec
-#--------------------------------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class ExecOptions:
-    """Full execution options (passed as second positional to exec/exec_stream)."""
-    args: tuple[str, ...] = ()
-    cwd: str | None = None
-    user: str | None = None
-    env: Mapping[str, str] = field(default_factory=dict)
-    timeout: float | None = None
-    stdin: Stdin = field(default_factory=Stdin.null)
-    tty: bool = False
-    rlimits: tuple[Rlimit, ...] = ()
-
-    def _to_dict(self) -> dict:
-        d: dict = {"args": list(self.args)}
-        if self.cwd is not None:
-            d["cwd"] = self.cwd
-        if self.user is not None:
-            d["user"] = self.user
-        if self.env:
-            d["env"] = dict(self.env)
-        if self.timeout is not None:
-            d["timeout"] = self.timeout
-        if self.tty:
-            d["tty"] = True
-        if self.stdin._mode != "null":
-            d["stdin"] = self.stdin._mode
-            if self.stdin._data is not None:
-                d["stdin_data"] = self.stdin._data
-        if self.rlimits:
-            d["rlimits"] = [
-                {"resource": str(r.resource), "soft": r.soft, "hard": r.hard}
-                for r in self.rlimits
-            ]
-        return d
 
 #--------------------------------------------------------------------------------------------------
 # Types: Init Handoff
@@ -267,45 +294,27 @@ class InitConfig:
         return d
 
 #--------------------------------------------------------------------------------------------------
-# Types: Attach
-#--------------------------------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class AttachOptions:
-    """Full options for attach (passed as second positional to attach)."""
-    args: tuple[str, ...] = ()
-    cwd: str | None = None
-    user: str | None = None
-    env: Mapping[str, str] = field(default_factory=dict)
-    detach_keys: str | None = None
-
-    def _to_dict(self) -> dict:
-        d: dict = {"args": list(self.args)}
-        if self.cwd is not None:
-            d["cwd"] = self.cwd
-        if self.user is not None:
-            d["user"] = self.user
-        if self.env:
-            d["env"] = dict(self.env)
-        if self.detach_keys is not None:
-            d["detach_keys"] = self.detach_keys
-        return d
-
-#--------------------------------------------------------------------------------------------------
 # Types: Mount
 #--------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
 class MountConfig:
-    """Volume mount configuration."""
+    """Volume mount configuration.
+
+    ``stat_virtualization`` and ``host_permissions`` are only meaningful for
+    virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
+    ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
+    """
     kind: MountKind
     bind: str | None = None
     named: str | None = None
     size_mib: int | None = None
     readonly: bool = False
     disk: str | None = None
-    format: DiskImageFormat | None = None
+    format: DiskImageFormat | str | None = None
     fstype: str | None = None
+    stat_virtualization: StatVirtualization | str | None = None
+    host_permissions: HostPermissions | str | None = None
 
     def _to_dict(self) -> dict:
         # Drive emission off `kind` exclusively so a `MountConfig` with
@@ -329,12 +338,27 @@ class MountConfig:
                 raise ValueError("MountConfig kind=DISK requires disk=...")
             d["disk"] = self.disk
             if self.format is not None:
-                d["format"] = self.format.value
+                d["format"] = _enum_value(self.format)
             if self.fstype is not None:
                 d["fstype"] = self.fstype
         else:  # pragma: no cover - StrEnum exhaustive above
             raise ValueError(f"unknown MountKind: {self.kind!r}")
+
+        # Per-mount policies — only valid for virtiofs-backed kinds.
+        if self.kind in (MountKind.BIND, MountKind.NAMED):
+            if self.stat_virtualization is not None:
+                d["stat_virtualization"] = _enum_value(self.stat_virtualization)
+            if self.host_permissions is not None:
+                d["host_permissions"] = _enum_value(self.host_permissions)
+        elif self.stat_virtualization is not None or self.host_permissions is not None:
+            raise ValueError(
+                f"stat_virtualization/host_permissions are only valid for "
+                f"BIND/NAMED mounts (got kind={self.kind.value})"
+            )
         return d
+
+def _enum_value(value: enum.Enum | str) -> str:
+    return value.value if isinstance(value, enum.Enum) else value
 
 #--------------------------------------------------------------------------------------------------
 # Types: Image
@@ -346,6 +370,7 @@ class ImageSource:
     _type: str
     _path: str | None = None
     _reference: str | None = None
+    _upper_size_mib: int | None = None
     _fstype: str | None = None
     _format: DiskImageFormat | None = None
 
@@ -363,8 +388,12 @@ class Image:
     """Factory for explicit image source configuration."""
 
     @staticmethod
-    def oci(reference: str) -> ImageSource:
-        return ImageSource(_type="oci", _reference=reference)
+    def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource:
+        return ImageSource(
+            _type="oci",
+            _reference=reference,
+            _upper_size_mib=upper_size_mib,
+        )
 
     @staticmethod
     def bind(path: str) -> ImageSource:
@@ -478,7 +507,7 @@ class SecretEntry:
     allow_host_patterns: tuple[str, ...] = ()
     placeholder: str | None = None
     require_tls: bool = True
-    on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
     injection: SecretInjection = field(default_factory=SecretInjection)
 
     def _to_dict(self) -> dict:
@@ -491,8 +520,9 @@ class SecretEntry:
             d["placeholder"] = self.placeholder
         if not self.require_tls:
             d["require_tls"] = False
-        if self.on_violation != ViolationAction.BLOCK_AND_LOG:
-            d["on_violation"] = str(self.on_violation)
+        violation = violation_policy_to_dict(self.on_violation)
+        if violation != str(ViolationAction.BLOCK_AND_LOG):
+            d["on_violation"] = violation
         injection = self.injection._to_dict()
         if injection:
             d["injection"] = injection
@@ -510,7 +540,7 @@ class Secret:
         allow_host_patterns: Sequence[str] = (),
         placeholder: str | None = None,
         require_tls: bool = True,
-        on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+        on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
         injection: SecretInjection | None = None,
     ) -> SecretEntry:
         return SecretEntry(
@@ -650,10 +680,35 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortBinding:
+    """Published host-to-guest port with an optional host bind address."""
+    host_port: int
+    guest_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    @classmethod
+    def tcp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.TCP)
+
+    @classmethod
+    def udp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.UDP)
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "guest_port": self.guest_port,
+            "bind": self.bind,
+            "protocol": self.protocol.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
-    ports: Mapping[int, int] = field(default_factory=dict)
+    ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
     `deny Domain("...")` policy rule that fires at DNS resolution
@@ -665,7 +720,14 @@ class Network:
     layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
+    ipv4_pool: str | None = None
+    """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
+    to ``172.16.0.0/12``."""
+    ipv6_pool: str | None = None
+    """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
+    to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
     def none(cls) -> Network:
@@ -687,7 +749,10 @@ class Network:
         elif isinstance(self.policy, NetworkPolicy):
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
-            d["ports"] = dict(self.ports)
+            if isinstance(self.ports, Mapping):
+                d["ports"] = dict(self.ports)
+            else:
+                d["ports"] = [p._to_dict() for p in self.ports]
         if self.deny_domains:
             d["deny_domains"] = list(self.deny_domains)
         if self.deny_domain_suffixes:
@@ -698,9 +763,22 @@ class Network:
                 d["dns"] = dns_dict
         if self.tls is not None:
             d["tls"] = self.tls._to_dict()
+        if self.ipv4_pool is not None:
+            d["ipv4_pool"] = self.ipv4_pool
+        if self.ipv6_pool is not None:
+            d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
+        violation = violation_policy_to_dict(self.on_secret_violation)
+        if violation != str(ViolationAction.BLOCK_AND_LOG):
+            d["on_secret_violation"] = violation
         return d
+
+
+def violation_policy_to_dict(policy: ViolationAction | ViolationPolicy) -> str | dict:
+    if isinstance(policy, ViolationPolicy):
+        return policy._to_dict()
+    return str(policy)
 
 #--------------------------------------------------------------------------------------------------
 # Types: Registry Auth

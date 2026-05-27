@@ -1,11 +1,12 @@
 [workspace]
 resolver = "3"
-exclude = ["crates/agentd"]
 members = [
+    "crates/agentd",
     "crates/cli",
     "crates/db",
     "crates/filesystem",
     "crates/image",
+    "crates/metrics",
     "crates/microsandbox",
     "crates/migration",
     "crates/protocol",
@@ -41,7 +42,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.4.6"
+version = "0.5.1"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -75,6 +76,7 @@ indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 nix = "0.30"
+notify = "8"
 oci-client = "0.16"
 oci-spec = "0.9.0"
 rand = "0.10.1"
@@ -87,6 +89,7 @@ serde_bytes = "0.11"
 serde_json = "1.0"
 sha2 = "0.11.0"
 smoltcp = { version = "0.13", default-features = false }
+socket2 = "0.5"
 tar = "0.4"
 time = "0.3"
 tempfile = "3.15"
@@ -126,3 +129,5 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.16.3"
 parking_lot = "0.12"
 rpassword = "7"
+russh = "0.61.0"
+russh-sftp = "2.2.2"

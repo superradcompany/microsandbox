@@ -1,18 +1,20 @@
 # microsandbox-image
 
-Pull OCI container images and cache ready-to-mount filesystem artifacts locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing EROFS layer images plus writable ext4 uppers.
+Pull OCI container images and cache ready-to-mount filesystem artifacts locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing per-layer EROFS images, fsmeta, and the VMDK descriptor used by the VM.
 
 - **Multi-platform resolution** — automatically picks the right manifest for your OS and architecture
-- **Parallel downloads** — all layers download and extract concurrently with SHA256 verification
+- **Parallel materialization** — layers download, verify, ingest, and materialize concurrently
 - **Content-addressable caching** — duplicate layers across images are stored once, with cross-process safety via `flock()`
-- **Progress streaming** — real-time events for download, extraction, and indexing stages
+- **Progress streaming** — real-time events for download, layer materialization, and fsmeta/VMDK stitching stages
 
 ## Quick Start
 
 ```rust
+use std::path::Path;
+
 use microsandbox_image::{GlobalCache, Platform, PullOptions, Registry};
 
-let cache = GlobalCache::new("/path/to/cache")?;
+let cache = GlobalCache::new(Path::new("/path/to/cache"))?;
 let platform = Platform::host_linux();
 let registry = Registry::new(platform, cache)?;
 
@@ -42,7 +44,7 @@ let auth = RegistryAuth::Basic {
     username: "user".into(),
     password: "token".into(),
 };
-let registry = Registry::with_auth(platform, cache, auth)?;
+let registry = Registry::builder(platform, cache).auth(auth).build()?;
 ```
 
 ## Pull Policies
@@ -67,6 +69,8 @@ let opts = PullOptions { pull_policy: PullPolicy::Never, ..Default::default() };
 Stream progress events while the download runs in the background.
 
 ```rust
+use microsandbox_image::PullProgress;
+
 let (mut progress, task) = registry.pull_with_progress(&reference, &PullOptions::default());
 
 tokio::spawn(async move {

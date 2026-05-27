@@ -22,6 +22,18 @@ use super::{
 const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
 const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
+const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
+
+/// Default timeout given to the existing sandbox during a `.replace()`
+/// create before it is force-killed.
+///
+/// Distinct from [`SandboxHandle::stop`]'s timeout: this one applies
+/// to the builder's override-an-existing-sandbox flow, not the
+/// user-facing stop. They share a numeric value today by coincidence,
+/// not by design.
+///
+/// [`SandboxHandle::stop`]: super::SandboxHandle::stop
+pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn default_cpus() -> u8 {
     crate::config::config().sandbox_defaults.cpus
@@ -204,13 +216,13 @@ pub struct SandboxConfig {
     ///
     /// Only consulted when `replace_existing` is true. A zero duration
     /// skips SIGTERM entirely and goes straight to SIGKILL. Default is
-    /// ten seconds, which gives the exit observer plenty of headroom
-    /// to flush logs and clean up the agent socket on a healthy
-    /// sandbox before we escalate.
+    /// [`DEFAULT_REPLACE_TIMEOUT`], which gives the exit observer plenty
+    /// of headroom to flush logs and clean up the agent socket on a
+    /// healthy sandbox before we escalate.
     ///
     /// This is an operation flag, not persisted sandbox state.
     #[serde(skip)]
-    pub replace_with_grace: std::time::Duration,
+    pub replace_with_timeout: std::time::Duration,
 
     /// Manifest digest for the resolved OCI image.
     ///
@@ -269,6 +281,22 @@ impl SandboxConfig {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+        }
+    }
+
+    /// Materialize rootfs defaults that should be persisted with the sandbox.
+    pub(crate) fn apply_rootfs_defaults(&mut self) {
+        if self.snapshot_upper_source.is_none()
+            && let RootfsSource::Oci(oci) = &mut self.image
+            && oci.upper_size_mib.is_none()
+        {
+            oci.upper_size_mib = Some(
+                crate::config::config()
+                    .sandbox_defaults
+                    .oci
+                    .upper_size_mib
+                    .unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB),
+            );
         }
     }
 
@@ -388,7 +416,7 @@ impl Default for SandboxConfig {
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
-            replace_with_grace: std::time::Duration::from_secs(10),
+            replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
         }
@@ -401,13 +429,9 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use microsandbox_image::ImageConfig;
-
-    use crate::sandbox::{RootfsSource, VolumeMount};
-
     use super::{SandboxConfig, merge_env};
+    use crate::sandbox::{RootfsSource, VolumeMount};
+    use microsandbox_image::ImageConfig;
 
     #[test]
     fn test_merge_env_image_base_with_user_override() {
@@ -543,7 +567,7 @@ mod tests {
     #[test]
     fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
         let mut config = SandboxConfig {
-            image: RootfsSource::Oci("python:3.12".into()),
+            image: RootfsSource::oci("python:3.12"),
             memory_mib: 2048,
             ..Default::default()
         };
@@ -566,13 +590,40 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_rootfs_defaults_sets_oci_upper_size() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::oci("python:3.12"),
+            ..Default::default()
+        };
+
+        config.apply_rootfs_defaults();
+
+        assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_skips_snapshot_upper_source() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::oci("python:3.12"),
+            snapshot_upper_source: Some("/tmp/upper.ext4".into()),
+            ..Default::default()
+        };
+
+        config.apply_rootfs_defaults();
+
+        assert_eq!(config.image.oci_upper_size_mib(), None);
+    }
+
+    #[test]
     fn test_apply_runtime_defaults_preserves_explicit_tmp_mount() {
         let mut config = SandboxConfig {
-            image: RootfsSource::Oci("python:3.12".into()),
+            image: RootfsSource::oci("python:3.12"),
             mounts: vec![VolumeMount::Bind {
                 host: "/host/tmp".into(),
                 guest: "/tmp/".into(),
                 readonly: false,
+                stat_virtualization: crate::sandbox::StatVirtualization::Strict,
+                host_permissions: crate::sandbox::HostPermissions::Private,
             }],
             ..Default::default()
         };

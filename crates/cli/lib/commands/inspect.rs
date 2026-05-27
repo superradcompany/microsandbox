@@ -1,9 +1,33 @@
 //! `msb inspect` command — show detailed sandbox information.
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxConfig, VolumeMount};
+use microsandbox::sandbox::{
+    HostPermissions, Sandbox, SandboxConfig, StatVirtualization, VolumeMount,
+};
 
 use crate::ui;
+
+/// Render a non-default mount policy suffix for `msb inspect` output.
+///
+/// Returns an empty string when both policies are at their conservative
+/// defaults (`Strict` + `Private`), so common mounts stay terse.
+fn mount_policy_suffix(sv: StatVirtualization, hp: HostPermissions) -> String {
+    let sv_str = match sv {
+        StatVirtualization::Strict => None,
+        StatVirtualization::Relaxed => Some("stat-virt=relaxed"),
+        StatVirtualization::Off => Some("stat-virt=off"),
+    };
+    let hp_str = match hp {
+        HostPermissions::Private => None,
+        HostPermissions::Mirror => Some("host-perms=mirror"),
+    };
+    match (sv_str, hp_str) {
+        (None, None) => String::new(),
+        (Some(s), None) => format!(" [{s}]"),
+        (None, Some(h)) => format!(" [{h}]"),
+        (Some(s), Some(h)) => format!(" [{s},{h}]"),
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -57,13 +81,16 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     // Parse and display config details.
     if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
         let image = match &config.image {
-            microsandbox::sandbox::RootfsSource::Oci(s) => s.clone(),
+            microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => {
                 path.display().to_string()
             }
         };
         ui::detail_kv("Image", &image);
+        if let Some(upper_size_mib) = config.image.oci_upper_size_mib() {
+            ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
+        }
 
         ui::detail_header("Resources");
         ui::detail_kv_indent("CPUs", &config.cpus.to_string());
@@ -91,17 +118,23 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         host,
                         guest,
                         readonly,
+                        stat_virtualization,
+                        host_permissions,
                     } => {
                         let ro = if *readonly { " (ro)" } else { " (rw)" };
-                        println!("  {guest:<16}\u{2192} {}{ro}", host.display());
+                        let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
+                        println!("  {guest:<16}\u{2192} {}{ro}{suffix}", host.display());
                     }
                     VolumeMount::Named {
                         name,
                         guest,
                         readonly,
+                        stat_virtualization,
+                        host_permissions,
                     } => {
                         let ro = if *readonly { " (ro)" } else { " (rw)" };
-                        println!("  {guest:<16}\u{2192} volume:{name}{ro}");
+                        let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
+                        println!("  {guest:<16}\u{2192} volume:{name}{ro}{suffix}");
                     }
                     VolumeMount::Tmpfs {
                         guest,

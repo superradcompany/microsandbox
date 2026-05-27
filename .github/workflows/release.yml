@@ -77,7 +77,7 @@ jobs:
           rustup target add aarch64-unknown-linux-musl
           cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+          cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@v4
@@ -151,7 +151,7 @@ jobs:
           rustup target add ${{ matrix.agentd_target }}
           cargo build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
           mkdir -p build
-          cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
+          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
@@ -202,7 +202,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net -p microsandbox-cli
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -350,9 +350,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Auto-prerelease for rc / alpha / beta / dev tags so consumers
+          # querying /releases/latest (e.g. install.microsandbox.dev) don't
+          # accidentally promote them. Matches v0.5.0-rc-1, v1.2.3-rc1,
+          # v1.0.0-alpha.4, etc.
+          PRERELEASE=""
+          if [[ "${{ github.ref_name }}" =~ -(rc|alpha|beta|dev) ]]; then
+            PRERELEASE="--prerelease"
+          fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
+            $PRERELEASE \
             release-artifacts/*
 
   # ---------------------------------------------------------------------------
@@ -524,11 +533,13 @@ jobs:
           for crate in \
             microsandbox-utils \
             microsandbox-protocol \
+            microsandbox-agentd \
             microsandbox-db \
             microsandbox-migration \
             microsandbox-image \
             microsandbox-filesystem \
             microsandbox-network \
+            microsandbox-metrics \
             microsandbox-runtime \
             microsandbox \
             microsandbox-cli; do

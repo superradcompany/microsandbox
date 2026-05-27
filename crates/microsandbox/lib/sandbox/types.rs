@@ -29,8 +29,8 @@ pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
     Bind(PathBuf),
 
-    /// Use an OCI image reference (e.g. `python`).
-    Oci(String),
+    /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
+    Oci(OciRootfsSource),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
     DiskImage {
@@ -43,14 +43,25 @@ pub enum RootfsSource {
     },
 }
 
+/// OCI root filesystem source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OciRootfsSource {
+    /// OCI image reference (e.g. `python`).
+    pub reference: String,
+
+    /// Writable overlay upper size in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_size_mib: Option<u32>,
+}
+
 /// Intermediate type for parsing user input into a [`RootfsSource`].
 ///
 /// Accepts `&str`, `String`, or `PathBuf` and resolves to the correct
 /// [`RootfsSource`] variant:
 ///
 /// - **`PathBuf`** → always local (bind mount or disk image based on extension).
-/// - **`&str` / `String`** → local path if prefixed with `/`, `./`, or `../`;
-///   otherwise [`RootfsSource::Oci`].
+/// - **`&str` / `String`** → local path if `.`, `..`, or prefixed with `/`,
+///   `./`, or `../`; otherwise [`RootfsSource::Oci`].
 ///
 /// Disk image extensions (`.qcow2`, `.raw`, `.vmdk`) resolve to
 /// [`RootfsSource::DiskImage`].
@@ -62,11 +73,12 @@ pub enum ImageSource {
     Path(PathBuf),
 }
 
-/// Builder for configuring a disk image rootfs.
+/// Builder for configuring an image rootfs.
 ///
 /// Used with [`crate::sandbox::SandboxBuilder::image_with`]:
 ///
 /// ```ignore
+/// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
 /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
 #[derive(Default)]
@@ -79,10 +91,44 @@ pub struct ImageBuilder {
 ///
 /// Implemented for:
 /// - `&str`, `String`, `PathBuf` — resolved via [`ImageSource`].
-/// - `FnOnce(ImageBuilder) -> ImageBuilder` — closure-based disk image configuration.
+/// - `FnOnce(ImageBuilder) -> ImageBuilder` — closure-based image configuration.
 pub trait IntoImage {
     /// Resolve this value into a concrete root filesystem source.
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
+}
+
+/// Stat virtualization policy for a virtiofs-backed volume mount.
+///
+/// Mirrors `microsandbox_filesystem::StatVirtualization`. See
+/// `design/filesystems/stat-virtualization.md` for the threat model.
+///
+/// Serializes/deserializes as the lowercase variant name (`"strict"`,
+/// `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar
+/// (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatVirtualization {
+    /// Fail-closed: probe the host backing path; require xattr support.
+    Strict,
+    /// Opportunistic: apply the overlay when present; tolerate missing xattr support.
+    Relaxed,
+    /// Literal host metadata: do not read or apply the override xattr.
+    Off,
+}
+
+/// Host permission propagation policy for a virtiofs-backed volume mount.
+///
+/// Mirrors `microsandbox_filesystem::HostPermissions`.
+///
+/// Serializes/deserializes as the lowercase variant name (`"private"`,
+/// `"mirror"`) to align with the CLI and NAPI spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostPermissions {
+    /// Guest chmod stays in the metadata overlay only.
+    Private,
+    /// Mirror ordinary rwx bits for regular files and directories to the host inode.
+    Mirror,
 }
 
 /// A volume mount specification for a sandbox.
@@ -96,6 +142,10 @@ pub enum VolumeMount {
         guest: String,
         /// Whether the mount is read-only.
         readonly: bool,
+        /// Guest-visible stat virtualization policy.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy.
+        host_permissions: HostPermissions,
     },
 
     /// Mount a named volume into the guest.
@@ -106,6 +156,10 @@ pub enum VolumeMount {
         guest: String,
         /// Whether the mount is read-only.
         readonly: bool,
+        /// Guest-visible stat virtualization policy.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy.
+        host_permissions: HostPermissions,
     },
 
     /// Temporary filesystem (memory-backed).
@@ -146,6 +200,8 @@ pub struct MountBuilder {
     size_mib: Option<u32>,
     disk_format: Option<DiskImageFormat>,
     disk_fstype: Option<String>,
+    stat_virtualization: Option<StatVirtualization>,
+    host_permissions: Option<HostPermissions>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -268,6 +324,8 @@ impl MountBuilder {
             size_mib: None,
             disk_format: None,
             disk_fstype: None,
+            stat_virtualization: None,
+            host_permissions: None,
             error: None,
         }
     }
@@ -338,6 +396,24 @@ impl MountBuilder {
         self
     }
 
+    /// Set the guest stat virtualization policy. Default: [`StatVirtualization::Strict`].
+    ///
+    /// Valid only for bind and named-directory/file mounts. Calling this on
+    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    pub fn stat_virtualization(mut self, policy: StatVirtualization) -> Self {
+        self.stat_virtualization = Some(policy);
+        self
+    }
+
+    /// Set the host permission propagation policy. Default: [`HostPermissions::Private`].
+    ///
+    /// Valid only for bind and named-directory/file mounts. Calling this on
+    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    pub fn host_permissions(mut self, policy: HostPermissions) -> Self {
+        self.host_permissions = Some(policy);
+        self
+    }
+
     /// Set size limit (for tmpfs).
     ///
     /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
@@ -379,6 +455,7 @@ impl MountBuilder {
         // Reject options set on the wrong kind.
         let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
         let is_disk = matches!(self.mount, MountKind::Disk(_));
+        let is_virtiofs = matches!(self.mount, MountKind::Bind(_) | MountKind::Named(_));
         if self.size_mib.is_some() && !is_tmpfs {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".size() is only valid for tmpfs mounts".into(),
@@ -394,18 +471,76 @@ impl MountBuilder {
                 ".fstype() is only valid for disk image mounts".into(),
             ));
         }
+        if self.stat_virtualization.is_some() && !is_virtiofs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".stat_virtualization() is only valid for bind and named volume mounts".into(),
+            ));
+        }
+        if self.host_permissions.is_some() && !is_virtiofs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".host_permissions() is only valid for bind and named volume mounts".into(),
+            ));
+        }
+
+        // `Off + Mirror` is a contradiction. With xattr disabled there is no
+        // overlay to keep guest chmod private, so chmod always hits the host —
+        // `Mirror` would silently be a no-op as a distinct policy. Reject only
+        // when the caller explicitly chose both, so the conservative defaults
+        // never trip the check.
+        if matches!(self.stat_virtualization, Some(StatVirtualization::Off))
+            && matches!(self.host_permissions, Some(HostPermissions::Mirror))
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "stat_virtualization=Off cannot be combined with host_permissions=Mirror: \
+                 Off has no overlay, so chmod already operates on the host inode and Mirror \
+                 would be a no-op. Drop one or the other."
+                    .into(),
+            ));
+        }
+
+        let stat_virtualization = self
+            .stat_virtualization
+            .unwrap_or(StatVirtualization::Strict);
+        let host_permissions = self.host_permissions.unwrap_or(HostPermissions::Private);
 
         match self.mount {
-            MountKind::Bind(host) => Ok(VolumeMount::Bind {
-                host,
-                guest: self.guest,
-                readonly: self.readonly,
-            }),
-            MountKind::Named(name) => Ok(VolumeMount::Named {
-                name,
-                guest: self.guest,
-                readonly: self.readonly,
-            }),
+            MountKind::Bind(host) => {
+                // The spawn → VM wire format encodes mount specs as
+                // `tag:host[:ro][,key=value]`. Embedded commas or colons in
+                // the host path would collide with that grammar and could
+                // silently inject policy options. Reject at the SDK
+                // boundary so callers get a clear error rather than a
+                // confusing parse failure later.
+                if let Some(s) = host.to_str() {
+                    if s.contains(',') {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "bind host path must not contain ',': {s}"
+                        )));
+                    }
+                    if s.contains(':') {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "bind host path must not contain ':': {s}"
+                        )));
+                    }
+                }
+                Ok(VolumeMount::Bind {
+                    host,
+                    guest: self.guest,
+                    readonly: self.readonly,
+                    stat_virtualization,
+                    host_permissions,
+                })
+            }
+            MountKind::Named(name) => {
+                crate::volume::validate_volume_name(&name)?;
+                Ok(VolumeMount::Named {
+                    name,
+                    guest: self.guest,
+                    readonly: self.readonly,
+                    stat_virtualization,
+                    host_permissions,
+                })
+            }
             MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
@@ -571,6 +706,45 @@ impl VolumeMount {
     }
 }
 
+impl OciRootfsSource {
+    /// Create a new OCI rootfs source.
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            upper_size_mib: None,
+        }
+    }
+
+    /// Set the writable overlay upper size.
+    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.upper_size_mib = Some(size.into().as_u32());
+        self
+    }
+}
+
+impl RootfsSource {
+    /// Create an OCI rootfs source from an image reference.
+    pub fn oci(reference: impl Into<String>) -> Self {
+        Self::Oci(OciRootfsSource::new(reference))
+    }
+
+    /// Return the OCI image reference if this is an OCI rootfs.
+    pub fn oci_reference(&self) -> Option<&str> {
+        match self {
+            Self::Oci(oci) => Some(&oci.reference),
+            _ => None,
+        }
+    }
+
+    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
+    pub fn oci_upper_size_mib(&self) -> Option<u32> {
+        match self {
+            Self::Oci(oci) => oci.upper_size_mib,
+            _ => None,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: ImageSource
 //--------------------------------------------------------------------------------------------------
@@ -581,10 +755,10 @@ impl ImageSource {
         match self {
             Self::Path(path) => Self::resolve_path(path),
             Self::Text(s) => {
-                if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+                if microsandbox_utils::looks_like_local_path_text(&s) {
                     Self::resolve_path(PathBuf::from(s))
                 } else {
-                    Ok(RootfsSource::Oci(s))
+                    Ok(RootfsSource::oci(s))
                 }
             }
         }
@@ -640,6 +814,36 @@ impl ImageBuilder {
     /// Create a new image builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Use an OCI image reference as the root filesystem.
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// ```
+    pub fn oci(mut self, reference: impl Into<String>) -> Self {
+        self.source = Some(RootfsSource::oci(reference));
+        self
+    }
+
+    /// Set the writable overlay upper size for an OCI rootfs.
+    ///
+    /// This is valid only after [`oci`](Self::oci).
+    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        let size_mib = size.into().as_u32();
+        match &mut self.source {
+            Some(RootfsSource::Oci(oci)) => {
+                oci.upper_size_mib = Some(size_mib);
+            }
+            _ => {
+                if self.error.is_none() {
+                    self.error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "upper_size() requires oci() to be called first".into(),
+                    ));
+                }
+            }
+        }
+        self
     }
 
     /// Use a disk image file as the root filesystem.
@@ -713,7 +917,7 @@ impl ImageBuilder {
         }
         self.source.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "ImageBuilder: no image source set (call .disk())".into(),
+                "ImageBuilder: no image source set (call .oci() or .disk())".into(),
             )
         })
     }
@@ -766,7 +970,7 @@ impl std::str::FromStr for DiskImageFormat {
 
 impl Default for RootfsSource {
     fn default() -> Self {
-        Self::Oci(String::new())
+        Self::oci(String::new())
     }
 }
 
@@ -798,24 +1002,32 @@ impl Serialize for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map = serializer.serialize_map(Some(6))?;
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
             }
             Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map = serializer.serialize_map(Some(6))?;
                 map.serialize_entry("type", "Named")?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
             }
             Self::Tmpfs {
@@ -854,6 +1066,13 @@ impl Serialize for VolumeMount {
 impl<'de> Deserialize<'de> for VolumeMount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         /// Helper for tagged deserialization.
+        fn default_strict() -> StatVirtualization {
+            StatVirtualization::Strict
+        }
+        fn default_private() -> HostPermissions {
+            HostPermissions::Private
+        }
+
         #[derive(Deserialize)]
         #[serde(tag = "type")]
         enum VolumeMountHelper {
@@ -862,12 +1081,20 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 readonly: bool,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
             },
             Named {
                 name: String,
                 guest: String,
                 #[serde(default)]
                 readonly: bool,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
             },
             Tmpfs {
                 guest: String,
@@ -893,19 +1120,27 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => Self::Bind {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             },
             VolumeMountHelper::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             },
             VolumeMountHelper::Tmpfs {
                 guest,
@@ -940,21 +1175,29 @@ impl std::fmt::Debug for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => f
                 .debug_struct("Bind")
                 .field("host", host)
                 .field("guest", guest)
                 .field("readonly", readonly)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
                 .finish(),
             Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => f
                 .debug_struct("Named")
                 .field("name", name)
                 .field("guest", guest)
                 .field("readonly", readonly)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
                 .finish(),
             Self::Tmpfs {
                 guest,
@@ -1079,6 +1322,27 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_accepts_valid_named_volume() {
+        let mount = MountBuilder::new("/data").named("cache_1").build().unwrap();
+        match mount {
+            VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "cache_1");
+                assert_eq!(guest, "/data");
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_invalid_named_volume() {
+        let err = MountBuilder::new("/data")
+            .named("cache/../../secrets")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("volume name"));
+    }
+
+    #[test]
     fn test_mount_builder_disk_then_format_overrides_inference() {
         // .disk(qcow2 path) would infer Qcow2; .format(Raw) afterwards must win.
         let mount = MountBuilder::new("/data")
@@ -1151,10 +1415,61 @@ mod tests {
     }
 
     #[test]
+    fn test_image_source_resolves_dot_as_bind() {
+        let source = ImageSource::from(".");
+        let rootfs = source.into_rootfs_source().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from(".")),
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
+    fn test_image_source_resolves_dot_dot_as_bind() {
+        let source = ImageSource::from("..");
+        let rootfs = source.into_rootfs_source().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from("..")),
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
     fn test_image_source_resolves_oci_reference() {
         let source = ImageSource::from("python");
         let rootfs = source.into_rootfs_source().unwrap();
-        assert!(matches!(rootfs, RootfsSource::Oci(_)));
+        match rootfs {
+            RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "python");
+                assert_eq!(oci.upper_size_mib, None);
+            }
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_oci_with_upper_size() {
+        let rootfs = ImageBuilder::new()
+            .oci("python:3.12")
+            .upper_size(8192u32)
+            .build()
+            .unwrap();
+
+        match rootfs {
+            RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "python:3.12");
+                assert_eq!(oci.upper_size_mib, Some(8192));
+            }
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_upper_size_requires_oci() {
+        let result = ImageBuilder::new().upper_size(8192u32).build();
+        let err = result.unwrap_err();
+
+        assert!(err.to_string().contains("upper_size() requires oci()"));
     }
 
     #[test]

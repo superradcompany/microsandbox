@@ -20,7 +20,7 @@ The `microsandbox` Python package provides native bindings to the [microsandbox]
 - **Rootfs patches** — Modify the filesystem before the VM boots
 - **Detached mode** — Sandboxes can outlive the Python process
 - **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
-- **Typed** — Frozen dataclasses, `StrEnum`s, sealed event unions, `.pyi` stubs
+- **Typed** — Frozen dataclasses, `StrEnum`s, event objects, `.pyi` stubs
 
 ## Requirements
 
@@ -73,6 +73,8 @@ asyncio.run(main())
 ### Command Execution
 
 ```python
+import sys
+
 from microsandbox import Sandbox
 
 # Collected output.
@@ -84,13 +86,14 @@ print(output.exit_code)      # 0
 output = await sandbox.shell("echo hello && pwd")
 print(output.stdout_text)
 
-# Full configuration via ExecOptions dict.
-output = await sandbox.exec("python3", {
-    "args": ["script.py"],
-    "cwd": "/app",
-    "env": {"PYTHONPATH": "/app/lib"},
-    "timeout": 30.0,
-})
+# Full configuration via keyword-only options.
+output = await sandbox.exec(
+    "python3",
+    ["script.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
 
 # Streaming output.
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
@@ -276,7 +279,7 @@ sandbox = await Sandbox.create(
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Python process:
+Sandboxes in detached mode survive the Python process after the returned handle is detached:
 
 ```python
 # Create in detached mode.
@@ -306,19 +309,19 @@ async with await Sandbox.create("temp", image="alpine", replace=True) as sb:
 
 `replace=True` stops a sandbox with the same name (if any) and
 recreates it. By default the existing one gets 10 seconds to exit
-cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_grace` (in
-seconds, fractional allowed) to override. Setting `replace_with_grace`
-implies `replace=True`.
+cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_timeout`
+(in seconds, fractional allowed) to override. Setting
+`replace_with_timeout` implies `replace=True`.
 
 ```python
-# Default 10s SIGTERM grace.
+# Default 10s SIGTERM timeout.
 sb = await Sandbox.create("worker", image="alpine", replace=True)
 
 # Wait longer for a workload that needs more time to shut down.
-sb = await Sandbox.create("worker", image="alpine", replace_with_grace=30)
+sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=30)
 
 # Skip SIGTERM entirely; SIGKILL immediately.
-sb = await Sandbox.create("worker", image="alpine", replace_with_grace=0)
+sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=0)
 ```
 
 If you'd rather handle the conflict yourself, catch the typed error:
@@ -409,7 +412,7 @@ if not is_installed():
 | `Network.none()` / `.public_only()` / `.allow_all()` | Network presets |
 | `Secret.env()` | Secret entry with host allowlist |
 | `Patch.text()` / `.mkdir()` / `.copy_file()` / `.append()` / ... | Pre-boot filesystem modifications |
-| `Image.oci()` / `.bind()` / `.disk()` | Explicit rootfs source configuration |
+| `Image.oci(..., upper_size_mib=...)` / `.bind()` / `.disk()` | Explicit rootfs source configuration |
 | `Rlimit.nofile()` / `.cpu()` / `.as_()` / ... | POSIX resource limits |
 
 ### Enums (Python `StrEnum`)
@@ -431,10 +434,8 @@ if not is_installed():
 
 | Type | Description |
 |------|-------------|
-| `ExecOptions` | Full execution options (args, cwd, env, timeout, tty, rlimits) |
-| `AttachOptions` | Attach options (args, cwd, env, detach_keys) |
 | `ExitStatus` | Exit code and success flag |
-| `MountConfig` | Volume mount (bind, named, or tmpfs) |
+| `MountConfig` | Volume mount (bind, named, tmpfs, or disk) |
 | `PatchConfig` | Pre-boot filesystem modification |
 | `SecretEntry` | Secret binding to env var with host allowlist |
 | `NetworkPolicy` | Custom network policy with rules |
@@ -445,12 +446,12 @@ if not is_installed():
 | `Size` | Memory/storage size value type |
 | `Rlimit` | POSIX resource limit |
 
-### Event Types (Python, sealed unions)
+### Event Types
 
-| Type | Variants |
-|------|----------|
-| `ExecEvent` | `StartedEvent`, `StdoutEvent`, `StderrEvent`, `ExitedEvent` |
-| `PullProgress` | `Resolving`, `Resolved`, `LayerDownloadProgress`, `LayerDownloadComplete`, `LayerExtractStarted`, `LayerExtractProgress`, `LayerExtractComplete`, `LayerIndexStarted`, `LayerIndexComplete`, `PullComplete` |
+| Type | Description |
+|------|-------------|
+| Streaming exec events | Event objects returned by `exec_stream()` / `shell_stream()`. Inspect `event_type`, `pid`, `data`, and `code`. |
+| Pull progress events | Event objects yielded by `PullSession.progress`. Inspect `event_type` and the optional detail fields for that event. |
 
 ### Functions
 

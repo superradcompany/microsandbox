@@ -44,6 +44,16 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissing",
         MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrity",
         MicrosandboxError::MetricsDisabled(_) => "MetricsDisabled",
+        MicrosandboxError::MissedRotation { .. } => "MissedRotation",
+        MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
+        MicrosandboxError::AgentClient(
+            microsandbox::AgentClientError::Pre05SandboxRestartRequired,
+        ) => {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            "Pre05SandboxRestartRequired"
+        }
+        MicrosandboxError::AgentClient(_) => "AgentClient",
         MicrosandboxError::Custom(_) => "Custom",
     }
 }

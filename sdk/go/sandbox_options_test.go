@@ -43,6 +43,20 @@ func TestFFIWireShape_WithImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {
+		t.Fatalf("oci_upper_size_mib = %v, want 8192", v)
+	}
+}
+
+func TestFFIWireShape_WithOCIUpperSizeZero(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(0))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(0) {
+		t.Fatalf("oci_upper_size_mib = %v, want 0", v)
+	}
+}
+
 func TestFFIWireShape_WithSnapshot(t *testing.T) {
 	got := marshalCreateOptions(t, WithSnapshot("after-pip-install"))
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
@@ -98,13 +112,13 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
+func TestFFIWireShape_ReplaceWithTimeoutMs(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(750*time.Millisecond),
+		WithReplaceWithTimeout(750*time.Millisecond),
 	)
-	if v := mustField(t, got, "replace_with_grace_ms"); v != float64(750) {
-		t.Fatalf("replace_with_grace_ms = %v, want 750", v)
+	if v := mustField(t, got, "replace_with_timeout_ms"); v != float64(750) {
+		t.Fatalf("replace_with_timeout_ms = %v, want 750", v)
 	}
 	if v := mustField(t, got, "replace"); v != true {
 		t.Fatalf("replace = %v, want true", v)
@@ -113,14 +127,14 @@ func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
 	// Zero must round-trip (means "skip SIGTERM"), not be omitted.
 	got = marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(0),
+		WithReplaceWithTimeout(0),
 	)
-	v, ok := got["replace_with_grace_ms"]
+	v, ok := got["replace_with_timeout_ms"]
 	if !ok {
-		t.Fatal("zero grace was omitted")
+		t.Fatal("zero timeout was omitted")
 	}
 	if v != float64(0) {
-		t.Fatalf("replace_with_grace_ms = %v, want 0", v)
+		t.Fatalf("replace_with_timeout_ms = %v, want 0", v)
 	}
 }
 
@@ -146,6 +160,7 @@ func TestFFIWireShape_Ports(t *testing.T) {
 		WithImage("alpine"),
 		WithPorts(map[uint16]uint16{8080: 80}),
 		WithPortsUDP(map[uint16]uint16{5353: 53}),
+		WithPortBindings(PortBinding{Bind: "0.0.0.0", HostPort: 8081, GuestPort: 81}),
 	)
 	ports := mustField(t, got, "ports").(map[string]any)
 	if ports["8080"] != float64(80) {
@@ -154,6 +169,11 @@ func TestFFIWireShape_Ports(t *testing.T) {
 	portsUDP := mustField(t, got, "ports_udp").(map[string]any)
 	if portsUDP["5353"] != float64(53) {
 		t.Fatalf("ports_udp = %v", portsUDP)
+	}
+	bindings := mustField(t, got, "port_bindings").([]any)
+	first := bindings[0].(map[string]any)
+	if first["bind"] != "0.0.0.0" || first["host_port"] != float64(8081) || first["guest_port"] != float64(81) {
+		t.Fatalf("port_bindings = %v", bindings)
 	}
 }
 
@@ -298,6 +318,8 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
+			IPv4Pool: "172.31.240.0/24",
+			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
 	)
 	net := mustField(t, got, "network").(map[string]any)
@@ -320,6 +342,12 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	if len(deny) != 1 || deny[0] != "blocked.example.com" {
 		t.Fatalf("deny_domains = %v", deny)
 	}
+	if net["ipv4_pool"] != "172.31.240.0/24" {
+		t.Fatalf("ipv4_pool = %v", net["ipv4_pool"])
+	}
+	if net["ipv6_pool"] != "fd7a:115c:a1e0:100::/56" {
+		t.Fatalf("ipv6_pool = %v", net["ipv6_pool"])
+	}
 	dns := net["dns"].(map[string]any)
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
@@ -327,8 +355,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 }
 
-// The Rust side relies on serde(default), so zero-valued Go fields must not
-// reach the wire — otherwise the runtime can't tell "unset" from "set to zero".
+// The Rust side relies on serde(default), so zero-valued Go scalar fields must
+// not reach the wire. Explicit optional values use pointers when zero is valid
+// on the wire for validation.
 func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 	got := marshalCreateOptions(t)
 
@@ -336,7 +365,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth",
+		"init", "registry_auth", "oci_upper_size_mib",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

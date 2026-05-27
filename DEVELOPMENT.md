@@ -103,7 +103,7 @@ The project is a Cargo workspace with these crates (in dependency order):
 | `microsandbox-runtime` | `crates/runtime` | VM runtime (libkrun integration) |
 | `microsandbox` | `crates/microsandbox` | Public SDK crate |
 | `microsandbox-cli` | `crates/cli` | `msb` CLI binary |
-| `agentd` | `crates/agentd` | In-guest agent (excluded from workspace, built separately for musl) |
+| `agentd` | `crates/agentd` | In-guest agent (workspace member, built separately for musl) |
 
 ### Other Packages
 

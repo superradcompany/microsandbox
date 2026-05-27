@@ -17,10 +17,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
+use microsandbox_protocol::core::RelayClientDisconnected;
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
+use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
 use tokio::net::UnixListener;
 use tokio::net::unix::OwnedReadHalf;
@@ -60,12 +62,6 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
-
-/// Maximum number of simultaneous clients.
-const MAX_CLIENTS: u32 = 16;
-
-/// Size of the correlation ID range allocated to each client.
-const ID_RANGE_STEP: u32 = u32::MAX / MAX_CLIENTS;
 
 /// Size of the length prefix in the wire format.
 const LEN_PREFIX_SIZE: usize = 4;
@@ -235,9 +231,11 @@ impl AgentRelay {
     /// console ring buffers, and handles client disconnects with session
     /// cleanup.
     ///
-    /// If a client sends a `core.shutdown` message (identified by
+    /// When a client sends a `core.shutdown` message (identified by
     /// `FLAG_SHUTDOWN` in the frame header), the relay notifies the caller
-    /// via `drain_tx`.
+    /// via `drain_tx` after forwarding the frame to agentd. The caller is
+    /// expected to give agentd a flush window before forcing host-side
+    /// teardown.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -299,7 +297,7 @@ impl AgentRelay {
                             let slot = {
                                 let mut slots = used_slots.lock().await;
                                 let mut found = None;
-                                for i in 0..MAX_CLIENTS {
+                                for i in 0..AGENT_RELAY_MAX_CLIENTS {
                                     if !slots.contains(&i) {
                                         slots.insert(i);
                                         found = Some(i);
@@ -318,16 +316,20 @@ impl AgentRelay {
                                 }
                             };
 
-                            let id_offset = slot * ID_RANGE_STEP;
+                            let id_offset = slot * AGENT_RELAY_ID_RANGE_STEP;
+                            let id_start = id_offset.saturating_add(1);
+                            let id_end_exclusive = id_offset.saturating_add(AGENT_RELAY_ID_RANGE_STEP);
                             tracing::info!(
-                                "agent relay: client connected slot={slot} id_offset={id_offset}"
+                                "agent relay: client connected slot={slot} id_start={id_start} id_end_exclusive={id_end_exclusive}"
                             );
 
-                            // Perform handshake: send [id_offset: u32 BE][ready_frame_bytes...].
+                            // Perform handshake: send
+                            // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...].
                             let (reader_half, mut writer_half) = stream.into_split();
 
-                            let mut handshake = Vec::with_capacity(4 + ready_frame.len());
-                            handshake.extend_from_slice(&id_offset.to_be_bytes());
+                            let mut handshake = Vec::with_capacity(8 + ready_frame.len());
+                            handshake.extend_from_slice(&id_start.to_be_bytes());
+                            handshake.extend_from_slice(&id_end_exclusive.to_be_bytes());
                             handshake.extend_from_slice(&ready_frame);
 
                             if let Err(e) = writer_half.write_all(&handshake).await {
@@ -379,6 +381,8 @@ impl AgentRelay {
                                 drain_tx_clone,
                                 registry_clone,
                                 next_id_clone,
+                                id_start,
+                                id_end_exclusive,
                             ));
                         }
                         Err(e) => {
@@ -557,19 +561,22 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
 async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
     while let Some(frame_bytes) = rx.recv().await {
         let mut data = frame_bytes;
-        for attempt in 0..50 {
+        let mut attempts = 0u64;
+        loop {
             match shared.rx_ring.push(data) {
                 Ok(()) => {
                     shared.rx_wake.wake();
                     break;
                 }
                 Err(returned) => {
-                    if attempt == 49 {
-                        tracing::error!("agent relay: rx_ring full after retries, dropping frame");
-                        break;
+                    attempts = attempts.saturating_add(1);
+                    if attempts == 50 || attempts.is_multiple_of(500) {
+                        tracing::warn!(
+                            attempts,
+                            "agent relay: rx_ring full, waiting to deliver frame"
+                        );
                     }
                     data = returned;
-                    // Brief yield to let the guest drain the ring.
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
@@ -629,8 +636,8 @@ async fn ring_reader_task(
         }
 
         for frame in frames.drain(..) {
-            let client_slot = frame.id / ID_RANGE_STEP;
-            let client_slot = client_slot.min(MAX_CLIENTS - 1);
+            let client_slot = frame.id / AGENT_RELAY_ID_RANGE_STEP;
+            let client_slot = client_slot.min(AGENT_RELAY_MAX_CLIENTS - 1);
 
             let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
@@ -741,6 +748,8 @@ async fn client_reader_task(
     drain_tx: mpsc::Sender<()>,
     session_registry: Arc<SessionRegistry>,
     next_session_id: Arc<AtomicU64>,
+    id_start: u32,
+    id_end_exclusive: u32,
 ) {
     loop {
         let frame = match read_raw_frame(&mut reader).await {
@@ -756,7 +765,21 @@ async fn client_reader_task(
         let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
         let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
 
-        // Notify the caller to start drain escalation.
+        if !is_client_frame_allowed(frame.id, frame.flags, id_start, id_end_exclusive) {
+            tracing::warn!(
+                "agent relay: client slot={slot} sent out-of-range id={} range=[{}, {})",
+                frame.id,
+                id_start,
+                id_end_exclusive
+            );
+            break;
+        }
+
+        // Forward shutdown to agentd (via the agent_tx send below) so the
+        // guest can sync filesystems and power off cleanly. Also notify the
+        // caller so it can start the flush-grace fallback timer — if the
+        // guest's clean poweroff doesn't reach VMM exit within that window,
+        // the caller force-exits as a backstop.
         if is_shutdown {
             tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
             let _ = drain_tx.try_send(());
@@ -771,10 +794,12 @@ async fn client_reader_task(
         //
         // FLAG_SESSION_START is set on both ExecRequest and FsRequest,
         // so we decode the type to disambiguate.
+        let mut is_exec_session_start = false;
         if is_session_start
             && let Ok(msg) = decode_frame(frame.data.to_vec())
             && msg.t == MessageType::ExecRequest
         {
+            is_exec_session_start = true;
             let pty = msg.payload::<ExecRequest>().map(|r| r.tty).unwrap_or(false);
             let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut registry) = session_registry.lock() {
@@ -790,10 +815,10 @@ async fn client_reader_task(
 
         // Only acquire the lock when session bookkeeping is needed.
         // Data frames (the vast majority) skip the lock entirely.
-        if is_session_start || is_terminal {
+        if is_exec_session_start || is_terminal {
             let mut map = clients.lock().await;
             if let Some(client) = map.get_mut(&slot) {
-                if is_session_start {
+                if is_exec_session_start {
                     client.active_sessions.insert(frame.id);
                 }
                 if is_terminal {
@@ -855,7 +880,71 @@ async fn client_reader_task(
         }
     }
 
+    let disconnected = RelayClientDisconnected {
+        id_start,
+        id_end_exclusive,
+    };
+    let disconnect_msg =
+        match Message::with_payload(MessageType::RelayClientDisconnected, 0, &disconnected) {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::error!("agent relay: failed to encode relay disconnect event: {e}");
+                used_slots.lock().await.remove(&slot);
+                tracing::debug!("agent relay: slot={slot} released");
+                return;
+            }
+        };
+    let mut buf = Vec::new();
+    match codec::encode_to_buf(&disconnect_msg, &mut buf) {
+        Ok(()) => {
+            if agent_tx.send(buf).await.is_err() {
+                tracing::error!("agent relay: ring writer channel closed during fs cleanup");
+            }
+        }
+        Err(e) => {
+            tracing::error!("agent relay: failed to encode relay disconnect frame: {e}");
+        }
+    }
+
     // Release the client slot.
     used_slots.lock().await.remove(&slot);
     tracing::debug!("agent relay: slot={slot} released");
+}
+
+/// Return whether a client-originated frame may be forwarded to agentd.
+///
+/// Most client frames must use a correlation ID from the relay-assigned
+/// range so responses route back to the owning client. `core.shutdown` is a
+/// process-level control frame, not a correlated request, and the SDK sends it
+/// with ID 0.
+fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: u32) -> bool {
+    let is_shutdown_control = (flags & FLAG_SHUTDOWN) != 0 && id == 0;
+    is_shutdown_control || (id >= id_start && id < id_end_exclusive)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_frame_validation_allows_ids_in_assigned_range() {
+        assert!(is_client_frame_allowed(10, 0, 10, 20));
+        assert!(is_client_frame_allowed(19, FLAG_SESSION_START, 10, 20));
+    }
+
+    #[test]
+    fn client_frame_validation_rejects_non_shutdown_ids_outside_range() {
+        assert!(!is_client_frame_allowed(0, 0, 10, 20));
+        assert!(!is_client_frame_allowed(9, FLAG_SESSION_START, 10, 20));
+        assert!(!is_client_frame_allowed(20, FLAG_TERMINAL, 10, 20));
+    }
+
+    #[test]
+    fn client_frame_validation_allows_shutdown_control_id_zero() {
+        assert!(is_client_frame_allowed(0, FLAG_SHUTDOWN, 10, 20));
+    }
 }

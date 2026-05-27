@@ -61,6 +61,17 @@ pub enum DomainNameError {
     /// chars, invalid UTF-8 for an ASCII name, etc.).
     #[error("invalid domain name: {0}")]
     Invalid(#[from] ProtoError),
+
+    /// Suffix pattern resolves to a single DNS label (e.g. `com`,
+    /// `local`, `internal`). A label-aware suffix matcher treats this
+    /// as "match every subdomain under that TLD," which is almost
+    /// never the operator's intent. Add at least one parent label
+    /// (e.g. `corp.internal`, `myco.com`).
+    #[error(
+        "suffix `{raw}` is a single DNS label and would match every domain under that TLD; \
+         add at least one parent label to scope it (e.g. `myco.{raw}`)"
+    )]
+    SuffixTooBroad { raw: String },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -72,6 +83,30 @@ impl DomainName {
     /// trailing dot and is lowercased ASCII.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Validate this name for use as a [`Destination::DomainSuffix`]
+    /// target and return it unchanged on success.
+    ///
+    /// Returns [`DomainNameError::SuffixTooBroad`] when the name is a
+    /// single DNS label (e.g. `com`, `local`, `internal`). The
+    /// label-aware suffix matcher would otherwise treat such a name
+    /// as "match every host under that TLD" which is almost certainly
+    /// not what the operator meant. Use a multi-label suffix
+    /// (`myco.com`, `corp.internal`) instead.
+    ///
+    /// Domains intended for exact-match rules are unaffected: use
+    /// `Destination::Domain` for those.
+    ///
+    /// [`Destination::DomainSuffix`]: super::Destination::DomainSuffix
+    pub fn try_into_suffix(self) -> Result<Self, DomainNameError> {
+        if self.0.contains('.') {
+            Ok(self)
+        } else {
+            Err(DomainNameError::SuffixTooBroad {
+                raw: self.0.clone(),
+            })
+        }
     }
 }
 
@@ -194,6 +229,34 @@ mod tests {
     fn serde_deserialize_validates() {
         assert!(serde_json::from_str::<DomainName>(r#""foo bar.example""#).is_err());
         assert!(serde_json::from_str::<DomainName>(r#""""#).is_err());
+    }
+
+    #[test]
+    fn try_into_suffix_accepts_multilabel_names() {
+        let name: DomainName = "example.com".parse().unwrap();
+        let suffix = name.try_into_suffix().unwrap();
+        assert_eq!(suffix.as_str(), "example.com");
+
+        let deep: DomainName = "api.staging.example.com".parse().unwrap();
+        let suffix = deep.try_into_suffix().unwrap();
+        assert_eq!(suffix.as_str(), "api.staging.example.com");
+    }
+
+    #[test]
+    fn try_into_suffix_rejects_single_label_tlds() {
+        for raw in ["com", "local", "internal", "intranet", "lan"] {
+            let name: DomainName = raw.parse().unwrap();
+            let err = name.try_into_suffix().unwrap_err();
+            assert!(
+                matches!(&err, DomainNameError::SuffixTooBroad { raw: r } if r == raw),
+                "expected SuffixTooBroad for `{raw}`, got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("match every domain"),
+                "error message should explain blast radius, got: {msg}"
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Args;
 use microsandbox_runtime::{
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, VmConfig},
+    vm::{Config, DiskMountSpec, MetricsSlotHandoff, VmConfig},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -79,6 +79,18 @@ pub struct SandboxArgs {
     /// Disable metrics sampling; overrides `--metrics-sample-interval-ms`.
     #[arg(long = "disable-metrics-sample")]
     pub disable_metrics_sample: bool,
+
+    /// Name of the POSIX shared-memory metrics registry, passed in by the host.
+    #[arg(long = "metrics-shm-name", hide = true)]
+    pub metrics_shm_name: Option<String>,
+
+    /// Reserved slot index inside the metrics registry.
+    #[arg(long = "metrics-slot", hide = true)]
+    pub metrics_slot: Option<u32>,
+
+    /// Generation stamp paired with the reserved slot.
+    #[arg(long = "metrics-generation", hide = true)]
+    pub metrics_generation: Option<u64>,
 
     /// Root filesystem path for direct passthrough mounts.
     #[arg(long)]
@@ -202,6 +214,18 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
             None
         } else {
             std::num::NonZero::new(args.metrics_sample_interval_ms)
+        },
+        metrics_slot: match (
+            args.metrics_shm_name,
+            args.metrics_slot,
+            args.metrics_generation,
+        ) {
+            (Some(shm_name), Some(slot), Some(generation)) => Some(MetricsSlotHandoff {
+                shm_name,
+                slot,
+                generation,
+            }),
+            _ => None,
         },
         vm: vm_config,
     };

@@ -237,6 +237,8 @@ pub fn smoltcp_poll_loop(
         &published_ports,
         config.guest_ipv4,
         config.guest_ipv6,
+        network_policy.clone(),
+        shared.clone(),
         &tokio_handle,
     );
     let mut udp_relay = UdpRelay::new(
@@ -444,10 +446,19 @@ pub fn smoltcp_poll_loop(
                     shared.clone(),
                     tls_state.clone(),
                     network_policy.clone(),
+                    conn.upstream_connected,
                 );
                 continue;
             }
             if conn.dst.port() == 53 {
+                // DNS proxies have no guest-visible
+                // "upstream-unreachable" failure mode — even an
+                // upstream DNS failure yields SERVFAIL responses
+                // rather than a silently-closed connection. Mark the
+                // connection as upstream-connected so normal task exit
+                // produces FIN, not RST.
+                conn.upstream_connected.store(true, Ordering::Release);
+
                 // DNS over TCP: route through the same forwarder the UDP
                 // path uses. The forwarder applies the domain block list
                 // and rebind protection to every query and routes
@@ -470,6 +481,9 @@ pub fn smoltcp_poll_loop(
             if conn.dst.port() == 853
                 && let Some(ref tls_state) = tls_state
             {
+                // Same "always upstream-connected" reasoning as plain DNS over TCP.
+                conn.upstream_connected.store(true, Ordering::Release);
+
                 // DNS over TLS: terminate TLS at the gateway with a
                 // per-domain cert, hand the inner DNS frames to the
                 // same forwarder plain DNS uses. Policy for the
@@ -496,6 +510,7 @@ pub fn smoltcp_poll_loop(
                 conn.to_smoltcp,
                 shared.clone(),
                 network_policy.clone(),
+                conn.upstream_connected,
             );
         }
 

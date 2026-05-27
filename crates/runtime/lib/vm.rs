@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
-use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
+use microsandbox_filesystem::{
+    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+};
+use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::Serialize;
@@ -82,8 +85,26 @@ pub struct Config {
     /// Metrics sampling interval in milliseconds; `None` disables sampling.
     pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 
+    /// Shared-memory metrics registry coordinates passed in by the host.
+    ///
+    /// When `None`, the runtime skips metrics activation entirely — either
+    /// metrics sampling is disabled or the host could not reserve a slot.
+    pub metrics_slot: Option<MetricsSlotHandoff>,
+
     /// VM hardware and rootfs configuration.
     pub vm: VmConfig,
+}
+
+/// Hidden CLI handoff describing the metrics slot the host reserved for this
+/// sandbox.
+#[derive(Clone, Debug)]
+pub struct MetricsSlotHandoff {
+    /// Name of the POSIX shared-memory object holding the registry.
+    pub shm_name: String,
+    /// Reserved slot index.
+    pub slot: u32,
+    /// Generation paired with the reservation.
+    pub generation: u64,
 }
 
 /// Specification for the writable upper layer attached as virtio-blk.
@@ -347,6 +368,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_reason: Arc<std::sync::atomic::AtomicU8> =
         Arc::new(std::sync::atomic::AtomicU8::new(EXIT_REASON_COMPLETED));
 
+    // Activate the shared-memory metrics writer if the host reserved a slot.
+    // The host always reserves and passes a handoff when sampling is enabled,
+    // so a missing handoff means sampling is disabled for this sandbox.
+    let metrics_writer = activate_metrics_writer(
+        config.metrics_slot.as_ref(),
+        config.metrics_sample_interval_ms,
+        run_db_id,
+        pid,
+    );
+
+    // If the host reserved a slot but activation failed (registry I/O error,
+    // generation mismatch from a stale reservation, etc.), the slot would
+    // otherwise stay in `Reserved` until the catalog reaper notices. Release
+    // it eagerly so it can be reused by other sandboxes.
+    if metrics_writer.is_none()
+        && config.metrics_slot.is_some()
+        && config.metrics_sample_interval_ms.is_some()
+    {
+        release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+    }
+
     // Build the VM with an exit observer for DB cleanup and socket removal.
     // The on_exit closure runs synchronously on the VMM thread before _exit().
     let rt_handle = tokio_rt.handle().clone();
@@ -356,6 +398,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
     let exit_log_writer = exec_log_writer.clone();
+    // Capture the activated writer so the exit observer can release the slot
+    // without re-opening the registry (saving two mmap syscalls and a
+    // potential `wait_for_ready` round-trip on the VMM's exit path).
+    let exit_metrics_writer = metrics_writer.clone();
     let (vm, _network_termination_handle, network_metrics_handle) = match build_vm(
         &config,
         console_backend,
@@ -409,6 +455,18 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 writer.write_system("--- sandbox stopped ---");
             }
 
+            // Release the metrics slot. `Stale` preserves the last sample
+            // for observers until the slot is reused. Best-effort — the
+            // host's reaper will eventually reclaim it if this path is
+            // bypassed. We reuse the writer's Arc-backed registry handle
+            // rather than re-opening the segment, since `_exit()` is about
+            // to run and extra syscalls here delay the VMM teardown.
+            if let Some(ref writer) = exit_metrics_writer
+                && let Err(err) = writer.clone().release(ReleaseMode::Stale)
+            {
+                tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
+            }
+
             // Clean up agent.sock — the relay's async cleanup won't run because
             // _exit() is called immediately after this observer returns.
             let _ = std::fs::remove_file(&exit_sock_path);
@@ -418,6 +476,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok(vm) => vm,
         Err(e) => {
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            // Free the slot: build_vm never started the sampler, so no live
+            // sample is worth preserving. Prefer the writer (already holds
+            // the registry handle) when activation succeeded; otherwise
+            // open the registry once via the handoff fields.
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+            }
             return Err(e);
         }
     };
@@ -434,19 +501,35 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    match config.metrics_sample_interval_ms {
-        None => tracing::debug!(
+    match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => tracing::debug!(
             sandbox = %config.sandbox_name,
             "metrics sampling disabled; not spawning sampler"
         ),
-        Some(interval_ms) => {
+        (Some(_), None) => {
+            // Distinguish "host did not reserve a slot" from "host reserved
+            // but runtime activation failed" so operators reading the warn
+            // can tell which path needs investigation.
+            if config.metrics_slot.is_some() {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics activation failed; slot was released and sampler not spawned"
+                );
+            } else {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
+                );
+            }
+        }
+        (Some(interval_ms), Some(writer)) => {
             tracing::debug!(
                 sandbox = %config.sandbox_name,
                 interval_ms = interval_ms.get(),
                 "starting metrics sampler"
             );
             tokio_rt.spawn(run_metrics_sampler(
-                db.clone(),
+                writer,
                 config.sandbox_id,
                 pid,
                 interval_ms,
@@ -478,13 +561,22 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }
     });
 
-    // Shutdown listener: when the relay receives core.shutdown from an SDK
-    // client (e.g. sandbox.stop()), trigger VM exit.
+    // Shutdown listener: when the relay forwards a `core.shutdown` frame to
+    // agentd, we give the guest a window to flush block-backed roots and
+    // power off cleanly. If the VM doesn't exit on its own within
+    // `SHUTDOWN_FLUSH_TIMEOUT`, the host triggers exit as a fallback so a
+    // wedged guest doesn't strand the VMM. The window's relationship to
+    // agentd's internal `HANDOFF_POWEROFF_TIMEOUT` is enforced at compile
+    // time in microsandbox-protocol.
     {
         let shutdown_exit_handle = exit_handle.clone();
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
-                tracing::info!("core.shutdown received, triggering exit");
+                tracing::info!(
+                    "core.shutdown forwarded to agentd, allowing flush window before host fallback"
+                );
+                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
         });
@@ -555,7 +647,17 @@ fn build_vm(
     let vm = &config.vm;
 
     let mut builder = VmBuilder::new()
-        .machine(|m| m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize))
+        .machine(|m| {
+            let m = m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                m.split_irqchip(true)
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            {
+                m
+            }
+        })
         .kernel(|k| {
             let k = k.krunfw_path(&vm.libkrunfw_path);
             if let Some(ref init_path) = vm.init_path {
@@ -656,22 +758,20 @@ fn build_vm(
 
     // Additional mounts.
     for mount_spec in &vm.mounts {
-        let (spec, _readonly) = match mount_spec.strip_suffix(":ro") {
-            Some(s) => (s, true),
-            None => (mount_spec.as_str(), false),
-        };
+        let parsed = parse_mount_spec(mount_spec)
+            .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
-        if let Some((tag, path)) = spec.split_once(':') {
-            let tag = tag.to_string();
-            let cfg = PassthroughConfig {
-                root_dir: PathBuf::from(path),
-                inject_init: false,
-                ..Default::default()
-            };
-            let backend = PassthroughFs::new(cfg)
-                .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
-            builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
-        }
+        let tag = parsed.tag;
+        let cfg = PassthroughConfig {
+            root_dir: PathBuf::from(parsed.host_path),
+            inject_init: false,
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
     // Disk-image volume mounts. Each adds an extra virtio-blk device with
@@ -790,6 +890,48 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Open the shared-memory registry and promote the host-reserved slot to
+/// `Active`, returning a writer handle for the sampler.
+fn activate_metrics_writer(
+    handoff: Option<&MetricsSlotHandoff>,
+    interval: Option<NonZero<u64>>,
+    run_id: i32,
+    pid: u32,
+) -> Option<microsandbox_metrics::MetricsSlotWriter> {
+    interval?;
+    let handoff = handoff?;
+    let registry = match MetricsRegistry::open(&handoff.shm_name) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::warn!(error = %err, shm = %handoff.shm_name, "failed to open metrics registry");
+            return None;
+        }
+    };
+    let started_at = chrono::Utc::now();
+    match registry.activate_writer(ActivateSlot {
+        slot: handoff.slot,
+        generation: handoff.generation,
+        run_id,
+        pid: pid as i32,
+        started_at,
+    }) {
+        Ok(writer) => Some(writer),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to activate metrics slot");
+            None
+        }
+    }
+}
+
+/// Best-effort release of a metrics slot. Used when activation has not yet
+/// happened (e.g. build_vm failure) and the slot would otherwise leak.
+fn release_metrics_slot(handoff: Option<&MetricsSlotHandoff>, mode: ReleaseMode) {
+    let Some(handoff) = handoff else { return };
+    if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
+        let _ = reg.release(handoff.slot, handoff.generation, mode);
+    }
+}
 
 /// Set up host log capture.
 ///
@@ -952,6 +1094,141 @@ fn spawn_log_thread(
     Ok(())
 }
 
+/// Parsed `--mount` spec: tag, host path, plus optional policies.
+///
+/// Wire format: `tag:host_path[:ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
+/// Defaults: `stat-virt=strict`, `host-perms=private`. The `:ro` segment is
+/// kept for protocol compatibility but only used by agentd, not the host fs.
+#[derive(Debug)]
+struct ParsedMountSpec {
+    tag: String,
+    host_path: String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+}
+
+/// Parse a `--mount` spec into [`ParsedMountSpec`].
+///
+/// Wire grammar: `tag:host_path[:ro][,key=value]*`. The host path may contain
+/// commas — the comma-option suffix is identified relative to the trailing
+/// `:ro` (if present) or, when absent, by the first `,` after the host path.
+///
+/// To make this unambiguous we split on the first `:` (tag/host boundary) and
+/// then peel the option suffix off the right side rather than splitting the
+/// whole spec on `,` first.
+fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
+    let (tag, rest) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("expected tag:host_path[:ro][,opts] shape, got {spec:?}"))?;
+    if tag.is_empty() {
+        return Err(format!("empty tag in mount spec {spec:?}"));
+    }
+
+    // Peel the trailing options block. Strategy:
+    //   1) If `:ro` is present in the spec (only ever after host_path), the
+    //      options block starts at the first `,` *after* the `:ro` token.
+    //   2) Otherwise the options block starts at the first `,` after the
+    //      first `:` that follows the host path. We accept that paths
+    //      containing both `:` and `,` outside this contract may be
+    //      misparsed — the producer side never emits such paths.
+    let (host_path_with_ro, options) = split_path_and_options(rest);
+
+    let (host_path, _readonly) = match host_path_with_ro.strip_suffix(":ro") {
+        Some(p) => (p, true),
+        None => (host_path_with_ro, false),
+    };
+
+    if host_path.is_empty() {
+        return Err(format!("empty host path in mount spec {spec:?}"));
+    }
+
+    let mut stat_virtualization = StatVirtualization::Strict;
+    let mut host_permissions = HostPermissions::Private;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            let (key, value) = opt
+                .split_once('=')
+                .ok_or_else(|| format!("expected key=value option, got {opt:?}"))?;
+            match key {
+                "stat-virt" => {
+                    if seen_stat_virt {
+                        return Err("mount option `stat-virt` specified more than once".to_string());
+                    }
+                    seen_stat_virt = true;
+                    stat_virtualization = match value {
+                        "strict" => StatVirtualization::Strict,
+                        "relaxed" => StatVirtualization::Relaxed,
+                        "off" => StatVirtualization::Off,
+                        other => {
+                            return Err(format!(
+                                "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                            ));
+                        }
+                    }
+                }
+                "host-perms" => {
+                    if seen_host_perms {
+                        return Err(
+                            "mount option `host-perms` specified more than once".to_string()
+                        );
+                    }
+                    seen_host_perms = true;
+                    host_permissions = match value {
+                        "private" => HostPermissions::Private,
+                        "mirror" => HostPermissions::Mirror,
+                        other => {
+                            return Err(format!(
+                                "invalid host-perms {other:?} (expected private|mirror)"
+                            ));
+                        }
+                    }
+                }
+                other => return Err(format!("unknown mount option {other:?}")),
+            }
+        }
+    }
+
+    Ok(ParsedMountSpec {
+        tag: tag.to_string(),
+        host_path: host_path.to_string(),
+        stat_virtualization,
+        host_permissions,
+    })
+}
+
+/// Split `rest = "host_path[:ro][,opts]"` into `(host_path_with_ro, opts)`.
+///
+/// The split point is the first `,` that follows either `:ro` (if present) or
+/// the entire `rest` (if no `,` exists). Producer-side encoding never embeds
+/// `,` in host paths, so the first comma after `:ro` (or anywhere, if no
+/// `:ro`) is always the options separator.
+fn split_path_and_options(rest: &str) -> (&str, Option<&str>) {
+    // If we have ":ro" anywhere, the option block is the first comma after the
+    // ":ro" position. Otherwise, the option block is the first comma anywhere.
+    let comma_start = if let Some(ro_idx) = rest.find(":ro") {
+        let after_ro = ro_idx + ":ro".len();
+        rest[after_ro..].find(',').map(|i| after_ro + i)
+    } else {
+        rest.find(',')
+    };
+
+    match comma_start {
+        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+        None => (rest, None),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Mount Spec Parsing
+//--------------------------------------------------------------------------------------------------
+
 /// Validate a disk image format string.
 pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
     match format.unwrap_or("raw") {
@@ -997,7 +1274,82 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_block_root_env, prepend_scripts_path, validate_disk_format};
+    use super::{
+        HostPermissions, StatVirtualization, append_block_root_env, parse_mount_spec,
+        prepend_scripts_path, validate_disk_format,
+    };
+
+    #[test]
+    fn test_parse_mount_spec_minimal() {
+        let p = parse_mount_spec("foo:/host/data").unwrap();
+        assert_eq!(p.tag, "foo");
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
+        assert!(matches!(p.host_permissions, HostPermissions::Private));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_ro_and_policies() {
+        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed,host-perms=mirror").unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_stat_virt_off() {
+        let p = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap();
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_unknown_key() {
+        let err = parse_mount_spec("foo:/host/data,bogus=1").unwrap_err();
+        assert!(err.contains("unknown mount option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_stat_virt() {
+        let err = parse_mount_spec("foo:/host/data,stat-virt=nope").unwrap_err();
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_host_perms() {
+        let err = parse_mount_spec("foo:/host/data,host-perms=public").unwrap_err();
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_missing_colon_errors() {
+        let err = parse_mount_spec("nopath").unwrap_err();
+        assert!(err.contains("expected tag:host_path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_empty_tag_errors() {
+        let err = parse_mount_spec(":/host").unwrap_err();
+        assert!(err.contains("empty tag"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_ro_anchors_options_block() {
+        // The SDK rejects commas in host paths, so the producer can guarantee
+        // commas in the wire format are always option separators. But the
+        // `:ro`-anchored split is still load-bearing: it ensures the option
+        // block starts after the `:ro` token even if a future relaxation of
+        // the path rules ever lets `,` slip through, the option scanner
+        // operates on the correct slice.
+        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed").unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
+        let err = parse_mount_spec("foo:/host,stat-virt=strict,stat-virt=off").unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
 
     #[test]
     fn test_validate_disk_format_rejects_unknown_values() {

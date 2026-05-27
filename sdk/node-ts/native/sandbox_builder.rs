@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -196,9 +197,9 @@ impl JsSandboxBuilder {
     /// Replace any existing sandbox with the same name.
     ///
     /// SIGTERMs the prior instance, waits up to 10 seconds for a
-    /// graceful exit, then SIGKILLs. To override the grace, use
-    /// `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
-    /// SIGKILLs immediately.
+    /// graceful exit, then SIGKILLs. To override the timeout, use
+    /// `replaceWithTimeout(ms)`; `replaceWithTimeout(0)` skips SIGTERM
+    /// and SIGKILLs immediately.
     #[napi]
     pub fn replace(&mut self) -> &Self {
         let prev = self.take_inner();
@@ -207,17 +208,18 @@ impl JsSandboxBuilder {
     }
 
     /// Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
-    /// grace. Implies `replace` — calling this alone is enough.
+    /// timeout. Implies `replace` — calling this alone is enough.
     ///
-    /// - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
-    /// - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
+    /// - `timeoutMs > 0`: SIGTERM, wait up to `timeoutMs`, then SIGKILL.
+    /// - `timeoutMs == 0`: SIGKILL immediately (skip SIGTERM).
     ///
-    /// The default grace used by `replace` is 10_000 ms.
+    /// The default timeout used by `replace` is 10_000 ms. An expired
+    /// timeout force-kills the prior sandbox; `create()` still proceeds.
     #[napi]
-    pub fn replace_with_grace(&mut self, grace_ms: u32) -> &Self {
+    pub fn replace_with_timeout(&mut self, timeout_ms: u32) -> &Self {
         let prev = self.take_inner();
         self.inner =
-            Some(prev.replace_with_grace(std::time::Duration::from_millis(grace_ms.into())));
+            Some(prev.replace_with_timeout(std::time::Duration::from_millis(timeout_ms.into())));
         self
     }
 
@@ -343,6 +345,19 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Publish a TCP port from host -> guest on a specific host bind address.
+    #[napi(js_name = "portBind")]
+    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_bind(bind, h, g));
+        Ok(self)
+    }
+
     /// Publish a UDP port from host -> guest.
     #[napi(js_name = "portUdp")]
     pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
@@ -352,6 +367,24 @@ impl JsSandboxBuilder {
             .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
         let prev = self.take_inner();
         self.inner = Some(prev.port_udp(h, g));
+        Ok(self)
+    }
+
+    /// Publish a UDP port from host -> guest on a specific host bind address.
+    #[napi(js_name = "portUdpBind")]
+    pub fn port_udp_bind(
+        &mut self,
+        bind: String,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_udp_bind(bind, h, g));
         Ok(self)
     }
 
@@ -582,6 +615,11 @@ impl JsSandboxBuilder {
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
         })
     }
+}
+
+fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
+    bind.parse::<IpAddr>()
+        .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
 }
 
 /// Pair returned by `createWithPullProgress`: the progress event stream

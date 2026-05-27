@@ -48,7 +48,8 @@ use microsandbox_network::policy::{
 pub enum RuleParseError {
     /// The token is missing the mandatory `@` separator.
     #[error(
-        "rule token `{token}` is missing `@`; expected `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`"
+        "rule token `{token}` is missing `@`; \
+         expected `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`"
     )]
     MissingAt { token: String },
 
@@ -62,7 +63,8 @@ pub enum RuleParseError {
 
     /// The direction modifier is not `egress`, `ingress`, or `any`.
     #[error(
-        "`{raw}` is not a recognized direction. Expected `egress`, `ingress`, or `any`{suggestion}"
+        "`{raw}` is not a recognized direction. \
+         Expected `egress`, `ingress`, or `any`{suggestion}"
     )]
     InvalidDirection {
         raw: String,
@@ -71,7 +73,9 @@ pub enum RuleParseError {
 
     /// The target field is empty or doesn't match any recognized form.
     #[error(
-        "`{raw}` is not a valid target. Expected: any, a group name (public, private, loopback, link-local, meta, multicast, host), an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
+        "`{raw}` is not a valid target. \
+         Expected: any, a group name (public, private, loopback, link-local, meta, multicast, host), \
+         an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
     )]
     InvalidTarget {
         raw: String,
@@ -81,7 +85,8 @@ pub enum RuleParseError {
     /// A bare single-label token was provided. Use `domain=<name>`
     /// for single-label hostnames to disambiguate from group keywords.
     #[error(
-        "`{raw}` is ambiguous (looks like a single-label hostname or a typoed keyword). Use `domain={raw}` to target a literal hostname{suggestion}"
+        "`{raw}` is ambiguous (looks like a single-label hostname or a typoed keyword). \
+         Use `domain={raw}` to target a literal hostname{suggestion}"
     )]
     AmbiguousBareToken {
         raw: String,
@@ -106,7 +111,8 @@ pub enum RuleParseError {
 
     /// The protocol field is not `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`.
     #[error(
-        "`{raw}` is not a recognized protocol. Expected `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`{suggestion}"
+        "`{raw}` is not a recognized protocol. \
+         Expected `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`{suggestion}"
     )]
     InvalidProtocol {
         raw: String,
@@ -124,7 +130,8 @@ pub enum RuleParseError {
     /// ICMP protocol used with a direction that has an ingress side
     /// (Ingress or Any). `publisher.rs` has no inbound ICMP path.
     #[error(
-        "ingress and any-direction rules do not support ICMP; only TCP (and UDP when UDP publishing lands)"
+        "ingress and any-direction rules do not support ICMP; \
+         only TCP (and UDP when UDP publishing lands)"
     )]
     IngressDoesNotSupportIcmp,
 
@@ -132,7 +139,8 @@ pub enum RuleParseError {
     /// on the right of `@`). For IPv6 addresses, the canonical form is
     /// to wrap in `[...]`.
     #[error(
-        "rule token `{token}` has trailing fields after `<ports>`; if this is an IPv6 address, wrap it as `[<addr>]`"
+        "rule token `{token}` has trailing fields after `<ports>`; \
+         if this is an IPv6 address, wrap it as `[<addr>]`"
     )]
     TrailingJunk { token: String },
 
@@ -142,7 +150,8 @@ pub enum RuleParseError {
 
     /// Content followed `]` but didn't begin with `:`.
     #[error(
-        "rule token `{token}` has unexpected content after `]`; expected `:<proto>` or end of token"
+        "rule token `{token}` has unexpected content after `]`; \
+         expected `:<proto>` or end of token"
     )]
     UnexpectedAfterBracket { token: String },
 
@@ -156,7 +165,8 @@ pub enum RuleParseError {
     /// URL-style `host:port` but the grammar is
     /// `<target>:<proto>:<ports>`.
     #[error(
-        "`{value}` is a port, not a protocol; did you mean `{target}:tcp:{value}`? port numbers don't belong in the target"
+        "`{value}` is a port, not a protocol; did you mean `{target}:tcp:{value}`? \
+         port numbers don't belong in the target"
     )]
     PortInProtocolSlot { target: String, value: String },
 }
@@ -365,16 +375,21 @@ fn parse_target(raw: &str) -> Result<Destination, RuleParseError> {
         return Ok(Destination::Group(group));
     }
 
-    // 5. `suffix=<name>`
-    if let Some(rest) = raw.strip_prefix("suffix=") {
-        let name = DomainName::from_str(rest).map_err(|source| RuleParseError::InvalidDomain {
-            raw: rest.to_string(),
-            source,
-        })?;
+    // 5. `*.<name>` (suffix shorthand). Mirrors the syntax already used
+    // by `--tls-bypass` and `--secret` so users see one wildcard
+    // convention across the CLI. Equivalent to `suffix=<name>`.
+    if let Some(rest) = raw.strip_prefix("*.") {
+        let name = parse_domain_suffix(rest)?;
         return Ok(Destination::DomainSuffix(name));
     }
 
-    // 6. `domain=<name>` (escape hatch)
+    // 6. `suffix=<name>` (explicit form, parallels `domain=`).
+    if let Some(rest) = raw.strip_prefix("suffix=") {
+        let name = parse_domain_suffix(rest)?;
+        return Ok(Destination::DomainSuffix(name));
+    }
+
+    // 7. `domain=<name>` (escape hatch)
     if let Some(rest) = raw.strip_prefix("domain=") {
         let name = DomainName::from_str(rest).map_err(|source| RuleParseError::InvalidDomain {
             raw: rest.to_string(),
@@ -418,6 +433,22 @@ fn parse_target(raw: &str) -> Result<Destination, RuleParseError> {
         raw: raw.to_string(),
         suggestion: SuggestionDisplay(suggestion),
     })
+}
+
+/// Parse a string as a [`DomainName`] and validate it for use as a
+/// [`Destination::DomainSuffix`] target. Shared by the `*.<name>` and
+/// `suffix=<name>` arms of [`parse_target`] so the TLD-broad guard
+/// (single-label suffix rejection) is enforced uniformly.
+fn parse_domain_suffix(raw: &str) -> Result<DomainName, RuleParseError> {
+    let name = DomainName::from_str(raw).map_err(|source| RuleParseError::InvalidDomain {
+        raw: raw.to_string(),
+        source,
+    })?;
+    name.try_into_suffix()
+        .map_err(|source| RuleParseError::InvalidDomain {
+            raw: raw.to_string(),
+            source,
+        })
 }
 
 fn parse_bracketed_target(inner: &str) -> Result<Destination, RuleParseError> {
@@ -637,11 +668,73 @@ mod tests {
 
     #[test]
     fn suffix_prefix_explicit() {
-        let r = parse_rule_token("allow@suffix=.local").unwrap();
+        let r = parse_rule_token("allow@suffix=corp.internal").unwrap();
         match r.destination {
-            Destination::DomainSuffix(name) => assert_eq!(name.as_str(), "local"),
+            Destination::DomainSuffix(name) => assert_eq!(name.as_str(), "corp.internal"),
             other => panic!("expected DomainSuffix, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn asterisk_suffix_shorthand_parses_as_domain_suffix() {
+        let r = parse_rule_token("deny@*.ads.example.com").unwrap();
+        match r.destination {
+            Destination::DomainSuffix(name) => assert_eq!(name.as_str(), "ads.example.com"),
+            other => panic!("expected DomainSuffix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asterisk_suffix_shorthand_with_two_labels_is_accepted() {
+        // Two-label suffixes pass the TLD-broad guard. The PSL
+        // shortcoming (`*.co.uk`, `*.github.io` etc) is documented; the
+        // guard intentionally stops at the dot heuristic.
+        let r = parse_rule_token("allow@*.example.com").unwrap();
+        match r.destination {
+            Destination::DomainSuffix(name) => assert_eq!(name.as_str(), "example.com"),
+            other => panic!("expected DomainSuffix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asterisk_suffix_rejects_single_label_tld() {
+        let err = parse_rule_token("deny@*.com").unwrap_err();
+        match &err {
+            RuleParseError::InvalidDomain { raw, source } => {
+                assert_eq!(raw, "com");
+                assert!(
+                    matches!(
+                        source,
+                        microsandbox_network::policy::DomainNameError::SuffixTooBroad { .. }
+                    ),
+                    "expected SuffixTooBroad, got {source:?}"
+                );
+            }
+            other => panic!("expected InvalidDomain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suffix_keyword_rejects_single_label_tld() {
+        let err = parse_rule_token("deny@suffix=local").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("match every domain"),
+            "expected guard message in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bare_asterisk_is_ambiguous() {
+        // `*` alone is not a suffix shorthand. The shorthand requires
+        // the `*.` prefix; bare `*` would conflict semantically with
+        // the `any` keyword and falls through to the ambiguous-token
+        // path so the user sees a hint.
+        let err = parse_rule_token("allow@*").unwrap_err();
+        assert!(
+            matches!(err, RuleParseError::AmbiguousBareToken { .. }),
+            "{err}"
+        );
     }
 
     #[test]

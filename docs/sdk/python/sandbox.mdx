@@ -14,17 +14,18 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ```python
 @staticmethod
-async def create(name_or_config: str | dict, **kwargs) -> Sandbox
+async def create(name: str, **kwargs) -> Sandbox
 ```
 
-Create and boot a sandbox. The first argument is either a name (`str`) or a full config (`dict`). Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
+Create and boot a sandbox. Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| name_or_config | `str \| dict` | Sandbox name or full configuration dict |
-| image | `str \| ImageSource` | OCI image, local path, or disk image (required) |
+| name | `str` | Sandbox name |
+| image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| snapshot | `str \| os.PathLike` | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | Virtual CPUs (default `1`) |
 | memory | `int` | Guest memory in MiB (default `512`) |
 | workdir | `str` | Default working directory for commands |
@@ -35,20 +36,20 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_grace | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
+| replace_with_timeout | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
 | env | `dict[str, str]` | Environment variables visible to all commands |
-| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` |
+| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| PullPolicy` | Image pull behavior |
 | log_level | `str \| LogLevel` | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
-| volumes | `dict[str, dict]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
+| volumes | `dict[str, MountConfig]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int]` | Port mappings (`host_port: guest_port`) |
+| ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
-| detached | `bool` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 `libkrunfw_path` is a host path, not a guest path. It must point to a platform shared library (`.so` on Linux, `.dylib` on macOS) and overrides the global/bundled `libkrunfw` resolution for this sandbox only.
 
@@ -73,7 +74,7 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 
 ```python
 @staticmethod
-def create_with_progress(name_or_config: str | dict, **kwargs) -> PullSession
+def create_with_progress(name: str, **kwargs) -> PullSession
 ```
 
 Same parameters as [`Sandbox.create()`](#sandboxcreate) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable) -- the async work happens through the `PullSession`.
@@ -193,7 +194,7 @@ Sandbox name. This is an async property -- use `await sb.name`.
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. `True` in attached mode, `False` in detached mode. This is an async property -- use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandboxcreate) or [`start()`](#sandboxstart) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#detach). Handles returned by [`connect()`](#connect) do not own lifecycle. This is an async property -- use `await sb.owns_lifecycle`.
 
 ---
 
@@ -221,7 +222,15 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 #### attach()
 
 ```python
-async def attach(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> int
+async def attach(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    detach_keys: str | None = None,
+) -> int
 ```
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session.
@@ -231,7 +240,11 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to run |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or execution options |
+| args | `list[str] \| None` | Command arguments |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| detach_keys | `str \| None` | Custom detach key sequence |
 
 **Returns**
 
@@ -280,17 +293,37 @@ Start a graceful drain (SIGUSR1). Existing commands run to completion, new `exec
 #### exec()
 
 ```python
-async def exec(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecOutput
+async def exec(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecOutput
 ```
 
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
+
+Pass per-execution options as keyword-only arguments. The SDK still accepts the older second-positional options dict for compatibility, but prefer kwargs for new code.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments (e.g. `["-c", "print('hello')"]`) or [`ExecOptions`](/sdk/python/execution#execoptions) |
+| args | `list[str] \| None` | Command arguments |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
 
 **Returns**
 
@@ -298,22 +331,52 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 |------|-------------|
 | [`ExecOutput`](/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
 
+```python
+output = await sb.exec(
+    "python",
+    ["compute.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
+```
+
 ---
 
 #### exec_stream()
 
 ```python
-async def exec_stream(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecHandle
+async def exec_stream(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecHandle
 ```
 
 Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
+
+Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. The older second-positional options dict remains accepted for compatibility.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or [`ExecOptions`](/sdk/python/execution#execoptions) |
+| args | `list[str] \| None` | Command arguments |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
 
 **Returns**
 
@@ -329,7 +392,11 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 async def kill() -> None
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+Force-terminate the sandbox immediately (SIGKILL). No graceful
+shutdown. Pending writes that the workload hasn't `fsync`'d may be
+lost — same durability semantics as a sudden power loss on a physical
+machine. Use [`stop()`](#stop) for graceful shutdown that gives the
+workload a chance to flush.
 
 ---
 
@@ -456,7 +523,17 @@ Remove the sandbox and all its persisted state from disk.
 #### shell()
 
 ```python
-async def shell(script: str) -> ExecOutput
+async def shell(
+    script: str,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecOutput
 ```
 
 Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
@@ -466,6 +543,13 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
 | Name | Type | Description |
 |------|------|-------------|
 | script | `str` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
 
 **Returns**
 
@@ -503,7 +587,11 @@ Shell command with streaming output.
 async def stop() -> None
 ```
 
-Gracefully shut down the sandbox (SIGTERM).
+Gracefully shut down the sandbox. Lets the sandbox finish writing
+any pending data to disk before it exits, so files written inside
+the sandbox aren't lost across a later restart. Waits up to ten
+seconds for a clean exit; if the sandbox is still running after
+that, it is force-killed.
 
 ---
 
@@ -764,41 +852,45 @@ Controls when the SDK fetches an OCI image from the registry.
 | `"if-missing"` | Pull only if the image is not already cached. This is the default. |
 | `"never"` | Never pull; fail if the image is not cached locally |
 
-### PullProgress
+### PullEvent
 
-Type alias for pull progress events emitted by [`PullSession.progress`](#pullsession). Each event is one of the following frozen dataclasses, imported from `microsandbox`:
+Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `event_type` and the fields relevant to that event:
 
-| Variant | Fields |
-|---------|--------|
-| `Resolving` | `reference: str` |
-| `Resolved` | `reference: str`, `manifest_digest: str`, `layer_count: int`, `total_download_bytes: int \| None` |
-| `LayerDownloadProgress` | `layer_index: int`, `digest: str`, `downloaded_bytes: int`, `total_bytes: int \| None` |
-| `LayerDownloadComplete` | `layer_index: int`, `digest: str`, `downloaded_bytes: int` |
-| `LayerExtractStarted` | `layer_index: int`, `diff_id: str` |
-| `LayerExtractProgress` | `layer_index: int`, `bytes_read: int`, `total_bytes: int` |
-| `LayerExtractComplete` | `layer_index: int`, `diff_id: str` |
-| `LayerIndexStarted` | `layer_index: int` |
-| `LayerIndexComplete` | `layer_index: int` |
-| `PullComplete` | `reference: str`, `layer_count: int` |
+| event_type | Fields |
+|------------|--------|
+| `"resolving"` | `reference` |
+| `"resolved"` | `reference`, `manifest_digest`, `layer_count`, `total_download_bytes` |
+| `"layer_download_progress"` | `layer_index`, `digest`, `downloaded_bytes`, `total_bytes` |
+| `"layer_download_complete"` | `layer_index`, `digest`, `downloaded_bytes` |
+| `"layer_download_verifying"` | `layer_index`, `digest` |
+| `"layer_materialize_started"` | `layer_index`, `diff_id` |
+| `"layer_materialize_progress"` | `layer_index`, `bytes_read`, `total_bytes` |
+| `"layer_materialize_writing"` | `layer_index` |
+| `"layer_materialize_complete"` | `layer_index`, `diff_id` |
+| `"stitch_merging_trees"` | `layer_count` |
+| `"stitch_writing_fsmeta"` | - |
+| `"stitch_writing_vmdk"` | - |
+| `"stitch_complete"` | - |
+| `"complete"` | `reference`, `layer_count` |
 
-Narrow with `isinstance`:
+Fields that do not apply to a particular event are `None`.
 
 ```python
-from microsandbox import Sandbox, Resolved, LayerDownloadProgress
+from microsandbox import Sandbox
 
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
-        if isinstance(event, Resolved):
+        if event.event_type == "resolved":
             print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
-        elif isinstance(event, LayerDownloadProgress):
+        elif event.event_type == "layer_download_progress":
             print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
     sb = await session.result()
 ```
 
 ### PullSession
 
-Returned by [`Sandbox.create_with_progress()`](#sandbox-create_with_progress). Use as an async context manager to track image pull progress.
+Returned by [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress). `Sandbox.create_with_progress()` itself is synchronous; use the returned session as an async context manager to track image pull progress.
 
 ```python
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
@@ -810,8 +902,8 @@ async with session:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullProgress`](#pullprogress)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await to get the final running sandbox |
+| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
+| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError`. |
 
 ### RegistryAuth
 
@@ -828,7 +920,8 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| ImageSource` | - | OCI image, local path, or disk image (required) |
+| image | `str \| ImageSource` | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
 | workdir | `str` | - | Default working directory for commands |
@@ -839,19 +932,20 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
+| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL`; implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
 | env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
-| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` |
+| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| PullPolicy` | `"if-missing"` | Image pull behavior |
 | log_level | `str \| LogLevel` | - | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
-| volumes | `dict[str, dict]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
+| volumes | `dict[str, MountConfig]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | `[]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int]` | `{}` | Port mappings (`host_port: guest_port`) |
+| ports | `dict[int, int] \| Sequence[PortBinding]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| detached | `bool` | `False` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig
 
@@ -910,10 +1004,12 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | config_json | `str` | Raw JSON configuration |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
 | updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox |
+| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox; returns an error if it doesn't respond within 10 seconds |
+| connect_with_timeout(timeout) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Same as `connect()` with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop() | `Awaitable[None]` | Graceful shutdown |
-| kill() | `Awaitable[None]` | Force terminate |
+| stop() | `Awaitable[None]` | Gracefully shut down. Waits up to 10 seconds for pending writes to flush, then force-kills |
+| stop_with_timeout(timeout) | `Awaitable[None]` | Same as `stop()` with an explicit timeout in seconds; `0` force-kills immediately |
+| kill() | `Awaitable[None]` | Force terminate immediately. Pending writes may be lost |
 | remove() | `Awaitable[None]` | Delete sandbox and state |
 | metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
 | logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
