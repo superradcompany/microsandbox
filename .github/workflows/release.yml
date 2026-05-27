@@ -533,6 +533,7 @@ jobs:
           for crate in \
             microsandbox-utils \
             microsandbox-protocol \
+            microsandbox-agentd \
             microsandbox-db \
             microsandbox-migration \
             microsandbox-image \

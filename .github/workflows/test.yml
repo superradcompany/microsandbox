@@ -220,7 +220,7 @@ jobs:
 
       # -- Tests --
       - name: Test workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude microsandbox-agentd
 
       - name: Test agentd
         if: matrix.os == 'linux'

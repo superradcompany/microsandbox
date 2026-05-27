@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-exclude = ["crates/agentd"]
 members = [
+    "crates/agentd",
     "crates/cli",
     "crates/db",
     "crates/filesystem",
