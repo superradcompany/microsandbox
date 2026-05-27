@@ -1,0 +1,91 @@
+---
+title: "Week of May 22, 2026"
+description: "Rotation-aware log streaming, raw agent client across SDKs, per-mount passthroughfs policies, network policy CLI cleanup, configurable port bind addresses, and ergonomic --script."
+icon: "bolt"
+---
+
+## New features
+
+**Rotation-aware log streaming**
+
+`Sandbox.log_stream` / `logStream` / `LogStream` lands in the Rust, Node, Python, and Go SDKs, alongside `read_logs` for sorted snapshots. The engine merges `exec.log`, `runtime.log`, and `kernel.log` including their rotated siblings, and each entry carries an opaque `cursor` so consumers can resume after a disconnect. `msb logs` and `msb logs -f` now ride the same engine; if a follower falls behind retention it receives a typed `MissedRotation` error with a hint to restart instead of silently skipping records.
+
+```python
+async for entry in sandbox.log_stream(follow=True):
+    print(entry.timestamp, entry.source, entry.data)
+```
+
+See [Sandbox logs](/sandboxes/logs).
+
+**Raw agent client in every SDK**
+
+A new `AgentClient` surface lets SDK callers talk to a sandbox's `agentd` directly through the relay, sending and receiving framed CBOR without going through the typed sandbox API. Rust ships both a typed tier (with a validated `core.ready` handshake and cached ready bytes) and a raw tier; Node, Python, and Go expose the raw tier and keep CBOR encoding in userland. Useful for experimenting with new agent operations or building higher-level tooling on top of the protocol.
+
+```ts
+const client = await AgentClient.connectSandbox("dev");
+const ready = client.ready();
+const response = await client.request(frame);
+```
+
+See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+
+**Per-mount passthroughfs policies**
+
+Two explicit knobs replace the previous boolean flags on every mount. `stat_virtualization` chooses between `Strict`, `Relaxed`, and `Off`, and `host_permissions` chooses between `Private` and `Mirror`. Defaults stay `Strict + Private`, so existing sandboxes are unchanged. The new combinations make it possible to bind-mount foreign-owned read-only paths like `/tmp`, mirror guest `chmod` bits to the host inode, and create real host-visible symlinks from inside the guest. The `--mount` flag gains `tag:host[:ro][,stat-virt=...][,host-perms=...]` for opting in.
+
+See [Sandbox filesystem](/sandboxes/filesystem).
+
+**Network policy CLI consolidation**
+
+The egress and ingress flags collapse into one consistent surface. `--net-default <allow|deny>` sets both directions at once, `*.foo.com` is now accepted as a suffix shorthand inside `--net-rule` targets, and `--no-net` is sugar for `--net-default deny` (it now also blocks ingress, matching its name). TLD-broad patterns like `*.com` are rejected at parse time so they cannot widen blast radius by accident. `--deny-domain` and `--deny-domain-suffix` are removed; express the same intent with `--net-rule "deny@..."` plus `--net-default allow`.
+
+```bash
+msb run alpine \
+  --net-default deny \
+  --net-rule "allow@*.good.com,allow@host"
+```
+
+See the [networking overview](/networking/overview).
+
+**Configurable port bind addresses**
+
+Published ports can now bind to a specific host address rather than the implicit loopback. The CLI accepts `BIND_ADDR:HOST:GUEST` and `/udp` variants, and the Rust, Python, TypeScript, and Go SDKs gained matching bind-aware port APIs. Existing `HOST:GUEST` mappings continue to bind to `127.0.0.1`.
+
+```bash
+msb run nginx --port 0.0.0.0:8080:80 --port 127.0.0.1:9000:9000/udp
+```
+
+See the [networking overview](/networking/overview).
+
+**Ergonomic `--script` flag**
+
+`msb create --script NAME=BODY` now produces a runnable script: the body is wrapped with a shebang derived from `--shell` (default `/bin/sh`), and the escapes `\n`, `\t`, `\r`, `\\`, `\"`, `\'` are decoded so multiline scripts survive normal shell quoting. A new `--script-raw NAME=BODY` writes the body byte-for-byte for callers that bring their own shebang. `--shell` rejects empty, whitespace, and NUL values at parse time so a stray newline cannot inject lines into every generated script.
+
+```bash
+msb create --replace alpine --name py \
+  --script start='echo hello\npython3 -c "print(123)"'
+msb exec py -- start
+```
+
+See the [CLI reference](/cli/sandbox-commands).
+
+**Other features**
+
+- **Passthrough secret violation action.** A new `Passthrough` violation policy forwards requests containing secret placeholders without substituting the real value, scoped to a configurable list of host patterns. Useful for letting non-sensitive traffic flow to hosts that happen to share placeholder syntax. See [Sandbox secrets](/sandboxes/secrets).
+- **Python exec keyword arguments.** `sandbox.exec("python3", ["script.py"], cwd="/app", env={...}, timeout=30.0)` now works directly, instead of requiring an `ExecOptions` dict. See the [Python SDK reference](/sdk/python/execution).
+- **Configurable guest IP pools.** Deployments can override the default IPv4 and IPv6 guest pools, and the default IPv4 pool changes from `100.96.0.0/11` to `172.16.0.0/12` to avoid colliding with Tailscale.
+- **`msb start` accepts variadic sandbox names.** Start more than one sandbox in a single command.
+- **Agent relay supports up to 128 concurrent clients.** Raised from 16. The relay also reports its correlation-ID range size to each SDK during the handshake, so a future bump will not silently misroute frames on older clients.
+- **Configurable shared-memory metrics registry.** Live per-sandbox metrics now live in a POSIX shared-memory segment instead of SQLite, removing steady-state writes to the catalog database. Capacity is tunable via `metrics.capacity` in `~/.microsandbox/config.json`; the public metrics API is unchanged. See [Sandbox metrics](/sandboxes/metrics).
+
+## Bug fixes
+
+- TLS interception no longer fails on long-lived sandboxes; cached per-domain leaf certificates are now refreshed before they expire.
+- Sandbox writes are flushed to disk on `msb stop` and `sandbox.stop()`; previously the host could tear down the VM before the guest synced ext4, occasionally losing in-flight writes across stop and start. As part of this fix, `replace_with_grace` is renamed to `replace_with_timeout` across the CLI, Rust, Python, Node, and Go SDKs, and `stop_with_timeout` / `connect_with_timeout` are now available on `SandboxHandle`.
+- The microsandbox CA is now installed into guest trust directories with mode `0755`, creating those directories first when they are missing, so distro trust-store refreshes pick it up.
+- `msb logs --follow --json` emits JSON Lines for the follow records, not just the initial snapshot, so streaming consumers no longer hit a parse error mid-stream.
+- Request bodies that arrive already content-encoded (gzip, brotli, deflate) are preserved verbatim during secret substitution instead of being silently rewritten.
+- `msb run ./path` and other dot-prefixed inputs are now recognized as local image inputs instead of being interpreted as registry references.
+- Sandboxes with large environment-variable payloads no longer overflow at startup.
+- `AllSandboxMetrics` in the Go SDK reports the real uptime instead of zero.
+- Several `--net-rule` suffix entry points now reject TLD-broad patterns like `*.com` at parse time, with a clear `SuffixTooBroad` error.

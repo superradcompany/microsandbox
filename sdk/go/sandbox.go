@@ -47,6 +47,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Workdir:         o.Workdir,
 		Shell:           o.Shell,
 		Hostname:        o.Hostname,
+		LibkrunfwPath:   o.LibkrunfwPath,
 		User:            o.User,
 		Replace:         o.Replace,
 		Env:             o.Env,

@@ -31,6 +31,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | workdir | `str` | Default working directory for commands |
 | shell | `str` | Shell for `shell()` calls (default `"/bin/sh"`) |
 | hostname | `str` | Guest hostname |
+| libkrunfw_path | `str` | Host path to a custom `libkrunfw` shared library for this sandbox. Use for custom kernel/firmware builds |
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
@@ -49,6 +50,8 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
 | detached | `bool` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
+
+`libkrunfw_path` is a host path, not a guest path. It must point to a platform shared library (`.so` on Linux, `.dylib` on macOS) and overrides the global/bundled `libkrunfw` resolution for this sandbox only.
 
 **Returns**
 
@@ -924,6 +927,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
 | hostname | `str` | - | Guest hostname |
+| libkrunfw_path | `str` | - | Host path to a custom `libkrunfw` shared library for this sandbox. Overrides global/bundled resolution |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |

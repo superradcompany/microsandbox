@@ -18,8 +18,11 @@ type SandboxConfig struct {
 	Workdir         string
 	Shell           string
 	Hostname        string
-	User            string
-	Replace         bool
+	// LibkrunfwPath overrides the host-side libkrunfw shared library used to
+	// boot this sandbox. It is a host path, not a guest path.
+	LibkrunfwPath string
+	User          string
+	Replace       bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -116,6 +119,13 @@ func WithEnv(env map[string]string) SandboxOption {
 // WithHostname sets the guest hostname.
 func WithHostname(hostname string) SandboxOption {
 	return func(o *SandboxConfig) { o.Hostname = hostname }
+}
+
+// WithLibkrunfwPath overrides the host-side libkrunfw shared library used to
+// boot this sandbox. Use this for custom kernel or firmware builds. The path
+// must point to the platform shared library (.so on Linux, .dylib on macOS).
+func WithLibkrunfwPath(path string) SandboxOption {
+	return func(o *SandboxConfig) { o.LibkrunfwPath = path }
 }
 
 // WithUser sets the user to run the sandbox process as (UID or name).

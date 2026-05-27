@@ -733,6 +733,16 @@ Guest hostname.
 
 ---
 
+#### WithLibkrunfwPath()
+
+```go
+func WithLibkrunfwPath(path string) SandboxOption
+```
+
+Override the host-side `libkrunfw` shared library used to boot this sandbox. Use this for custom kernel/firmware builds. The path is a host path, not a guest path, and must point to the platform shared library (`.so` on Linux, `.dylib` on macOS).
+
+---
+
 #### WithUser()
 
 ```go
@@ -975,6 +985,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | Workdir          | `string`                                             | Default working directory                                            |
 | Shell            | `string`                                             | Shell binary used by `Shell` calls                                   |
 | Hostname         | `string`                                             | Guest hostname                                                       |
+| LibkrunfwPath    | `string`                                             | Host-side custom `libkrunfw` path                                    |
 | User             | `string`                                             | Default guest user                                                   |
 | Replace          | `bool`                                               | Replace existing sandbox with same name                              |
 | ReplaceWithTimeout | `*time.Duration`                                   | Timeout between SIGTERM and SIGKILL (implies `Replace`)              |

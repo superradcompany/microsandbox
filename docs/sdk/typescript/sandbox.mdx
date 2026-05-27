@@ -384,6 +384,55 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
 
 ---
 
+## SandboxBuilder
+
+Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter returns the same builder so calls can be chained.
+
+| Method | Description |
+|--------|-------------|
+| `image(src)` | OCI image (`"alpine"`) or local rootfs/disk path. **Required.** |
+| `imageWith(i => i.oci("alpine").upperSize(8192))` | Configure explicit OCI upper size or disk-image details |
+| `cpus(n)` | Virtual CPUs |
+| `memory(mib)` | Guest memory in MiB |
+| `logLevel(level)` | Override log verbosity |
+| `quietLogs()` | Suppress log output |
+| `workdir(path)` | Default working directory for commands |
+| `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
+| `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
+| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
+| `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
+| `hostname(name)` | Guest hostname |
+| `user(user)` | Default guest user |
+| `pullPolicy(policy)` | Image pull behavior |
+| `libkrunfwPath(path)` | Override the host-side `libkrunfw` shared library for this sandbox. Use for custom kernel/firmware builds |
+| `env(key, value)` | Add a single env var |
+| `envs(record \| iter)` | Add many env vars |
+| `script(name, content)` | Mount a script at `/.msb/scripts/<name>` |
+| `scripts(record \| iter)` | Mount many scripts |
+| `replace()` | Replace any existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
+| `replaceWithTimeout(timeoutMs)` | Same as `replace()` with a custom SIGTERM timeout in milliseconds. `0` skips SIGTERM. Implies `replace()` |
+| `maxDuration(secs)` | Maximum sandbox lifetime |
+| `idleTimeout(secs)` | Stop the sandbox after this many idle seconds |
+| `volume(guestPath, m => ...)` | Mount a volume — see [Volumes](/sdk/typescript/volumes) |
+| `patch(p => ...)` | Modify the rootfs before boot — see [Snapshots](/sdk/typescript/snapshots) |
+| `addPatch(patch)` | Append a pre-built `Patch` |
+| `registry(r => r.auth(...).insecure().caCertsPath(...))` | Configure the OCI registry |
+| `port(host, guest)` | Publish a TCP port |
+| `portUdp(host, guest)` | Publish a UDP port |
+| `disableNetwork()` | Disable networking entirely |
+| `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
+| `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
+| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
+| `build(): Promise<SandboxConfig>` | Materialize without booting |
+| `create(): Promise<Sandbox>` | Build and boot in attached mode |
+| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
+| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
+| `createDetachedWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in detached mode while streaming image pull progress |
+
+`libkrunfwPath(path)` is a host path, not a guest path. It takes precedence over the global `paths.libkrunfw` setting for this sandbox only, and the path must point to the platform shared library (`.so` on Linux, `.dylib` on macOS).
+
+---
+
 ## PatchBuilder
 
 Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
@@ -549,51 +598,6 @@ Write UTF-8 text content at `path`.
 
 ## Types
 
-### SandboxBuilder
-
-Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter returns the same builder so calls can be chained.
-
-| Method | Description |
-|--------|-------------|
-| `image(src)` | OCI image (`"alpine"`) or local rootfs/disk path. **Required.** |
-| `imageWith(i => i.oci("alpine").upperSize(8192))` | Configure explicit OCI upper size or disk-image details |
-| `cpus(n)` | Virtual CPUs |
-| `memory(mib)` | Guest memory in MiB |
-| `logLevel(level)` | Override log verbosity |
-| `quietLogs()` | Suppress log output |
-| `workdir(path)` | Default working directory for commands |
-| `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
-| `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
-| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
-| `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
-| `hostname(name)` | Guest hostname |
-| `user(user)` | Default guest user |
-| `pullPolicy(policy)` | Image pull behavior |
-| `libkrunfwPath(path)` | Override the bundled libkrunfw shared library |
-| `env(key, value)` | Add a single env var |
-| `envs(record \| iter)` | Add many env vars |
-| `script(name, content)` | Mount a script at `/.msb/scripts/<name>` |
-| `scripts(record \| iter)` | Mount many scripts |
-| `replace()` | Replace any existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
-| `replaceWithTimeout(timeoutMs)` | Same as `replace()` with a custom SIGTERM timeout in milliseconds. `0` skips SIGTERM. Implies `replace()` |
-| `maxDuration(secs)` | Maximum sandbox lifetime |
-| `idleTimeout(secs)` | Stop the sandbox after this many idle seconds |
-| `volume(guestPath, m => ...)` | Mount a volume — see [Volumes](/sdk/typescript/volumes) |
-| `patch(p => ...)` | Modify the rootfs before boot — see [Snapshots](/sdk/typescript/snapshots) |
-| `addPatch(patch)` | Append a pre-built `Patch` |
-| `registry(r => r.auth(...).insecure().caCertsPath(...))` | Configure the OCI registry |
-| `port(host, guest)` | Publish a TCP port |
-| `portUdp(host, guest)` | Publish a UDP port |
-| `disableNetwork()` | Disable networking entirely |
-| `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
-| `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
-| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
-| `build(): Promise<SandboxConfig>` | Materialize without booting |
-| `create(): Promise<Sandbox>` | Build and boot in attached mode |
-| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
-| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
-| `createDetachedWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in detached mode while streaming image pull progress |
-
 ### LogLevel
 
 Sandbox process log verbosity.
@@ -729,7 +733,7 @@ Frozen configuration object — produced by `SandboxBuilder.build()` and exposed
 | cmd | `string[] \| null` | Override image cmd |
 | hostname | `string \| null` | Guest hostname |
 | user | `string \| null` | Default guest user |
-| libkrunfwPath | `string \| null` | Custom libkrunfw path |
+| libkrunfwPath | `string \| null` | Host-side custom `libkrunfw` path |
 | env | `Array<readonly [string, string]>` | Environment variables |
 | scripts | `Array<readonly [string, string]>` | Named scripts |
 | mounts | `VolumeMount[]` | Volume mounts |

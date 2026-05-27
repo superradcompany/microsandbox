@@ -562,6 +562,7 @@ sb, err := h.Connect(ctx)
 | `WithVolumeQuota(mib)` | Volume quota in MiB (zero = unlimited) |
 | `WithVolumeLabels(map)` | Key-value labels for organising volumes |
 | `WithHostname(hostname)` | Guest hostname |
+| `WithLibkrunfwPath(path)` | Host-side custom `libkrunfw` path for custom kernel/firmware builds |
 | `WithUser(user)` | User to run the sandbox process as (UID or name) |
 | `WithReplace()` | Kill any existing sandbox with the same name before creating |
 | `WithShell(path)` | Default shell binary inside the guest |

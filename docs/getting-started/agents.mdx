@@ -6,7 +6,7 @@ icon: "robot"
 
 microsandbox is built for AI agents. The SDK and CLI give you full programmatic control, but there are two additional ways to connect agents directly: **Agent Skills** for coding assistants and an **MCP server** for any MCP-compatible client.
 
-## Agent Skills
+## Agent skills
 
 [Agent Skills](https://github.com/superradcompany/skills) teach AI coding agents how to use microsandbox without any custom integration code. Once installed, the agent can create sandboxes, run commands, manage files, and control the full sandbox lifecycle through natural language.
 
@@ -18,7 +18,7 @@ npx skills add superradcompany/skills
 
 This installs a set of skill files into your project that the agent reads as context. No server process, no configuration, just files that describe how to use microsandbox.
 
-## MCP Server
+## MCP server
 
 The [microsandbox MCP server](https://github.com/superradcompany/microsandbox-mcp) exposes microsandbox as a set of structured tool calls over the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP-compatible client can use it to manage sandbox lifecycle, execute commands, access the filesystem, work with volumes, and monitor sandbox state.
 

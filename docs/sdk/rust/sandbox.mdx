@@ -528,6 +528,12 @@ fn idle_timeout(self, secs: u64) -> Self
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
 
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `u64` | Idle timeout in seconds |
+
 ---
 
 #### init()
@@ -589,12 +595,6 @@ let sb = Sandbox::builder("worker")
 
 Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
 
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| secs | `u64` | Idle timeout in seconds |
-
 ---
 
 #### image()
@@ -635,6 +635,24 @@ let sb = Sandbox::builder("worker")
     .create()
     .await?;
 ```
+
+---
+
+#### libkrunfw_path()
+
+```rust
+fn libkrunfw_path(self, path: impl Into<PathBuf>) -> Self
+```
+
+Override the host-side `libkrunfw` shared library used to boot this sandbox. Use this for custom kernel/firmware development; by default microsandbox resolves `libkrunfw` from the global config, next to the `msb` binary, or under `~/.microsandbox/lib/`.
+
+The path is a host path, not a guest path. It must point to the platform shared library (`.so` on Linux, `.dylib` on macOS) and is validated when [`build`](#build) runs.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<PathBuf>` | Host path to the custom `libkrunfw` shared library |
 
 ---
 
@@ -1174,6 +1192,7 @@ The full configuration of a sandbox. Obtained via [`config()`](#config) or built
 | env | `Vec<(String, String)>` | Environment variables |
 | idle_timeout_secs | `Option<u64>` | Idle timeout |
 | image | `RootfsSource` | Root filesystem source (OCI, bind, or disk image) |
+| libkrunfw_path | `Option<PathBuf>` | Per-sandbox custom `libkrunfw` path. Host-side and not persisted |
 | max_duration_secs | `Option<u64>` | Maximum lifetime |
 | memory_mib | `u32` | Guest memory in MiB |
 | name | `String` | Sandbox name |
