@@ -101,7 +101,7 @@ jobs:
           rustup target add --toolchain stable aarch64-unknown-linux-musl
           cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+          cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@v4
@@ -164,7 +164,7 @@ jobs:
           rustup target add --toolchain stable ${{ matrix.agentd_target }}
           cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
           mkdir -p build
-          cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
+          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
@@ -453,7 +453,7 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl
           cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
-          cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation

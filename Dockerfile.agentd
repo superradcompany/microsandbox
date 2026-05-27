@@ -4,12 +4,9 @@ RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 
-# Copy only the crates needed for agentd
-COPY crates/agentd crates/agentd
-COPY crates/protocol crates/protocol
-COPY Cargo.toml Cargo.toml
+COPY . .
 
-RUN cd crates/agentd && cargo build --release
+RUN cargo build --release -p microsandbox-agentd
 
 FROM scratch
-COPY --from=builder /build/crates/agentd/target/release/agentd /agentd
+COPY --from=builder /build/target/release/agentd /agentd

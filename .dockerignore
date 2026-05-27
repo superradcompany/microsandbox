@@ -8,7 +8,12 @@ vendor/
 .vscode/
 .claude/
 assets/
-sdk/
+examples/**/rootfs-alpine/
+examples/**/qcow2-alpine/
+examples/**/sample-images/
+sdk/**/node_modules/
+sdk/python/.venv/
+sdk/**/dist/
 
 # Temporary and cache files
 **/*.o
