@@ -1,6 +1,6 @@
 {
   "name": "microsandbox",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -48,9 +48,9 @@
     "vitest": "^4.1"
   },
   "optionalDependencies": {
-    "@superradcompany/microsandbox-darwin-arm64": "0.5.0",
-    "@superradcompany/microsandbox-linux-arm64-gnu": "0.5.0",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.5.0"
+    "@superradcompany/microsandbox-darwin-arm64": "0.5.1",
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.5.1",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.5.1"
   },
   "files": [
     "dist",

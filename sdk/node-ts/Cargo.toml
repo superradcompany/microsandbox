@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 path = "native/lib.rs"
 
 [dependencies]
-microsandbox = { version = "0.5.0", path = "../../crates/microsandbox", features = ["ssh"] }
-microsandbox-network = { version = "0.5.0", path = "../../crates/network" }
+microsandbox = { version = "0.5.1", path = "../../crates/microsandbox", features = ["ssh"] }
+microsandbox-network = { version = "0.5.1", path = "../../crates/network" }
 ipnetwork = { workspace = true }
 napi = { version = "3", default-features = false, features = [
     "async",

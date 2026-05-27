@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-microsandbox = { version = "0.5.0", path = "../../crates/microsandbox", features = ["ssh"] }
-microsandbox-network = { version = "0.5.0", path = "../../crates/network" }
+microsandbox = { version = "0.5.1", path = "../../crates/microsandbox", features = ["ssh"] }
+microsandbox-network = { version = "0.5.1", path = "../../crates/network" }
 chrono = { workspace = true }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
