@@ -55,6 +55,7 @@ from microsandbox.errors import (
     MicrosandboxError,
     NetworkPolicyError,
     PathNotFoundError,
+    Pre05SandboxRestartRequiredError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
@@ -251,6 +252,7 @@ __all__ = [
     "TlsError",
     "IoError",
     "MetricsDisabledError",
+    "Pre05SandboxRestartRequiredError",
     # Setup
     "install",
     "is_installed",

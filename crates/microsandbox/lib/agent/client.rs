@@ -25,9 +25,9 @@ use std::sync::{
 use std::time::Duration;
 
 use microsandbox_protocol::{
-    codec::{self, RawFrame},
+    codec::{self, MAX_FRAME_SIZE, RawFrame},
     core::Ready,
-    message::{FLAG_TERMINAL, Message, MessageType},
+    message::{FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType, PROTOCOL_VERSION},
 };
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -45,9 +45,27 @@ use super::error::{AgentClientError, AgentClientResult};
 /// Default handshake timeout used by [`AgentClient::connect`].
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+// compatibility for versions before 0.5 is no longer supported.
+const LEGACY_PROTOCOL_VERSION: u8 = 1;
+const LEGACY_RELAY_ID_RANGE_STEP: u32 = u32::MAX / 16;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Agent protocol generation spoken by a connected sandbox relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentProtocol {
+    /// Current protocol generation.
+    Current,
+
+    /// pre-0.5 microsandbox relay handshake and agent protocol.
+    ///
+    /// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+    /// compatibility for versions before 0.5 is no longer supported.
+    LegacyV1,
+}
 
 /// Client for communicating with agentd through the agent relay.
 ///
@@ -61,6 +79,8 @@ pub struct AgentClient {
     id_min: u32,
     /// Upper bound (exclusive) of the assigned ID range.
     id_max: u32,
+    /// Agent protocol generation for this connection.
+    protocol: AgentProtocol,
     /// Pending response channels keyed by correlation ID.
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
     /// Background reader task handle.
@@ -74,6 +94,15 @@ pub struct AgentClient {
 //--------------------------------------------------------------------------------------------------
 // Methods: Connection lifecycle
 //--------------------------------------------------------------------------------------------------
+
+impl AgentProtocol {
+    fn version(self) -> u8 {
+        match self {
+            Self::Current => PROTOCOL_VERSION,
+            Self::LegacyV1 => LEGACY_PROTOCOL_VERSION,
+        }
+    }
+}
 
 impl AgentClient {
     /// Connect to the sandbox's agent relay socket using the default 10s
@@ -112,7 +141,14 @@ impl AgentClient {
 
         let (mut reader, writer) = stream.into_split();
 
-        // Handshake: [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
+        // Current handshake:
+        // [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
+        //
+        // Legacy pre-0.5 handshake:
+        // [id_offset: u32 BE][ready_frame_bytes...]
+        //
+        // Reading 8 bytes up-front lets us distinguish the two forms. For
+        // legacy relays, the second word is the ready-frame length prefix.
         let mut range_buf = [0u8; 8];
         tokio::time::timeout_at(deadline, reader.read_exact(&mut range_buf))
             .await
@@ -122,23 +158,47 @@ impl AgentClient {
                 )
             })?
             .map_err(|e| AgentClientError::Handshake(format!("read id range: {e}")))?;
-        let id_min = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
-        let id_max = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
+        let id_start_or_offset = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
+        let id_max_or_frame_len = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
 
-        if id_min >= id_max {
+        let legacy_handshake =
+            looks_like_legacy_relay_handshake(id_start_or_offset, id_max_or_frame_len);
+        let (id_min, id_max, ready_frame, protocol) = if legacy_handshake {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            let id_offset = id_start_or_offset;
+            let ready_frame = read_raw_frame_after_len_prefix(
+                &mut reader,
+                range_buf[4..8].try_into().unwrap(),
+                deadline,
+            )
+            .await?;
+            (
+                id_offset.saturating_add(1),
+                id_offset.saturating_add(LEGACY_RELAY_ID_RANGE_STEP),
+                ready_frame,
+                AgentProtocol::LegacyV1,
+            )
+        } else if id_start_or_offset >= id_max_or_frame_len {
             return Err(AgentClientError::Handshake(format!(
-                "invalid relay id range: start={id_min}, end={id_max}"
+                "invalid relay id range: start={id_start_or_offset}, end={id_max_or_frame_len}"
             )));
-        }
-
-        let ready_frame = tokio::time::timeout_at(deadline, codec::read_raw_frame(&mut reader))
-            .await
-            .map_err(|_| {
-                AgentClientError::Handshake(
-                    "read ready frame: timed out before relay sent frame".into(),
-                )
-            })?
-            .map_err(|e| AgentClientError::Handshake(format!("read ready frame: {e}")))?;
+        } else {
+            let ready_frame = tokio::time::timeout_at(deadline, codec::read_raw_frame(&mut reader))
+                .await
+                .map_err(|_| {
+                    AgentClientError::Handshake(
+                        "read ready frame: timed out before relay sent frame".into(),
+                    )
+                })?
+                .map_err(|e| AgentClientError::Handshake(format!("read ready frame: {e}")))?;
+            (
+                id_start_or_offset,
+                id_max_or_frame_len,
+                ready_frame,
+                AgentProtocol::Current,
+            )
+        };
         let ready_msg = codec::raw_frame_to_message(ready_frame.clone())
             .map_err(|e| AgentClientError::Handshake(format!("decode ready frame: {e}")))?;
         if ready_msg.t != MessageType::Ready {
@@ -154,10 +214,18 @@ impl AgentClient {
         tracing::info!(
             id_min,
             id_max,
+            protocol = ?protocol,
             ready_bytes = ready_frame.body.len(),
             boot_time_ns = ready.boot_time_ns,
             "agent client: connected to relay"
         );
+        if protocol == AgentProtocol::LegacyV1 {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            tracing::warn!(
+                "agent client: connected to a sandbox started before microsandbox 0.5; exec compatibility is temporary and filesystem/SFTP require stop/start"
+            );
+        }
 
         let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -167,9 +235,10 @@ impl AgentClient {
 
         Ok(Self {
             writer,
-            next_id: AtomicU32::new(id_min),
+            next_id: AtomicU32::new(first_request_id(id_min)),
             id_min,
             id_max,
+            protocol,
             pending,
             reader_handle,
             ready_body: ready_frame.body,
@@ -270,6 +339,16 @@ impl AgentClient {
     pub fn ready_bytes(&self) -> &[u8] {
         &self.ready_body
     }
+
+    /// Agent protocol generation for this connection.
+    pub fn protocol(&self) -> AgentProtocol {
+        self.protocol
+    }
+
+    /// Returns `true` if this connection is using the legacy pre-0.5 protocol.
+    pub fn is_legacy_protocol(&self) -> bool {
+        self.protocol == AgentProtocol::LegacyV1
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -284,7 +363,7 @@ impl AgentClient {
         payload: &T,
     ) -> AgentClientResult<Message> {
         let flags = t.flags();
-        let body = encode_message_body(t, payload)?;
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
         let frame = self.request_raw(flags, body).await?;
         Ok(codec::raw_frame_to_message(frame)?)
     }
@@ -297,7 +376,7 @@ impl AgentClient {
         payload: &T,
     ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<Message>)> {
         let flags = t.flags();
-        let body = encode_message_body(t, payload)?;
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
         let (id, raw_rx) = self.stream_raw(flags, body).await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -313,7 +392,7 @@ impl AgentClient {
         payload: &T,
     ) -> AgentClientResult<()> {
         let flags = t.flags();
-        let body = encode_message_body(t, payload)?;
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
         self.write_frame(id, flags, &body).await
     }
 
@@ -334,10 +413,11 @@ impl AgentClient {
     fn alloc_id(&self) -> u32 {
         loop {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id >= self.id_min && id < self.id_max {
+            if id != 0 && id >= self.id_min && id < self.id_max {
                 return id;
             }
-            self.next_id.store(self.id_min, Ordering::Relaxed);
+            self.next_id
+                .store(first_request_id(self.id_min), Ordering::Relaxed);
         }
     }
 
@@ -362,6 +442,54 @@ impl AgentClient {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn looks_like_legacy_relay_handshake(_id_min: u32, id_max: u32) -> bool {
+    // TODO(upgrade-0.6): Remove in 0.6.x or later once pre-0.5 relay
+    // handshakes are no longer accepted.
+    // In the legacy relay handshake, the first 4 bytes are the id offset and
+    // the next 4 bytes are already the ready-frame length prefix. In the v2
+    // handshake, the second word is the exclusive upper id bound, which is far
+    // larger than any valid frame length.
+    id_max >= FRAME_HEADER_SIZE as u32 && id_max <= MAX_FRAME_SIZE
+}
+
+fn first_request_id(id_min: u32) -> u32 {
+    id_min.max(1)
+}
+
+async fn read_raw_frame_after_len_prefix<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    len_buf: [u8; 4],
+    deadline: Instant,
+) -> AgentClientResult<RawFrame> {
+    let frame_len = u32::from_be_bytes(len_buf);
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(AgentClientError::Handshake(format!(
+            "legacy ready frame too large: {frame_len} bytes (max {MAX_FRAME_SIZE})"
+        )));
+    }
+    if frame_len < FRAME_HEADER_SIZE as u32 {
+        return Err(AgentClientError::Handshake(format!(
+            "legacy ready frame too short: {frame_len} bytes"
+        )));
+    }
+
+    let mut data = vec![0u8; frame_len as usize];
+    tokio::time::timeout_at(deadline, reader.read_exact(&mut data))
+        .await
+        .map_err(|_| {
+            AgentClientError::Handshake(
+                "read legacy ready frame: timed out before relay sent frame".into(),
+            )
+        })?
+        .map_err(|e| AgentClientError::Handshake(format!("read legacy ready frame: {e}")))?;
+
+    let id = u32::from_be_bytes(data[0..4].try_into().unwrap());
+    let flags = data[4];
+    let body = data[FRAME_HEADER_SIZE..].to_vec();
+
+    Ok(RawFrame { id, flags, body })
+}
 
 /// Background task that reads frames from the relay and dispatches them to
 /// pending channels by correlation ID. Operates on raw frames — no CBOR.
@@ -421,8 +549,13 @@ async fn decode_stream_task(
 }
 
 /// Encode a typed payload to a CBOR `Message` body.
-fn encode_message_body<T: Serialize>(t: MessageType, payload: &T) -> AgentClientResult<Vec<u8>> {
-    let msg = Message::with_payload(t, 0, payload)?;
+fn encode_message_body<T: Serialize>(
+    version: u8,
+    t: MessageType,
+    payload: &T,
+) -> AgentClientResult<Vec<u8>> {
+    let mut msg = Message::with_payload(t, 0, payload)?;
+    msg.v = version;
     let mut body = Vec::new();
     ciborium::into_writer(&msg, &mut body).map_err(microsandbox_protocol::ProtocolError::from)?;
     Ok(body)
@@ -444,8 +577,10 @@ fn sandbox_socket_path(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use microsandbox_protocol::core::Ready;
+    use microsandbox_protocol::exec::ExecRequest;
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixListener;
+    use tokio::sync::oneshot;
 
     use super::*;
 
@@ -464,7 +599,10 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             socket.write_all(&1u32.to_be_bytes()).await.unwrap();
-            socket.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            socket
+                .write_all(&microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP.to_be_bytes())
+                .await
+                .unwrap();
             codec::write_message(&mut socket, &ready_msg).await.unwrap();
         });
 
@@ -473,6 +611,7 @@ mod tests {
                 .await
                 .unwrap();
 
+        assert_eq!(client.protocol(), AgentProtocol::Current);
         let decoded = client.ready().unwrap();
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
@@ -480,6 +619,92 @@ mod tests {
 
         let raw_msg: Message = ciborium::from_reader(client.ready_bytes()).unwrap();
         assert_eq!(raw_msg.t, MessageType::Ready);
+    }
+
+    #[tokio::test]
+    async fn connect_accepts_legacy_relay_handshake() {
+        assert_accepts_legacy_relay_handshake(0).await;
+        assert_accepts_legacy_relay_handshake(268_435_455).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_relay_requests_use_v1_and_legacy_id_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+        let id_offset = 268_435_455u32;
+        let (frame_tx, frame_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&id_offset.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+            let frame = codec::read_raw_frame(&mut socket).await.unwrap();
+            frame_tx.send(frame).unwrap();
+        });
+
+        let client =
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+        let request = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let (id, _rx) = client
+            .stream(MessageType::ExecRequest, &request)
+            .await
+            .unwrap();
+
+        let frame = frame_rx.await.unwrap();
+        let message = codec::raw_frame_to_message(frame).unwrap();
+
+        assert_eq!(id, id_offset + 1);
+        assert_eq!(message.id, id_offset + 1);
+        assert_eq!(message.v, LEGACY_PROTOCOL_VERSION);
+        assert_eq!(message.t, MessageType::ExecRequest);
+    }
+
+    async fn assert_accepts_legacy_relay_handshake(id_offset: u32) {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&id_offset.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+        });
+
+        let client =
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+
+        assert_eq!(client.protocol(), AgentProtocol::LegacyV1);
+        let decoded = client.ready().unwrap();
+        assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
+        assert_eq!(decoded.init_time_ns, ready.init_time_ns);
+        assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
     }
 }
 

@@ -13,6 +13,6 @@ mod error;
 //--------------------------------------------------------------------------------------------------
 
 pub use bridge::{AgentBridge, BridgeFrame, StreamHandle};
-pub use client::AgentClient;
+pub use client::{AgentClient, AgentProtocol};
 pub use error::{AgentClientError, AgentClientResult};
 pub use microsandbox_protocol::codec::RawFrame;

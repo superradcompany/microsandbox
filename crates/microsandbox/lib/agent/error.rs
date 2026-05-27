@@ -26,6 +26,15 @@ pub enum AgentClientError {
     #[error("handshake: {0}")]
     Handshake(String),
 
+    /// The sandbox must be restarted before using filesystem or SFTP features.
+    ///
+    /// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+    /// compatibility for versions before 0.5 is no longer supported.
+    #[error(
+        "filesystem and SFTP features need this sandbox to be restarted: this sandbox was started before microsandbox 0.5; stop and start it, then retry"
+    )]
+    Pre05SandboxRestartRequired,
+
     /// Sandbox name could not be resolved to an agent socket path.
     #[error("sandbox '{0}' not found")]
     SandboxNotFound(String),

@@ -189,6 +189,21 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
         return 1;
     }
+    if find_pre05_sandbox_restart_required_in_chain(err) {
+        // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+        // compatibility for versions before 0.5 is no longer supported.
+        microsandbox_cli::ui::error_with_lines(
+            "filesystem and SFTP features need this sandbox to be restarted",
+            &[
+                microsandbox_cli::ui::ErrorLine::Cause(
+                    "this sandbox was started before microsandbox 0.5",
+                ),
+                microsandbox_cli::ui::ErrorLine::Hint("exec and shell still work temporarily"),
+                microsandbox_cli::ui::ErrorLine::Hint("stop and start the sandbox, then retry"),
+            ],
+        );
+        return 1;
+    }
     if let Some(failed) = find_exec_failed_in_chain(err) {
         // Try the chain first (callers wrap with `failed to exec
         // "<cmd>"`); fall back to the cmd embedded in the ExecFailed
@@ -233,6 +248,22 @@ fn find_exec_failed_in_chain(
         }
     }
     None
+}
+
+/// Walk the chain looking for a pre-0.5 sandbox restart error.
+///
+/// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+/// compatibility for versions before 0.5 is no longer supported.
+fn find_pre05_sandbox_restart_required_in_chain(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(microsandbox::MicrosandboxError::AgentClient(
+            microsandbox::AgentClientError::Pre05SandboxRestartRequired,
+        )) = cause.downcast_ref::<microsandbox::MicrosandboxError>()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Pull the first non-empty quoted token from a message. Used to

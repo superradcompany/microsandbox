@@ -3255,6 +3255,7 @@ name = "microsandbox-migration"
 version = "0.5.0"
 dependencies = [
  "sea-orm-migration",
+ "serde_json",
 ]
 
 [[package]]

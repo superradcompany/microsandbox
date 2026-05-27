@@ -20,7 +20,10 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
-use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient};
+use crate::{
+    MicrosandboxError, MicrosandboxResult, Sandbox,
+    agent::{AgentClient, AgentClientError},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -97,6 +100,9 @@ pub struct SshClient {
     handle: russh::client::Handle<SshClientHandler>,
     term: String,
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
+    // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+    // compatibility for versions before 0.5 is no longer supported.
+    legacy_agent: bool,
 }
 
 /// High-level SFTP client session.
@@ -275,6 +281,7 @@ impl SandboxSsh {
             handle: client,
             term,
             server_task: Some(server_task),
+            legacy_agent: self.sandbox.client().is_legacy_protocol(),
         })
     }
 
@@ -632,6 +639,14 @@ impl SshClient {
 
     /// Open an SFTP client session over this SSH connection.
     pub async fn sftp(&self) -> MicrosandboxResult<SftpClient> {
+        if self.legacy_agent {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            return Err(MicrosandboxError::AgentClient(
+                AgentClientError::Pre05SandboxRestartRequired,
+            ));
+        }
+
         let mut channel = self
             .handle
             .channel_open_session()
@@ -1008,6 +1023,13 @@ impl russh::server::Handler for SshSession {
         };
 
         let client = self.agent_client().await?;
+        if client.is_legacy_protocol() {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
         let fs = crate::sandbox::fs::SandboxFs::new(&client);
         let cwd = self
             .settings

@@ -22,8 +22,8 @@ pub mod snapshot;
 pub mod volume;
 
 pub use agent::{
-    AgentBridge, AgentClient, AgentClientError, AgentClientResult, BridgeFrame, RawFrame,
-    StreamHandle,
+    AgentBridge, AgentClient, AgentClientError, AgentClientResult, AgentProtocol, BridgeFrame,
+    RawFrame, StreamHandle,
 };
 pub use error::*;
 pub use image::{Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail};

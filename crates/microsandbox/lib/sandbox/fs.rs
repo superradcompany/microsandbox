@@ -13,7 +13,10 @@ use microsandbox_protocol::{
 };
 use tokio::sync::mpsc;
 
-use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
+use crate::{
+    MicrosandboxError, MicrosandboxResult,
+    agent::{AgentClient, AgentClientError},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -133,6 +136,17 @@ impl SandboxFs {
         }
     }
 
+    fn ensure_current_protocol(&self) -> MicrosandboxResult<()> {
+        if self.client.is_legacy_protocol() {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
+            return Err(MicrosandboxError::AgentClient(
+                AgentClientError::Pre05SandboxRestartRequired,
+            ));
+        }
+        Ok(())
+    }
+
     //----------------------------------------------------------------------------------------------
     // Read Operations
     //----------------------------------------------------------------------------------------------
@@ -201,6 +215,7 @@ impl SandboxFs {
         len: Option<u64>,
         close_handle: Option<FsHandle>,
     ) -> MicrosandboxResult<FsReadStream> {
+        self.ensure_current_protocol()?;
         let req = FsRequest {
             op: FsOp::Read {
                 handle,
@@ -286,6 +301,7 @@ impl SandboxFs {
         len: Option<u64>,
         close_handle: Option<FsHandle>,
     ) -> MicrosandboxResult<FsWriteSink> {
+        self.ensure_current_protocol()?;
         let req = FsRequest {
             op: FsOp::Write {
                 handle,
@@ -632,6 +648,7 @@ impl SandboxFs {
     }
 
     async fn request_response(&self, req: FsRequest) -> MicrosandboxResult<FsResponse> {
+        self.ensure_current_protocol()?;
         let msg = self.client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = msg.payload()?;
         if resp.ok {
@@ -814,5 +831,53 @@ fn read_only_open_options() -> FsOpenOptions {
     FsOpenOptions {
         read: true,
         ..Default::default()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use microsandbox_protocol::{codec, core::Ready};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+    use tokio::time::Instant;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn filesystem_operations_reject_legacy_agent_protocol() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&0u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+        });
+
+        let client = Arc::new(
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap(),
+        );
+        let fs = SandboxFs::new(&client);
+
+        match fs.stat("/").await {
+            Err(MicrosandboxError::AgentClient(AgentClientError::Pre05SandboxRestartRequired)) => {}
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("legacy filesystem request unexpectedly succeeded"),
+        }
     }
 }
