@@ -299,7 +299,7 @@ async fn udp_relay_task(
 /// Construct an ethernet frame containing a UDP response for the guest.
 ///
 /// Builds Ethernet + IPv4/IPv6 + UDP headers using smoltcp's wire module.
-fn construct_udp_response(
+pub(crate) fn construct_udp_response(
     src: SocketAddr,
     dst: SocketAddr,
     payload: &[u8],

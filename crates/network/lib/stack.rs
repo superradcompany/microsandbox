@@ -232,6 +232,8 @@ pub fn smoltcp_poll_loop(
         gateway_ips,
         network_policy.clone(),
         config.gateway,
+        config.gateway_mac,
+        config.guest_mac,
     );
     let mut port_publisher = PortPublisher::new(
         &published_ports,

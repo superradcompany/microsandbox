@@ -1,10 +1,11 @@
 //! DNS query interception: the smoltcp ↔ channel bridge.
 //!
 //! `DnsInterceptor` owns the smoltcp UDP socket bound to `gateway:53`
-//! and a pair of channels to the async forwarder task spawned on the
-//! tokio runtime. Each poll-loop iteration, `process()` reads pending
-//! queries off the smoltcp socket and hands them to the forwarder,
-//! then writes any forwarded responses back to the socket.
+//! and a channel to the async forwarder task spawned on the tokio
+//! runtime. Each poll-loop iteration, `process()` reads pending queries
+//! off the smoltcp socket and hands them to the forwarder. Forwarded
+//! responses are injected directly into the guest RX ring by the UDP
+//! proxy.
 //!
 //! The DNS wire protocol, upstream client, block-list, and rebind-
 //! protection logic all live under sibling modules and are reached via
@@ -42,7 +43,7 @@ const DNS_MAX_SIZE: usize = 4096;
 /// Number of packet slots in the smoltcp UDP socket buffers.
 const DNS_SOCKET_PACKET_SLOTS: usize = 16;
 
-/// Capacity of the query/response channels.
+/// Capacity of the query channel.
 const CHANNEL_CAPACITY: usize = 64;
 
 //--------------------------------------------------------------------------------------------------
@@ -51,11 +52,10 @@ const CHANNEL_CAPACITY: usize = 64;
 
 /// DNS query/response interceptor.
 ///
-/// Owns the smoltcp UDP socket handle and channels to the async forwarder
+/// Owns the smoltcp UDP socket handle and channel to the async forwarder
 /// task. The poll loop calls [`process()`] each iteration to:
 ///
 /// 1. Read pending queries from the smoltcp socket → send to forwarder task.
-/// 2. Read forwarded responses from the channel → write to smoltcp socket.
 ///
 /// [`process()`]: DnsInterceptor::process
 pub(crate) struct DnsInterceptor {
@@ -63,8 +63,6 @@ pub(crate) struct DnsInterceptor {
     socket_handle: smoltcp::iface::SocketHandle,
     /// Sends queries to the background forwarder task.
     query_tx: mpsc::Sender<DnsQuery>,
-    /// Receives responses from the background forwarder task.
-    response_rx: mpsc::Receiver<DnsResponse>,
 }
 
 /// A DNS query extracted from the smoltcp socket.
@@ -79,17 +77,6 @@ pub(crate) struct DnsQuery {
     /// preserving the original destination we'd reply from the gateway
     /// IP and the guest's resolver would drop the response.
     pub(super) original_dst: Option<IpAddress>,
-}
-
-/// A forwarded DNS response ready to send back to the guest.
-pub(crate) struct DnsResponse {
-    /// Raw DNS response bytes.
-    pub(crate) data: Bytes,
-    /// Destination endpoint (guest IP:port).
-    pub(super) dest: IpEndpoint,
-    /// Source IP to stamp on the outgoing packet. Echoes the query's
-    /// original destination so replies match what the guest asked.
-    pub(super) source_addr: Option<IpAddress>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -111,6 +98,8 @@ impl DnsInterceptor {
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
         gateway: GatewayIps,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
     ) -> (Self, DnsForwarderHandle) {
         // Create and bind the smoltcp UDP socket.
         let rx_meta = vec![PacketMetadata::EMPTY; DNS_SOCKET_PACKET_SLOTS];
@@ -131,9 +120,8 @@ impl DnsInterceptor {
 
         let socket_handle = sockets.add(socket);
 
-        // Create channels.
+        // Create channel.
         let (query_tx, query_rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let (response_tx, response_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let normalized = Arc::new(NormalizedDnsConfig::from_config(dns_config));
 
@@ -155,16 +143,16 @@ impl DnsInterceptor {
         UdpProxy::spawn(
             tokio_handle,
             query_rx,
-            response_tx,
             forwarder_handle.clone(),
             shared,
+            gateway_mac,
+            guest_mac,
         );
 
         (
             Self {
                 socket_handle,
                 query_tx,
-                response_rx,
             },
             forwarder_handle,
         )
@@ -174,7 +162,6 @@ impl DnsInterceptor {
     ///
     /// Called by the poll loop each iteration:
     /// 1. Reads queries from the smoltcp socket → sends to forwarder task.
-    /// 2. Reads responses from the forwarder → writes to smoltcp socket.
     pub(crate) fn process(&mut self, sockets: &mut SocketSet<'_>) {
         let socket = sockets.get_mut::<udp::Socket>(self.socket_handle);
 
@@ -192,23 +179,6 @@ impl DnsInterceptor {
                         // Channel full — drop query. Guest will retry.
                         tracing::debug!("DNS query channel full, dropping query");
                     }
-                }
-                Err(_) => break,
-            }
-        }
-
-        // Write responses to the smoltcp socket.
-        // Check can_send() BEFORE consuming from the channel so
-        // undeliverable responses remain for the next poll iteration.
-        while socket.can_send() {
-            match self.response_rx.try_recv() {
-                Ok(response) => {
-                    let mut meta = udp::UdpMetadata::from(response.dest);
-                    // Stamp the reply with the IP the guest originally
-                    // aimed at; smoltcp uses this as the source IP when
-                    // it dispatches the packet.
-                    meta.local_address = response.source_addr;
-                    let _ = socket.send_slice(&response.data, meta);
                 }
                 Err(_) => break,
             }
@@ -259,10 +229,9 @@ mod tests {
             })
             .expect("bind addr:None succeeds");
 
-        // Construct outgoing metadata with a v6 source: this is what
-        // the interceptor does when it stamps responses for guests that
-        // aimed at a v6 resolver. If the bind didn't accept v6, the
-        // send_slice path below would fail.
+        // Construct outgoing metadata with a v6 source. The production
+        // response path injects raw frames now, but this keeps the
+        // addr:None socket metadata behavior covered.
         let v6: Ipv6Address = "fd42::1".parse().unwrap();
         let v6_dest = IpEndpoint {
             addr: IpAddress::Ipv6(v6),

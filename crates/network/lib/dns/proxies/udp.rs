@@ -1,6 +1,6 @@
 //! DNS-over-UDP proxy: drain queries from the interceptor channel,
-//! route each through the shared [`DnsForwarder`], and send responses
-//! back via the response channel.
+//! route each through the shared [`DnsForwarder`], and inject responses
+//! back into the guest RX ring.
 //!
 //! Mirrors [`super::tcp`] for the connectionless side. The interceptor
 //! ([`crate::dns::interceptor::DnsInterceptor`]) handles smoltcp UDP
@@ -10,15 +10,24 @@
 //!
 //! [`DnsForwarder`]: super::super::forwarder::DnsForwarder
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::sync::mpsc;
 
 use super::super::common::transport::Transport;
 use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
-use super::super::interceptor::{DnsQuery, DnsResponse};
+use super::super::interceptor::DnsQuery;
 use crate::shared::SharedState;
+use crate::udp_relay::construct_udp_response;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// DNS port.
+const DNS_PORT: u16 = 53;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -26,17 +35,18 @@ use crate::shared::SharedState;
 
 /// DNS-over-UDP proxy. Drains [`DnsQuery`] records the interceptor
 /// pushed onto `query_rx`, dispatches each through the shared
-/// forwarder, and sends [`DnsResponse`]s back on `response_tx` for the
-/// interceptor to write to the smoltcp socket.
+/// forwarder, and injects response frames directly into the guest RX ring.
 pub(crate) struct UdpProxy {
     /// Queries pushed by the interceptor's smoltcp read loop.
     query_rx: mpsc::Receiver<DnsQuery>,
-    /// Responses the interceptor will pop and write back to the socket.
-    response_tx: mpsc::Sender<DnsResponse>,
     /// Shared forwarder handle used by every inner query.
     forwarder: Arc<DnsForwarder>,
-    /// Shared wake handle for poking the smoltcp poll loop after send.
+    /// Shared rings and wake handles for guest delivery.
     shared: Arc<SharedState>,
+    /// Source MAC on synthesized response frames.
+    gateway_mac: EthernetAddress,
+    /// Destination MAC on synthesized response frames.
+    guest_mac: EthernetAddress,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -49,9 +59,10 @@ impl UdpProxy {
     pub(crate) fn spawn(
         handle: &tokio::runtime::Handle,
         query_rx: mpsc::Receiver<DnsQuery>,
-        response_tx: mpsc::Sender<DnsResponse>,
         forwarder: DnsForwarderHandle,
         shared: Arc<SharedState>,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
     ) {
         handle.spawn(async move {
             let Some(forwarder) = DnsForwarder::wait(forwarder).await else {
@@ -60,7 +71,7 @@ impl UdpProxy {
                 );
                 return;
             };
-            Self::new(query_rx, response_tx, forwarder, shared)
+            Self::new(query_rx, forwarder, shared, gateway_mac, guest_mac)
                 .run()
                 .await;
         });
@@ -69,15 +80,17 @@ impl UdpProxy {
     /// Build a UDP proxy bound to the interceptor's channel pair.
     fn new(
         query_rx: mpsc::Receiver<DnsQuery>,
-        response_tx: mpsc::Sender<DnsResponse>,
         forwarder: Arc<DnsForwarder>,
         shared: Arc<SharedState>,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
     ) -> Self {
         Self {
             query_rx,
-            response_tx,
             forwarder,
             shared,
+            gateway_mac: EthernetAddress(gateway_mac),
+            guest_mac: EthernetAddress(guest_mac),
         }
     }
 
@@ -85,9 +98,10 @@ impl UdpProxy {
     /// are owned by this task for its lifetime.
     async fn run(mut self) {
         while let Some(query) = self.query_rx.recv().await {
-            let response_tx = self.response_tx.clone();
             let shared = self.shared.clone();
             let forwarder = self.forwarder.clone();
+            let gateway_mac = self.gateway_mac;
+            let guest_mac = self.guest_mac;
             // Two views of the same address: smoltcp's IpAddress for
             // the outgoing source-IP stamp on the response, and std's
             // IpAddr for the forwarder's policy lookup.
@@ -101,14 +115,14 @@ impl UdpProxy {
                 else {
                     return;
                 };
-                let response = DnsResponse {
-                    data,
-                    dest: query.source,
-                    source_addr: original_dst_smoltcp,
-                };
-                if response_tx.send(response).await.is_ok() {
-                    shared.proxy_wake.wake();
-                }
+                inject_dns_response(
+                    query.source,
+                    original_dst_smoltcp,
+                    &data,
+                    shared,
+                    gateway_mac,
+                    guest_mac,
+                );
             });
         }
     }
@@ -125,6 +139,44 @@ fn smoltcp_ip_to_std(addr: smoltcp::wire::IpAddress) -> IpAddr {
     match addr {
         smoltcp::wire::IpAddress::Ipv4(a) => IpAddr::V4(a),
         smoltcp::wire::IpAddress::Ipv6(a) => IpAddr::V6(a),
+    }
+}
+
+fn smoltcp_endpoint_to_std(endpoint: IpEndpoint) -> SocketAddr {
+    SocketAddr::new(smoltcp_ip_to_std(endpoint.addr), endpoint.port)
+}
+
+fn inject_dns_response(
+    response_dest: IpEndpoint,
+    response_source: Option<smoltcp::wire::IpAddress>,
+    payload: &[u8],
+    shared: Arc<SharedState>,
+    gateway_mac: EthernetAddress,
+    guest_mac: EthernetAddress,
+) {
+    let Some(response_source) = response_source else {
+        tracing::debug!("dns/udp: response dropped because original destination is missing");
+        return;
+    };
+
+    let response_source = SocketAddr::new(smoltcp_ip_to_std(response_source), DNS_PORT);
+    let response_dest = smoltcp_endpoint_to_std(response_dest);
+
+    let Some(frame) = construct_udp_response(
+        response_source,
+        response_dest,
+        payload,
+        gateway_mac,
+        guest_mac,
+    ) else {
+        tracing::debug!("dns/udp: response dropped because address families differ");
+        return;
+    };
+
+    if shared.rx_ring.push(frame).is_ok() {
+        shared.rx_wake.wake();
+    } else {
+        tracing::debug!("dns/udp: response dropped because rx_ring is full");
     }
 }
 
@@ -152,6 +204,19 @@ mod tests {
         assert_eq!(
             smoltcp_ip_to_std(smoltcp),
             IpAddr::V6("fd42::1".parse::<Ipv6Addr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn smoltcp_endpoint_to_std_preserves_port() {
+        let endpoint = IpEndpoint {
+            addr: smoltcp::wire::IpAddress::Ipv4(Ipv4Addr::new(10, 0, 0, 2)),
+            port: 4242,
+        };
+
+        assert_eq!(
+            smoltcp_endpoint_to_std(endpoint),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 4242)
         );
     }
 }
