@@ -187,14 +187,7 @@ impl SandboxHandle {
             )));
         }
 
-        let global = crate::config::config();
-        let sock_path = global
-            .sandboxes_dir()
-            .join(&self.name)
-            .join("runtime")
-            .join("agent.sock");
-
-        let client = AgentClient::connect_with_timeout(&sock_path, timeout).await?;
+        let client = AgentClient::connect_sandbox_with_timeout(&self.name, timeout).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {

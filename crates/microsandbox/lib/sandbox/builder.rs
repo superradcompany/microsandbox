@@ -809,6 +809,7 @@ impl SandboxBuilder {
                 "sandbox name is required".into(),
             ));
         }
+        super::validate_sandbox_name_for_runtime(&self.config.name)?;
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
@@ -923,6 +924,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, Some(LogLevel::Debug));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_accepts_long_sandbox_name() {
+        let name = format!("testing-{}", "x".repeat(256));
+        let config = SandboxBuilder::new(name.clone())
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.name, name);
     }
 
     #[tokio::test]

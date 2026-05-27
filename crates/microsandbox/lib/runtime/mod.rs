@@ -13,3 +13,4 @@ pub(crate) mod spawn;
 
 pub use handle::ProcessHandle;
 pub use spawn::{SpawnMode, spawn_sandbox};
+pub(crate) use spawn::{resolve_sandbox_agent_socket_path, sandbox_agent_socket_path_candidates};
