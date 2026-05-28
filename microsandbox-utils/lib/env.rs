@@ -20,6 +20,10 @@ pub const MSBRUN_EXE_ENV_VAR: &str = "MSBRUN_EXE";
 /// Environment variable for the msbserver binary path
 pub const MSBSERVER_EXE_ENV_VAR: &str = "MSBSERVER_EXE";
 
+/// Environment variable for the FEX-Emulator rootfs path
+#[cfg(target_os = "macos")]
+pub const FEX_EMU_PATH_ENV_VAR: &str = "FEX_EMU_PATH";
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -43,5 +47,17 @@ pub fn get_oci_registry() -> String {
         oci_registry_domain
     } else {
         DEFAULT_OCI_REGISTRY.to_string()
+    }
+}
+
+/// Returns the path to the FEX-Emu rootfs directory.
+/// If the FEX_EMU_PATH environment variable is set, returns that path.
+/// Otherwise, returns the default FEX-Emu path (~/.local/share/microsandbox/fex-emu).
+#[cfg(target_os = "macos")]
+pub fn get_fex_emulator_path() -> PathBuf {
+    if let Ok(fex_emu_path) = std::env::var(FEX_EMU_PATH_ENV_VAR) {
+        PathBuf::from(fex_emu_path)
+    } else {
+        crate::DEFAULT_FEX_EMU_PATH.to_owned()
     }
 }

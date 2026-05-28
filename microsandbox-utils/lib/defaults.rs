@@ -77,3 +77,11 @@ pub const DEFAULT_SERVER_PORT: u16 = 5555;
 
 /// The default microsandbox-portal port.
 pub const DEFAULT_PORTAL_GUEST_PORT: u16 = 4444;
+
+/// The path where FEX-Emu rootfs is installed.
+#[cfg(target_os = "macos")]
+pub static DEFAULT_FEX_EMU_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    dirs::home_dir()
+        .unwrap()
+        .join(".local/share/microsandbox/fex-emu")
+});

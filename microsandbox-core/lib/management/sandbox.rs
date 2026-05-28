@@ -15,6 +15,8 @@ use microsandbox_utils::{
     MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, MSBRUN_EXE_ENV_VAR, OCI_DB_FILENAME,
     PATCH_SUBDIR, RW_SUBDIR, SANDBOX_DB_FILENAME, SANDBOX_DIR, SCRIPTS_DIR, SHELL_SCRIPT_NAME, env,
 };
+#[cfg(target_os = "macos")]
+use microsandbox_utils::get_fex_emulator_path;
 use sqlx::{Pool, Sqlite};
 use tempfile;
 use tokio::{fs, process::Command};
@@ -641,6 +643,17 @@ async fn setup_image_rootfs(
         rootfs::patch_with_stat_override(&top_rw_path).await?;
     } else {
         tracing::info!("skipping sandbox patch - config unchanged");
+    }
+
+    // Add FEX-Emu overlay layer for x86_64 emulation on ARM64
+    #[cfg(target_os = "macos")] {
+        let fex_path = get_fex_emulator_path();
+        if fex_path.exists() {
+            tracing::info!("Adding FEX-Emu overlay layer from {}", fex_path.display());
+            layer_paths.push(fex_path);
+        } else {
+            tracing::debug!("FEX-Emu not found at {}, skipping overlay layer", fex_path.display());
+        }
     }
 
     // Add the scripts and rootfs directories to the layer paths

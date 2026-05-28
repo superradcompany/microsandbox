@@ -200,6 +200,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # Set up variables
 BUILD_DIR="$ORIGINAL_DIR/build"
+FEX_EMU_DIR="$BUILD_DIR/fex-emu"
 LIBKRUNFW_REPO="https://github.com/microsandbox/libkrunfw.git"
 LIBKRUN_REPO="https://github.com/microsandbox/libkrun.git"
 NO_CLEANUP=false
@@ -237,6 +238,18 @@ if [ "$OS_TYPE" = "Linux" ]; then
     check_python_dependencies
 fi
 
+
+# Set FEX default based on platform (ARM64 macOS only)
+# FEX-Emu enables x86_64 emulation on ARM64 systems
+if [ "$OS_TYPE" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    FEX=${FEX:-1}
+    if [ "$FEX" = "1" ]; then
+        printf "Building with FEX-Emu...\n"
+    fi
+else
+    FEX=${FEX:-0}
+fi
+
 # Function to handle cleanup
 cleanup() {
   if [ "$NO_CLEANUP" = true ]; then
@@ -255,6 +268,9 @@ cleanup() {
 
     warn "Deleting libkrun-builder VM..."
     krunvm delete libkrun-builder
+
+    warn "Deleting fex-emu-builder VM..."
+    krunvm delete fex-emu-builder
   fi
   info "Cleanup complete."
 }
@@ -297,6 +313,22 @@ check_existing_lib() {
 
     if [ -f "$lib_path" ]; then
         info "$lib_name already exists in $lib_path. Skipping build."
+        return 1
+    fi
+    return 0
+}
+
+# Function to check if FEX-Emu was already built
+check_existing_fex() {
+    if [ "$FORCE_BUILD" = true ]; then
+        info "Force build enabled. Skipping check for existing FEX-Emu."
+        return 0
+    fi
+
+    local fex_tarball="$FEX_EMU_DIR/fex-emu-rootfs.tar.gz"
+
+    if [ -f "$fex_tarball" ]; then
+        info "FEX-Emu already exists in $fex_tarball. Skipping build."
         return 1
     fi
     return 0
@@ -413,10 +445,10 @@ build_libkrun() {
 
     case "$OS_TYPE" in
         Darwin)
-            sudo make LIBRARY_PATH="$LIBRARY_PATH" PATH="$PATH"
+            sudo FEX=$FEX make LIBRARY_PATH="$LIBRARY_PATH" PATH="$PATH"
             ;;
         *)
-            make LIBRARY_PATH="$LIBRARY_PATH" PATH="$PATH"
+            FEX=$FEX make LIBRARY_PATH="$LIBRARY_PATH" PATH="$PATH"
             ;;
     esac
     check_success "Failed to build libkrun"
@@ -445,6 +477,55 @@ build_libkrun() {
     check_success "Failed to copy libkrun"
 }
 
+# Function to build FEX-Emu in krunvm
+build_fex_emu() {
+    info "Building FEX-Emu in krunvm..."
+    mkdir -p "$BUILD_DIR/fex-emu"
+    chmod -R 755 "$BUILD_DIR/fex-emu"
+
+    local fex_dir="$BUILD_DIR/fex-emu"
+    local scripts_dir="$ORIGINAL_DIR/scripts"
+    cd "$fex_dir" || { error "Failed to change to fex directory"; exit 1; }
+
+    # Check if krunvm is available
+    if ! which krunvm >/dev/null 2>&1; then
+        error "krunvm not found. Cannot build FEX-Emu."
+        exit 1
+    fi
+
+    # Create a temporary VM for building FEX-Emu
+    info "Creating krunvm builder VM for FEX-Emu..."
+    krunvm create fedora \
+        --name fex-emu-builder \
+        --mem 4096 \
+        --cpus 4 \
+        -v "$fex_dir:/output" \
+        -v "$scripts_dir:/scripts" \
+        -w /output
+    if [ $? -ne 0 ]; then
+        error "Failed to create fex-emu-builder VM"
+        exit 1
+    fi
+
+    krunvm start fex-emu-builder /bin/sh -- /scripts/build_fex_emu.sh
+    if [ $? -ne 0 ]; then
+        krunvm delete fex-emu-builder
+        error "Failed to build FEX-Emu"
+        exit 1
+    fi
+
+    # Fix ownership since we are running as root due to krunvm
+    if [ "$(id -u)" = "0" ] && [ -n "$SUDO_USER" ]; then
+        chown -R "$SUDO_USER:staff" "$fex_dir"
+    fi
+
+    # Delete the VM
+    info "Cleaning up fex-emu-builder VM..."
+    krunvm delete fex-emu-builder
+
+    info "FEX-Emu build complete: $fex_dir/fex-emu-rootfs.tar.gz"
+}
+
 # Main script execution
 check_existing_lib "libkrunfw"
 if [ $? -eq 0 ]; then
@@ -456,8 +537,15 @@ fi
 check_existing_lib "libkrun"
 if [ $? -eq 0 ]; then
     create_build_directory
-    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch --branch develop
+    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch --branch toks/fex-emu
     build_libkrun
+fi
+
+# Build FEX-Emu if previous step succeeded and FEX is enabled
+check_existing_fex
+if [ $? -eq 0 ] && [ "$FEX" = "1" ]; then
+    create_build_directory
+    build_fex_emu
 fi
 
 # Finished

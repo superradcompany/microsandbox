@@ -30,6 +30,7 @@ export CARGO_PROFILE_RELEASE_LTO := $(if $(filter 1,$(LTO)),true,off)
 # -----------------------------------------------------------------------------
 HOME_LIB := $(HOME)/.local/lib
 HOME_BIN := $(HOME)/.local/bin
+HOME_SHARE := $(HOME)/.local/share/microsandbox
 
 # -----------------------------------------------------------------------------
 # Build Paths and Directories
@@ -117,6 +118,7 @@ install: build
 	@echo "Installing $(if $(filter 1,$(DEBUG)),debug,release) build..."
 	install -d $(HOME_BIN)
 	install -d $(HOME_LIB)
+	install -d $(HOME_SHARE)
 	install -m 755 $(BUILD_DIR)/msb $(HOME_BIN)/msb
 	install -m 755 $(BUILD_DIR)/msbrun $(HOME_BIN)/msbrun
 	install -m 755 $(BUILD_DIR)/msbserver $(HOME_BIN)/msbserver
@@ -134,6 +136,11 @@ install: build
 		cd $(HOME_LIB) && ln -sf $(notdir $(LIBKRUN_FILE)) libkrun.dylib; \
 	else \
 		echo "Warning: libkrun library not found in build directory"; \
+	fi
+	@if [ -f "$(BUILD_DIR)/fex-emu/fex-emu-rootfs.tar.gz" ]; then \
+		rm -rf $(HOME_SHARE)/fex-emu; \
+		tar -xzf $(BUILD_DIR)/fex-emu/fex-emu-rootfs.tar.gz -C $(HOME_SHARE)/; \
+		mv $(HOME_SHARE)/fex-emu-rootfs $(HOME_SHARE)/fex-emu; \
 	fi
 	@echo "Installation of $(if $(filter 1,$(DEBUG)),debug,release) build complete."
 
@@ -153,6 +160,7 @@ uninstall:
 	rm -f $(HOME_BIN)/msi
 	rm -f $(HOME_LIB)/libkrunfw.dylib
 	rm -f $(HOME_LIB)/libkrun.dylib
+	rm -rf $(HOME_SHARE)/fex-emu
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \
 		rm -f $(HOME_LIB)/$(notdir $(LIBKRUNFW_FILE)); \
 	fi
