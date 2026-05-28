@@ -81,6 +81,9 @@ pub enum MessageType {
     /// Host relay reports that one SDK client disconnected.
     RelayClientDisconnected,
 
+    /// Host asks the guest to synchronize `CLOCK_REALTIME`.
+    ClockSync,
+
     /// Host requests command execution.
     ExecRequest,
 
@@ -184,6 +187,7 @@ impl MessageType {
             Self::Ready => "core.ready",
             Self::Shutdown => "core.shutdown",
             Self::RelayClientDisconnected => "core.relay.client.disconnected",
+            Self::ClockSync => "core.clock.sync",
             Self::ExecRequest => "core.exec.request",
             Self::ExecStarted => "core.exec.started",
             Self::ExecStdin => "core.exec.stdin",
@@ -206,6 +210,7 @@ impl MessageType {
             "core.ready" => Some(Self::Ready),
             "core.shutdown" => Some(Self::Shutdown),
             "core.relay.client.disconnected" => Some(Self::RelayClientDisconnected),
+            "core.clock.sync" => Some(Self::ClockSync),
             "core.exec.request" => Some(Self::ExecRequest),
             "core.exec.started" => Some(Self::ExecStarted),
             "core.exec.stdin" => Some(Self::ExecStdin),
@@ -261,6 +266,11 @@ mod tests {
         let types = [
             (MessageType::Ready, "core.ready"),
             (MessageType::Shutdown, "core.shutdown"),
+            (
+                MessageType::RelayClientDisconnected,
+                "core.relay.client.disconnected",
+            ),
+            (MessageType::ClockSync, "core.clock.sync"),
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
             (MessageType::ExecStdin, "core.exec.stdin"),
@@ -287,6 +297,8 @@ mod tests {
         let types = [
             MessageType::Ready,
             MessageType::Shutdown,
+            MessageType::RelayClientDisconnected,
+            MessageType::ClockSync,
             MessageType::ExecRequest,
             MessageType::ExecStarted,
             MessageType::ExecStdin,
@@ -339,6 +351,7 @@ mod tests {
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::Ready.flags(), 0);
         assert_eq!(MessageType::Shutdown.flags(), FLAG_SHUTDOWN);
+        assert_eq!(MessageType::ClockSync.flags(), 0);
         assert_eq!(MessageType::ExecStarted.flags(), 0);
         assert_eq!(MessageType::ExecStdin.flags(), 0);
         assert_eq!(MessageType::ExecStdout.flags(), 0);

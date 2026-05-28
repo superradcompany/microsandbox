@@ -12,7 +12,7 @@ use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
-use microsandbox_protocol::core::{Ready, RelayClientDisconnected};
+use microsandbox_protocol::core::{ClockSync, Ready, RelayClientDisconnected};
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
     ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
@@ -128,7 +128,6 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
                         }
                         Ok(Ok(n)) => {
                             serial_in_buf.extend_from_slice(&read_buf[..n]);
-                            last_activity = Utc::now();
 
                             // Guard against unbounded buffer growth.
                             if serial_in_buf.len() > MAX_INPUT_BUF_SIZE {
@@ -141,6 +140,10 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
                             while let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
                                 .map_err(|e| AgentdError::ExecSession(format!("decode: {e}")))?
                             {
+                                if message_refreshes_idle_timer(&msg.t) {
+                                    last_activity = Utc::now();
+                                }
+
                                 handle_message(
                                     msg,
                                     &mut state,
@@ -375,6 +378,15 @@ async fn handle_message(
             });
         }
 
+        MessageType::ClockSync => {
+            let sync: ClockSync = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode clock sync: {e}")))?;
+            if let Err(e) = clock::sync_realtime_unix_nanos(sync.unix_time_nanos) {
+                eprintln!("clock: failed to sync realtime clock: {e}");
+            }
+        }
+
         MessageType::Shutdown => {
             // Graceful shutdown — signal all sessions, then ask the guest
             // kernel to power off so block-root filesystems can shut down
@@ -403,6 +415,14 @@ async fn handle_message(
 /// inherits from agentd's environment and prepends.
 /// Default PATH for the guest when no PATH is inherited.
 const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Returns whether a host message should refresh the sandbox idle timer.
+///
+/// Maintenance traffic such as clock synchronization must not count as user
+/// activity, otherwise periodic host tasks would keep an idle sandbox alive.
+fn message_refreshes_idle_timer(t: &MessageType) -> bool {
+    !matches!(t, MessageType::ClockSync)
+}
 
 fn remove_completed_fs_read(frame_bytes: &[u8], read_sessions: &mut HashMap<u32, FsReadSession>) {
     let mut buf = frame_bytes.to_vec();

@@ -28,6 +28,7 @@ use tokio::net::UnixListener;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::clock::spawn_clock_sync_task;
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
 use crate::{RuntimeError, RuntimeResult};
@@ -66,6 +67,9 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 /// Size of the length prefix in the wire format.
 const LEN_PREFIX_SIZE: usize = 4;
 
+/// Capacity of the per-client write channel.
+const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -79,9 +83,6 @@ struct ClientState {
     /// Uses `Bytes` for zero-copy frame forwarding from the ring buffer.
     write_tx: mpsc::Sender<Bytes>,
 }
-
-/// Capacity of the per-client write channel.
-const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
 
 /// The agent relay running in the sandbox process.
 ///
@@ -258,6 +259,7 @@ impl AgentRelay {
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
         let ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
+        let clock_sync_handle = spawn_clock_sync_task(agent_tx.clone());
 
         // Spawn the ring reader task (tx_ring → guest frames → clients).
         // When a log writer is attached, the reader also captures
@@ -407,6 +409,7 @@ impl AgentRelay {
         let _ = std::fs::remove_file(&self.sock_path);
 
         // Abort background tasks.
+        clock_sync_handle.abort();
         ring_writer_handle.abort();
         ring_reader_handle.abort();
 

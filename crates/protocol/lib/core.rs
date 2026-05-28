@@ -27,6 +27,16 @@ pub struct Ready {
     pub ready_time_ns: u64,
 }
 
+/// Payload for `core.clock.sync` messages.
+///
+/// Sent by the host to ask the guest agent to step `CLOCK_REALTIME` to the
+/// host's current wall-clock time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClockSync {
+    /// Host Unix timestamp in nanoseconds.
+    pub unix_time_nanos: u64,
+}
+
 /// Payload for `core.relay.client.disconnected` messages.
 ///
 /// Sent by the host relay when one SDK client socket disconnects. The
