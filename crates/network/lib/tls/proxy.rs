@@ -346,6 +346,8 @@ async fn forward_plaintext(
     shared: &SharedState,
     buf: &mut [u8],
 ) -> io::Result<()> {
+    let mut wrote_plaintext = false;
+
     loop {
         let n = match guest_tls.reader().read(buf) {
             Ok(0) => break,
@@ -356,12 +358,14 @@ async fn forward_plaintext(
 
         if secrets_handler.is_empty() {
             server_tls.write_all(&buf[..n]).await?;
+            wrote_plaintext = true;
             continue;
         }
 
         match secrets_handler.substitute(&buf[..n]) {
             Ok(data) => {
                 server_tls.write_all(&data).await?;
+                wrote_plaintext = true;
             }
             Err(action) => {
                 // Violation: placeholder going to disallowed host. Drop the connection.
@@ -375,6 +379,13 @@ async fn forward_plaintext(
             }
         }
     }
+
+    // tokio-rustls buffers writes; flush each drained plaintext batch so
+    // upstream servers waiting for the full request body can respond.
+    if wrote_plaintext {
+        server_tls.flush().await?;
+    }
+
     Ok(())
 }
 
