@@ -43,6 +43,9 @@ pub(crate) fn do_setxattr(
     if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
     }
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     // Block writes to the override xattr.
     if name == stat_override::OVERRIDE_XATTR_KEY {
@@ -298,6 +301,9 @@ pub(crate) fn do_removexattr(
 ) -> io::Result<()> {
     if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
+    }
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
     }
 
     // Block removal of the override xattr.

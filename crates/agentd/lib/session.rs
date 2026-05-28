@@ -19,6 +19,17 @@ use crate::error::{AgentdError, AgentdResult};
 use crate::rlimit;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+const CAP_SYS_ADMIN: u32 = 21;
+const CAP_WORD_BITS: u32 = 32;
+const PR_CAPBSET_DROP: libc::c_int = 24;
+const PR_CAP_AMBIENT: libc::c_int = 47;
+const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
+
+//--------------------------------------------------------------------------------------------------
 // Functions: classify
 //--------------------------------------------------------------------------------------------------
 
@@ -155,6 +166,21 @@ struct GroupEntry {
 struct ExecErrorPipe {
     read_end: OwnedFd,
     write_end: OwnedFd,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapUserHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -360,6 +386,10 @@ impl ExecSession {
                 }
             }
 
+            if drop_mount_admin_privileges().is_err() {
+                unsafe { libc::_exit(1) };
+            }
+
             if let Some(ref user) = resolved_user
                 && apply_resolved_user(user).is_err()
             {
@@ -445,22 +475,21 @@ impl ExecSession {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
 
-        // Apply resource limits in the child before exec.
+        // Drop mount privileges and apply resource limits in the child before exec.
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
-        if resolved_user.is_some() || !parsed_rlimits.is_empty() {
-            unsafe {
-                cmd.pre_exec(move || {
-                    if let Some(ref user) = resolved_user {
-                        apply_resolved_user(user).map_err(agentd_to_io_error)?;
+        unsafe {
+            cmd.pre_exec(move || {
+                drop_mount_admin_privileges().map_err(agentd_to_io_error)?;
+                if let Some(ref user) = resolved_user {
+                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                }
+                for (resource, limit) in &parsed_rlimits {
+                    if libc::setrlimit(*resource as _, limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
                     }
-                    for (resource, limit) in &parsed_rlimits {
-                        if libc::setrlimit(*resource as _, limit) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                    Ok(())
-                });
-            }
+                }
+                Ok(())
+            });
         }
 
         let cmd_label = req.cmd.clone();
@@ -534,6 +563,54 @@ fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
     if ret < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    Ok(())
+}
+
+fn drop_mount_admin_privileges() -> AgentdResult<()> {
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let ret = unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINVAL) {
+            return Err(err.into());
+        }
+    }
+
+    let mut header = CapUserHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [CapUserData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+
+    if unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let index = (CAP_SYS_ADMIN / CAP_WORD_BITS) as usize;
+    let mask = 1u32 << (CAP_SYS_ADMIN % CAP_WORD_BITS);
+    data[index].effective &= !mask;
+    data[index].permitted &= !mask;
+    data[index].inheritable &= !mask;
+
+    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let ret = unsafe { libc::prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN, 0, 0, 0) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINVAL) {
+            return Err(err.into());
+        }
+    }
+
     Ok(())
 }
 

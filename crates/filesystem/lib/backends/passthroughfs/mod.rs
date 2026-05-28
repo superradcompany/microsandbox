@@ -125,6 +125,13 @@ pub struct PassthroughConfig {
     /// Default: [`HostPermissions::Private`].
     pub host_permissions: HostPermissions,
 
+    /// Whether mutating guest filesystem operations should be rejected.
+    ///
+    /// This is host-side defense in depth for read-only virtiofs volume mounts.
+    /// The guest mount also uses `MS_RDONLY`, but a privileged guest process can
+    /// attempt to remount; the backend must still deny writes.
+    pub readonly: bool,
+
     /// FUSE entry cache timeout.
     pub entry_timeout: Duration,
 
@@ -414,6 +421,11 @@ impl PassthroughConfig {
     pub(crate) fn mirror_host_permissions(&self) -> bool {
         matches!(self.host_permissions, HostPermissions::Mirror)
     }
+
+    /// Whether the backend should reject guest-side mutations.
+    pub(crate) fn readonly(&self) -> bool {
+        self.readonly
+    }
 }
 
 impl Default for PassthroughConfig {
@@ -422,6 +434,7 @@ impl Default for PassthroughConfig {
             root_dir: PathBuf::new(),
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            readonly: false,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,

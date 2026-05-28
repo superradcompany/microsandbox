@@ -1030,6 +1030,8 @@ struct MountSpec {
     fstype: Option<String>,
     #[serde(default)]
     readonly: bool,
+    #[serde(default)]
+    noexec: bool,
     size_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
@@ -1586,6 +1588,7 @@ fn apply_volume(
     let disk = m.disk.clone();
     let fstype = m.fstype.clone();
     let readonly = m.readonly;
+    let noexec = m.noexec;
     let size_mib = m.size_mib;
 
     let kinds_set: u8 =
@@ -1616,6 +1619,9 @@ fn apply_volume(
         }
         if readonly {
             mb = mb.readonly();
+        }
+        if noexec {
+            mb = mb.noexec();
         }
         if let Some(siz) = size_mib {
             mb = mb.size(siz);

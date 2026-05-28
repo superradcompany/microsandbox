@@ -35,6 +35,7 @@ def test_bind_accepts_policy_strings() -> None:
     )
     assert mc._to_dict() == {
         "readonly": True,
+        "noexec": False,
         "bind": "/host/data",
         "stat_virtualization": "relaxed",
         "host_permissions": "mirror",

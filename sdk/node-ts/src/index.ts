@@ -338,6 +338,7 @@ import type {
   NapiInterfaceOverridesBuilder,
   NapiPullProgressEvent,
   NapiPullProgressStream,
+  NapiVolumeMount,
 } from "./internal/napi.js";
 export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
@@ -422,6 +423,7 @@ export const VolumeMountKinds: readonly VolumeMountKind[] = [
   "tmpfs",
   "disk",
 ] as const;
+export type VolumeMount = NapiVolumeMount;
 /** Per-mount stat-virtualization policy for virtiofs-backed mounts. */
 export type StatVirtualization = "strict" | "relaxed" | "off";
 export const StatVirtualizations: readonly StatVirtualization[] = [

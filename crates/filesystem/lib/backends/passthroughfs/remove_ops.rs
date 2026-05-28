@@ -34,6 +34,9 @@ pub(crate) fn do_unlink(
     name: &CStr,
 ) -> io::Result<()> {
     name_validation::validate_name(name)?;
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     // Protect init.krun from deletion.
     if fs.is_reserved_init_name(parent, name.to_bytes()) {
@@ -145,6 +148,9 @@ pub(crate) fn do_rmdir(
     name: &CStr,
 ) -> io::Result<()> {
     name_validation::validate_name(name)?;
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
@@ -219,6 +225,9 @@ pub(crate) fn do_rename(
 ) -> io::Result<()> {
     name_validation::validate_name(oldname)?;
     name_validation::validate_name(newname)?;
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     // Protect init.krun from being renamed or overwritten.
     if fs.is_reserved_init_name(olddir, oldname.to_bytes())

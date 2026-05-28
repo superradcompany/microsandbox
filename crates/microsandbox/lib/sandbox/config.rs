@@ -12,7 +12,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 use super::{
     exec::Rlimit,
     init::HandoffInit,
-    types::{Patch, RootfsSource, VolumeMount},
+    types::{MountOptions, Patch, RootfsSource, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -318,7 +318,7 @@ impl SandboxConfig {
         self.mounts.push(VolumeMount::Tmpfs {
             guest: DEFAULT_OCI_TMPFS_PATH.to_string(),
             size_mib: Some(default_oci_tmpfs_size_mib(self.memory_mib)),
-            readonly: false,
+            options: MountOptions::default(),
         });
     }
 }
@@ -430,7 +430,7 @@ impl Default for SandboxConfig {
 #[cfg(test)]
 mod tests {
     use super::{SandboxConfig, merge_env};
-    use crate::sandbox::{RootfsSource, VolumeMount};
+    use crate::sandbox::{MountOptions, RootfsSource, VolumeMount};
     use microsandbox_image::ImageConfig;
 
     #[test]
@@ -579,11 +579,11 @@ mod tests {
             VolumeMount::Tmpfs {
                 guest,
                 size_mib,
-                readonly,
+                options,
             } => {
                 assert_eq!(guest, "/tmp");
                 assert_eq!(*size_mib, Some(512));
-                assert!(!*readonly);
+                assert_eq!(*options, MountOptions::default());
             }
             mount => panic!("expected tmpfs mount, got {mount:?}"),
         }
@@ -621,7 +621,7 @@ mod tests {
             mounts: vec![VolumeMount::Bind {
                 host: "/host/tmp".into(),
                 guest: "/tmp/".into(),
-                readonly: false,
+                options: MountOptions::default(),
                 stat_virtualization: crate::sandbox::StatVirtualization::Strict,
                 host_permissions: crate::sandbox::HostPermissions::Private,
             }],

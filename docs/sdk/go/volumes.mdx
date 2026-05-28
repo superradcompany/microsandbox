@@ -330,7 +330,8 @@ Tuning struct for `Mount.Bind` and `Mount.Named`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Readonly | `bool` | Mount as read-only |
+| Readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
+| Noexec | `bool` | Prevent direct execution from the mount |
 
 ### TmpfsOptions
 
@@ -340,6 +341,7 @@ Tuning struct for `Mount.Tmpfs`.
 |-------|------|-------------|
 | SizeMiB | `uint32` | Maximum size in MiB |
 | Readonly | `bool` | Mount as read-only |
+| Noexec | `bool` | Prevent direct execution from the mount |
 
 ### DiskOptions
 
@@ -347,9 +349,10 @@ Tuning struct for `Mount.Disk`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Format | `string` | Format hint (`"raw"`, `"qcow2"`, `"vmdk"`). Optional — the runtime can usually probe |
-| Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional |
+| Format | `string` | Format hint (`"raw"`, `"qcow2"`, `"vmdk"`). Optional; defaults from the file extension |
+| Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional; omitted means auto-detect |
 | Readonly | `bool` | Mount as read-only |
+| Noexec | `bool` | Prevent direct execution from the mount |
 
 ### MountConfig
 
@@ -364,6 +367,7 @@ Discriminated mount configuration produced by `Mount` helpers. Inspect the kind 
 | Format | `string` | Disk format |
 | Fstype | `string` | Inner filesystem type |
 | Readonly | `bool` | Whether the mount is read-only |
+| Noexec | `bool` | Whether direct execution from the mount is disabled |
 | SizeMiB | `uint32` | Size limit for tmpfs mounts |
 
 ### MountKind

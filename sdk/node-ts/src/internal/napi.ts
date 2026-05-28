@@ -882,9 +882,25 @@ export interface NapiMountBuilder {
   format(format: string): this;
   fstype(fstype: string): this;
   readonly(): this;
+  noexec(): this;
   size(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
+  build(): NapiVolumeMount;
+}
+
+export interface NapiVolumeMount {
+  readonly kind: "bind" | "named" | "tmpfs" | "disk";
+  readonly guest: string;
+  readonly readonly: boolean;
+  readonly noexec: boolean;
+  readonly host?: string;
+  readonly name?: string;
+  readonly sizeMib?: number;
+  readonly format?: string;
+  readonly fstype?: string;
+  readonly statVirtualization?: string;
+  readonly hostPermissions?: string;
 }
 
 export interface NapiPatchBuilder {

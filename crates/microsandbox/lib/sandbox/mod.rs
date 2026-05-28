@@ -84,8 +84,8 @@ pub use ssh::{
     SshStdioStream,
 };
 pub use types::{
-    DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch,
-    PatchBuilder, RootfsSource, StatVirtualization, VolumeMount,
+    DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
+    MountOptions, Patch, PatchBuilder, RootfsSource, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -211,6 +211,7 @@ impl Sandbox {
         config.apply_rootfs_defaults();
         config.apply_runtime_defaults();
         validate_rootfs_source(&config.image)?;
+        types::validate_volume_mounts(&config.mounts)?;
 
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
@@ -430,6 +431,7 @@ impl Sandbox {
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
         config.apply_runtime_defaults();
         validate_rootfs_source(&config.image)?;
+        types::validate_volume_mounts(&config.mounts)?;
         validate_start_state(&config, &crate::config::config().sandboxes_dir().join(name))?;
         update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 

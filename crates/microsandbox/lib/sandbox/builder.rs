@@ -850,6 +850,8 @@ impl SandboxBuilder {
             }
         }
 
+        super::types::validate_volume_mounts(&self.config.mounts)?;
+
         if let Some(spec) = &self.config.init {
             super::init::validate(spec)?;
         }

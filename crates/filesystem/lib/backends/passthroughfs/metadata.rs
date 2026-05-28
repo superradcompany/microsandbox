@@ -55,6 +55,9 @@ pub(crate) fn do_setattr(
     if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
     }
+    if fs.cfg.readonly() && setattr_mutates(valid) {
+        return Err(platform::erofs());
+    }
 
     // With xattr-overlay disabled, the only honest answer to a uid/gid change
     // is to reject it — the host process cannot chown(2) without CAP_CHOWN.
@@ -212,6 +215,20 @@ pub(crate) fn do_setattr(
     // Return updated attributes.
     let st = inode::stat_inode(fs, ino)?;
     Ok((st, fs.cfg.attr_timeout))
+}
+
+fn setattr_mutates(valid: SetattrValid) -> bool {
+    valid.intersects(
+        SetattrValid::MODE
+            | SetattrValid::UID
+            | SetattrValid::GID
+            | SetattrValid::SIZE
+            | SetattrValid::ATIME
+            | SetattrValid::MTIME
+            | SetattrValid::ATIME_NOW
+            | SetattrValid::MTIME_NOW
+            | SetattrValid::CTIME,
+    )
 }
 
 /// Check file access permissions using virtualized uid/gid/mode.

@@ -96,6 +96,9 @@ pub(crate) fn do_fallocate(
     if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
@@ -207,6 +210,9 @@ pub(crate) fn do_copyfilerange(
 ) -> io::Result<usize> {
     if fs.is_virtual_init_inode(inode_in) || fs.is_virtual_init_inode(inode_out) {
         return Err(platform::enosys());
+    }
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
     }
 
     #[cfg(target_os = "linux")]

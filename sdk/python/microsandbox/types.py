@@ -310,6 +310,7 @@ class MountConfig:
     named: str | None = None
     size_mib: int | None = None
     readonly: bool = False
+    noexec: bool = False
     disk: str | None = None
     format: DiskImageFormat | str | None = None
     fstype: str | None = None
@@ -320,7 +321,7 @@ class MountConfig:
         # Drive emission off `kind` exclusively so a `MountConfig` with
         # contradictory fields (e.g. kind=DISK + bind=...) raises here
         # rather than silently letting the wrong arm of `apply_mount` win.
-        d: dict = {"readonly": self.readonly}
+        d: dict = {"readonly": self.readonly, "noexec": self.noexec}
         if self.kind == MountKind.BIND:
             if self.bind is None:
                 raise ValueError("MountConfig kind=BIND requires bind=...")

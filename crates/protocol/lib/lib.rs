@@ -71,24 +71,26 @@ pub const AGENT_RELAY_ID_RANGE_STEP: u32 = u32::MAX / AGENT_RELAY_MAX_CLIENTS;
 
 /// Environment variable carrying tmpfs mount specs for guest init.
 ///
-/// Format: `path[,key=value,...][;path[,key=value,...];...]`
-///
 /// - `path` — guest mount path (required, always the first element)
 /// - `size=N` — size limit in MiB (optional)
 /// - `noexec` — mount with noexec flag (optional)
+/// - `nosuid` — accepted as an explicit assertion; tmpfs mounts always use nosuid
 /// - `ro` — mount read-only (optional)
+/// - `rw` — explicit writable default (optional)
 /// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
 ///
-/// Entries are separated by `;`. Within an entry, the path comes first
-/// followed by comma-separated options. Options compose order-independently
-/// (e.g. `,ro,noexec` and `,noexec,ro` are equivalent).
+/// Format: `path[:opts][;path[:opts];...]`.
+///
+/// Entries are separated by `;`. Within an entry, the path comes first,
+/// followed by an optional colon and comma-separated options. Options compose
+/// order-independently (e.g. `:ro,noexec` and `:noexec,ro` are equivalent).
 ///
 /// Examples:
-/// - `MSB_TMPFS=/tmp,size=256` — 256 MiB tmpfs at `/tmp`
-/// - `MSB_TMPFS=/tmp,size=256;/var/tmp,size=128` — two tmpfs mounts
+/// - `MSB_TMPFS=/tmp:size=256` — 256 MiB tmpfs at `/tmp`
+/// - `MSB_TMPFS=/tmp:size=256;/var/tmp:size=128` — two tmpfs mounts
 /// - `MSB_TMPFS=/tmp` — tmpfs at `/tmp` with defaults
-/// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
-/// - `MSB_TMPFS=/seed,size=64,ro` — read-only tmpfs
+/// - `MSB_TMPFS=/tmp:size=256,noexec` — with noexec flag
+/// - `MSB_TMPFS=/seed:size=64,ro` — read-only tmpfs
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
 /// Environment variable specifying how agentd assembles the root filesystem.
@@ -141,17 +143,19 @@ pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 
 /// Environment variable carrying virtiofs directory volume mount specs for guest init.
 ///
-/// Format: `tag:guest_path[:ro][;tag:guest_path[:ro];...]`
+/// Format: `tag:guest_path[:opts][;tag:guest_path[:opts];...]`
 ///
 /// - `tag` — virtiofs tag name (required, matches the tag used in `--mount`)
 /// - `guest_path` — mount point inside the guest (required)
-/// - `ro` — mount read-only (optional suffix)
+/// - `ro` / `rw` — access mode option (optional)
+/// - `noexec` — disable direct execution from the mount (optional)
+/// - `nosuid` — accepted as an explicit assertion; directory mounts always use nosuid
 ///
 /// Entries are separated by `;`.
 ///
 /// Examples:
 /// - `MSB_DIR_MOUNTS=data:/data` — mount virtiofs tag `data` at `/data`
-/// - `MSB_DIR_MOUNTS=data:/data:ro` — mount read-only
+/// - `MSB_DIR_MOUNTS=data:/data:ro,noexec` — mount read-only and noexec
 /// - `MSB_DIR_MOUNTS=data:/data;cache:/cache:ro` — two mounts
 pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 
@@ -163,18 +167,20 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// share at [`FILE_MOUNTS_DIR`]`/<tag>/` and bind-mounts the file to the
 /// guest path.
 ///
-/// Format: `tag:filename:guest_path[:ro][;tag:filename:guest_path[:ro];...]`
+/// Format: `tag:filename:guest_path[:opts][;tag:filename:guest_path[:opts];...]`
 ///
 /// - `tag` — virtiofs tag name (required, matches the tag used in `--mount`)
 /// - `filename` — name of the file inside the virtiofs share (required)
 /// - `guest_path` — final file path inside the guest (required)
-/// - `ro` — mount read-only (optional suffix)
+/// - `ro` / `rw` — access mode option (optional)
+/// - `noexec` — disable direct execution from the mount (optional)
+/// - `nosuid` — accepted as an explicit assertion; file mounts always use nosuid
 ///
 /// Entries are separated by `;`.
 ///
 /// Examples:
 /// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf`
-/// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf:ro`
+/// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf:ro,noexec`
 /// - `MSB_FILE_MOUNTS=fm_a:a.sh:/usr/bin/a.sh;fm_b:b.sh:/usr/bin/b.sh`
 pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 
@@ -184,25 +190,25 @@ pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 /// of being mounted at a guest path by agentd (distinct from the rootfs
 /// block device, which is described by [`ENV_BLOCK_ROOT`]).
 ///
-/// Format: `id:guest_path[:fstype][:ro][;id:guest_path[:fstype][:ro];...]`
+/// Format: `id:guest_path[:opts][;id:guest_path[:opts];...]`
 ///
 /// - `id` — the `virtio_blk_config.serial` value set by the VMM. Agentd
 ///   resolves it to a device node via `/dev/disk/by-id/virtio-<id>`, or
 ///   by scanning `/sys/block/*/serial` as a fallback.
 /// - `guest_path` — absolute mount path in the guest (required).
-/// - `fstype` — inner filesystem type (optional). When empty or absent,
+/// - `fstype=...` — inner filesystem type (optional). When absent,
 ///   agentd probes `/proc/filesystems` to find a type that mounts cleanly.
-/// - `ro` — optional flag: mount read-only.
+/// - `ro` / `rw` — access mode option (optional).
+/// - `noexec` — disable direct execution from the mount (optional).
+/// - `nosuid` — accepted as an explicit assertion; disk-image mounts always use nosuid.
 ///
-/// Entries are separated by `;`. The `fstype` slot is positional, not
-/// keyed. To express "no fstype + ro" the slot must be empty:
-/// `id:/path::ro`. The form `id:/path:ro` would parse as `fstype=ro`,
-/// not the readonly flag.
+/// Entries are separated by `;`. Options are comma-separated flags or
+/// key-value pairs in the final option block.
 ///
 /// Examples:
-/// - `MSB_DISK_MOUNTS=data_12ab:/data:ext4` — ext4 disk at `/data`
-/// - `MSB_DISK_MOUNTS=seed_7f:/seed::ro` — autodetect fstype, read-only
-/// - `MSB_DISK_MOUNTS=a_1:/a:ext4;b_2:/b::ro` — two disks
+/// - `MSB_DISK_MOUNTS=data_12ab:/data:fstype=ext4` — ext4 disk at `/data`
+/// - `MSB_DISK_MOUNTS=seed_7f:/seed:ro` — autodetect fstype, read-only
+/// - `MSB_DISK_MOUNTS=a_1:/a:fstype=ext4;b_2:/b:ro,noexec` — two disks
 pub const ENV_DISK_MOUNTS: &str = "MSB_DISK_MOUNTS";
 
 /// Environment variable carrying the default guest user for agentd execs.

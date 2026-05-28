@@ -1404,6 +1404,7 @@ type MountSpec struct {
 	Format             string `json:"format,omitempty"`
 	Fstype             string `json:"fstype,omitempty"`
 	Readonly           bool   `json:"readonly,omitempty"`
+	Noexec             bool   `json:"noexec,omitempty"`
 	SizeMiB            uint32 `json:"size_mib,omitempty"`
 	StatVirtualization string `json:"stat_virtualization,omitempty"`
 	HostPermissions    string `json:"host_permissions,omitempty"`

@@ -360,6 +360,9 @@ mod linux {
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
         let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.noexec {
+            flags |= MsFlags::MS_NOEXEC;
+        }
         if spec.readonly {
             flags |= MsFlags::MS_RDONLY;
         }
@@ -417,6 +420,9 @@ mod linux {
 
         // 2. Mount the virtiofs share at the staging directory.
         let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.noexec {
+            flags |= MsFlags::MS_NOEXEC;
+        }
         if spec.readonly {
             flags |= MsFlags::MS_RDONLY;
         }
@@ -435,69 +441,97 @@ mod linux {
             ))
         })?;
 
-        // 3. Create parent directories for the guest path.
-        let guest = Path::new(&spec.guest_path);
-        if let Some(parent) = guest.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                AgentdError::Init(format!(
-                    "failed to create parent dirs for {}: {e}",
-                    spec.guest_path
-                ))
-            })?;
-        }
+        let bind_result = (|| {
+            // 3. Create parent directories for the guest path.
+            let guest = Path::new(&spec.guest_path);
+            if let Some(parent) = guest.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    AgentdError::Init(format!(
+                        "failed to create parent dirs for {}: {e}",
+                        spec.guest_path
+                    ))
+                })?;
+            }
 
-        // 4. Create the target file (touch) as a bind mount target.
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&spec.guest_path)
-            .map_err(|e| {
-                AgentdError::Init(format!(
-                    "failed to create bind target {}: {e}",
-                    spec.guest_path
-                ))
-            })?;
+            // 4. Create the target file (touch) as a bind mount target.
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&spec.guest_path)
+                .map_err(|e| {
+                    AgentdError::Init(format!(
+                        "failed to create bind target {}: {e}",
+                        spec.guest_path
+                    ))
+                })?;
 
-        // 5. Bind mount the file from staging to the guest path.
-        let source_path = format!("{staging_path}/{}", spec.filename);
-        mount::mount(
-            Some(source_path.as_str()),
-            spec.guest_path.as_str(),
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>,
-        )
-        .map_err(|e| {
-            AgentdError::Init(format!(
-                "failed to bind mount {source_path} to {}: {e}",
-                spec.guest_path
-            ))
-        })?;
-
-        // 6. If read-only, remount the bind mount as read-only.
-        if spec.readonly {
+            // 5. Bind mount the file from staging to the guest path.
+            let source_path = format!("{staging_path}/{}", spec.filename);
             mount::mount(
-                None::<&str>,
+                Some(source_path.as_str()),
                 spec.guest_path.as_str(),
                 None::<&str>,
-                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                MsFlags::MS_BIND,
                 None::<&str>,
             )
             .map_err(|e| {
                 AgentdError::Init(format!(
-                    "failed to remount {} as read-only: {e}",
+                    "failed to bind mount {source_path} to {}: {e}",
                     spec.guest_path
                 ))
             })?;
+
+            // 6. Remount the file bind with the guest-facing VFS flags.
+            let mut remount_flags =
+                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
+            if spec.noexec {
+                remount_flags |= MsFlags::MS_NOEXEC;
+            }
+            if spec.readonly {
+                remount_flags |= MsFlags::MS_RDONLY;
+            }
+            mount::mount(
+                None::<&str>,
+                spec.guest_path.as_str(),
+                None::<&str>,
+                remount_flags,
+                None::<&str>,
+            )
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "failed to remount {} with volume flags: {e}",
+                    spec.guest_path
+                ))
+            })?;
+
+            Ok(())
+        })();
+
+        let cleanup_result = cleanup_file_mount_staging(&staging_path);
+        match (bind_result, cleanup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), Ok(())) => Err(err),
+            (Ok(()), Err(err)) => Err(err),
+            (Err(err), Err(cleanup_err)) => Err(AgentdError::Init(format!(
+                "{err}; additionally failed to cleanup file mount staging {staging_path}: {cleanup_err}"
+            ))),
         }
+    }
 
-        // 7. Unmount the staging virtiofs share and remove the directory.
-        //    The bind mount keeps the file accessible at the guest path;
-        //    removing the share prevents alternate-path access.
-        let _ = mount::umount2(staging_path.as_str(), MntFlags::MNT_DETACH);
-        let _ = fs::remove_dir(&staging_path);
-
+    fn cleanup_file_mount_staging(staging_path: &str) -> AgentdResult<()> {
+        // The bind mount keeps the file accessible at the guest path; removing
+        // the share prevents alternate-path access through the staging tree.
+        mount::umount2(staging_path, MntFlags::MNT_DETACH).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to unmount file mount staging {staging_path}: {e}"
+            ))
+        })?;
+        fs::remove_dir(staging_path).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to remove file mount staging {staging_path}: {e}"
+            ))
+        })?;
         Ok(())
     }
 
@@ -577,6 +611,9 @@ mod linux {
         let device = resolve_disk_device(&spec.id)?;
 
         let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.noexec {
+            flags |= MsFlags::MS_NOEXEC;
+        }
         if spec.readonly {
             flags |= MsFlags::MS_RDONLY;
         }

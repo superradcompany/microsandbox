@@ -196,7 +196,7 @@ pub struct VmConfig {
     /// site.
     pub rootfs_upper_spec: Option<UpperSpec>,
 
-    /// Additional mounts as `tag:host_path[:ro]` strings.
+    /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
 
     /// Disk-image volume mounts attached as extra virtio-blk devices.
@@ -767,6 +767,7 @@ fn build_vm(
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -1096,56 +1097,54 @@ fn spawn_log_thread(
 
 /// Parsed `--mount` spec: tag, host path, plus optional policies.
 ///
-/// Wire format: `tag:host_path[:ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
-/// Defaults: `stat-virt=strict`, `host-perms=private`. The `:ro` segment is
-/// kept for protocol compatibility but only used by agentd, not the host fs.
+/// Wire format: `tag:host_path[:opts]`.
+/// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`. The `ro` flag is
+/// enforced by the host filesystem server; execution and suid flags are applied
+/// by agentd when the guest mount is installed.
 #[derive(Debug)]
 struct ParsedMountSpec {
     tag: String,
     host_path: String,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    readonly: bool,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
 ///
-/// Wire grammar: `tag:host_path[:ro][,key=value]*`. The host path may contain
-/// commas — the comma-option suffix is identified relative to the trailing
-/// `:ro` (if present) or, when absent, by the first `,` after the host path.
-///
-/// To make this unambiguous we split on the first `:` (tag/host boundary) and
-/// then peel the option suffix off the right side rather than splitting the
-/// whole spec on `,` first.
+/// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
+/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`) and keyed policies
+/// (`stat-virt=...`, `host-perms=...`).
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
-        .ok_or_else(|| format!("expected tag:host_path[:ro][,opts] shape, got {spec:?}"))?;
+        .ok_or_else(|| format!("expected tag:host_path[:opts] shape, got {spec:?}"))?;
     if tag.is_empty() {
         return Err(format!("empty tag in mount spec {spec:?}"));
     }
 
-    // Peel the trailing options block. Strategy:
-    //   1) If `:ro` is present in the spec (only ever after host_path), the
-    //      options block starts at the first `,` *after* the `:ro` token.
-    //   2) Otherwise the options block starts at the first `,` after the
-    //      first `:` that follows the host path. We accept that paths
-    //      containing both `:` and `,` outside this contract may be
-    //      misparsed — the producer side never emits such paths.
-    let (host_path_with_ro, options) = split_path_and_options(rest);
-
-    let (host_path, _readonly) = match host_path_with_ro.strip_suffix(":ro") {
-        Some(p) => (p, true),
-        None => (host_path_with_ro, false),
+    let (host_path, options) = match rest.split_once(':') {
+        Some((path, opts)) => (path, Some(opts)),
+        None => (rest, None),
     };
 
     if host_path.is_empty() {
         return Err(format!("empty host path in mount spec {spec:?}"));
     }
+    if host_path.contains(',') {
+        return Err(format!(
+            "mount options must use tag:host_path:opts syntax, got comma in host path {host_path:?}"
+        ));
+    }
 
     let mut stat_virtualization = StatVirtualization::Strict;
     let mut host_permissions = HostPermissions::Private;
+    let mut readonly = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
+    let mut seen_access = false;
+    let mut seen_noexec = false;
+    let mut seen_nosuid = false;
 
     if let Some(opts) = options {
         for opt in opts.split(',') {
@@ -1153,44 +1152,71 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
             if opt.is_empty() {
                 continue;
             }
-            let (key, value) = opt
-                .split_once('=')
-                .ok_or_else(|| format!("expected key=value option, got {opt:?}"))?;
-            match key {
-                "stat-virt" => {
-                    if seen_stat_virt {
-                        return Err("mount option `stat-virt` specified more than once".to_string());
+            match opt {
+                "ro" | "rw" => {
+                    if seen_access {
+                        return Err("mount option `ro`/`rw` specified more than once".to_string());
                     }
-                    seen_stat_virt = true;
-                    stat_virtualization = match value {
-                        "strict" => StatVirtualization::Strict,
-                        "relaxed" => StatVirtualization::Relaxed,
-                        "off" => StatVirtualization::Off,
-                        other => {
-                            return Err(format!(
-                                "invalid stat-virt {other:?} (expected strict|relaxed|off)"
-                            ));
+                    seen_access = true;
+                    readonly = opt == "ro";
+                }
+                "noexec" => {
+                    if seen_noexec {
+                        return Err("mount option `noexec` specified more than once".to_string());
+                    }
+                    seen_noexec = true;
+                }
+                "nosuid" => {
+                    if seen_nosuid {
+                        return Err("mount option `nosuid` specified more than once".to_string());
+                    }
+                    seen_nosuid = true;
+                }
+                "suid" | "exec" | "dev" => {
+                    return Err(format!("unsupported mount option {opt:?}"));
+                }
+                _ => {
+                    let (key, value) = opt
+                        .split_once('=')
+                        .ok_or_else(|| format!("expected flag or key=value option, got {opt:?}"))?;
+                    match key {
+                        "stat-virt" => {
+                            if seen_stat_virt {
+                                return Err(
+                                    "mount option `stat-virt` specified more than once".to_string()
+                                );
+                            }
+                            seen_stat_virt = true;
+                            stat_virtualization = match value {
+                                "strict" => StatVirtualization::Strict,
+                                "relaxed" => StatVirtualization::Relaxed,
+                                "off" => StatVirtualization::Off,
+                                other => {
+                                    return Err(format!(
+                                        "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                                    ));
+                                }
+                            }
                         }
+                        "host-perms" => {
+                            if seen_host_perms {
+                                return Err("mount option `host-perms` specified more than once"
+                                    .to_string());
+                            }
+                            seen_host_perms = true;
+                            host_permissions = match value {
+                                "private" => HostPermissions::Private,
+                                "mirror" => HostPermissions::Mirror,
+                                other => {
+                                    return Err(format!(
+                                        "invalid host-perms {other:?} (expected private|mirror)"
+                                    ));
+                                }
+                            }
+                        }
+                        other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
-                "host-perms" => {
-                    if seen_host_perms {
-                        return Err(
-                            "mount option `host-perms` specified more than once".to_string()
-                        );
-                    }
-                    seen_host_perms = true;
-                    host_permissions = match value {
-                        "private" => HostPermissions::Private,
-                        "mirror" => HostPermissions::Mirror,
-                        other => {
-                            return Err(format!(
-                                "invalid host-perms {other:?} (expected private|mirror)"
-                            ));
-                        }
-                    }
-                }
-                other => return Err(format!("unknown mount option {other:?}")),
             }
         }
     }
@@ -1200,29 +1226,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         host_path: host_path.to_string(),
         stat_virtualization,
         host_permissions,
+        readonly,
     })
-}
-
-/// Split `rest = "host_path[:ro][,opts]"` into `(host_path_with_ro, opts)`.
-///
-/// The split point is the first `,` that follows either `:ro` (if present) or
-/// the entire `rest` (if no `,` exists). Producer-side encoding never embeds
-/// `,` in host paths, so the first comma after `:ro` (or anywhere, if no
-/// `:ro`) is always the options separator.
-fn split_path_and_options(rest: &str) -> (&str, Option<&str>) {
-    // If we have ":ro" anywhere, the option block is the first comma after the
-    // ":ro" position. Otherwise, the option block is the first comma anywhere.
-    let comma_start = if let Some(ro_idx) = rest.find(":ro") {
-        let after_ro = ro_idx + ":ro".len();
-        rest[after_ro..].find(',').map(|i| after_ro + i)
-    } else {
-        rest.find(',')
-    };
-
-    match comma_start {
-        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
-        None => (rest, None),
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1286,37 +1291,41 @@ mod tests {
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
         assert!(matches!(p.host_permissions, HostPermissions::Private));
+        assert!(!p.readonly);
     }
 
     #[test]
     fn test_parse_mount_spec_with_ro_and_policies() {
-        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed,host-perms=mirror").unwrap();
+        let p = parse_mount_spec("foo:/host/data:ro,noexec,stat-virt=relaxed,host-perms=mirror")
+            .unwrap();
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
         assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+        assert!(p.readonly);
     }
 
     #[test]
     fn test_parse_mount_spec_stat_virt_off() {
-        let p = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap();
+        let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+        assert!(!p.readonly);
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_unknown_key() {
-        let err = parse_mount_spec("foo:/host/data,bogus=1").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:bogus=1").unwrap_err();
         assert!(err.contains("unknown mount option"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_invalid_stat_virt() {
-        let err = parse_mount_spec("foo:/host/data,stat-virt=nope").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:stat-virt=nope").unwrap_err();
         assert!(err.contains("invalid stat-virt"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_invalid_host_perms() {
-        let err = parse_mount_spec("foo:/host/data,host-perms=public").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:host-perms=public").unwrap_err();
         assert!(err.contains("invalid host-perms"), "got: {err}");
     }
 
@@ -1333,22 +1342,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_mount_spec_with_ro_anchors_options_block() {
-        // The SDK rejects commas in host paths, so the producer can guarantee
-        // commas in the wire format are always option separators. But the
-        // `:ro`-anchored split is still load-bearing: it ensures the option
-        // block starts after the `:ro` token even if a future relaxation of
-        // the path rules ever lets `,` slip through, the option scanner
-        // operates on the correct slice.
-        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed").unwrap();
+    fn test_parse_mount_spec_with_flags_before_policies() {
+        let p = parse_mount_spec("foo:/host/data:ro,nosuid,stat-virt=relaxed").unwrap();
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
-        let err = parse_mount_spec("foo:/host,stat-virt=strict,stat-virt=off").unwrap_err();
+        let err = parse_mount_spec("foo:/host:stat-virt=strict,stat-virt=off").unwrap_err();
         assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_legacy_comma_options() {
+        let err = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap_err();
+        assert!(err.contains("tag:host_path:opts"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_flags() {
+        let err = parse_mount_spec("foo:/host:ro,rw").unwrap_err();
+        assert!(err.contains("ro`/`rw"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_unsupported_flags() {
+        let err = parse_mount_spec("foo:/host:exec").unwrap_err();
+        assert!(err.contains("unsupported mount option"), "got: {err}");
     }
 
     #[test]

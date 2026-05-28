@@ -422,6 +422,7 @@ fn apply_mount(
     mount: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
+    let noexec = extract_opt::<bool>(mount, "noexec")?.unwrap_or(false);
     let stat_virt = extract_opt::<String>(mount, "stat_virtualization")?
         .map(parse_stat_virt)
         .transpose()?;
@@ -434,6 +435,9 @@ fn apply_mount(
             let mut m = v.bind(&bind_path);
             if readonly {
                 m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
             }
             if let Some(p) = stat_virt {
                 m = m.stat_virtualization(p);
@@ -448,6 +452,9 @@ fn apply_mount(
             let mut m = v.named(&vol_name);
             if readonly {
                 m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
             }
             if let Some(p) = stat_virt {
                 m = m.stat_virtualization(p);
@@ -464,7 +471,13 @@ fn apply_mount(
             if let Some(size) = size_mib {
                 m = m.size(size);
             }
-            if readonly { m.readonly() } else { m }
+            if readonly {
+                m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
+            }
+            m
         }))
     } else if let Some(disk_path) = extract_opt::<String>(mount, "disk")? {
         let format_str = extract_opt::<String>(mount, "format")?;
@@ -484,7 +497,13 @@ fn apply_mount(
             if let Some(fstype) = fstype {
                 m = m.fstype(fstype);
             }
-            if readonly { m.readonly() } else { m }
+            if readonly {
+                m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
+            }
+            m
         }))
     } else {
         Err(pyo3::exceptions::PyValueError::new_err(

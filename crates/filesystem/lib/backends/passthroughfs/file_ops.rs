@@ -46,6 +46,9 @@ pub(crate) fn do_open(
     }
 
     let mut open_flags = inode::translate_open_flags(flags as i32);
+    if fs.cfg.readonly() && open_flags_mutate(open_flags) {
+        return Err(platform::erofs());
+    }
 
     // Writeback cache: kernel may issue reads on O_WRONLY fds for cache coherency,
     // so widen to O_RDWR. Strip O_APPEND because it races with the kernel's cached
@@ -128,6 +131,9 @@ pub(crate) fn do_write(
     if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
+    if fs.cfg.readonly() {
+        return Err(platform::erofs());
+    }
 
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
@@ -150,6 +156,10 @@ pub(crate) fn do_write(
     }
 
     Ok(written)
+}
+
+fn open_flags_mutate(flags: i32) -> bool {
+    (flags & libc::O_ACCMODE) != libc::O_RDONLY || (flags & libc::O_TRUNC) != 0
 }
 
 /// Flush pending data for a file handle.

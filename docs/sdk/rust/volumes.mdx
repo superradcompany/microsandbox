@@ -170,7 +170,47 @@ Mount a named volume. The volume must already exist (create it with [`Volume::bu
 fn readonly(self) -> Self
 ```
 
-Mount as read-only. The guest can read but not write.
+Mount as read-only. The guest can read but not write, and virtiofs-backed mounts also reject writes in the host filesystem server.
+
+---
+
+#### noexec()
+
+```rust
+fn noexec(self) -> Self
+```
+
+Prevent direct execution from this mount. Interpreters can still read scripts from the mount, such as `sh /mnt/script.sh`.
+
+---
+
+#### disk()
+
+```rust
+fn disk(self, host_path: impl Into<PathBuf>) -> Self
+```
+
+Mount a host disk image as a virtio-blk device. The disk image format defaults from the extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw).
+
+---
+
+#### format()
+
+```rust
+fn format(self, format: DiskImageFormat) -> Self
+```
+
+Set the disk image format explicitly. Valid only with [`disk()`](#disk).
+
+---
+
+#### fstype()
+
+```rust
+fn fstype(self, fstype: impl Into<String>) -> Self
+```
+
+Set the inner filesystem type for a disk-image volume, for example `"ext4"`. If omitted, agentd probes supported filesystems and uses the first type that mounts cleanly. Empty values and mount-spec separators are rejected.
 
 ---
 
@@ -180,7 +220,7 @@ Mount as read-only. The guest can read but not write.
 fn size(self, mib: impl Into<Mebibytes>) -> Self
 ```
 
-Set the size limit for a tmpfs mount. Has no effect on bind or named mounts.
+Set the size limit for a tmpfs mount. Valid only for tmpfs mounts.
 
 **Parameters**
 

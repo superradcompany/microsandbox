@@ -62,6 +62,7 @@ describe("MountBuilder", () => {
       host: "/host/data",
       guest: "/data",
       readonly: false,
+      noexec: false,
       statVirtualization: "strict",
       hostPermissions: "private",
     });
@@ -78,7 +79,24 @@ describe("MountBuilder", () => {
       guest: "/scratch",
       sizeMib: 64,
       readonly: true,
+      noexec: false,
     });
+  });
+
+  it("propagates noexec across mount kinds", () => {
+    expect(
+      new MountBuilder("/data").bind("/host/data").noexec().build(),
+    ).toMatchObject({ kind: "bind", noexec: true });
+    expect(new MountBuilder("/cache").named("v1").noexec().build()).toMatchObject(
+      { kind: "named", noexec: true },
+    );
+    expect(new MountBuilder("/scratch").tmpfs().noexec().build()).toMatchObject({
+      kind: "tmpfs",
+      noexec: true,
+    });
+    expect(
+      new MountBuilder("/seed").disk("./fixture.qcow2").noexec().build(),
+    ).toMatchObject({ kind: "disk", noexec: true });
   });
 
   it("auto-infers disk format from the host extension", () => {
@@ -240,12 +258,12 @@ describe("SandboxBuilder.build", () => {
       .volume("/tmp", (m) => m.tmpfs().size(MiB(64)))
       .build();
     expect(cfg.mounts).toHaveLength(2);
-    // The Rust VolumeMount enum serializes externally-tagged: each
-    // entry is `{ type: "Named", name, guest, readonly }` etc.
+    // The Rust VolumeMount enum serializes externally-tagged with a shared
+    // options object for mount behavior.
     expect(cfg.mounts[0]).toMatchObject({
       type: "Named",
       name: "v1",
-      readonly: true,
+      options: { readonly: true },
     });
     expect(cfg.mounts[1]).toMatchObject({
       type: "Tmpfs",

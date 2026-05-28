@@ -353,6 +353,11 @@ pub(crate) fn eperm() -> io::Error {
     io::Error::from_raw_os_error(LINUX_EPERM)
 }
 
+/// Create an `io::Error` with Linux `EROFS`.
+pub(crate) fn erofs() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EROFS)
+}
+
 /// Create an `io::Error` with Linux `ENOSYS`.
 pub(crate) fn enosys() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENOSYS)

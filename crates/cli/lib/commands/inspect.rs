@@ -2,7 +2,7 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    HostPermissions, Sandbox, SandboxConfig, StatVirtualization, VolumeMount,
+    HostPermissions, MountOptions, Sandbox, SandboxConfig, StatVirtualization, VolumeMount,
 };
 
 use crate::ui;
@@ -26,6 +26,16 @@ fn mount_policy_suffix(sv: StatVirtualization, hp: HostPermissions) -> String {
         (Some(s), None) => format!(" [{s}]"),
         (None, Some(h)) => format!(" [{h}]"),
         (Some(s), Some(h)) => format!(" [{s},{h}]"),
+    }
+}
+
+/// Render mount access and execution flags for `msb inspect` output.
+fn mount_flags_suffix(options: MountOptions) -> String {
+    let access = if options.readonly { "ro" } else { "rw" };
+    if options.noexec {
+        format!(" ({access},noexec)")
+    } else {
+        format!(" ({access})")
     }
 }
 
@@ -117,45 +127,45 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                     VolumeMount::Bind {
                         host,
                         guest,
-                        readonly,
+                        options,
                         stat_virtualization,
                         host_permissions,
                     } => {
-                        let ro = if *readonly { " (ro)" } else { " (rw)" };
+                        let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
-                        println!("  {guest:<16}\u{2192} {}{ro}{suffix}", host.display());
+                        println!("  {guest:<16}\u{2192} {}{flags}{suffix}", host.display());
                     }
                     VolumeMount::Named {
                         name,
                         guest,
-                        readonly,
+                        options,
                         stat_virtualization,
                         host_permissions,
                     } => {
-                        let ro = if *readonly { " (ro)" } else { " (rw)" };
+                        let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
-                        println!("  {guest:<16}\u{2192} volume:{name}{ro}{suffix}");
+                        println!("  {guest:<16}\u{2192} volume:{name}{flags}{suffix}");
                     }
                     VolumeMount::Tmpfs {
                         guest,
                         size_mib,
-                        readonly,
+                        options,
                     } => {
                         let size = size_mib.map(|s| format!(" ({s} MiB)")).unwrap_or_default();
-                        let ro = if *readonly { " (ro)" } else { "" };
-                        println!("  {guest:<16}\u{2192} tmpfs{size}{ro}");
+                        let flags = mount_flags_suffix(*options);
+                        println!("  {guest:<16}\u{2192} tmpfs{size}{flags}");
                     }
                     VolumeMount::DiskImage {
                         host,
                         guest,
                         format,
                         fstype,
-                        readonly,
+                        options,
                     } => {
-                        let ro = if *readonly { " (ro)" } else { " (rw)" };
+                        let flags = mount_flags_suffix(*options);
                         let fstype = fstype.as_deref().unwrap_or("auto");
                         println!(
-                            "  {guest:<16}\u{2192} disk:{} ({}) [{fstype}]{ro}",
+                            "  {guest:<16}\u{2192} disk:{} ({}) [{fstype}]{flags}",
                             host.display(),
                             format.as_str()
                         );

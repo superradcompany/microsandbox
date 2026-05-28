@@ -26,7 +26,7 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub memory: Option<String>,
 
-    /// Mount a host path or named volume into the sandbox (SOURCE:DEST).
+    /// Mount a host path or named volume into the sandbox (SOURCE:DEST[:OPTIONS]).
     #[arg(short, long)]
     pub volume: Vec<String>,
 
@@ -59,7 +59,7 @@ pub struct SandboxOpts {
     pub quiet: bool,
 
     // --- Filesystem ---
-    /// Mount a temporary in-memory filesystem (PATH or PATH:SIZE, e.g. /tmp:100M).
+    /// Mount a temporary in-memory filesystem (PATH, PATH:SIZE, or PATH:SIZE:OPTIONS).
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
@@ -290,6 +290,23 @@ pub struct SandboxOpts {
     pub on_secret_violation: Option<String>,
 }
 
+/// Parsed public CLI mount options.
+#[derive(Debug, Default)]
+struct CliMountOptions {
+    readonly: bool,
+    noexec: bool,
+    stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
+    host_permissions: Option<microsandbox::sandbox::HostPermissions>,
+    size_mib: Option<u32>,
+}
+
+/// Which keyed options are valid for a public CLI mount flag.
+#[derive(Debug, Clone, Copy, Default)]
+struct CliMountOptionSupport {
+    policies: bool,
+    size: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -392,12 +409,20 @@ pub fn apply_sandbox_opts(
 
     // --- Tmpfs ---
     for tmpfs_str in &opts.tmpfs {
-        let (path, size) = parse_tmpfs(tmpfs_str)?;
-        builder = if let Some(size_mib) = size {
-            builder.volume(&path, |m| m.tmpfs().size(size_mib))
-        } else {
-            builder.volume(&path, |m| m.tmpfs())
-        };
+        let (path, size, options) = parse_tmpfs(tmpfs_str)?;
+        builder = builder.volume(&path, move |mut m| {
+            m = m.tmpfs();
+            if let Some(size_mib) = size {
+                m = m.size(size_mib);
+            }
+            if options.readonly {
+                m = m.readonly();
+            }
+            if options.noexec {
+                m = m.noexec();
+            }
+            m
+        });
     }
 
     // --- Scripts ---
@@ -477,84 +502,35 @@ pub fn apply_sandbox_opts(
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[,ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
-///
-/// SRC and DST may contain commas — the parser splits on `:` first to
-/// separate `SRC` from `DST[,opts]`, and only then treats commas inside the
-/// DST portion as option separators. Duplicate option keys are rejected.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,stat-virt=...][,host-perms=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    use microsandbox::sandbox::{HostPermissions, StatVirtualization};
-
     let (source, guest_and_opts) = spec
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest"))?;
+        .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest[:options]"))?;
 
-    let (guest, options) = match guest_and_opts.split_once(',') {
+    let (guest, opts) = match guest_and_opts.split_once(':') {
         Some((g, o)) => (g, Some(o)),
-        None => (guest_and_opts, None),
-    };
-
-    let mut readonly = false;
-    let mut stat_virt: Option<StatVirtualization> = None;
-    let mut host_perms: Option<HostPermissions> = None;
-    let mut seen_ro = false;
-    let mut seen_stat_virt = false;
-    let mut seen_host_perms = false;
-
-    if let Some(opts) = options {
-        for opt in opts.split(',') {
-            let opt = opt.trim();
-            if opt.is_empty() {
-                continue;
+        None => {
+            if guest_and_opts.contains(',') {
+                let suggestion = guest_and_opts
+                    .split_once(',')
+                    .map(|(guest, opts)| format!("{source}:{guest}:{opts}"))
+                    .unwrap_or_else(|| format!("{source}:{guest_and_opts}:ro"));
+                anyhow::bail!(
+                    "volume options must use Docker-style source:guest:options syntax, \
+                     for example {suggestion}"
+                );
             }
-            match opt {
-                "ro" | "rw" => {
-                    if seen_ro {
-                        anyhow::bail!("volume option `ro`/`rw` specified more than once");
-                    }
-                    seen_ro = true;
-                    readonly = opt == "ro";
-                }
-                _ => {
-                    let (key, value) = opt.split_once('=').ok_or_else(|| {
-                        anyhow::anyhow!("volume option {opt:?} must be key=value")
-                    })?;
-                    match key {
-                        "stat-virt" => {
-                            if seen_stat_virt {
-                                anyhow::bail!("volume option `stat-virt` specified more than once");
-                            }
-                            seen_stat_virt = true;
-                            stat_virt = Some(match value {
-                                "strict" => StatVirtualization::Strict,
-                                "relaxed" => StatVirtualization::Relaxed,
-                                "off" => StatVirtualization::Off,
-                                other => anyhow::bail!(
-                                    "invalid stat-virt {other:?} (expected strict|relaxed|off)"
-                                ),
-                            });
-                        }
-                        "host-perms" => {
-                            if seen_host_perms {
-                                anyhow::bail!(
-                                    "volume option `host-perms` specified more than once"
-                                );
-                            }
-                            seen_host_perms = true;
-                            host_perms = Some(match value {
-                                "private" => HostPermissions::Private,
-                                "mirror" => HostPermissions::Mirror,
-                                other => anyhow::bail!(
-                                    "invalid host-perms {other:?} (expected private|mirror)"
-                                ),
-                            });
-                        }
-                        other => anyhow::bail!("unknown volume option {other:?}"),
-                    }
-                }
-            }
+            (guest_and_opts, None)
         }
-    }
+    };
+    let options = parse_cli_mount_options(
+        opts,
+        CliMountOptionSupport {
+            policies: true,
+            ..CliMountOptionSupport::default()
+        },
+    )?;
 
     let is_path = microsandbox_utils::looks_like_local_path_text(source);
     let source = source.to_string();
@@ -565,17 +541,125 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         } else {
             m.named(&source)
         };
-        if readonly {
+        if options.readonly {
             m = m.readonly();
         }
-        if let Some(sv) = stat_virt {
+        if options.noexec {
+            m = m.noexec();
+        }
+        if let Some(sv) = options.stat_virtualization {
             m = m.stat_virtualization(sv);
         }
-        if let Some(hp) = host_perms {
+        if let Some(hp) = options.host_permissions {
             m = m.host_permissions(hp);
         }
         m
     }))
+}
+
+/// Validate the public `-v/--volume` syntax without retaining a builder.
+pub fn validate_volume_spec(spec: &str) -> anyhow::Result<()> {
+    apply_volume(SandboxBuilder::new("__msb_volume_validation__"), spec).map(|_| ())
+}
+
+/// Parse public comma-separated mount options.
+fn parse_cli_mount_options(
+    opts: Option<&str>,
+    support: CliMountOptionSupport,
+) -> anyhow::Result<CliMountOptions> {
+    use microsandbox::sandbox::{HostPermissions, StatVirtualization};
+
+    let mut parsed = CliMountOptions::default();
+    let mut seen_access = false;
+    let mut seen_noexec = false;
+    let mut seen_nosuid = false;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+    let mut seen_size = false;
+
+    let Some(opts) = opts else {
+        return Ok(parsed);
+    };
+
+    for opt in opts.split(',') {
+        let opt = opt.trim();
+        if opt.is_empty() {
+            continue;
+        }
+        match opt {
+            "ro" | "rw" => {
+                if seen_access {
+                    anyhow::bail!("mount option `ro`/`rw` specified more than once");
+                }
+                seen_access = true;
+                parsed.readonly = opt == "ro";
+            }
+            "noexec" => {
+                if seen_noexec {
+                    anyhow::bail!("mount option `noexec` specified more than once");
+                }
+                seen_noexec = true;
+                parsed.noexec = true;
+            }
+            "nosuid" => {
+                if seen_nosuid {
+                    anyhow::bail!("mount option `nosuid` specified more than once");
+                }
+                seen_nosuid = true;
+            }
+            "suid" | "exec" | "dev" => {
+                anyhow::bail!("unsupported mount option {opt:?}");
+            }
+            _ => {
+                let (key, value) = opt.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!("mount option {opt:?} must be a flag or key=value")
+                })?;
+                match key {
+                    "stat-virt" if support.policies => {
+                        if seen_stat_virt {
+                            anyhow::bail!("mount option `stat-virt` specified more than once");
+                        }
+                        seen_stat_virt = true;
+                        parsed.stat_virtualization = Some(match value {
+                            "strict" => StatVirtualization::Strict,
+                            "relaxed" => StatVirtualization::Relaxed,
+                            "off" => StatVirtualization::Off,
+                            other => anyhow::bail!(
+                                "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                            ),
+                        });
+                    }
+                    "host-perms" if support.policies => {
+                        if seen_host_perms {
+                            anyhow::bail!("mount option `host-perms` specified more than once");
+                        }
+                        seen_host_perms = true;
+                        parsed.host_permissions = Some(match value {
+                            "private" => HostPermissions::Private,
+                            "mirror" => HostPermissions::Mirror,
+                            other => anyhow::bail!(
+                                "invalid host-perms {other:?} (expected private|mirror)"
+                            ),
+                        });
+                    }
+                    "size" if support.size => {
+                        if seen_size {
+                            anyhow::bail!("mount option `size` specified more than once");
+                        }
+                        seen_size = true;
+                        parsed.size_mib =
+                            Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
+                    }
+                    "stat-virt" | "host-perms" | "size" => {
+                        anyhow::bail!("mount option `{key}` is not valid here");
+                    }
+                    other => anyhow::bail!("unknown mount option {other:?}"),
+                }
+            }
+        }
+    }
+
+    Ok(parsed)
 }
 
 /// Apply network-related options to the builder (requires "net" feature).
@@ -959,14 +1043,57 @@ fn parse_violation_action(
     }
 }
 
-/// Parse a tmpfs spec: `PATH` or `PATH:SIZE`.
-fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>)> {
-    if let Some((path, size_str)) = spec.split_once(':') {
-        let size_mib = ui::parse_size_mib(size_str).map_err(anyhow::Error::msg)?;
-        Ok((path.to_string(), Some(size_mib)))
-    } else {
-        Ok((spec.to_string(), None))
+/// Parse a tmpfs spec: `PATH`, `PATH:SIZE`, `PATH:OPTIONS`, or `PATH:SIZE:OPTIONS`.
+fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>, CliMountOptions)> {
+    let mut parts = spec.splitn(3, ':');
+    let path = parts.next().unwrap_or_default();
+    if path.is_empty() {
+        anyhow::bail!("tmpfs path must not be empty");
     }
+
+    let Some(second) = parts.next() else {
+        return Ok((path.to_string(), None, CliMountOptions::default()));
+    };
+
+    let support = CliMountOptionSupport {
+        size: true,
+        ..CliMountOptionSupport::default()
+    };
+
+    let (positional_size, option_block) = match parts.next() {
+        Some(opts) => {
+            if second.is_empty() {
+                anyhow::bail!("tmpfs size must not be empty before options");
+            }
+            (
+                Some(ui::parse_size_mib(second).map_err(anyhow::Error::msg)?),
+                Some(opts),
+            )
+        }
+        None if looks_like_mount_options(second) => (None, Some(second)),
+        None => (
+            Some(ui::parse_size_mib(second).map_err(anyhow::Error::msg)?),
+            None,
+        ),
+    };
+
+    let options = parse_cli_mount_options(option_block, support)?;
+    if positional_size.is_some() && options.size_mib.is_some() {
+        anyhow::bail!("tmpfs size specified more than once");
+    }
+    let size_mib = positional_size.or(options.size_mib);
+
+    Ok((path.to_string(), size_mib, options))
+}
+
+/// Returns true when a tmpfs segment is clearly an option block, not a size.
+fn looks_like_mount_options(segment: &str) -> bool {
+    segment.contains(',')
+        || segment.contains('=')
+        || matches!(
+            segment,
+            "ro" | "rw" | "noexec" | "nosuid" | "suid" | "exec" | "dev"
+        )
 }
 
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
@@ -1235,7 +1362,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use microsandbox::sandbox::{HostPermissions, RootfsSource, StatVirtualization, VolumeMount};
+    use microsandbox::sandbox::{
+        HostPermissions, MountOptions, RootfsSource, StatVirtualization, VolumeMount,
+    };
 
     use super::*;
 
@@ -1289,12 +1418,12 @@ mod tests {
             VolumeMount::Bind {
                 stat_virtualization,
                 host_permissions,
-                readonly,
+                options,
                 ..
             } => {
                 assert!(matches!(stat_virtualization, StatVirtualization::Strict));
                 assert!(matches!(host_permissions, HostPermissions::Private));
-                assert!(!readonly);
+                assert_eq!(options, MountOptions::default());
             }
             other => panic!("expected Bind, got {other:?}"),
         }
@@ -1302,24 +1431,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_volume_ro_flag() {
-        let mount = build_one("/host:/guest,ro").await;
+        let mount = build_one("/host:/guest:ro").await;
         match mount {
-            VolumeMount::Bind { readonly, .. } => assert!(readonly),
+            VolumeMount::Bind { options, .. } => assert!(options.readonly),
             other => panic!("expected Bind, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_apply_volume_stat_virt_relaxed() {
-        let mount = build_one("/host:/guest,ro,stat-virt=relaxed").await;
+        let mount = build_one("/host:/guest:ro,noexec,stat-virt=relaxed").await;
         match mount {
             VolumeMount::Bind {
                 stat_virtualization,
-                readonly,
+                options,
                 ..
             } => {
                 assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
-                assert!(readonly);
+                assert!(options.readonly);
+                assert!(options.noexec);
             }
             other => panic!("expected Bind, got {other:?}"),
         }
@@ -1327,7 +1457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_volume_host_perms_mirror() {
-        let mount = build_one("./project:/work,host-perms=mirror").await;
+        let mount = build_one("./project:/work:host-perms=mirror").await;
         match mount {
             VolumeMount::Bind {
                 host_permissions, ..
@@ -1341,17 +1471,17 @@ mod tests {
     #[tokio::test]
     async fn test_apply_volume_combined_policies() {
         // Off + Mirror is rejected at build; use Relaxed + Mirror instead.
-        let mount = build_one("/mnt:/host,ro,stat-virt=relaxed,host-perms=mirror").await;
+        let mount = build_one("/mnt:/host:ro,stat-virt=relaxed,host-perms=mirror").await;
         match mount {
             VolumeMount::Bind {
                 stat_virtualization,
                 host_permissions,
-                readonly,
+                options,
                 ..
             } => {
                 assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
                 assert!(matches!(host_permissions, HostPermissions::Mirror));
-                assert!(readonly);
+                assert!(options.readonly);
             }
             other => panic!("expected Bind, got {other:?}"),
         }
@@ -1362,7 +1492,7 @@ mod tests {
         // The Off+Mirror conflict surfaces at SandboxBuilder.build() time
         // because MountBuilder.build() is deferred inside the volume closure.
         let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
-        let builder = apply_volume(builder, "/mnt:/host,stat-virt=off,host-perms=mirror")
+        let builder = apply_volume(builder, "/mnt:/host:stat-virt=off,host-perms=mirror")
             .expect("apply_volume defers validation");
         let err = builder.build().await.unwrap_err();
         assert!(
@@ -1373,7 +1503,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_volume_named() {
-        let mount = build_one("mycache:/data,stat-virt=relaxed").await;
+        let mount = build_one("mycache:/data:stat-virt=relaxed").await;
         match mount {
             VolumeMount::Named {
                 name,
@@ -1397,26 +1527,62 @@ mod tests {
 
     #[test]
     fn test_apply_volume_rejects_unknown_stat_virt() {
-        let err = expect_apply_volume_err("/host:/guest,stat-virt=bogus");
+        let err = expect_apply_volume_err("/host:/guest:stat-virt=bogus");
         assert!(err.contains("invalid stat-virt"), "got: {err}");
     }
 
     #[test]
     fn test_apply_volume_rejects_unknown_host_perms() {
-        let err = expect_apply_volume_err("/host:/guest,host-perms=public");
+        let err = expect_apply_volume_err("/host:/guest:host-perms=public");
         assert!(err.contains("invalid host-perms"), "got: {err}");
     }
 
     #[test]
     fn test_apply_volume_rejects_unknown_option_key() {
-        let err = expect_apply_volume_err("/host:/guest,bogus=1");
-        assert!(err.contains("unknown volume option"), "got: {err}");
+        let err = expect_apply_volume_err("/host:/guest:bogus=1");
+        assert!(err.contains("unknown mount option"), "got: {err}");
     }
 
     #[test]
     fn test_apply_volume_rejects_duplicate_stat_virt() {
-        let err = expect_apply_volume_err("/host:/guest,stat-virt=strict,stat-virt=off");
+        let err = expect_apply_volume_err("/host:/guest:stat-virt=strict,stat-virt=off");
         assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_legacy_comma_options() {
+        let err = expect_apply_volume_err("/host:/guest,ro");
+        assert!(err.contains("source:guest:options"), "got: {err}");
+        assert!(err.contains("/host:/guest:ro"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_volume_spec_rejects_legacy_comma_options() {
+        let err = validate_volume_spec("/host:/guest,ro").unwrap_err();
+        assert!(err.to_string().contains("source:guest:options"));
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unsupported_flags() {
+        let err = expect_apply_volume_err("/host:/guest:exec");
+        assert!(err.contains("unsupported mount option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_tmpfs_accepts_size_and_noexec() {
+        let (path, size, options) = parse_tmpfs("/tmp:1G:noexec").unwrap();
+        assert_eq!(path, "/tmp");
+        assert_eq!(size, Some(1024));
+        assert!(options.noexec);
+    }
+
+    #[test]
+    fn test_parse_tmpfs_accepts_keyed_size_and_flags() {
+        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec").unwrap();
+        assert_eq!(path, "/seed");
+        assert_eq!(size, Some(64));
+        assert!(options.readonly);
+        assert!(options.noexec);
     }
 
     #[tokio::test]

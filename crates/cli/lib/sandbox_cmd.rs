@@ -158,6 +158,13 @@ pub struct SandboxArgs {
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
     let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
+    let disks = match parse_disk_args(&args.disk) {
+        Ok(disks) => disks,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
     let vm_config = VmConfig {
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
@@ -178,7 +185,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         },
         rootfs_disk_readonly: args.rootfs_disk_readonly,
         mounts: args.mount,
-        disks: parse_disk_args(&args.disk),
+        disks,
         backends: vec![],
         init_path: args.init_path,
         env: args.env,
@@ -239,39 +246,40 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
 /// `MSB_DISK_MOUNTS` env var and are consumed by agentd, so the runtime
 /// only needs what `DiskBuilder` will set.
 ///
-/// Malformed entries are skipped with a stderr warning rather than
-/// panicking, but every rejection path emits a diagnostic so users get
-/// a clear signal if a CLI flag is dropped.
-fn parse_disk_args(entries: &[String]) -> Vec<DiskMountSpec> {
+/// Malformed entries are hard errors so the host-side `MSB_DISK_MOUNTS`
+/// handoff cannot mention a disk that the runtime silently failed to attach.
+fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
     entries
         .iter()
-        .filter_map(|entry| parse_one_disk_arg(entry))
+        .map(|entry| parse_one_disk_arg(entry))
         .collect()
 }
 
-fn parse_one_disk_arg(entry: &str) -> Option<DiskMountSpec> {
+fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 3 || parts.len() > 4 {
-        eprintln!("ignoring --disk entry, expected id:host:format[:ro], got: {entry:?}");
-        return None;
+        return Err(format!(
+            "invalid --disk entry, expected id:host:format[:ro], got: {entry:?}"
+        ));
     }
 
     let id = parts[0];
     if id.is_empty() {
-        eprintln!("ignoring --disk entry with empty id: {entry:?}");
-        return None;
+        return Err(format!("invalid --disk entry with empty id: {entry:?}"));
     }
     let host = parts[1];
     if host.is_empty() {
-        eprintln!("ignoring --disk entry with empty host path: {entry:?}");
-        return None;
+        return Err(format!(
+            "invalid --disk entry with empty host path: {entry:?}"
+        ));
     }
     let fmt_str = parts[2];
     let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
         Ok(f) => f,
         Err(_) => {
-            eprintln!("ignoring --disk entry with unknown format {fmt_str:?}: {entry:?}");
-            return None;
+            return Err(format!(
+                "invalid --disk entry with unknown format {fmt_str:?}: {entry:?}"
+            ));
         }
     };
 
@@ -279,14 +287,13 @@ fn parse_one_disk_arg(entry: &str) -> Option<DiskMountSpec> {
         None => false,
         Some(&"ro") => true,
         Some(&other) => {
-            eprintln!(
-                "ignoring --disk entry with unknown flag {other:?} (expected 'ro'): {entry:?}"
-            );
-            return None;
+            return Err(format!(
+                "invalid --disk entry with unknown flag {other:?} (expected 'ro'): {entry:?}"
+            ));
         }
     };
 
-    Some(DiskMountSpec {
+    Ok(DiskMountSpec {
         id: id.to_string(),
         host: PathBuf::from(host),
         guest: String::new(), // consumed only by agentd via env
@@ -326,45 +333,55 @@ mod tests {
     #[test]
     fn test_parse_one_disk_arg_missing_format_field() {
         // Two-field entries are rejected (no format token).
-        assert!(parse_one_disk_arg("id:/host").is_none());
+        assert!(parse_one_disk_arg("id:/host").is_err());
     }
 
     #[test]
     fn test_parse_one_disk_arg_too_many_fields() {
-        assert!(parse_one_disk_arg("id:/host:raw:ro:extra").is_none());
+        assert!(parse_one_disk_arg("id:/host:raw:ro:extra").is_err());
     }
 
     #[test]
     fn test_parse_one_disk_arg_empty_id() {
-        assert!(parse_one_disk_arg(":/host:raw").is_none());
+        assert!(parse_one_disk_arg(":/host:raw").is_err());
     }
 
     #[test]
     fn test_parse_one_disk_arg_empty_host() {
-        assert!(parse_one_disk_arg("id::raw").is_none());
+        assert!(parse_one_disk_arg("id::raw").is_err());
     }
 
     #[test]
     fn test_parse_one_disk_arg_unknown_format() {
-        assert!(parse_one_disk_arg("id:/host:bogus").is_none());
+        assert!(parse_one_disk_arg("id:/host:bogus").is_err());
     }
 
     #[test]
     fn test_parse_one_disk_arg_unknown_flag() {
         // "rw" / typos are rejected explicitly so they don't silently coerce
         // to readonly=false.
-        assert!(parse_one_disk_arg("id:/host:raw:rw").is_none());
-        assert!(parse_one_disk_arg("id:/host:raw:RO").is_none());
+        assert!(parse_one_disk_arg("id:/host:raw:rw").is_err());
+        assert!(parse_one_disk_arg("id:/host:raw:RO").is_err());
     }
 
     #[test]
-    fn test_parse_disk_args_skips_bad_entries_keeps_good() {
+    fn test_parse_disk_args_rejects_bad_entries() {
         let entries = vec![
             "good:/host/g.raw:raw".to_string(),
             "bad".to_string(),
             "another:/host/a.qcow2:qcow2:ro".to_string(),
         ];
-        let specs = parse_disk_args(&entries);
+        let err = parse_disk_args(&entries).unwrap_err();
+        assert!(err.contains("invalid --disk entry"));
+    }
+
+    #[test]
+    fn test_parse_disk_args_keeps_good_entries() {
+        let entries = vec![
+            "good:/host/g.raw:raw".to_string(),
+            "another:/host/a.qcow2:qcow2:ro".to_string(),
+        ];
+        let specs = parse_disk_args(&entries).unwrap();
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].id, "good");
         assert_eq!(specs[1].id, "another");

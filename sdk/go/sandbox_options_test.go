@@ -240,8 +240,8 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 		WithImage("alpine"),
 		WithMounts(map[string]MountConfig{
 			"/data":    Mount.Named("vol-a", MountOptions{}),
-			"/host":    Mount.Bind("/var/lib", MountOptions{Readonly: true}),
-			"/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 128}),
+			"/host":    Mount.Bind("/var/lib", MountOptions{Readonly: true, Noexec: true}),
+			"/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 128, Noexec: true}),
 			"/img":     Mount.Disk("/tmp/pool.img", DiskOptions{Format: "raw", Readonly: true}),
 		}),
 	)
@@ -249,10 +249,10 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 	if v := volumes["/data"].(map[string]any); v["named"] != "vol-a" {
 		t.Fatalf("/data named = %v", v)
 	}
-	if v := volumes["/host"].(map[string]any); v["bind"] != "/var/lib" || v["readonly"] != true {
+	if v := volumes["/host"].(map[string]any); v["bind"] != "/var/lib" || v["readonly"] != true || v["noexec"] != true {
 		t.Fatalf("/host = %v", v)
 	}
-	if v := volumes["/scratch"].(map[string]any); v["tmpfs"] != true || v["size_mib"] != float64(128) {
+	if v := volumes["/scratch"].(map[string]any); v["tmpfs"] != true || v["size_mib"] != float64(128) || v["noexec"] != true {
 		t.Fatalf("/scratch = %v", v)
 	}
 	if v := volumes["/img"].(map[string]any); v["disk"] != "/tmp/pool.img" || v["format"] != "raw" {

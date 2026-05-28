@@ -147,6 +147,7 @@ pub(crate) struct DirMountSpec {
     pub tag: String,
     pub guest_path: String,
     pub readonly: bool,
+    pub noexec: bool,
 }
 
 /// Parsed virtiofs file volume mount specification.
@@ -156,6 +157,7 @@ pub(crate) struct FileMountSpec {
     pub filename: String,
     pub guest_path: String,
     pub readonly: bool,
+    pub noexec: bool,
 }
 
 /// Parsed disk-image volume mount specification.
@@ -171,6 +173,25 @@ pub(crate) struct DiskMountSpec {
     /// `/proc/filesystems` in agentd's init path.
     pub fstype: Option<String>,
     pub readonly: bool,
+    pub noexec: bool,
+}
+
+/// Parsed common volume mount option block.
+#[derive(Debug, Default)]
+struct ParsedMountOptions {
+    readonly: bool,
+    noexec: bool,
+    fstype: Option<String>,
+    size_mib: Option<u32>,
+    mode: Option<u32>,
+}
+
+/// Which keyed options are valid for a specific mount environment variable.
+#[derive(Debug, Clone, Copy, Default)]
+struct MountOptionSupport {
+    fstype: bool,
+    size: bool,
+    mode: bool,
 }
 
 /// Parsed `MSB_NET` specification.
@@ -342,6 +363,127 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec> {
     }
 }
 
+/// Parse a comma-separated volume mount option block.
+fn parse_mount_options(
+    env_name: &str,
+    opts: Option<&str>,
+    support: MountOptionSupport,
+) -> AgentdResult<ParsedMountOptions> {
+    let mut parsed = ParsedMountOptions::default();
+    let mut seen_access = false;
+    let mut seen_noexec = false;
+    let mut seen_nosuid = false;
+    let mut seen_fstype = false;
+    let mut seen_size = false;
+    let mut seen_mode = false;
+
+    let Some(opts) = opts else {
+        return Ok(parsed);
+    };
+
+    for opt in opts.split(',') {
+        let opt = opt.trim();
+        if opt.is_empty() {
+            continue;
+        }
+        match opt {
+            "ro" | "rw" => {
+                if seen_access {
+                    return Err(AgentdError::Config(format!(
+                        "{env_name} option 'ro'/'rw' specified more than once"
+                    )));
+                }
+                seen_access = true;
+                parsed.readonly = opt == "ro";
+            }
+            "noexec" => {
+                if seen_noexec {
+                    return Err(AgentdError::Config(format!(
+                        "{env_name} option 'noexec' specified more than once"
+                    )));
+                }
+                seen_noexec = true;
+                parsed.noexec = true;
+            }
+            "nosuid" => {
+                if seen_nosuid {
+                    return Err(AgentdError::Config(format!(
+                        "{env_name} option 'nosuid' specified more than once"
+                    )));
+                }
+                seen_nosuid = true;
+            }
+            "suid" | "exec" | "dev" => {
+                return Err(AgentdError::Config(format!(
+                    "{env_name} unsupported mount option '{opt}'"
+                )));
+            }
+            _ => {
+                let (key, value) = opt.split_once('=').ok_or_else(|| {
+                    AgentdError::Config(format!("{env_name} unknown mount option '{opt}'"))
+                })?;
+                if value.is_empty() {
+                    return Err(AgentdError::Config(format!(
+                        "{env_name} option '{key}' must not be empty"
+                    )));
+                }
+                match key {
+                    "fstype" if support.fstype => {
+                        if seen_fstype {
+                            return Err(AgentdError::Config(format!(
+                                "{env_name} option 'fstype' specified more than once"
+                            )));
+                        }
+                        seen_fstype = true;
+                        if value.chars().any(|c| matches!(c, ',' | ';' | ':' | '=')) {
+                            return Err(AgentdError::Config(format!(
+                                "{env_name} fstype must not contain ',', ';', ':', or '=': {value}"
+                            )));
+                        }
+                        parsed.fstype = Some(value.to_string());
+                    }
+                    "size" if support.size => {
+                        if seen_size {
+                            return Err(AgentdError::Config(format!(
+                                "{env_name} option 'size' specified more than once"
+                            )));
+                        }
+                        seen_size = true;
+                        parsed.size_mib = Some(value.parse::<u32>().map_err(|_| {
+                            AgentdError::Config(format!("{env_name} invalid tmpfs size: {value}"))
+                        })?);
+                    }
+                    "mode" if support.mode => {
+                        if seen_mode {
+                            return Err(AgentdError::Config(format!(
+                                "{env_name} option 'mode' specified more than once"
+                            )));
+                        }
+                        seen_mode = true;
+                        parsed.mode = Some(u32::from_str_radix(value, 8).map_err(|_| {
+                            AgentdError::Config(format!(
+                                "{env_name} invalid octal tmpfs mode: {value}"
+                            ))
+                        })?);
+                    }
+                    "fstype" | "size" | "mode" => {
+                        return Err(AgentdError::Config(format!(
+                            "{env_name} option '{key}' is not valid for this mount kind"
+                        )));
+                    }
+                    other => {
+                        return Err(AgentdError::Config(format!(
+                            "{env_name} unknown mount option '{other}'"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(parsed)
+}
+
 /// Parses semicolon-separated directory mount entries.
 fn parse_dir_mounts(val: &str) -> AgentdResult<Vec<DirMountSpec>> {
     val.split(';')
@@ -350,32 +492,18 @@ fn parse_dir_mounts(val: &str) -> AgentdResult<Vec<DirMountSpec>> {
         .collect()
 }
 
-/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
+/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:opts]`.
 fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 2 {
-        return Err(AgentdError::Config(format!(
-            "MSB_DIR_MOUNTS entry must be tag:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let guest_path = parts[1];
-    let readonly = match parts.get(2) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Config(format!(
-                "MSB_DIR_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
+    let mut parts = entry.splitn(3, ':');
+    let Some(tag) = parts.next() else {
+        unreachable!("splitn always yields at least one part");
     };
-
-    if parts.len() > 3 {
-        return Err(AgentdError::Config(format!(
-            "MSB_DIR_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
+    let guest_path = parts.next().ok_or_else(|| {
+        AgentdError::Config(format!(
+            "MSB_DIR_MOUNTS entry must be tag:path[:opts], got: {entry}"
+        ))
+    })?;
+    let options = parse_mount_options(ENV_DIR_MOUNTS, parts.next(), MountOptionSupport::default())?;
 
     if tag.is_empty() {
         return Err(AgentdError::Config(
@@ -391,7 +519,8 @@ fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec> {
     Ok(DirMountSpec {
         tag: tag.to_string(),
         guest_path: guest_path.to_string(),
-        readonly,
+        readonly: options.readonly,
+        noexec: options.noexec,
     })
 }
 
@@ -403,33 +532,24 @@ fn parse_file_mounts(val: &str) -> AgentdResult<Vec<FileMountSpec>> {
         .collect()
 }
 
-/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:ro]`
+/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:opts]`.
 fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 3 {
-        return Err(AgentdError::Config(format!(
-            "MSB_FILE_MOUNTS entry must be tag:filename:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let filename = parts[1];
-    let guest_path = parts[2];
-    let readonly = match parts.get(3) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Config(format!(
-                "MSB_FILE_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
+    let mut parts = entry.splitn(4, ':');
+    let Some(tag) = parts.next() else {
+        unreachable!("splitn always yields at least one part");
     };
-
-    if parts.len() > 4 {
-        return Err(AgentdError::Config(format!(
-            "MSB_FILE_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
+    let filename = parts.next().ok_or_else(|| {
+        AgentdError::Config(format!(
+            "MSB_FILE_MOUNTS entry must be tag:filename:path[:opts], got: {entry}"
+        ))
+    })?;
+    let guest_path = parts.next().ok_or_else(|| {
+        AgentdError::Config(format!(
+            "MSB_FILE_MOUNTS entry must be tag:filename:path[:opts], got: {entry}"
+        ))
+    })?;
+    let options =
+        parse_mount_options(ENV_FILE_MOUNTS, parts.next(), MountOptionSupport::default())?;
 
     if tag.is_empty() {
         return Err(AgentdError::Config(
@@ -451,7 +571,8 @@ fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
         tag: tag.to_string(),
         filename: filename.to_string(),
         guest_path: guest_path.to_string(),
-        readonly,
+        readonly: options.readonly,
+        noexec: options.noexec,
     })
 }
 
@@ -463,43 +584,25 @@ fn parse_disk_mounts(val: &str) -> AgentdResult<Vec<DiskMountSpec>> {
         .collect()
 }
 
-/// Parses a single disk-image mount entry: `id:guest_path[:fstype][:ro]`.
-///
-/// `fstype` may be empty (treated as autodetect). `ro` is the optional
-/// final token.
+/// Parses a single disk-image mount entry: `id:guest_path[:opts]`.
 fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 2 {
-        return Err(AgentdError::Config(format!(
-            "MSB_DISK_MOUNTS entry must be id:guest_path[:fstype][:ro], got: {entry}"
-        )));
-    }
-
-    let id = parts[0];
-    let guest_path = parts[1];
-    let mut fstype: Option<String> = None;
-    let mut readonly = false;
-
-    if let Some(third) = parts.get(2)
-        && !third.is_empty()
-    {
-        fstype = Some((*third).to_string());
-    }
-    if let Some(fourth) = parts.get(3) {
-        match *fourth {
-            "ro" => readonly = true,
-            other => {
-                return Err(AgentdError::Config(format!(
-                    "MSB_DISK_MOUNTS unknown flag '{other}' (expected 'ro')"
-                )));
-            }
-        }
-    }
-    if parts.len() > 4 {
-        return Err(AgentdError::Config(format!(
-            "MSB_DISK_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
+    let mut parts = entry.splitn(3, ':');
+    let Some(id) = parts.next() else {
+        unreachable!("splitn always yields at least one part");
+    };
+    let guest_path = parts.next().ok_or_else(|| {
+        AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS entry must be id:guest_path[:opts], got: {entry}"
+        ))
+    })?;
+    let options = parse_mount_options(
+        ENV_DISK_MOUNTS,
+        parts.next(),
+        MountOptionSupport {
+            fstype: true,
+            ..MountOptionSupport::default()
+        },
+    )?;
 
     if id.is_empty() {
         return Err(AgentdError::Config(
@@ -515,8 +618,9 @@ fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
     Ok(DiskMountSpec {
         id: id.to_string(),
         guest_path: guest_path.to_string(),
-        fstype,
-        readonly,
+        fstype: options.fstype,
+        readonly: options.readonly,
+        noexec: options.noexec,
     })
 }
 
@@ -528,47 +632,43 @@ fn parse_tmpfs_mounts(val: &str) -> AgentdResult<Vec<TmpfsSpec>> {
         .collect()
 }
 
-/// Parses a single tmpfs entry: `path[,size=N][,mode=N][,noexec]`
+/// Parses a single tmpfs entry: `path[:opts]`.
 ///
+/// Supported options are `size=N`, `mode=N`, `ro`, `rw`, `nosuid`, and `noexec`.
 /// Mode is parsed as octal (e.g. `mode=1777`).
 fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
-    let mut parts = entry.split(',');
-    let path = parts.next().unwrap(); // always at least one element
+    let (path, opts) = match entry.split_once(':') {
+        Some((path, opts)) => (path, Some(opts)),
+        None => {
+            if entry.contains(',') {
+                return Err(AgentdError::Config(
+                    "MSB_TMPFS options must use path:opts syntax".into(),
+                ));
+            }
+            (entry, None)
+        }
+    };
+
     if path.is_empty() {
         return Err(AgentdError::Config("tmpfs entry has empty path".into()));
     }
 
-    let mut size_mib = None;
-    let mut mode = None;
-    let mut noexec = false;
-    let mut readonly = false;
-
-    for opt in parts {
-        if opt == "noexec" {
-            noexec = true;
-        } else if opt == "ro" {
-            readonly = true;
-        } else if let Some(val) = opt.strip_prefix("size=") {
-            size_mib = Some(
-                val.parse::<u32>()
-                    .map_err(|_| AgentdError::Config(format!("invalid tmpfs size: {val}")))?,
-            );
-        } else if let Some(val) = opt.strip_prefix("mode=") {
-            mode =
-                Some(u32::from_str_radix(val, 8).map_err(|_| {
-                    AgentdError::Config(format!("invalid octal tmpfs mode: {val}"))
-                })?);
-        } else {
-            return Err(AgentdError::Config(format!("unknown tmpfs option: {opt}")));
-        }
-    }
+    let options = parse_mount_options(
+        ENV_TMPFS,
+        opts,
+        MountOptionSupport {
+            size: true,
+            mode: true,
+            ..MountOptionSupport::default()
+        },
+    )?;
 
     Ok(TmpfsSpec {
         path: path.to_string(),
-        size_mib,
-        mode,
-        noexec,
-        readonly,
+        size_mib: options.size_mib,
+        mode: options.mode,
+        noexec: options.noexec,
+        readonly: options.readonly,
     })
 }
 
@@ -944,12 +1044,14 @@ mod tests {
         assert_eq!(spec.filename, "app.conf");
         assert_eq!(spec.guest_path, "/etc/app.conf");
         assert!(!spec.readonly);
+        assert!(!spec.noexec);
     }
 
     #[test]
     fn test_parse_file_mount_entry_readonly() {
-        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro").unwrap();
+        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro,noexec").unwrap();
         assert!(spec.readonly);
+        assert!(spec.noexec);
     }
 
     #[test]
@@ -974,7 +1076,7 @@ mod tests {
 
     #[test]
     fn test_parse_file_mount_entry_unknown_flag() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:rw").is_err());
+        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:exec").is_err());
     }
 
     #[test]
@@ -995,14 +1097,14 @@ mod tests {
 
     #[test]
     fn test_parse_with_size() {
-        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
+        let spec = parse_tmpfs_entry("/tmp:size=256").unwrap();
         assert_eq!(spec.path, "/tmp");
         assert_eq!(spec.size_mib, Some(256));
     }
 
     #[test]
     fn test_parse_with_noexec() {
-        let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
+        let spec = parse_tmpfs_entry("/tmp:noexec").unwrap();
         assert_eq!(spec.path, "/tmp");
         assert!(spec.noexec);
     }
@@ -1011,23 +1113,25 @@ mod tests {
 
     #[test]
     fn test_parse_disk_mount_entry_basic() {
-        let spec = parse_disk_mount_entry("data_abc:/data:ext4").unwrap();
+        let spec = parse_disk_mount_entry("data_abc:/data:fstype=ext4").unwrap();
         assert_eq!(spec.id, "data_abc");
         assert_eq!(spec.guest_path, "/data");
         assert_eq!(spec.fstype.as_deref(), Some("ext4"));
         assert!(!spec.readonly);
+        assert!(!spec.noexec);
     }
 
     #[test]
     fn test_parse_disk_mount_entry_readonly() {
-        let spec = parse_disk_mount_entry("seed_7f:/seed:ext4:ro").unwrap();
+        let spec = parse_disk_mount_entry("seed_7f:/seed:ro,noexec,fstype=ext4").unwrap();
         assert!(spec.readonly);
+        assert!(spec.noexec);
         assert_eq!(spec.fstype.as_deref(), Some("ext4"));
     }
 
     #[test]
-    fn test_parse_disk_mount_entry_empty_fstype_means_autodetect() {
-        let spec = parse_disk_mount_entry("probe_1:/data::ro").unwrap();
+    fn test_parse_disk_mount_entry_no_fstype_means_autodetect() {
+        let spec = parse_disk_mount_entry("probe_1:/data:ro").unwrap();
         assert!(spec.fstype.is_none());
         assert!(spec.readonly);
     }
@@ -1041,8 +1145,8 @@ mod tests {
 
     #[test]
     fn test_parse_disk_mount_entry_rejects_unknown_flag() {
-        let err = parse_disk_mount_entry("id:/data:ext4:rw").unwrap_err();
-        assert!(err.to_string().contains("unknown flag"));
+        let err = parse_disk_mount_entry("id:/data:exec").unwrap_err();
+        assert!(err.to_string().contains("unsupported mount option"));
     }
 
     #[test]
@@ -1052,17 +1156,18 @@ mod tests {
 
     #[test]
     fn test_parse_disk_mount_entry_rejects_empty_id() {
-        assert!(parse_disk_mount_entry(":/data:ext4").is_err());
+        assert!(parse_disk_mount_entry(":/data:fstype=ext4").is_err());
     }
 
     #[test]
     fn test_parse_disk_mount_entry_rejects_too_many_parts() {
-        assert!(parse_disk_mount_entry("id:/data:ext4:ro:extra").is_err());
+        assert!(parse_disk_mount_entry("id:/data:fstype=ext4:extra").is_err());
     }
 
     #[test]
     fn test_parse_disk_mounts_multiple_entries() {
-        let specs = parse_disk_mounts("data_1:/data:ext4;seed_2:/seed::ro;probe_3:/p").unwrap();
+        let specs =
+            parse_disk_mounts("data_1:/data:fstype=ext4;seed_2:/seed:ro;probe_3:/p").unwrap();
         assert_eq!(specs.len(), 3);
         assert_eq!(specs[0].guest_path, "/data");
         assert!(specs[1].readonly);
@@ -1071,7 +1176,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_ro() {
-        let spec = parse_tmpfs_entry("/seed,size=64,ro").unwrap();
+        let spec = parse_tmpfs_entry("/seed:size=64,ro").unwrap();
         assert_eq!(spec.path, "/seed");
         assert_eq!(spec.size_mib, Some(64));
         assert!(spec.readonly);
@@ -1080,22 +1185,22 @@ mod tests {
 
     #[test]
     fn test_parse_ro_defaults_to_false_when_absent() {
-        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
+        let spec = parse_tmpfs_entry("/tmp:size=256").unwrap();
         assert!(!spec.readonly);
     }
 
     #[test]
     fn test_parse_with_octal_mode() {
-        let spec = parse_tmpfs_entry("/tmp,mode=1777").unwrap();
+        let spec = parse_tmpfs_entry("/tmp:mode=1777").unwrap();
         assert_eq!(spec.mode, Some(0o1777));
 
-        let spec = parse_tmpfs_entry("/data,mode=755").unwrap();
+        let spec = parse_tmpfs_entry("/data:mode=755").unwrap();
         assert_eq!(spec.mode, Some(0o755));
     }
 
     #[test]
     fn test_parse_multi_options() {
-        let spec = parse_tmpfs_entry("/tmp,size=256,mode=1777,noexec").unwrap();
+        let spec = parse_tmpfs_entry("/tmp:size=256,mode=1777,noexec").unwrap();
         assert_eq!(spec.path, "/tmp");
         assert_eq!(spec.size_mib, Some(256));
         assert_eq!(spec.mode, Some(0o1777));
@@ -1104,25 +1209,25 @@ mod tests {
 
     #[test]
     fn test_parse_unknown_option_errors() {
-        let err = parse_tmpfs_entry("/tmp,bogus=42").unwrap_err();
-        assert!(err.to_string().contains("unknown tmpfs option"));
+        let err = parse_tmpfs_entry("/tmp:bogus=42").unwrap_err();
+        assert!(err.to_string().contains("unknown mount option"));
     }
 
     #[test]
     fn test_parse_invalid_size_errors() {
-        let err = parse_tmpfs_entry("/tmp,size=abc").unwrap_err();
+        let err = parse_tmpfs_entry("/tmp:size=abc").unwrap_err();
         assert!(err.to_string().contains("invalid tmpfs size"));
     }
 
     #[test]
     fn test_parse_invalid_mode_errors() {
-        let err = parse_tmpfs_entry("/tmp,mode=zzz").unwrap_err();
+        let err = parse_tmpfs_entry("/tmp:mode=zzz").unwrap_err();
         assert!(err.to_string().contains("invalid octal tmpfs mode"));
     }
 
     #[test]
     fn test_parse_empty_path_errors() {
-        let err = parse_tmpfs_entry(",size=256").unwrap_err();
+        let err = parse_tmpfs_entry(":size=256").unwrap_err();
         assert!(err.to_string().contains("empty path"));
     }
 

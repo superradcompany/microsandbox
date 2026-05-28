@@ -252,6 +252,73 @@ func TestNamedVolumeReadonlyMount(t *testing.T) {
 	}
 }
 
+// TestNamedVolumeNoexecMount verifies that MountOptions.Noexec prevents direct
+// execution from a named volume while still allowing the file to be read.
+func TestNamedVolumeNoexecMount(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-volnoexec-" + t.Name()
+
+	if _, err := microsandbox.CreateVolume(ctx, name); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
+
+	writer, err := microsandbox.CreateSandbox(ctx, "sb-writer-"+name,
+		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{}),
+		}),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox writer: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = writer.Stop(stopCtx)
+		_ = writer.Close()
+	})
+
+	out, err := writer.Shell(ctx, `cat >/data/run.sh <<'SH'
+#!/bin/sh
+echo go-noexec-ok
+SH
+chmod +x /data/run.sh`)
+	if err != nil {
+		t.Fatalf("Shell writer: %v", err)
+	}
+	if !out.Success() {
+		t.Fatalf("writer script failed: stdout=%q stderr=%q", out.Stdout(), out.Stderr())
+	}
+
+	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
+		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{Noexec: true}),
+		}),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox noexec: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+	})
+
+	out, err = sb.Shell(ctx, "if /data/run.sh >/tmp/direct 2>&1; then cat /tmp/direct; exit 1; fi; sh /data/run.sh")
+	if err != nil {
+		t.Fatalf("Shell noexec: %v", err)
+	}
+	if !out.Success() {
+		t.Fatalf("noexec verification failed: stdout=%q stderr=%q", out.Stdout(), out.Stderr())
+	}
+	if !strings.Contains(out.Stdout(), "go-noexec-ok") {
+		t.Errorf("expected interpreter-read script output, got %q", out.Stdout())
+	}
+}
+
 // TestTmpfsMountWithSizeLimit creates a tmpfs mount with a 4 MiB cap and
 // verifies that writing more than that fails.
 func TestTmpfsMountWithSizeLimit(t *testing.T) {

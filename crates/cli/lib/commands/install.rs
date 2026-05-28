@@ -9,6 +9,8 @@ use microsandbox::config;
 
 use crate::ui;
 
+use super::common::validate_volume_spec;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -39,7 +41,7 @@ pub struct InstallArgs {
     #[arg(short, long)]
     pub memory: Option<String>,
 
-    /// Mount a host path or named volume into the sandbox (SOURCE:DEST).
+    /// Mount a host path or named volume into the sandbox (SOURCE:DEST[:OPTIONS]).
     #[arg(short, long)]
     pub volume: Vec<String>,
 
@@ -93,6 +95,9 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
     let alias_name = args.name.as_deref().unwrap_or_else(|| derive_name(image));
 
     validate_alias_name(alias_name)?;
+    for volume in &args.volume {
+        validate_volume_spec(volume)?;
+    }
 
     let alias_path = bin_dir.join(alias_name);
 

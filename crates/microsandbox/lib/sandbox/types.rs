@@ -2,7 +2,7 @@
 //!
 //! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -131,6 +131,26 @@ pub enum HostPermissions {
     Mirror,
 }
 
+/// Guest mount behavior shared by every volume mount kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountOptions {
+    /// Whether the mount is read-only.
+    ///
+    /// Guest writes fail with the kernel's read-only filesystem behavior.
+    /// Virtiofs-backed mounts also reject writes on the host-side filesystem
+    /// server as defense in depth.
+    pub readonly: bool,
+
+    /// Whether direct execution from the mount is disabled.
+    ///
+    /// This prevents `execve` of binaries or scripts located on the mount.
+    /// Interpreters can still read files from the mount, for example
+    /// `sh /mnt/script.sh`, because the interpreter itself executes from a
+    /// different filesystem. Guest volume mounts always also use internal
+    /// `nosuid` and `nodev` safety defaults.
+    pub noexec: bool,
+}
+
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 pub enum VolumeMount {
@@ -140,8 +160,8 @@ pub enum VolumeMount {
         host: PathBuf,
         /// Guest mount path.
         guest: String,
-        /// Whether the mount is read-only.
-        readonly: bool,
+        /// Guest mount behavior.
+        options: MountOptions,
         /// Guest-visible stat virtualization policy.
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
@@ -154,8 +174,8 @@ pub enum VolumeMount {
         name: String,
         /// Guest mount path.
         guest: String,
-        /// Whether the mount is read-only.
-        readonly: bool,
+        /// Guest mount behavior.
+        options: MountOptions,
         /// Guest-visible stat virtualization policy.
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
@@ -168,8 +188,8 @@ pub enum VolumeMount {
         guest: String,
         /// Size limit in MiB.
         size_mib: Option<u32>,
-        /// Whether the mount is read-only.
-        readonly: bool,
+        /// Guest mount behavior.
+        options: MountOptions,
     },
 
     /// Mount a disk image file as a virtio-blk device at a guest path.
@@ -187,8 +207,8 @@ pub enum VolumeMount {
         format: DiskImageFormat,
         /// Inner filesystem type. When `None`, agentd probes `/proc/filesystems`.
         fstype: Option<String>,
-        /// Whether the mount is read-only.
-        readonly: bool,
+        /// Guest mount behavior.
+        options: MountOptions,
     },
 }
 
@@ -196,7 +216,7 @@ pub enum VolumeMount {
 pub struct MountBuilder {
     guest: String,
     mount: MountKind,
-    readonly: bool,
+    options: MountOptions,
     size_mib: Option<u32>,
     disk_format: Option<DiskImageFormat>,
     disk_fstype: Option<String>,
@@ -320,7 +340,7 @@ impl MountBuilder {
         Self {
             guest: guest.into(),
             mount: MountKind::Unset,
-            readonly: false,
+            options: MountOptions::default(),
             size_mib: None,
             disk_format: None,
             disk_fstype: None,
@@ -373,6 +393,12 @@ impl MountBuilder {
     /// cleanly.
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
+        if fstype.is_empty() {
+            self.error.get_or_insert_with(|| {
+                crate::MicrosandboxError::InvalidConfig("fstype must not be empty".into())
+            });
+            return self;
+        }
         if fstype.contains(',')
             || fstype.contains(';')
             || fstype.contains(':')
@@ -392,7 +418,18 @@ impl MountBuilder {
     /// Prevent writes to this mount. Enforced both at the host (virtiofs
     /// server rejects writes) and guest (kernel returns `EROFS`).
     pub fn readonly(mut self) -> Self {
-        self.readonly = true;
+        self.options.readonly = true;
+        self
+    }
+
+    /// Prevent direct execution from this mount.
+    ///
+    /// This blocks executing a file located on the mount directly. It does
+    /// not block interpreters from reading files on the mount, such as
+    /// `sh /mnt/script.sh`, because the interpreter binary executes from a
+    /// different filesystem.
+    pub fn noexec(mut self) -> Self {
+        self.options.noexec = true;
         self
     }
 
@@ -445,9 +482,9 @@ impl MountBuilder {
                 "cannot mount a volume at guest root /".into(),
             ));
         }
-        if self.guest.contains(':') || self.guest.contains(';') {
+        if self.guest.contains(':') || self.guest.contains(';') || self.guest.contains(',') {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "guest mount path must not contain ':' or ';': {}",
+                "guest mount path must not contain ':', ';', or ',': {}",
                 self.guest
             )));
         }
@@ -503,11 +540,11 @@ impl MountBuilder {
             .unwrap_or(StatVirtualization::Strict);
         let host_permissions = self.host_permissions.unwrap_or(HostPermissions::Private);
 
-        match self.mount {
+        let mount = match self.mount {
             MountKind::Bind(host) => {
                 // The spawn → VM wire format encodes mount specs as
-                // `tag:host[:ro][,key=value]`. Embedded commas or colons in
-                // the host path would collide with that grammar and could
+                // `tag:host[:opts]`. Embedded separators in the host
+                // path would collide with that grammar and could
                 // silently inject policy options. Reject at the SDK
                 // boundary so callers get a clear error rather than a
                 // confusing parse failure later.
@@ -522,30 +559,39 @@ impl MountBuilder {
                             "bind host path must not contain ':': {s}"
                         )));
                     }
+                    if s.contains(';') {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "bind host path must not contain ';': {s}"
+                        )));
+                    }
+                } else {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "bind host path must be valid UTF-8".into(),
+                    ));
                 }
-                Ok(VolumeMount::Bind {
+                VolumeMount::Bind {
                     host,
                     guest: self.guest,
-                    readonly: self.readonly,
+                    options: self.options,
                     stat_virtualization,
                     host_permissions,
-                })
+                }
             }
             MountKind::Named(name) => {
                 crate::volume::validate_volume_name(&name)?;
-                Ok(VolumeMount::Named {
+                VolumeMount::Named {
                     name,
                     guest: self.guest,
-                    readonly: self.readonly,
+                    options: self.options,
                     stat_virtualization,
                     host_permissions,
-                })
+                }
             }
-            MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
+            MountKind::Tmpfs => VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
-                readonly: self.readonly,
-            }),
+                options: self.options,
+            },
             MountKind::Disk(host) => {
                 let format = self.disk_format.unwrap_or_else(|| {
                     host.extension()
@@ -553,19 +599,24 @@ impl MountBuilder {
                         .and_then(DiskImageFormat::from_extension)
                         .unwrap_or(DiskImageFormat::Raw)
                 });
-                Ok(VolumeMount::DiskImage {
+                VolumeMount::DiskImage {
                     host,
                     guest: self.guest,
                     format,
                     fstype: self.disk_fstype,
-                    readonly: self.readonly,
-                })
+                    options: self.options,
+                }
             }
-            MountKind::Unset => Err(crate::MicrosandboxError::InvalidConfig(
-                "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
-                    .into(),
-            )),
-        }
+            MountKind::Unset => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
+                        .into(),
+                ));
+            }
+        };
+
+        validate_volume_mount(&mount)?;
+        Ok(mount)
     }
 }
 
@@ -885,6 +936,12 @@ impl ImageBuilder {
     /// ```
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
+        if fstype.is_empty() {
+            self.error = Some(crate::MicrosandboxError::InvalidConfig(
+                "fstype must not be empty".into(),
+            ));
+            return self;
+        }
         if fstype.contains(',')
             || fstype.contains(';')
             || fstype.contains(':')
@@ -921,6 +978,125 @@ impl ImageBuilder {
             )
         })
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn validate_volume_mounts(mounts: &[VolumeMount]) -> crate::MicrosandboxResult<()> {
+    for mount in mounts {
+        validate_volume_mount(mount)?;
+    }
+    Ok(())
+}
+
+fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
+    match mount {
+        VolumeMount::Bind {
+            host,
+            guest,
+            stat_virtualization,
+            host_permissions,
+            ..
+        } => {
+            validate_guest_mount_path(guest)?;
+            validate_host_path_wire_safe(host, "bind host path")?;
+            validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+        }
+        VolumeMount::Named {
+            name,
+            guest,
+            stat_virtualization,
+            host_permissions,
+            ..
+        } => {
+            validate_guest_mount_path(guest)?;
+            crate::volume::validate_volume_name(name)?;
+            validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+        }
+        VolumeMount::Tmpfs { guest, .. } => {
+            validate_guest_mount_path(guest)?;
+        }
+        VolumeMount::DiskImage {
+            host,
+            guest,
+            fstype,
+            ..
+        } => {
+            validate_guest_mount_path(guest)?;
+            validate_host_path_wire_safe(host, "disk image host path")?;
+            if let Some(fstype) = fstype {
+                validate_fstype(fstype)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_guest_mount_path(guest: &str) -> crate::MicrosandboxResult<()> {
+    if !guest.starts_with('/') {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must be absolute: {guest}"
+        )));
+    }
+    if guest == "/" {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "cannot mount a volume at guest root /".into(),
+        ));
+    }
+    if guest.contains(':') || guest.contains(';') || guest.contains(',') {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must not contain ':', ';', or ',': {guest}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::MicrosandboxResult<()> {
+    let Some(path) = path.to_str() else {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "{label} must be valid UTF-8"
+        )));
+    };
+
+    if path.contains(',') || path.contains(':') || path.contains(';') {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "{label} must not contain ',', ':', or ';': {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {
+    if fstype.is_empty() {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "fstype must not be empty".into(),
+        ));
+    }
+    if fstype.contains(',') || fstype.contains(';') || fstype.contains(':') || fstype.contains('=')
+    {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "fstype must not contain ',', ';', ':', or '=': {fstype}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_virtiofs_policies(
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) -> crate::MicrosandboxResult<()> {
+    if stat_virtualization == StatVirtualization::Off && host_permissions == HostPermissions::Mirror
+    {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "stat_virtualization=Off cannot be combined with host_permissions=Mirror: Off has no \
+             overlay, so chmod already operates on the host inode and Mirror would be a no-op. \
+             Drop one or the other."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1001,7 +1177,7 @@ impl Serialize for VolumeMount {
             Self::Bind {
                 host,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => {
@@ -1009,7 +1185,7 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
-                map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
@@ -1017,7 +1193,7 @@ impl Serialize for VolumeMount {
             Self::Named {
                 name,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => {
@@ -1025,7 +1201,7 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("type", "Named")?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("guest", guest)?;
-                map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
@@ -1033,13 +1209,13 @@ impl Serialize for VolumeMount {
             Self::Tmpfs {
                 guest,
                 size_mib,
-                readonly,
+                options,
             } => {
                 let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "Tmpfs")?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("size_mib", size_mib)?;
-                map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("options", options)?;
                 map.end()
             }
             Self::DiskImage {
@@ -1047,7 +1223,7 @@ impl Serialize for VolumeMount {
                 guest,
                 format,
                 fstype,
-                readonly,
+                options,
             } => {
                 let mut map = serializer.serialize_map(Some(6))?;
                 map.serialize_entry("type", "DiskImage")?;
@@ -1055,7 +1231,7 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("format", format)?;
                 map.serialize_entry("fstype", fstype)?;
-                map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("options", options)?;
                 map.end()
             }
         }
@@ -1079,8 +1255,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Bind {
                 host: PathBuf,
                 guest: String,
-                #[serde(default)]
-                readonly: bool,
+                options: MountOptions,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1089,8 +1264,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Named {
                 name: String,
                 guest: String,
-                #[serde(default)]
-                readonly: bool,
+                options: MountOptions,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1100,8 +1274,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 size_mib: Option<u32>,
-                #[serde(default)]
-                readonly: bool,
+                options: MountOptions,
             },
             DiskImage {
                 host: PathBuf,
@@ -1109,8 +1282,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 format: DiskImageFormat,
                 #[serde(default)]
                 fstype: Option<String>,
-                #[serde(default)]
-                readonly: bool,
+                options: MountOptions,
             },
         }
 
@@ -1119,50 +1291,50 @@ impl<'de> Deserialize<'de> for VolumeMount {
             VolumeMountHelper::Bind {
                 host,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => Self::Bind {
                 host,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             },
             VolumeMountHelper::Named {
                 name,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => Self::Named {
                 name,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             },
             VolumeMountHelper::Tmpfs {
                 guest,
                 size_mib,
-                readonly,
+                options,
             } => Self::Tmpfs {
                 guest,
                 size_mib,
-                readonly,
+                options,
             },
             VolumeMountHelper::DiskImage {
                 host,
                 guest,
                 format,
                 fstype,
-                readonly,
+                options,
             } => Self::DiskImage {
                 host,
                 guest,
                 format,
                 fstype,
-                readonly,
+                options,
             },
         })
     }
@@ -1174,54 +1346,54 @@ impl std::fmt::Debug for VolumeMount {
             Self::Bind {
                 host,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => f
                 .debug_struct("Bind")
                 .field("host", host)
                 .field("guest", guest)
-                .field("readonly", readonly)
+                .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
                 .finish(),
             Self::Named {
                 name,
                 guest,
-                readonly,
+                options,
                 stat_virtualization,
                 host_permissions,
             } => f
                 .debug_struct("Named")
                 .field("name", name)
                 .field("guest", guest)
-                .field("readonly", readonly)
+                .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
                 .finish(),
             Self::Tmpfs {
                 guest,
                 size_mib,
-                readonly,
+                options,
             } => f
                 .debug_struct("Tmpfs")
                 .field("guest", guest)
                 .field("size_mib", size_mib)
-                .field("readonly", readonly)
+                .field("options", options)
                 .finish(),
             Self::DiskImage {
                 host,
                 guest,
                 format,
                 fstype,
-                readonly,
+                options,
             } => f
                 .debug_struct("DiskImage")
                 .field("host", host)
                 .field("guest", guest)
                 .field("format", format)
                 .field("fstype", fstype)
-                .field("readonly", readonly)
+                .field("options", options)
                 .finish(),
         }
     }
@@ -1340,6 +1512,89 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("volume name"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_guest_separators() {
+        let mount = VolumeMount::Tmpfs {
+            guest: "/data,ro".to_string(),
+            size_mib: None,
+            options: MountOptions::default(),
+        };
+
+        let err = validate_volume_mounts(&[mount]).unwrap_err();
+        assert!(err.to_string().contains("guest mount path"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_disk_host_separators() {
+        let mount = VolumeMount::DiskImage {
+            host: PathBuf::from("/host/data:ro.raw"),
+            guest: "/data".to_string(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions::default(),
+        };
+
+        let err = validate_volume_mounts(&[mount]).unwrap_err();
+        assert!(err.to_string().contains("disk image host path"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_empty_fstype() {
+        let mount = VolumeMount::DiskImage {
+            host: PathBuf::from("/host/data.raw"),
+            guest: "/data".to_string(),
+            format: DiskImageFormat::Raw,
+            fstype: Some(String::new()),
+            options: MountOptions::default(),
+        };
+
+        let err = validate_volume_mounts(&[mount]).unwrap_err();
+        assert!(err.to_string().contains("fstype must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_off_mirror() {
+        let mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Off,
+            host_permissions: HostPermissions::Mirror,
+        };
+
+        let err = validate_volume_mounts(&[mount]).unwrap_err();
+        assert!(err.to_string().contains("stat_virtualization=Off"));
+    }
+
+    #[test]
+    fn test_volume_mount_json_uses_options_object() {
+        let mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions {
+                readonly: true,
+                noexec: true,
+            },
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        };
+
+        let value = serde_json::to_value(&mount).unwrap();
+        assert!(value.get("readonly").is_none());
+        assert!(value.get("noexec").is_none());
+        assert_eq!(value["options"]["readonly"], true);
+        assert_eq!(value["options"]["noexec"], true);
+
+        let decoded: VolumeMount = serde_json::from_value(value).unwrap();
+        match decoded {
+            VolumeMount::Bind { options, .. } => {
+                assert!(options.readonly);
+                assert!(options.noexec);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
     }
 
     #[test]

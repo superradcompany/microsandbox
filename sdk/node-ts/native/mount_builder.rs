@@ -25,6 +25,7 @@ pub struct JsBuiltVolumeMount {
     pub kind: String,
     pub guest: String,
     pub readonly: bool,
+    pub noexec: bool,
     pub host: Option<String>,
     pub name: Option<String>,
     pub size_mib: Option<u32>,
@@ -39,9 +40,9 @@ pub struct JsBuiltVolumeMount {
 /// Fluent builder for a sandbox volume mount.
 ///
 /// Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
-/// `.disk(...)`, then chain modifiers (`.readonly()`, `.size(mib)` for
-/// tmpfs, `.format(fmt)` / `.fstype(s)` for disk). Validation is deferred
-/// to the terminal `.build()` call.
+/// `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`,
+/// `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
+/// Validation is deferred to the terminal `.build()` call.
 #[napi(js_name = "MountBuilder")]
 pub struct JsMountBuilder {
     inner: Option<RustMountBuilder>,
@@ -127,6 +128,14 @@ impl JsMountBuilder {
         self
     }
 
+    /// Prevent direct execution from the mount.
+    #[napi]
+    pub fn noexec(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.noexec());
+        self
+    }
+
     /// Tmpfs size cap in MiB (only valid with `.tmpfs()`).
     #[napi]
     pub fn size(&mut self, mib: u32) -> &Self {
@@ -176,8 +185,8 @@ impl JsMountBuilder {
         Ok(self)
     }
 
-    /// Materialize the mount spec. Returns a flat `BuiltVolumeMount`
-    /// with a `kind` discriminator and per-variant fields.
+    /// Materialize the mount spec. Returns a flat `VolumeMount` with a
+    /// `kind` discriminator and per-variant fields.
     #[napi]
     pub fn build(&mut self) -> Result<JsBuiltVolumeMount> {
         let mount = self
@@ -211,13 +220,14 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
         RustVolumeMount::Bind {
             host,
             guest,
-            readonly,
+            options,
             stat_virtualization,
             host_permissions,
         } => JsBuiltVolumeMount {
             kind: "bind".into(),
             guest,
-            readonly,
+            readonly: options.readonly,
+            noexec: options.noexec,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             size_mib: None,
@@ -229,13 +239,14 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
         RustVolumeMount::Named {
             name,
             guest,
-            readonly,
+            options,
             stat_virtualization,
             host_permissions,
         } => JsBuiltVolumeMount {
             kind: "named".into(),
             guest,
-            readonly,
+            readonly: options.readonly,
+            noexec: options.noexec,
             host: None,
             name: Some(name),
             size_mib: None,
@@ -247,11 +258,12 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
         RustVolumeMount::Tmpfs {
             guest,
             size_mib,
-            readonly,
+            options,
         } => JsBuiltVolumeMount {
             kind: "tmpfs".into(),
             guest,
-            readonly,
+            readonly: options.readonly,
+            noexec: options.noexec,
             host: None,
             name: None,
             size_mib,
@@ -265,11 +277,12 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             guest,
             format,
             fstype,
-            readonly,
+            options,
         } => JsBuiltVolumeMount {
             kind: "disk".into(),
             guest,
-            readonly,
+            readonly: options.readonly,
+            noexec: options.noexec,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             size_mib: None,

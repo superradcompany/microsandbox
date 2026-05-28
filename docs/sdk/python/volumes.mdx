@@ -115,7 +115,7 @@ Static factory methods on `Volume` for creating mount configurations used in san
 #### Volume.bind()
 
 ```python
-def Volume.bind(path: str, *, readonly: bool = False) -> dict
+def Volume.bind(path: str, *, readonly: bool = False, noexec: bool = False) -> dict
 ```
 
 Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
@@ -125,7 +125,8 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 | Name | Type | Description |
 |------|------|-------------|
 | path | `str` | Directory path on the host |
-| readonly | `bool` | Mount as read-only |
+| readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
+| noexec | `bool` | Prevent direct execution from the mount |
 
 **Returns**
 
@@ -138,7 +139,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 #### Volume.named()
 
 ```python
-def Volume.named(name: str, *, readonly: bool = False) -> dict
+def Volume.named(name: str, *, readonly: bool = False, noexec: bool = False) -> dict
 ```
 
 Mount a named volume. The volume must already exist (create it with [`Volume.create()`](#volumecreate)).
@@ -148,7 +149,8 @@ Mount a named volume. The volume must already exist (create it with [`Volume.cre
 | Name | Type | Description |
 |------|------|-------------|
 | name | `str` | Volume name |
-| readonly | `bool` | Mount as read-only |
+| readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
+| noexec | `bool` | Prevent direct execution from the mount |
 
 **Returns**
 
@@ -161,7 +163,7 @@ Mount a named volume. The volume must already exist (create it with [`Volume.cre
 #### Volume.tmpfs()
 
 ```python
-def Volume.tmpfs(*, size_mib: int | None = None, readonly: bool = False) -> dict
+def Volume.tmpfs(*, size_mib: int | None = None, readonly: bool = False, noexec: bool = False) -> dict
 ```
 
 Use an in-memory filesystem. Contents are discarded when the sandbox stops.
@@ -172,6 +174,40 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 |------|------|-------------|
 | size_mib | `int \| None` | Maximum size in MiB |
 | readonly | `bool` | Mount as read-only |
+| noexec | `bool` | Prevent direct execution from the mount |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `dict` | Mount configuration dictionary |
+
+---
+
+#### Volume.disk()
+
+```python
+def Volume.disk(
+    path: str,
+    *,
+    format: str | None = None,
+    fstype: str | None = None,
+    readonly: bool = False,
+    noexec: bool = False,
+) -> dict
+```
+
+Mount a host disk image as a virtio-blk device. `format` may be `"raw"`, `"qcow2"`, or `"vmdk"`; when omitted it defaults from the file extension. `fstype` is the inner filesystem type such as `"ext4"`; when omitted agentd auto-detects.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Host path to the disk image |
+| format | `str \| None` | Disk image format hint |
+| fstype | `str \| None` | Inner filesystem type |
+| readonly | `bool` | Mount as read-only |
+| noexec | `bool` | Prevent direct execution from the mount |
 
 **Returns**
 
@@ -353,6 +389,7 @@ MountConfig(
     named: str | None = None,
     size_mib: int | None = None,
     readonly: bool = False,
+    noexec: bool = False,
 )
 ```
 
@@ -363,6 +400,7 @@ MountConfig(
 | named | `str \| None` | `None` | Volume name for named mounts |
 | size_mib | `int \| None` | `None` | Size limit for tmpfs mounts |
 | readonly | `bool` | `False` | Whether the mount is read-only |
+| noexec | `bool` | `False` | Whether direct execution from the mount is disabled |
 
 ### MountKind
 

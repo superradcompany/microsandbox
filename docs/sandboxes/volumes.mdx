@@ -4,9 +4,11 @@ description: Persist and share data across sandboxes
 icon: "hard-drive"
 ---
 
-Volumes give a sandbox direct filesystem access to host-side directories. They're useful for persisting data across restarts, sharing data between sandboxes, or mounting host directories into the guest. They're also significantly faster than the [filesystem API](/sandboxes/filesystem) (which transfers files individually), so for anything beyond ad-hoc reads and writes, volumes are the way to go.
+Volumes give a sandbox direct filesystem access to host-side storage or in-memory filesystems. They're useful for persisting data across restarts, sharing data between sandboxes, or mounting host data into the guest. They're also significantly faster than the [filesystem API](/sandboxes/filesystem) (which transfers files individually), so for anything beyond ad-hoc reads and writes, volumes are the way to go.
 
-microsandbox supports three types of mounts: bind mounts, named volumes, and tmpfs.
+microsandbox supports four types of mounts: bind mounts, named volumes, tmpfs, and disk-image volumes.
+
+Mounts are `nosuid` and `nodev` inside the guest by default. Add `readonly` / `ro` when the guest should not write, and add `noexec` when files on the mount should not be executed directly. User commands also run without mount-admin privilege, so `ro` and `noexec` cannot be undone with a guest remount. `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
 
 ## Bind mounts
 
@@ -16,7 +18,7 @@ Mount a directory from the host directly into the sandbox. Changes inside the sa
 ```rust Rust
 let sb = Sandbox::builder("dev")
     .image("python")
-    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
     .volume("/app/data", |v| v.bind("./data"))
     .create()
     .await?;
@@ -27,7 +29,7 @@ import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("dev")
     .image("python")
-    .volume("/app/src",  (m) => m.bind("./src").readonly())
+    .volume("/app/src",  (m) => m.bind("./src").readonly().noexec())
     .volume("/app/data", (m) => m.bind("./data"))
     .create();
 ```
@@ -39,7 +41,7 @@ sb = await Sandbox.create(
     "dev",
     image="python",
     volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
+        "/app/src": Volume.bind("./src", readonly=True, noexec=True),
         "/app/data": Volume.bind("./data"),
     },
 )
@@ -49,7 +51,7 @@ sb = await Sandbox.create(
 sb, err := m.CreateSandbox(ctx, "dev",
     m.WithImage("python"),
     m.WithMounts(map[string]m.MountConfig{
-        "/app/src":  m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/app/src":  m.Mount.Bind("./src", m.MountOptions{Readonly: true, Noexec: true}),
         "/app/data": m.Mount.Bind("./data", m.MountOptions{}),
     }),
 )
@@ -57,7 +59,7 @@ sb, err := m.CreateSandbox(ctx, "dev",
 
 ```bash CLI
 msb create python --name dev \
-  -v ./src:/app/src:ro \
+  -v ./src:/app/src:ro,noexec \
   -v ./data:/app/data
 ```
 
@@ -287,6 +289,44 @@ msb volume rm old-cache
 
 </CodeGroup>
 
+## Disk-image volumes
+
+Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw), and the inner filesystem type is auto-detected unless you set `fstype`.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("seeded")
+    .image("alpine")
+    .volume("/seed", |v| v.disk("./seed.raw").readonly().noexec())
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("seeded")
+    .image("alpine")
+    .volume("/seed", (m) => m.disk("./seed.raw").readonly().noexec())
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "seeded",
+    image="alpine",
+    volumes={"/seed": Volume.disk("./seed.raw", readonly=True, noexec=True)},
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "seeded",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/seed": m.Mount.Disk("./seed.raw", m.DiskOptions{Readonly: true, Noexec: true}),
+    }),
+)
+```
+</CodeGroup>
+
 ## Tmpfs
 
 An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space, build artifacts, or anything that doesn't need to outlive the sandbox.
@@ -295,7 +335,7 @@ An in-memory filesystem that disappears when the sandbox stops. Useful for scrat
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("alpine")
-    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100).noexec())
     .create()
     .await?;
 ```
@@ -305,7 +345,7 @@ import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
     .image("alpine")
-    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100).noexec())
     .create();
 ```
 
@@ -314,7 +354,7 @@ sb = await Sandbox.create(
     "worker",
     image="alpine",
     volumes={
-        "/tmp/scratch": Volume.tmpfs(size_mib=100),
+        "/tmp/scratch": Volume.tmpfs(size_mib=100, noexec=True),
     },
 )
 ```
@@ -323,14 +363,14 @@ sb = await Sandbox.create(
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("alpine"),
     m.WithMounts(map[string]m.MountConfig{
-        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100, Noexec: true}),
     }),
 )
 ```
 
 ```bash CLI
 msb create alpine --name worker \
-  --tmpfs /tmp/scratch:100
+  --tmpfs /tmp/scratch:100:noexec
 ```
 
 </CodeGroup>

@@ -37,6 +37,7 @@ pub struct PassthroughFsBuilder {
     root_dir: Option<PathBuf>,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    readonly: bool,
     entry_timeout: Duration,
     attr_timeout: Duration,
     cache_policy: CachePolicy,
@@ -55,6 +56,7 @@ impl PassthroughFsBuilder {
             root_dir: None,
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            readonly: false,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
@@ -78,6 +80,12 @@ impl PassthroughFsBuilder {
     /// Set the host permission propagation policy. Default: [`HostPermissions::Private`].
     pub fn host_permissions(mut self, policy: HostPermissions) -> Self {
         self.host_permissions = policy;
+        self
+    }
+
+    /// Set whether mutating guest operations should be rejected.
+    pub fn readonly(mut self, readonly: bool) -> Self {
+        self.readonly = readonly;
         self
     }
 
@@ -138,6 +146,7 @@ impl PassthroughFsBuilder {
             root_dir: root_dir.clone(),
             stat_virtualization: self.stat_virtualization,
             host_permissions: self.host_permissions,
+            readonly: self.readonly,
             entry_timeout: self.entry_timeout,
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,

@@ -163,7 +163,8 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | `disk(host)` | Mount a host disk image as a virtio-blk device. |
 | `format(fmt)` | Disk image format (`'qcow2' \| 'raw' \| 'vmdk'`). Defaults to the file extension. Disk only. |
 | `fstype(fs)` | Inner filesystem type (e.g. `"ext4"`). Disk only; omit to autodetect. |
-| `readonly()` | Mount read-only. |
+| `readonly()` | Mount read-only; virtiofs-backed mounts also reject writes in the host filesystem server. |
+| `noexec()` | Prevent direct execution from the mount. Interpreters can still read scripts from it. |
 | `size(mib)` | Cap in MiB. Tmpfs only. |
 | `build()` | Internal — produce a `VolumeMount`. |
 
@@ -173,9 +174,9 @@ Discriminated union produced by `MountBuilder.build()`.
 
 ```typescript
 type VolumeMount =
-  | { kind: "bind"; host: string; guest: string; readonly: boolean }
-  | { kind: "named"; name: string; guest: string; readonly: boolean }
-  | { kind: "tmpfs"; guest: string; sizeMib: number | null; readonly: boolean }
+  | { kind: "bind"; host: string; guest: string; readonly: boolean; noexec: boolean }
+  | { kind: "named"; name: string; guest: string; readonly: boolean; noexec: boolean }
+  | { kind: "tmpfs"; guest: string; sizeMib: number | null; readonly: boolean; noexec: boolean }
   | {
       kind: "disk";
       host: string;
@@ -183,6 +184,7 @@ type VolumeMount =
       format: DiskImageFormat;
       fstype: string | null;
       readonly: boolean;
+      noexec: boolean;
     };
 ```
 

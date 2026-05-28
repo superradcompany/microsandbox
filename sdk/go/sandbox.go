@@ -100,6 +100,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				Format:             m.Format,
 				Fstype:             m.Fstype,
 				Readonly:           m.Readonly,
+				Noexec:             m.Noexec,
 				SizeMiB:            m.SizeMiB,
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
