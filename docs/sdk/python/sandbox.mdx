@@ -17,13 +17,13 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 async def create(name: str, **kwargs) -> Sandbox
 ```
 
-Create and boot a sandbox. Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
+Create and boot a sandbox. Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `str` | Sandbox name |
+| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
 | image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
 | snapshot | `str \| os.PathLike` | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | Virtual CPUs (default `1`) |
@@ -101,7 +101,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `str` | Name of a stopped sandbox |
+| name | `str` | Name of a stopped sandbox, up to 128 UTF-8 bytes |
 | detached | `bool` | If `True`, sandbox survives after your process exits (default `False`) |
 
 **Returns**
@@ -125,7 +125,7 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `str` | Sandbox name |
+| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
 
 **Returns**
 
@@ -165,7 +165,7 @@ Delete a stopped sandbox and all its state from disk. Fails if the sandbox is st
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `str` | Sandbox name |
+| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
 
 ---
 
@@ -180,7 +180,7 @@ Delete a stopped sandbox and all its state from disk. Fails if the sandbox is st
 async def name(self) -> str
 ```
 
-Sandbox name. This is an async property -- use `await sb.name`.
+Sandbox name. Names are limited to 128 UTF-8 bytes. This is an async property -- use `await sb.name`.
 
 ---
 
@@ -995,7 +995,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| name | `str` | Sandbox name |
+| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
 | status | `str` | Current status (`"running"`, `"stopped"`, `"crashed"`, `"draining"`, `"paused"`) |
 | config_json | `str` | Raw JSON configuration |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |

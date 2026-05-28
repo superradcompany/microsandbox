@@ -75,6 +75,8 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Start an existing stopped sandbox (attached mode).
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[napi(factory)]
     pub async fn start(name: String) -> Result<Sandbox> {
         let inner = microsandbox::sandbox::Sandbox::start(&name)
@@ -86,6 +88,8 @@ impl Sandbox {
     }
 
     /// Start an existing stopped sandbox (detached mode).
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[napi(factory)]
     pub async fn start_detached(name: String) -> Result<Sandbox> {
         let inner = microsandbox::sandbox::Sandbox::start_detached(&name)
@@ -101,6 +105,8 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Get a lightweight handle to an existing sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[napi]
     pub async fn get(name: String) -> Result<JsSandboxHandle> {
         let handle = microsandbox::sandbox::Sandbox::get(&name)
@@ -119,6 +125,8 @@ impl Sandbox {
     }
 
     /// Remove a stopped sandbox from the database.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[napi(js_name = "remove")]
     pub async fn remove_static(name: String) -> Result<()> {
         microsandbox::sandbox::Sandbox::remove(&name)
@@ -130,7 +138,7 @@ impl Sandbox {
     // Properties
     //----------------------------------------------------------------------------------------------
 
-    /// Sandbox name.
+    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
     pub async fn name(&self) -> Result<String> {
         let guard = self.inner.lock().await;

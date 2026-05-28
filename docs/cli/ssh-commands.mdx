@@ -18,8 +18,8 @@ msb ssh --name serve -- uptime
 
 | Argument | Description |
 |----------|-------------|
-| `sandbox` | Sandbox name |
-| `--name NAME` | Explicit sandbox name, useful when the name collides with `serve`, `authorize`, or `help` |
+| `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
+| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes; useful when the name collides with `serve`, `authorize`, or `help` |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
 ## msb ssh authorize
@@ -82,8 +82,8 @@ msb ssh connect devbox -- uname -a
 
 | Argument | Description |
 |----------|-------------|
-| `sandbox` | Sandbox name |
-| `--name NAME` | Explicit sandbox name |
+| `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
+| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
 ## SSH state

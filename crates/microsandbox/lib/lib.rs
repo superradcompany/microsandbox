@@ -40,7 +40,9 @@ pub use sandbox::ssh::{
     SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
     SshStdioStream,
 };
-pub use sandbox::{ExecOutput, Sandbox, SandboxConfig};
+pub use sandbox::{
+    ExecOutput, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig, validate_sandbox_name,
+};
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
     SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,

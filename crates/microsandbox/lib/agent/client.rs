@@ -249,17 +249,23 @@ impl AgentClient {
     /// Resolve a sandbox name to its agent socket path and connect.
     ///
     /// The socket lives under the SDK's configured runtime directory at a
-    /// short, name-derived path.
+    /// short, name-derived path. Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
         Self::connect_sandbox_with_timeout(name, DEFAULT_HANDSHAKE_TIMEOUT).await
     }
 
     /// Resolve a sandbox name to its agent socket path and connect with an
     /// explicit handshake timeout.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn connect_sandbox_with_timeout(
         name: &str,
         timeout: Duration,
     ) -> AgentClientResult<Self> {
+        if let Some(message) = crate::sandbox::sandbox_name_validation_message(name) {
+            return Err(AgentClientError::InvalidSandboxName(message));
+        }
+
         let mut last_error = None;
         for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
             if !sock_path.exists() {

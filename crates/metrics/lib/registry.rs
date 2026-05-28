@@ -37,7 +37,7 @@ const INIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub struct ReserveSlot<'a> {
     /// Catalog sandbox id.
     pub sandbox_id: i32,
-    /// Sandbox name. Truncated to fit the slot.
+    /// Sandbox name. Must fit in the slot's fixed inline name buffer.
     pub name: &'a str,
     /// Configured guest memory limit in bytes.
     pub memory_limit_bytes: u64,
@@ -241,6 +241,13 @@ impl MetricsRegistry {
 
     /// Reserve a slot for an upcoming sandbox spawn.
     pub fn reserve(&self, spec: ReserveSlot<'_>) -> MetricsResult<SlotReservation> {
+        if spec.name.len() > NAME_BYTES {
+            return Err(MetricsError::Custom(format!(
+                "sandbox name is too long for metrics slot: {} bytes (max {NAME_BYTES})",
+                spec.name.len()
+            )));
+        }
+
         let capacity = self.inner.capacity;
         // Scan slots once for a Free entry; fall back to a second pass that
         // also reclaims Stale entries. Two passes keep Stale samples visible
@@ -1054,6 +1061,26 @@ mod tests {
 
         writer.release(ReleaseMode::Free).unwrap();
         assert!(reg.snapshot().unwrap().is_empty());
+        cleanup(&name);
+    }
+
+    #[test]
+    fn reserve_rejects_name_that_exceeds_inline_slot_capacity() {
+        let name = unique_name("long");
+        let reg = MetricsRegistry::open_or_create(&name, 16).unwrap();
+
+        let err = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: &"x".repeat(NAME_BYTES + 1),
+                memory_limit_bytes: 1,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "sandbox name is too long for metrics slot: 129 bytes (max 128)"
+        );
         cleanup(&name);
     }
 

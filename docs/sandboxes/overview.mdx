@@ -10,7 +10,7 @@ The security boundary here is hardware virtualization, not Linux namespaces. Con
 
 ## Creating a sandbox
 
-At minimum, a sandbox needs a name and an image. Everything else has sensible defaults: 1 vCPU, 512 MiB memory, public-only networking, `/bin/sh` as the shell.
+At minimum, a sandbox needs a name and an image. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. Everything else has sensible defaults: 1 vCPU, 512 MiB memory, public-only networking, `/bin/sh` as the shell.
 
 <CodeGroup>
 ```rust Rust

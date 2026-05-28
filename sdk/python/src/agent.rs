@@ -25,6 +25,8 @@ pub struct PyAgentClient {
 #[pymethods]
 impl PyAgentClient {
     /// Connect to a running sandbox by name.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     #[pyo3(signature = (name, *, timeout = None))]
     fn connect_sandbox<'py>(

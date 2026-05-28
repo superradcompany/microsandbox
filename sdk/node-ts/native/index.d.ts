@@ -10,7 +10,8 @@
 export declare class AgentClient {
   /**
    * Connect to a sandbox by name. Resolves the agent socket from the
-   * SDK's configured sandboxes directory.
+   * SDK's configured sandboxes directory. Sandbox names are limited to
+   * 128 UTF-8 bytes.
    */
   static connectSandbox(name: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
   /** Connect to an agentd relay socket by path. */
@@ -729,17 +730,33 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
-  /** Start an existing stopped sandbox (attached mode). */
+  /**
+   * Start an existing stopped sandbox (attached mode).
+   *
+   * Sandbox names are limited to 128 UTF-8 bytes.
+   */
   static start(name: string): Promise<Sandbox>
-  /** Start an existing stopped sandbox (detached mode). */
+  /**
+   * Start an existing stopped sandbox (detached mode).
+   *
+   * Sandbox names are limited to 128 UTF-8 bytes.
+   */
   static startDetached(name: string): Promise<Sandbox>
-  /** Get a lightweight handle to an existing sandbox. */
+  /**
+   * Get a lightweight handle to an existing sandbox.
+   *
+   * Sandbox names are limited to 128 UTF-8 bytes.
+   */
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
   static list(): Promise<Array<SandboxInfo>>
-  /** Remove a stopped sandbox from the database. */
+  /**
+   * Remove a stopped sandbox from the database.
+   *
+   * Sandbox names are limited to 128 UTF-8 bytes.
+   */
   static remove(name: string): Promise<void>
-  /** Sandbox name. */
+  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
   get ownsLifecycle(): Promise<boolean>
@@ -830,9 +847,11 @@ export declare class Sandbox {
  * 1:1; setters mutate in place and return `this`. Closure-style
  * sub-builders (volume / patch / network / secret / registry / imageWith)
  * receive a fresh napi-wrapped builder, let JS chain on it, and route
- * the result back through the core SDK's closure callback.
+ * the result back through the core SDK's closure callback. Sandbox names are
+ * limited to 128 UTF-8 bytes.
  */
 export declare class SandboxBuilder {
+  /** Start building a sandbox. Names are limited to 128 UTF-8 bytes. */
   constructor(name: string)
   /**
    * Set the rootfs image source. Accepts an OCI reference or a host
@@ -1041,7 +1060,7 @@ export type JsSandboxFs = SandboxFs
  * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
  */
 export declare class SandboxHandle {
-  /** Sandbox name. */
+  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Status at time of query: "running", "stopped", "crashed", or "draining". */
   get status(): string
@@ -1796,6 +1815,7 @@ export interface Rlimit {
 
 /** Lightweight handle info for a sandbox from the database. */
 export interface SandboxInfo {
+  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   name: string
   /** "running", "stopped", "crashed", or "draining". */
   status: string

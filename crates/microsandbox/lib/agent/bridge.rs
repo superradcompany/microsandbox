@@ -61,12 +61,16 @@ pub struct AgentBridge {
 
 impl AgentBridge {
     /// Connect to a sandbox by name (resolves the socket path from SDK config).
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
         let client = AgentClient::connect_sandbox(name).await?;
         Ok(Self::from_client(client))
     }
 
     /// Connect to a sandbox by name with an explicit handshake timeout.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn connect_sandbox_with_timeout(
         name: &str,
         timeout: Duration,

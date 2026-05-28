@@ -83,6 +83,10 @@ class AgentClient:
         *,
         timeout: float | None = None,
     ) -> AgentClient:
+        """Connect to a running sandbox by name.
+
+        Sandbox names are limited to 128 UTF-8 bytes.
+        """
         return cls(await _PyAgentClient.connect_sandbox(name, timeout=timeout))
 
     @classmethod

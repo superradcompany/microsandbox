@@ -86,6 +86,8 @@ pub const REGISTRY_VERSION: u32 = 1;
 pub const DEFAULT_CAPACITY: u32 = 1024;
 
 /// Maximum bytes reserved for the sandbox name inside a slot.
+///
+/// This matches the public sandbox-name byte limit enforced by the SDK crate.
 pub const NAME_BYTES: usize = 128;
 
 /// Size of one slot in bytes. Sized at 512 bytes so a slot occupies a single
@@ -191,7 +193,8 @@ pub struct Slot {
     pub name_len: AtomicU16,
     /// Padding before the byte array so trailing atomics align cleanly.
     _pad1: [AtomicU8; 6],
-    /// UTF-8 encoded sandbox name, truncated to `NAME_BYTES`.
+    /// UTF-8 encoded sandbox name. Public SDK callers reject names longer
+    /// than `NAME_BYTES`.
     pub name_bytes: [AtomicU8; NAME_BYTES],
     /// Padding to round the struct up to `SLOT_SIZE`.
     _tail: [u8; SLOT_TAIL_PAD],

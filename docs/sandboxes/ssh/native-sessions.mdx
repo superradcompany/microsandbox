@@ -21,7 +21,7 @@ msb ssh devbox -- uname -a
 msb ssh devbox -- sh -lc "cd /app && npm test"
 ```
 
-If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`:
+If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`. Sandbox names are limited to 128 UTF-8 bytes:
 
 ```bash
 msb ssh --name serve

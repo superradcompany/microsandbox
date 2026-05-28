@@ -67,8 +67,10 @@ impl RegistryConfigBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
-    /// Start building a sandbox configuration. The name must be unique
-    /// among existing sandboxes (unless [`replace`](Self::replace) is set).
+    /// Start building a sandbox configuration.
+    ///
+    /// The name must be unique among existing sandboxes (unless
+    /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             config: SandboxConfig {
@@ -908,7 +910,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
-    use crate::sandbox::RlimitResource;
+    use crate::sandbox::{MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
     #[cfg(feature = "net")]
@@ -928,8 +930,8 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_builder_accepts_long_sandbox_name() {
-        let name = format!("testing-{}", "x".repeat(256));
+    async fn test_builder_accepts_128_byte_sandbox_name() {
+        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
         let config = SandboxBuilder::new(name.clone())
             .image("alpine")
             .build()
@@ -937,6 +939,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.name, name);
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_over_128_byte_sandbox_name() {
+        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES + 1);
+        let err = SandboxBuilder::new(name)
+            .image("alpine")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
     }
 
     #[tokio::test]

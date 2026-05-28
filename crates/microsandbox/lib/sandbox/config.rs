@@ -69,7 +69,7 @@ fn default_disable_metrics_sample() -> bool {
 /// `Serialize`/`Deserialize` for file-based configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Unique sandbox name (required).
+    /// Unique sandbox name (required, maximum 128 UTF-8 bytes).
     pub name: String,
 
     /// Root filesystem source (required).

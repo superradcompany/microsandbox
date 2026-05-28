@@ -36,7 +36,7 @@ stateDiagram-v2
 
 ## Create a sandbox
 
-Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands.
+Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands. Names must be non-empty and no longer than 128 UTF-8 bytes.
 
 <CodeGroup>
 ```rust Rust

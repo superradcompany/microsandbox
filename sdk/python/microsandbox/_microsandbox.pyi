@@ -9,6 +9,11 @@ from typing import Any
 from microsandbox.types import LogReadSource, LogSource, MountConfig, Rlimit, Stdin
 
 class PyAgentClient:
+    """Raw agent client.
+
+    Sandbox names passed to connect_sandbox are limited to 128 UTF-8 bytes.
+    """
+
     @staticmethod
     async def connect_sandbox(
         name: str,
@@ -30,6 +35,11 @@ class PyAgentClient:
     async def close(self) -> None: ...
 
 class Sandbox:
+    """Sandbox lifecycle API.
+
+    Sandbox names are limited to 128 UTF-8 bytes.
+    """
+
     @staticmethod
     async def create(name: str, **kwargs: Any) -> Sandbox: ...
     @staticmethod
@@ -142,6 +152,11 @@ class Sandbox:
     ) -> bool: ...
 
 class SandboxHandle:
+    """Lightweight sandbox metadata handle.
+
+    Sandbox names are limited to 128 UTF-8 bytes.
+    """
+
     @property
     def name(self) -> str: ...
     @property

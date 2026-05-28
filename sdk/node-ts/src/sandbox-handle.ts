@@ -23,6 +23,7 @@ const READ_ONLY_MSG =
 
 export class SandboxHandle {
   private readonly inner: NapiSandboxHandle | NapiSandboxInfo;
+  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly status: SandboxStatus;
   readonly configJson: string;

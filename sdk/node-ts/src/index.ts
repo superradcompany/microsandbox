@@ -18,7 +18,8 @@ import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
  * equivalent to `Sandbox.builder(name)` — both return the same shape
- * with `.create()` resolving to a TS `Sandbox`.
+ * with `.create()` resolving to a TS `Sandbox`. Names are limited to
+ * 128 UTF-8 bytes.
  */
 export const SandboxBuilder = function SandboxBuilder(
   this: unknown,

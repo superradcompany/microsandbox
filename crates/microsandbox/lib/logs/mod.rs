@@ -132,6 +132,8 @@ pub fn log_dir_for(name: &str) -> PathBuf {
 
 /// Read all matching log entries for the named sandbox.
 ///
+/// Sandbox names are limited to 128 UTF-8 bytes.
+///
 /// Returns entries sorted by timestamp (strict chronological order
 /// across all sources). Returns
 /// [`MicrosandboxError::SandboxNotFound`] if the sandbox's log
@@ -151,6 +153,7 @@ pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<
 /// [`log_stream`] with [`LogStreamStart::From`] without losing log
 /// lines written between the snapshot drain and follow startup.
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
+    crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
         sources: opts.sources.clone(),
         // Push `since` into the parser when possible so early
@@ -180,6 +183,8 @@ pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxRe
 
 /// Stream log entries for the named sandbox.
 ///
+/// Sandbox names are limited to 128 UTF-8 bytes.
+///
 /// Returns [`MicrosandboxError::SandboxNotFound`] if the sandbox's
 /// log directory doesn't exist. Within each source, entries are
 /// chronological; across sources, ordering is "as parsed."
@@ -187,6 +192,7 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
+    crate::sandbox::validate_sandbox_name(name)?;
     let log_dir = log_dir_for(name);
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
         return Err(MicrosandboxError::SandboxNotFound(name.to_string()));

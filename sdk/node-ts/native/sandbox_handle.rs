@@ -30,7 +30,7 @@ impl JsSandboxHandle {
 
 #[napi]
 impl JsSandboxHandle {
-    /// Sandbox name.
+    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
     pub fn name(&self) -> String {
         self.inner.name().to_string()

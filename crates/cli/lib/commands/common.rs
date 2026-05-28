@@ -14,7 +14,7 @@ use crate::ui;
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
 #[derive(Debug, Default, Args)]
 pub struct SandboxOpts {
-    /// Name for the sandbox. Auto-generated if omitted.
+    /// Name for the sandbox. Auto-generated if omitted. Maximum 128 UTF-8 bytes.
     #[arg(short, long)]
     pub name: Option<String>,
 

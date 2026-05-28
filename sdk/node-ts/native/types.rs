@@ -182,6 +182,7 @@ pub struct ExecEvent {
 /// Lightweight handle info for a sandbox from the database.
 #[napi(object)]
 pub struct SandboxInfo {
+    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     pub name: String,
     /// "running", "stopped", "crashed", or "draining".
     pub status: String,

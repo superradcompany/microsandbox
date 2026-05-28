@@ -31,7 +31,7 @@ impl PySandboxHandle {
 
 #[pymethods]
 impl PySandboxHandle {
-    /// Sandbox name.
+    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[getter]
     fn name(&self) -> PyResult<String> {
         let guard = self

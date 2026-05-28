@@ -63,7 +63,7 @@ impl ProcessHandle {
         self.pid
     }
 
-    /// Get the sandbox name.
+    /// Get the sandbox name. Names are limited to 128 UTF-8 bytes.
     pub fn sandbox_name(&self) -> &str {
         &self.sandbox_name
     }

@@ -75,6 +75,8 @@ impl SandboxHandle {
     }
 
     /// Unique name identifying this sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub fn name(&self) -> &str {
         &self.name
     }

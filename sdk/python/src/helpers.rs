@@ -11,6 +11,8 @@ use pyo3::types::{PyDict, PyList};
 /// Build a `SandboxBuilder` from the `(name, **kwargs)` form of
 /// `Sandbox.create`.
 ///
+/// Sandbox names are limited to 128 UTF-8 bytes by the core builder.
+///
 /// Returns the builder so the async caller can drive `build().await` or
 /// `create().await` itself — the kwarg-extraction phase has to stay sync
 /// (PyO3 dict access needs the GIL), but the config materialization step

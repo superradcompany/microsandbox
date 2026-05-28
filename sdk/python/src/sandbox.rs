@@ -21,6 +21,8 @@ use crate::ssh::PySandboxSsh;
 //--------------------------------------------------------------------------------------------------
 
 /// A running sandbox instance.
+///
+/// Sandbox names are limited to 128 UTF-8 bytes.
 #[pyclass(name = "Sandbox")]
 pub struct PySandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
@@ -65,6 +67,8 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Create a sandbox from a name and keyword-only configuration.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     #[pyo3(signature = (name, **kwargs))]
     fn create<'py>(
@@ -89,6 +93,8 @@ impl PySandbox {
     }
 
     /// Start an existing stopped sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     #[pyo3(signature = (name, *, detached = false))]
     fn start<'py>(py: Python<'py>, name: String, detached: bool) -> PyResult<Bound<'py, PyAny>> {
@@ -107,6 +113,8 @@ impl PySandbox {
     }
 
     /// Create a sandbox with pull progress reporting.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     /// Returns a PullSession async context manager.
     #[staticmethod]
     #[pyo3(signature = (name, **kwargs))]
@@ -144,6 +152,8 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Get a lightweight handle to an existing sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     fn get<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -170,6 +180,8 @@ impl PySandbox {
     }
 
     /// Remove a stopped sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     fn remove<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -184,7 +196,7 @@ impl PySandbox {
     // Properties
     //----------------------------------------------------------------------------------------------
 
-    /// Sandbox name.
+    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[getter]
     fn name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

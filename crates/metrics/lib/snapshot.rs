@@ -15,7 +15,7 @@ pub struct LiveMetric {
     pub run_id: i32,
     /// PID of the runtime process that owns the slot.
     pub pid: i32,
-    /// UTF-8 sandbox name (truncated to the slot capacity).
+    /// UTF-8 sandbox name stored inline in the slot.
     pub name: String,
     /// Wall-clock time at which the most recent sample was written.
     pub timestamp: chrono::DateTime<chrono::Utc>,

@@ -55,6 +55,17 @@ use self::attach::AttachOptions;
 use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum UTF-8 byte length for a sandbox name.
+///
+/// The limit matches the fixed inline name storage in the shared-memory
+/// metrics slot, so SDK names can be copied into live metrics without
+/// truncation.
+pub const MAX_SANDBOX_NAME_BYTES: usize = microsandbox_metrics::SLOT_NAME_BYTES;
+
+//--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
@@ -118,6 +129,8 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Start building a new sandbox configuration.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
         SandboxBuilder::new(name)
     }
@@ -181,6 +194,8 @@ impl Sandbox {
 
     /// Start an existing stopped sandbox from persisted state.
     ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
+    ///
     /// Reuses the serialized sandbox config and pinned rootfs state without
     /// re-resolving the original OCI reference.
     pub async fn start(name: &str) -> MicrosandboxResult<Self> {
@@ -188,6 +203,8 @@ impl Sandbox {
     }
 
     /// Start an existing sandbox in detached/background mode.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
         Self::start_with_mode(name, SpawnMode::Detached).await
     }
@@ -408,6 +425,7 @@ impl Sandbox {
     }
 
     pub(super) async fn start_with_mode(name: &str, mode: SpawnMode) -> MicrosandboxResult<Self> {
+        validate_sandbox_name(name)?;
         tracing::debug!(sandbox = name, ?mode, "start_with_mode: loading record");
         let pools = db::init_global().await?;
         let write_db = pools.write();
@@ -472,7 +490,10 @@ impl Sandbox {
     }
 
     /// Get a sandbox handle by name from the database.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
+        validate_sandbox_name(name)?;
         let pools = db::init_global().await?;
 
         let model = sandbox_entity::Entity::find()
@@ -516,6 +537,7 @@ impl Sandbox {
     /// Remove a stopped sandbox from the database.
     ///
     /// Convenience method equivalent to `Sandbox::get(name).await?.remove().await`.
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
         Self::get(name).await?.remove().await
     }
@@ -544,6 +566,8 @@ impl Sandbox {
     }
 
     /// Unique name identifying this sandbox.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
     pub fn name(&self) -> &str {
         &self.config.name
     }
@@ -1729,15 +1753,39 @@ fn digest_pinned_reference(reference: &str, manifest_digest: &str) -> Microsandb
     Ok(pinned)
 }
 
+/// Validate a sandbox name used by CLI and SDK APIs.
+///
+/// Names are UTF-8 strings and must be non-empty and no longer than
+/// [`MAX_SANDBOX_NAME_BYTES`] bytes. The limit is measured in bytes, not
+/// Unicode scalar values, because names are stored in fixed-size shared-memory
+/// metrics slots.
+pub fn validate_sandbox_name(name: &str) -> MicrosandboxResult<()> {
+    if let Some(message) = sandbox_name_validation_message(name) {
+        return Err(MicrosandboxError::InvalidConfig(message));
+    }
+
+    Ok(())
+}
+
 /// Validate sandbox-name-derived runtime paths before the sandbox process starts.
 pub(super) fn validate_sandbox_name_for_runtime(name: &str) -> MicrosandboxResult<()> {
+    validate_sandbox_name(name)?;
+    runtime::resolve_sandbox_agent_socket_path(name).map(|_| ())
+}
+
+pub(crate) fn sandbox_name_validation_message(name: &str) -> Option<String> {
     if name.is_empty() {
-        return Err(MicrosandboxError::InvalidConfig(
-            "sandbox name is required".into(),
+        return Some("sandbox name is required".into());
+    }
+
+    let len = name.len();
+    if len > MAX_SANDBOX_NAME_BYTES {
+        return Some(format!(
+            "sandbox name is too long: {len} bytes (max {MAX_SANDBOX_NAME_BYTES})"
         ));
     }
 
-    runtime::resolve_sandbox_agent_socket_path(name).map(|_| ())
+    None
 }
 
 /// Pull an OCI image and return the pull result.
@@ -2233,9 +2281,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        RootfsSource, SandboxConfig, SandboxStatus, digest_pinned_reference, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, validate_rootfs_source, validate_sandbox_name_for_runtime,
+        MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxStatus,
+        digest_pinned_reference, insert_sandbox_record, persist_oci_manifest_pin,
+        prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
+        validate_rootfs_source, validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2402,8 +2451,30 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_sandbox_name_accepts_long_name() {
-        validate_sandbox_name_for_runtime(&"x".repeat(256)).unwrap();
+    fn test_validate_sandbox_name_accepts_128_byte_name() {
+        validate_sandbox_name_for_runtime(&"x".repeat(MAX_SANDBOX_NAME_BYTES)).unwrap();
+    }
+
+    #[test]
+    fn test_validate_sandbox_name_rejects_over_128_bytes() {
+        let err =
+            validate_sandbox_name_for_runtime(&"x".repeat(MAX_SANDBOX_NAME_BYTES + 1)).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
+    }
+
+    #[test]
+    fn test_validate_sandbox_name_limit_is_utf8_bytes() {
+        validate_sandbox_name_for_runtime(&"é".repeat(64)).unwrap();
+
+        let err = validate_sandbox_name_for_runtime(&"é".repeat(65)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid config: sandbox name is too long: 130 bytes (max 128)"
+        );
     }
 
     #[test]

@@ -16,13 +16,13 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 fn builder(name: impl Into<String>) -> SandboxBuilder
 ```
 
-Create a builder for configuring a new sandbox. The builder lets you set the image, resources, volumes, networking, secrets, and other options before booting the VM. See [`SandboxBuilder`](#sandboxbuilder) for all available options.
+Create a builder for configuring a new sandbox. The builder lets you set the image, resources, volumes, networking, secrets, and other options before booting the VM. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. See [`SandboxBuilder`](#sandboxbuilder) for all available options.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `impl Into<String>` | Sandbox name - must be unique among running sandboxes |
+| name | `impl Into<String>` | Sandbox name - must be unique and no longer than 128 UTF-8 bytes |
 
 **Returns**
 
@@ -44,7 +44,7 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `&str` | Sandbox name |
+| name | `&str` | Sandbox name, up to 128 UTF-8 bytes |
 
 **Returns**
 
@@ -82,7 +82,7 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `&str` | Sandbox name |
+| name | `&str` | Sandbox name, up to 128 UTF-8 bytes |
 
 ---
 
@@ -98,7 +98,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `&str` | Name of a stopped sandbox |
+| name | `&str` | Name of a stopped sandbox, up to 128 UTF-8 bytes |
 
 **Returns**
 
@@ -120,7 +120,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 | Name | Type | Description |
 |------|------|-------------|
-| name | `&str` | Name of a stopped sandbox |
+| name | `&str` | Name of a stopped sandbox, up to 128 UTF-8 bytes |
 
 **Returns**
 
@@ -315,7 +315,7 @@ Get the sandbox name.
 
 | Type | Description |
 |------|-------------|
-| `&str` | Sandbox name |
+| `&str` | Sandbox name, up to 128 UTF-8 bytes |
 
 ---
 
@@ -1176,7 +1176,7 @@ The full configuration of a sandbox. Obtained via [`config()`](#config) or built
 | image | `RootfsSource` | Root filesystem source (OCI, bind, or disk image) |
 | max_duration_secs | `Option<u64>` | Maximum lifetime |
 | memory_mib | `u32` | Guest memory in MiB |
-| name | `String` | Sandbox name |
+| name | `String` | Sandbox name, up to 128 UTF-8 bytes |
 | patches | `Vec<Patch>` | Rootfs patches |
 | scripts | `Vec<(String, String)>` | Named scripts |
 | shell | `Option<String>` | Shell for `shell()` calls |
@@ -1197,7 +1197,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | kill() | `Result<()>` | Force terminate immediately. Pending writes may be lost |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
-| name() | `&str` | Sandbox name |
+| name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
 | remove() | `Result<()>` | Delete sandbox and state |
 | start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |

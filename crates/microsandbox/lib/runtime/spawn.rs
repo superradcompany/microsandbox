@@ -1156,7 +1156,8 @@ mod tests {
     #[test]
     fn test_sandbox_agent_socket_path_is_independent_of_sandbox_name_length() {
         let short = sandbox_agent_socket_path("test");
-        let long = sandbox_agent_socket_path(&format!("testing-{}", "x".repeat(256)));
+        let max_len =
+            sandbox_agent_socket_path(&"x".repeat(crate::sandbox::MAX_SANDBOX_NAME_BYTES));
 
         let expected_len = "0123456789abcdef0123456789abcdef.sock".len();
         assert_eq!(
@@ -1164,11 +1165,11 @@ mod tests {
             expected_len
         );
         assert_eq!(
-            long.file_name().unwrap().to_string_lossy().len(),
+            max_len.file_name().unwrap().to_string_lossy().len(),
             expected_len
         );
-        assert_eq!(short.parent(), long.parent());
-        assert_ne!(short.file_name(), long.file_name());
+        assert_eq!(short.parent(), max_len.parent());
+        assert_ne!(short.file_name(), max_len.file_name());
     }
 
     #[test]

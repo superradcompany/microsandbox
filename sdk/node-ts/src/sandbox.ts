@@ -29,6 +29,7 @@ import { SandboxSsh } from "./ssh.js";
 
 /**
  * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
+ * Sandbox names are limited to 128 UTF-8 bytes.
  *
  * The instance IS the napi-rs `SandboxBuilder` class — every setter is a
  * native call, no TS-side reimplementation. Only the terminal `create()`
@@ -98,6 +99,7 @@ export class PullProgressCreate {
 export class Sandbox implements AsyncDisposable {
   /** @internal */
   readonly inner: NapiSandbox;
+  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly ownsLifecycle: boolean;
 
@@ -110,7 +112,7 @@ export class Sandbox implements AsyncDisposable {
 
   // -- statics ------------------------------------------------------------
 
-  /** Begin building a new sandbox. */
+  /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     const nb = new napi.SandboxBuilder(name);
     const origCreate = nb.create.bind(nb);
@@ -148,13 +150,19 @@ export class Sandbox implements AsyncDisposable {
     return nb as unknown as SandboxBuilder;
   }
 
-  /** Resume an existing stopped sandbox in attached mode. */
+  /**
+   * Resume an existing stopped sandbox in attached mode.
+   * Names are limited to 128 UTF-8 bytes.
+   */
   static async start(name: string): Promise<Sandbox> {
     const inner = await withMappedErrors(() => napi.Sandbox.start(name));
     return new Sandbox(inner, name, /*ownsLifecycle*/ true);
   }
 
-  /** Resume an existing stopped sandbox in detached mode. */
+  /**
+   * Resume an existing stopped sandbox in detached mode.
+   * Names are limited to 128 UTF-8 bytes.
+   */
   static async startDetached(name: string): Promise<Sandbox> {
     const inner = await withMappedErrors(() =>
       napi.Sandbox.startDetached(name),
@@ -162,7 +170,10 @@ export class Sandbox implements AsyncDisposable {
     return new Sandbox(inner, name, /*ownsLifecycle*/ false);
   }
 
-  /** Look up a database handle for an existing sandbox. */
+  /**
+   * Look up a database handle for an existing sandbox.
+   * Names are limited to 128 UTF-8 bytes.
+   */
   static async get(name: string): Promise<SandboxHandle> {
     const h = await withMappedErrors(() => napi.Sandbox.get(name));
     return new SandboxHandle(h);
@@ -174,7 +185,10 @@ export class Sandbox implements AsyncDisposable {
     return infos.map(sandboxInfoToHandle);
   }
 
-  /** Remove a stopped sandbox from the database. */
+  /**
+   * Remove a stopped sandbox from the database.
+   * Names are limited to 128 UTF-8 bytes.
+   */
   static async remove(name: string): Promise<void> {
     await withMappedErrors(() => napi.Sandbox.remove(name));
   }

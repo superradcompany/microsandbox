@@ -18,6 +18,8 @@ type Sandbox struct {
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
 // VM process — call Close (or StopAndWait + Close) when done.
 //
+// Sandbox names are limited to 128 UTF-8 bytes.
+//
 // ctx controls the boot operation only; cancelling ctx after this function
 // returns has no effect on the running sandbox.
 func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
@@ -151,7 +153,7 @@ func durationSecsCeil(d time.Duration) uint64 {
 
 // CreateSandboxDetached creates and boots a sandbox in detached mode. The VM
 // continues running after the returned handle is released or the Go process
-// exits. Reattach via GetSandbox.
+// exits. Reattach via GetSandbox. Sandbox names are limited to 128 UTF-8 bytes.
 func CreateSandboxDetached(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
 	opts = append(opts, WithDetached())
 	return CreateSandbox(ctx, name, opts...)
@@ -232,6 +234,7 @@ func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 }
 
 // GetSandbox returns metadata for a sandbox by name without connecting to it.
+// Sandbox names are limited to 128 UTF-8 bytes.
 // Returns ErrSandboxNotFound if no such sandbox exists. The returned
 // SandboxHandle exposes Connect/Start/Stop/Kill/Remove to operate on the sandbox.
 func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error) {
@@ -243,6 +246,7 @@ func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error) {
 }
 
 // StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
+// Sandbox names are limited to 128 UTF-8 bytes.
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	inner, err := ffi.StartSandbox(ctx, name, false)
 	if err != nil {
@@ -252,7 +256,8 @@ func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
 }
 
 // StartSandboxDetached boots a stopped sandbox in detached mode. The VM keeps
-// running after the returned handle is released.
+// running after the returned handle is released. Sandbox names are limited to
+// 128 UTF-8 bytes.
 func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
 	inner, err := ffi.StartSandbox(ctx, name, true)
 	if err != nil {
@@ -299,6 +304,7 @@ func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error) {
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
+// Sandbox names are limited to 128 UTF-8 bytes.
 func RemoveSandbox(ctx context.Context, name string) error {
 	return wrapFFI(ffi.RemoveSandbox(ctx, name))
 }
@@ -328,7 +334,7 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 	}
 }
 
-// Name returns the sandbox name.
+// Name returns the sandbox name. Names are limited to 128 UTF-8 bytes.
 func (h *SandboxHandle) Name() string { return h.name }
 
 // Status returns the sandbox's last-known lifecycle status.
@@ -429,7 +435,7 @@ func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotA
 // Live sandbox methods
 // ---------------------------------------------------------------------------
 
-// Name returns the sandbox's name.
+// Name returns the sandbox's name. Names are limited to 128 UTF-8 bytes.
 func (s *Sandbox) Name() string { return s.inner.Name() }
 
 // Stop gracefully stops the sandbox. It does not wait for the VM process

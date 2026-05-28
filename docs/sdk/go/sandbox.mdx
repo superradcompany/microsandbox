@@ -91,14 +91,14 @@ func CreateSandbox(
 ) (*Sandbox, error)
 ```
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. The returned [`*Sandbox`](#instance-methods) owns the VM process — call `Close` (or `StopAndWait` + `Close`) when done.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#instance-methods) owns the VM process — call `Close` (or `StopAndWait` + `Close`) when done.
 
 **Parameters**
 
 | Name | Type               | Description                                                                                             |
 | ---- | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | ctx  | `context.Context`  | Cancels the boot operation. Cancelling after this function returns has no effect on the running sandbox |
-| name | `string`           | Sandbox name                                                                                            |
+| name | `string`           | Sandbox name, up to 128 UTF-8 bytes                                                                    |
 | opts | `...SandboxOption` | Functional options — see [Options](#options)                                                            |
 
 **Returns**
@@ -136,7 +136,7 @@ func CreateSandboxDetached(
 ) (*Sandbox, error)
 ```
 
-Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox).
+Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox). Sandbox names are limited to 128 UTF-8 bytes.
 
 ---
 
@@ -153,7 +153,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
 | Name | Type              | Description                |
 | ---- | ----------------- | -------------------------- |
 | ctx  | `context.Context` | Cancels the boot operation |
-| name | `string`          | Name of a stopped sandbox  |
+| name | `string`          | Name of a stopped sandbox, up to 128 UTF-8 bytes |
 
 **Returns**
 
@@ -179,7 +179,7 @@ Boot a stopped sandbox in detached mode.
 func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
 ```
 
-Look up a sandbox by name and return a metadata handle without connecting to it. Returns `ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, and `Logs`.
+Look up a sandbox by name and return a metadata handle without connecting to it. Sandbox names are limited to 128 UTF-8 bytes. Returns `ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, and `Logs`.
 
 ---
 
@@ -940,7 +940,7 @@ A lightweight metadata reference to a sandbox returned by [`GetSandbox`](#getsan
 
 | Method                  | Returns                           | Description                                       |
 | ----------------------- | --------------------------------- | ------------------------------------------------- |
-| `Name()`                | `string`                          | Sandbox name                                      |
+| `Name()`                | `string`                          | Sandbox name, up to 128 UTF-8 bytes              |
 | `Status()`              | [`SandboxStatus`](#sandboxstatus) | Last-known lifecycle status                       |
 | `ConfigJSON()`          | `string`                          | Raw JSON configuration                            |
 | `CreatedAt()`           | `time.Time`                       | Creation time, zero value if unknown              |

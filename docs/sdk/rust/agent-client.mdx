@@ -54,7 +54,7 @@ Connect to an agent relay socket by path. The connection performs the relay hand
 async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
 ```
 
-Resolve a sandbox name to its relay socket path and connect to it.
+Resolve a sandbox name to its relay socket path and connect to it. Sandbox names are limited to 128 UTF-8 bytes.
 
 ---
 

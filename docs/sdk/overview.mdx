@@ -4,7 +4,7 @@ description: Install the SDK and create your first sandbox
 icon: "play"
 ---
 
-The SDK embeds the microsandbox runtime directly into whatever application uses it. `Sandbox.builder(name).create()` spawns the VM as a child process. No daemon to install, no server to connect to.
+The SDK embeds the microsandbox runtime directly into whatever application uses it. `Sandbox.builder(name).create()` spawns the VM as a child process. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. No daemon to install, no server to connect to.
 
 ## Installation
 

@@ -43,6 +43,7 @@ type AgentStream struct {
 }
 
 // ConnectAgentSandbox connects to a running sandbox by name.
+// Sandbox names are limited to 128 UTF-8 bytes.
 // Use context.WithTimeout to override the default 10s handshake timeout.
 func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error) {
 	inner, err := ffi.OpenAgentSandbox(ctx, name)

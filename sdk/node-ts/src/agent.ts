@@ -52,7 +52,10 @@ export interface AgentConnectOptions {
 export class AgentClient {
   private constructor(private readonly native: NapiAgentClient) {}
 
-  /** Connect to a running sandbox by name. */
+  /**
+   * Connect to a running sandbox by name.
+   * Names are limited to 128 UTF-8 bytes.
+   */
   static async connectSandbox(
     name: string,
     opts?: AgentConnectOptions,

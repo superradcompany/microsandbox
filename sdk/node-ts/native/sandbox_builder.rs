@@ -39,7 +39,8 @@ type _NapiHints = (JsDnsBuilder, JsTlsBuilder, JsSecretBuilder);
 /// 1:1; setters mutate in place and return `this`. Closure-style
 /// sub-builders (volume / patch / network / secret / registry / imageWith)
 /// receive a fresh napi-wrapped builder, let JS chain on it, and route
-/// the result back through the core SDK's closure callback.
+/// the result back through the core SDK's closure callback. Sandbox names are
+/// limited to 128 UTF-8 bytes.
 #[napi(js_name = "SandboxBuilder")]
 pub struct JsSandboxBuilder {
     inner: Option<RustSandboxBuilder>,
@@ -51,6 +52,7 @@ pub struct JsSandboxBuilder {
 
 #[napi]
 impl JsSandboxBuilder {
+    /// Start building a sandbox. Names are limited to 128 UTF-8 bytes.
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {

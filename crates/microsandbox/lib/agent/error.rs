@@ -39,6 +39,10 @@ pub enum AgentClientError {
     #[error("sandbox '{0}' not found")]
     SandboxNotFound(String),
 
+    /// Sandbox name failed SDK validation before socket resolution.
+    #[error("invalid sandbox name: {0}")]
+    InvalidSandboxName(String),
+
     /// An I/O error occurred on the socket after connect.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

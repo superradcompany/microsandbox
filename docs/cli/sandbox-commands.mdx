@@ -33,7 +33,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 
 | Flag | Description |
 |------|-------------|
-| `-n`, `--name` | Sandbox name (if omitted, sandbox is ephemeral) |
+| `-n`, `--name` | Sandbox name, up to 128 UTF-8 bytes (if omitted, sandbox is ephemeral) |
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
 | `--oci-upper-size` | Writable overlay upper size for OCI images (e.g. `4G`, `8192M`) |
