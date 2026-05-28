@@ -60,7 +60,7 @@ fn realtime_unix_nanos() -> io::Result<u64> {
 }
 
 fn set_realtime_unix_nanos(unix_time_nanos: u64) -> io::Result<()> {
-    let ts = timespec_from_unix_nanos(unix_time_nanos);
+    let ts = timespec_from_unix_nanos(unix_time_nanos)?;
     let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
     if ret == 0 {
         Ok(())
@@ -85,11 +85,17 @@ fn unix_nanos_from_timespec(ts: libc::timespec) -> io::Result<u64> {
         })
 }
 
-fn timespec_from_unix_nanos(unix_time_nanos: u64) -> libc::timespec {
-    libc::timespec {
-        tv_sec: (unix_time_nanos / NANOS_PER_SECOND) as libc::time_t,
-        tv_nsec: (unix_time_nanos % NANOS_PER_SECOND) as libc::c_long,
-    }
+fn timespec_from_unix_nanos(unix_time_nanos: u64) -> io::Result<libc::timespec> {
+    let tv_sec = (unix_time_nanos / NANOS_PER_SECOND)
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "realtime seconds overflow"))?;
+    let tv_nsec = (unix_time_nanos % NANOS_PER_SECOND)
+        .try_into()
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "realtime nanoseconds overflow")
+        })?;
+
+    Ok(libc::timespec { tv_sec, tv_nsec })
 }
 
 fn clock_delta_exceeds_tolerance(current_unix_nanos: u64, target_unix_nanos: u64) -> bool {
@@ -106,7 +112,7 @@ mod tests {
 
     #[test]
     fn timespec_from_unix_nanos_splits_seconds_and_nanos() {
-        let ts = timespec_from_unix_nanos(1_700_000_000_123_456_789);
+        let ts = timespec_from_unix_nanos(1_700_000_000_123_456_789).unwrap();
 
         assert_eq!(ts.tv_sec, 1_700_000_000);
         assert_eq!(ts.tv_nsec, 123_456_789);
