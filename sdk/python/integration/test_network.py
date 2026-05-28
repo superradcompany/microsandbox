@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from integration.helpers import free_tcp_port
-from microsandbox import Destination, Network, NetworkPolicy, PortBinding, Protocol, Rule
+from microsandbox import (
+    DestGroup,
+    Destination,
+    Network,
+    NetworkPolicy,
+    PortBinding,
+    Protocol,
+    Rule,
+    Sandbox,
+)
 
 
 @pytest.mark.asyncio
@@ -48,6 +59,11 @@ async def test_ip_destination_allows_specific_egress(label, destination, sandbox
                         protocol=Protocol.TCP,
                         port=443,
                     ),
+                    Rule.allow(
+                        destination=Destination.group(DestGroup.LINK_LOCAL),
+                        protocol=Protocol.TCP,
+                        port=80,
+                    ),
                 ),
             ),
         ),
@@ -61,3 +77,8 @@ async def test_ip_destination_allows_specific_egress(label, destination, sandbox
 
     assert "cloudflare-failed" not in combined
     assert "google-failed" in combined
+
+    handle = await Sandbox.get(await sandbox.name)
+    config = json.loads(handle.config_json)
+    destinations = [rule["destination"] for rule in config["network"]["policy"]["rules"]]
+    assert {"group": "link_local"} in destinations

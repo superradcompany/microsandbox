@@ -107,6 +107,13 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 					Protocol:    microsandbox.PolicyProtocolTCP,
 					Port:        "443",
 				},
+				{
+					Action:      microsandbox.PolicyActionAllow,
+					Direction:   microsandbox.PolicyDirectionEgress,
+					Destination: "link-local",
+					Protocol:    microsandbox.PolicyProtocolTCP,
+					Port:        "80",
+				},
 			},
 		}),
 	)
@@ -119,6 +126,14 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 		_ = sb.Stop(stopCtx)
 		_ = sb.Close()
 	})
+
+	h, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if !strings.Contains(h.ConfigJSON(), `"link_local"`) {
+		t.Errorf("expected link-local rule in ConfigJSON; got %s", h.ConfigJSON())
+	}
 
 	// 1.1.1.1:443 should be reachable; 8.8.8.8:443 should not.
 	out, err := sb.Shell(ctx,
