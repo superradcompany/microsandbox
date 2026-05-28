@@ -129,14 +129,27 @@ PortBinding.udp(5353, 5353, bind="0.0.0.0")
 A list of rules plus two per-direction defaults, evaluated first-match-wins. Pass to `Network(policy=...)` for custom policies:
 
 ```python
-from microsandbox import NetworkPolicy, Rule, Action, Direction, Protocol
+from microsandbox import (
+    Action,
+    DestGroup,
+    Destination,
+    Direction,
+    NetworkPolicy,
+    Protocol,
+    Rule,
+)
 
 policy = NetworkPolicy(
     default_egress=Action.DENY,
     default_ingress=Action.ALLOW,
     rules=(
-        Rule.allow(protocol=Protocol.TCP, port=443, destination="public"),
-        Rule.deny(destination="198.51.100.5"),
+        Rule.allow(
+            protocol=Protocol.TCP,
+            port=443,
+            destination=Destination.ip("1.1.1.1"),
+        ),
+        Rule.allow(destination=Destination.group(DestGroup.LINK_LOCAL)),
+        Rule.deny(destination=Destination.domain("api.example.com")),
     ),
 )
 ```
@@ -184,7 +197,7 @@ Frozen dataclass for a single network policy rule.
 Rule(
     action: Action,
     direction: Direction = Direction.EGRESS,
-    destination: str | None = None,
+    destination: str | NetworkDestination | None = None,
     protocol: Protocol | None = None,
     port: int | str | None = None,
 )
@@ -194,7 +207,7 @@ Rule(
 |-------|------|-------------|
 | action | [`Action`](#action) | What to do when this rule matches |
 | direction | [`Direction`](#direction) | Which evaluator considers this rule. `Direction.ANY` matches in either direction |
-| destination | `str \| None` | Target filter: a [`DestGroup`](#destgroup) value, domain, CIDR range, domain suffix (prefixed with `"."`), or `"*"` for any. Domain and suffix strings are validated at sandbox creation; invalid names raise `ValueError` |
+| destination | `str \| NetworkDestination \| None` | Target filter. Prefer typed [`Destination`](#destination) helpers for new code. String shorthand remains supported: [`DestGroup`](#destgroup) values, exact IPs, domains, CIDR ranges, domain suffixes prefixed with `"."`, or `"*"` for any. Domain and suffix strings are validated at sandbox creation; invalid names raise `ValueError` |
 | protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
 | port | `int \| str \| None` | Single port (`443`) or range (`"8000-9000"`) |
 
@@ -211,7 +224,7 @@ def allow(
     direction: Direction = Direction.EGRESS,
     protocol: Protocol | None = None,
     port: int | str | None = None,
-    destination: str | None = None,
+    destination: str | NetworkDestination | None = None,
 ) -> Rule
 ```
 
@@ -224,7 +237,7 @@ Create a rule that permits matching traffic.
 | direction | [`Direction`](#direction) | Traffic direction |
 | protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
 | port | `int \| str \| None` | Port or port range |
-| destination | `str \| None` | Destination filter |
+| destination | `str \| NetworkDestination \| None` | Destination filter |
 
 **Returns**
 
@@ -243,7 +256,7 @@ def deny(
     direction: Direction = Direction.EGRESS,
     protocol: Protocol | None = None,
     port: int | str | None = None,
-    destination: str | None = None,
+    destination: str | NetworkDestination | None = None,
 ) -> Rule
 ```
 
@@ -256,7 +269,7 @@ Create a rule that blocks matching traffic.
 | direction | [`Direction`](#direction) | Traffic direction |
 | protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
 | port | `int \| str \| None` | Port or port range |
-| destination | `str \| None` | Destination filter |
+| destination | `str \| NetworkDestination \| None` | Destination filter |
 
 **Returns**
 
@@ -282,18 +295,68 @@ policy = NetworkPolicy(
     default_egress=Action.DENY,
     rules=(
         *Rule.allow_dns(),
-        Rule.allow(protocol=Protocol.TCP, port=443, destination="public"),
+        Rule.allow(
+            protocol=Protocol.TCP,
+            port=443,
+            destination=Destination.group(DestGroup.PUBLIC),
+        ),
     ),
 )
 ```
 
-DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination="host", protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
+DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
 | `tuple[`[`Rule`](#rule)`, `[`Rule`](#rule)`]` | `(udp_rule, tcp_rule)` for `Group::Host` on port 53 |
+
+---
+
+## Destination
+
+Factory namespace for typed network policy destinations. Typed destinations avoid string-shorthand ambiguity and match the TypeScript SDK shape.
+
+```python
+from microsandbox import DestGroup, Destination
+
+Destination.any()
+Destination.ip("1.1.1.1")
+Destination.cidr("10.0.0.0/8")
+Destination.domain("api.example.com")
+Destination.domain_suffix(".example.com")
+Destination.group(DestGroup.LINK_LOCAL)
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Destination.any()` | [`NetworkDestination`](#networkdestination) | Match any destination |
+| `Destination.ip(ip)` | [`NetworkDestination`](#networkdestination) | Match an exact IPv4 or IPv6 address. Stored as `/32` for IPv4 or `/128` for IPv6 |
+| `Destination.cidr(cidr)` | [`NetworkDestination`](#networkdestination) | Match a CIDR range |
+| `Destination.domain(domain)` | [`NetworkDestination`](#networkdestination) | Match an exact domain |
+| `Destination.domain_suffix(suffix)` | [`NetworkDestination`](#networkdestination) | Match the apex domain and all subdomains |
+| `Destination.group(group)` | [`NetworkDestination`](#networkdestination) | Match a [`DestGroup`](#destgroup) value |
+
+Bare IP strings such as `"1.1.1.1"` remain supported and are parsed like `Destination.ip("1.1.1.1")`. Prefer `Destination.ip(...)` when the value is known to be an IP address.
+
+---
+
+### NetworkDestination
+
+Frozen dataclass produced by [`Destination`](#destination) helpers.
+
+```python
+NetworkDestination(
+    kind: Literal["any", "ip", "cidr", "domain", "domain_suffix", "group"],
+    value: str | None = None,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | `Literal["any", "ip", "cidr", "domain", "domain_suffix", "group"]` | Destination variant |
+| value | `str \| None` | Variant value, omitted for `Destination.any()` |
 
 ---
 
@@ -388,7 +451,7 @@ String enum for port-level protocol selection.
 
 ### DestGroup
 
-String enum for well-known destination groups used in [`Rule.destination`](#rule).
+String enum for well-known destination groups used in [`Destination.group()`](#destination) or string-shorthand [`Rule.destination`](#rule).
 
 | Value | Description |
 |-------|-------------|
