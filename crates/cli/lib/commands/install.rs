@@ -41,7 +41,7 @@ pub struct InstallArgs {
     #[arg(short, long)]
     pub memory: Option<String>,
 
-    /// Mount a host path or named volume into the sandbox (SOURCE:DEST[:OPTIONS]).
+    /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
     pub volume: Vec<String>,
 

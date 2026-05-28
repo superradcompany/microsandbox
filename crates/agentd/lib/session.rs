@@ -595,18 +595,27 @@ fn drop_mount_admin_privileges() -> AgentdResult<()> {
 
     let index = (CAP_SYS_ADMIN / CAP_WORD_BITS) as usize;
     let mask = 1u32 << (CAP_SYS_ADMIN % CAP_WORD_BITS);
-    data[index].effective &= !mask;
-    data[index].permitted &= !mask;
-    data[index].inheritable &= !mask;
+    let had_sys_admin = data[index].effective & mask != 0
+        || data[index].permitted & mask != 0
+        || data[index].inheritable & mask != 0;
 
-    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    if had_sys_admin {
+        data[index].effective &= !mask;
+        data[index].permitted &= !mask;
+        data[index].inheritable &= !mask;
+
+        if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
     }
 
     let ret = unsafe { libc::prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN, 0, 0, 0) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EINVAL) {
+        let errno = err.raw_os_error();
+        // Already-unprivileged callers may also lack CAP_SETPCAP for the bounding-set drop.
+        let already_unprivileged = !had_sys_admin && errno == Some(libc::EPERM);
+        if errno != Some(libc::EINVAL) && !already_unprivileged {
             return Err(err.into());
         }
     }
