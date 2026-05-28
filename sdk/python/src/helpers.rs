@@ -700,59 +700,12 @@ fn apply_network(
                         )));
                     }
                 };
-                let destination = if let Some(dest_str) = extract_opt::<String>(&rd, "destination")?
-                {
-                    match dest_str.as_str() {
-                        "*" => microsandbox_network::policy::Destination::Any,
-                        "public" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Public,
-                        ),
-                        "loopback" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Loopback,
-                        ),
-                        "private" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Private,
-                        ),
-                        "link-local" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::LinkLocal,
-                        ),
-                        "metadata" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Metadata,
-                        ),
-                        "multicast" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Multicast,
-                        ),
-                        "host" => microsandbox_network::policy::Destination::Group(
-                            microsandbox_network::policy::DestinationGroup::Host,
-                        ),
-                        s if s.starts_with('.') => {
-                            let name = s.parse().map_err(|e| {
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "invalid domain suffix: {e}"
-                                ))
-                            })?;
-                            microsandbox_network::policy::Destination::DomainSuffix(name)
-                        }
-                        s if s.contains('/') => {
-                            let cidr: ipnetwork::IpNetwork = s.parse().map_err(|e| {
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "invalid CIDR: {e}"
-                                ))
-                            })?;
-                            microsandbox_network::policy::Destination::Cidr(cidr)
-                        }
-                        s => {
-                            let name = s.parse().map_err(|e| {
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "invalid domain: {e}"
-                                ))
-                            })?;
-                            microsandbox_network::policy::Destination::Domain(name)
-                        }
-                    }
-                } else {
-                    microsandbox_network::policy::Destination::Any
-                };
+                let destination_kind = extract_opt::<String>(&rd, "destination_kind")?;
+                let destination_raw = extract_opt::<String>(&rd, "destination")?;
+                let destination = parse_network_destination(
+                    destination_kind.as_deref(),
+                    destination_raw.as_deref(),
+                )?;
                 let protocols = if let Some(proto_str) = extract_opt::<String>(&rd, "protocol")? {
                     let proto = match proto_str.as_str() {
                         "tcp" => microsandbox_network::policy::Protocol::Tcp,
@@ -1066,6 +1019,124 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
         "expected dict or object with _to_dict(), got {}",
         obj.get_type().name()?
     )))
+}
+
+fn parse_network_destination(
+    kind: Option<&str>,
+    raw: Option<&str>,
+) -> PyResult<microsandbox_network::policy::Destination> {
+    match kind {
+        Some("any") => Ok(microsandbox_network::policy::Destination::Any),
+        Some("ip") => parse_ip_destination(required_destination(kind, raw)?),
+        Some("cidr") => parse_cidr_destination(required_destination(kind, raw)?),
+        Some("domain") => parse_domain_destination(required_destination(kind, raw)?),
+        Some("domain_suffix") | Some("domain-suffix") => {
+            parse_domain_suffix_destination(required_destination(kind, raw)?)
+        }
+        Some("group") => parse_group_destination(required_destination(kind, raw)?),
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown destination kind: {other}"
+        ))),
+        None => parse_shorthand_destination(raw),
+    }
+}
+
+fn parse_shorthand_destination(
+    raw: Option<&str>,
+) -> PyResult<microsandbox_network::policy::Destination> {
+    let Some(raw) = raw else {
+        return Ok(microsandbox_network::policy::Destination::Any);
+    };
+
+    if raw == "*" {
+        return Ok(microsandbox_network::policy::Destination::Any);
+    }
+    if let Some(rest) = raw.strip_prefix("domain=") {
+        return parse_domain_destination(rest);
+    }
+    if let Some(rest) = raw.strip_prefix("suffix=") {
+        return parse_domain_suffix_destination(rest);
+    }
+    if let Some(destination) = maybe_group_destination(raw) {
+        return Ok(destination);
+    }
+    if raw.starts_with('.') {
+        return parse_domain_suffix_destination(raw);
+    }
+    if raw.contains('/') {
+        return parse_cidr_destination(raw);
+    }
+    if raw.parse::<std::net::IpAddr>().is_ok() {
+        return parse_ip_destination(raw);
+    }
+    parse_domain_destination(raw)
+}
+
+fn required_destination<'a>(kind: Option<&str>, raw: Option<&'a str>) -> PyResult<&'a str> {
+    raw.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "destination is required for destination kind `{}`",
+            kind.unwrap_or("unknown")
+        ))
+    })
+}
+
+fn parse_ip_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
+    let ip: std::net::IpAddr = raw.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid IP address {raw:?}: {e}"))
+    })?;
+    let prefix = if ip.is_ipv4() { 32 } else { 128 };
+    let cidr = ipnetwork::IpNetwork::new(ip, prefix).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid IP address {raw:?}: {e}"))
+    })?;
+    Ok(microsandbox_network::policy::Destination::Cidr(cidr))
+}
+
+fn parse_cidr_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
+    let cidr: ipnetwork::IpNetwork = raw.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid CIDR {raw:?}: {e}"))
+    })?;
+    Ok(microsandbox_network::policy::Destination::Cidr(cidr))
+}
+
+fn parse_domain_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
+    let name = raw.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid domain {raw:?}: {e}"))
+    })?;
+    Ok(microsandbox_network::policy::Destination::Domain(name))
+}
+
+fn parse_domain_suffix_destination(
+    raw: &str,
+) -> PyResult<microsandbox_network::policy::Destination> {
+    let name = raw.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid domain suffix {raw:?}: {e}"))
+    })?;
+    Ok(microsandbox_network::policy::Destination::DomainSuffix(
+        name,
+    ))
+}
+
+fn parse_group_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
+    maybe_group_destination(raw).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("unknown destination group: {raw}"))
+    })
+}
+
+fn maybe_group_destination(raw: &str) -> Option<microsandbox_network::policy::Destination> {
+    use microsandbox_network::policy::{Destination, DestinationGroup};
+
+    let group = match raw {
+        "public" => DestinationGroup::Public,
+        "loopback" => DestinationGroup::Loopback,
+        "private" => DestinationGroup::Private,
+        "link-local" | "link_local" => DestinationGroup::LinkLocal,
+        "metadata" => DestinationGroup::Metadata,
+        "multicast" => DestinationGroup::Multicast,
+        "host" => DestinationGroup::Host,
+        _ => return None,
+    };
+    Some(Destination::Group(group))
 }
 
 fn parse_violation_action(
