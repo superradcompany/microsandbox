@@ -93,7 +93,7 @@ func TestCustomPolicyDefaultEgressDeny(t *testing.T) {
 // other destinations blocked.
 func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 	ctx := integrationCtx(t)
-	name := "go-sdk-allowspec-" + t.Name()
+	name := uniqueIntegrationName(t, "go-net-ip")
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
@@ -103,9 +103,16 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 				{
 					Action:      microsandbox.PolicyActionAllow,
 					Direction:   microsandbox.PolicyDirectionEgress,
-					Destination: "1.1.1.1/32",
+					Destination: "1.1.1.1",
 					Protocol:    microsandbox.PolicyProtocolTCP,
 					Port:        "443",
+				},
+				{
+					Action:      microsandbox.PolicyActionAllow,
+					Direction:   microsandbox.PolicyDirectionEgress,
+					Destination: "link-local",
+					Protocol:    microsandbox.PolicyProtocolTCP,
+					Port:        "80",
 				},
 			},
 		}),
@@ -119,6 +126,14 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 		_ = sb.Stop(stopCtx)
 		_ = sb.Close()
 	})
+
+	h, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if !strings.Contains(h.ConfigJSON(), `"link_local"`) {
+		t.Errorf("expected link-local rule in ConfigJSON; got %s", h.ConfigJSON())
+	}
 
 	// 1.1.1.1:443 should be reachable; 8.8.8.8:443 should not.
 	out, err := sb.Shell(ctx,

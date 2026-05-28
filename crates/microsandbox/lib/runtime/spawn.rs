@@ -6,10 +6,13 @@
 //! internally.
 
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
+    fmt::Write,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -30,7 +33,7 @@ use microsandbox_protocol::{
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 use crate::{
-    MicrosandboxResult, config,
+    MicrosandboxError, MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
     sandbox::{
         DiskImageFormat, HostPermissions, Rlimit, RootfsSource, SandboxConfig, StatVirtualization,
@@ -44,6 +47,8 @@ use crate::{
 
 #[cfg(target_os = "linux")]
 static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -119,7 +124,7 @@ pub async fn spawn_sandbox(
     for (name, content) in &config.scripts {
         // Prevent path traversal: only use the filename component.
         let safe_name = Path::new(name).file_name().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
+            MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
         })?;
         let script_path = scripts_dir.join(safe_name);
         tokio::fs::write(&script_path, content).await?;
@@ -127,8 +132,10 @@ pub async fn spawn_sandbox(
         tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
-    // Compute the agent relay socket path.
-    let agent_sock_path = runtime_dir.join("agent.sock");
+    // Compute the agent relay socket path. This intentionally lives outside
+    // the name-derived sandbox tree so long sandbox names do not exceed the
+    // platform Unix-domain socket path limit.
+    let agent_sock_path = resolve_sandbox_agent_socket_path(&config.name)?;
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
@@ -192,7 +199,7 @@ pub async fn spawn_sandbox(
         Some(pid) => pid,
         None => {
             release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
-            return Err(crate::MicrosandboxError::Runtime(
+            return Err(MicrosandboxError::Runtime(
                 "sandbox process exited immediately".into(),
             ));
         }
@@ -204,7 +211,7 @@ pub async fn spawn_sandbox(
         Some(stdout) => stdout,
         None => {
             release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
-            return Err(crate::MicrosandboxError::Runtime(
+            return Err(MicrosandboxError::Runtime(
                 "failed to capture sandbox stdout".into(),
             ));
         }
@@ -227,7 +234,7 @@ pub async fn spawn_sandbox(
         Err(_) => {
             terminate_startup_process(&mut child).await;
             release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
-            return Err(crate::MicrosandboxError::Runtime(
+            return Err(MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
         }
@@ -243,7 +250,7 @@ pub async fn spawn_sandbox(
                 exit_status = ?status,
                 "spawn_sandbox: failed to parse startup JSON"
             );
-            return Err(crate::MicrosandboxError::Runtime(format!(
+            return Err(MicrosandboxError::Runtime(format!(
                 "sandbox process exited ({status:?}) before sending startup info \
                  (line: {line:?}, check stderr above for details)"
             )));
@@ -309,6 +316,93 @@ fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<Metri
     }
 }
 
+/// Build the host-side agent relay socket path for a sandbox name.
+fn sandbox_agent_socket_path(name: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut filename = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN + ".sock".len());
+    for byte in digest.iter().take(AGENT_SOCKET_HASH_HEX_LEN / 2) {
+        let _ = Write::write_fmt(&mut filename, format_args!("{byte:02x}"));
+    }
+    filename.push_str(".sock");
+
+    config::config().run_dir().join("agent").join(filename)
+}
+
+/// Build the legacy name-derived agent relay socket path.
+fn legacy_sandbox_agent_socket_path(name: &str) -> PathBuf {
+    config::config()
+        .sandboxes_dir()
+        .join(name)
+        .join("runtime")
+        .join("agent.sock")
+}
+
+/// Return agent relay socket paths in preferred connection order.
+pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
+    [
+        sandbox_agent_socket_path(name),
+        legacy_sandbox_agent_socket_path(name),
+    ]
+}
+
+/// Pick the first socket path usable on this platform.
+pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResult<PathBuf> {
+    let candidates = sandbox_agent_socket_path_candidates(name);
+    for path in &candidates {
+        if sandbox_agent_socket_path_fits(path) {
+            return Ok(path.clone());
+        }
+    }
+
+    let shortest = candidates
+        .iter()
+        .map(|path| sandbox_agent_socket_path_len(path))
+        .min()
+        .unwrap_or(0);
+    Err(MicrosandboxError::InvalidConfig(format!(
+        "agent relay socket path is too long: shortest derived path is {shortest} bytes, \
+         but Unix socket paths on this platform must be shorter than {} bytes; set \
+         MSB_HOME or paths.sandboxes to a shorter directory",
+        unix_socket_path_capacity()
+    )))
+}
+
+#[cfg(unix)]
+fn sandbox_agent_socket_path_fits(path: &Path) -> bool {
+    sandbox_agent_socket_path_len(path) < unix_socket_path_capacity()
+}
+
+#[cfg(not(unix))]
+fn sandbox_agent_socket_path_fits(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn sandbox_agent_socket_path_len(path: &Path) -> usize {
+    path.as_os_str().as_bytes().len()
+}
+
+#[cfg(not(unix))]
+fn sandbox_agent_socket_path_len(_path: &Path) -> usize {
+    0
+}
+
+#[cfg(unix)]
+fn unix_socket_path_capacity() -> usize {
+    // SAFETY: a zeroed sockaddr_un is valid, and we only inspect the fixed-size
+    // sun_path array length to mirror the UnixListener/socket2 precondition.
+    let storage = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
+    storage.sun_path.len()
+}
+
+#[cfg(not(unix))]
+fn unix_socket_path_capacity() -> usize {
+    usize::MAX
+}
+
 /// Best-effort release of a reservation when spawn cannot continue.
 fn release_metrics_reservation(
     config: &SandboxConfig,
@@ -336,7 +430,7 @@ async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxRes
         .get_or_try_init(|| async {
             install_tokio_sigchld_handler()?;
             patch_sigchld_handler_uses_alt_stack();
-            Ok::<(), crate::MicrosandboxError>(())
+            Ok::<(), MicrosandboxError>(())
         })
         .await?;
     Ok(())
@@ -447,14 +541,14 @@ async fn stage_file_mounts(
         tokio::fs::create_dir_all(&file_mount_dir).await?;
 
         let filename_os = host.file_name().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!(
+            MicrosandboxError::InvalidConfig(format!(
                 "file mount has no filename: {}",
                 host.display()
             ))
         })?;
 
         let filename = filename_os.to_str().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!(
+            MicrosandboxError::InvalidConfig(format!(
                 "file mount filename is not valid UTF-8: {}",
                 host.display()
             ))
@@ -462,7 +556,7 @@ async fn stage_file_mounts(
 
         // The MSB_FILE_MOUNTS protocol uses `:` and `;` as delimiters.
         if filename.contains(':') || filename.contains(';') {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            return Err(MicrosandboxError::InvalidConfig(format!(
                 "file mount filename must not contain ':' or ';': {filename}"
             )));
         }
@@ -1026,7 +1120,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    use super::sandbox_cli_args;
+    use super::{
+        legacy_sandbox_agent_socket_path, resolve_sandbox_agent_socket_path,
+        sandbox_agent_socket_path, sandbox_agent_socket_path_candidates, sandbox_cli_args,
+    };
     use crate::{
         LogLevel,
         sandbox::{
@@ -1054,6 +1151,41 @@ mod tests {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
+    }
+
+    #[test]
+    fn test_sandbox_agent_socket_path_is_independent_of_sandbox_name_length() {
+        let short = sandbox_agent_socket_path("test");
+        let long = sandbox_agent_socket_path(&format!("testing-{}", "x".repeat(256)));
+
+        let expected_len = "0123456789abcdef0123456789abcdef.sock".len();
+        assert_eq!(
+            short.file_name().unwrap().to_string_lossy().len(),
+            expected_len
+        );
+        assert_eq!(
+            long.file_name().unwrap().to_string_lossy().len(),
+            expected_len
+        );
+        assert_eq!(short.parent(), long.parent());
+        assert_ne!(short.file_name(), long.file_name());
+    }
+
+    #[test]
+    fn test_sandbox_agent_socket_path_candidates_include_legacy_fallback() {
+        let candidates = sandbox_agent_socket_path_candidates("test");
+
+        assert_eq!(candidates[0], sandbox_agent_socket_path("test"));
+        assert_eq!(candidates[1], legacy_sandbox_agent_socket_path("test"));
+        assert!(candidates[1].ends_with("sandboxes/test/runtime/agent.sock"));
+    }
+
+    #[test]
+    fn test_resolve_sandbox_agent_socket_path_prefers_hashed_path() {
+        assert_eq!(
+            resolve_sandbox_agent_socket_path("test").unwrap(),
+            sandbox_agent_socket_path("test")
+        );
     }
 
     fn render_args_with_file_mounts(

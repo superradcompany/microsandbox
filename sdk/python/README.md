@@ -195,7 +195,7 @@ sb = await Sandbox.create(
 ### Network Policies
 
 ```python
-from microsandbox import Network, Sandbox
+from microsandbox import Destination, Network, NetworkPolicy, Protocol, Rule, Sandbox
 
 # Default: public internet only (blocks private ranges).
 sandbox = await Sandbox.create("public", image="alpine")
@@ -221,6 +221,29 @@ sandbox = await Sandbox.create(
     network=Network(
         deny_domains=("blocked.example.com",),
         deny_domain_suffixes=(".evil.com",),
+    ),
+)
+
+# Explicit allowlist with typed destinations.
+sandbox = await Sandbox.create(
+    "allowlisted",
+    image="alpine",
+    network=Network(
+        policy=NetworkPolicy(
+            default_egress="deny",
+            rules=(
+                Rule.allow(
+                    destination=Destination.ip("1.1.1.1"),
+                    protocol=Protocol.TCP,
+                    port=443,
+                ),
+                Rule.allow(
+                    destination=Destination.domain("api.github.com"),
+                    protocol=Protocol.TCP,
+                    port=443,
+                ),
+            ),
+        ),
     ),
 )
 ```

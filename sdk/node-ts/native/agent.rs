@@ -59,7 +59,7 @@ pub struct AgentClient {
 #[napi]
 impl AgentClient {
     /// Connect to a sandbox by name. Resolves the agent socket from the
-    /// SDK's configured sandboxes directory.
+    /// SDK's configured runtime directory.
     #[napi(factory, js_name = "connectSandbox")]
     pub async fn connect_sandbox(
         name: String,

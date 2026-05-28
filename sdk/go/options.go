@@ -406,8 +406,9 @@ type PolicyRule struct {
 	Action      PolicyAction
 	Direction   PolicyDirection
 	Destination string // "*", "loopback", "private", "link-local", "metadata",
-	// "multicast", "public", "host", a CIDR ("10.0.0.0/8"), a domain suffix
-	// (".internal"), or a plain domain ("api.example.com").
+	// "multicast", "public", "host", an IP ("1.1.1.1"), a CIDR
+	// ("10.0.0.0/8"), a domain suffix (".internal"), or a plain domain
+	// ("api.example.com").
 
 	// Protocol is the legacy single-protocol field. Prefer Protocols when
 	// matching multiple. The empty string means any.

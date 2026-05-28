@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from integration.helpers import free_tcp_port
-from microsandbox import Network, NetworkPolicy, PortBinding, Protocol, Rule
+from microsandbox import (
+    DestGroup,
+    Destination,
+    Network,
+    NetworkPolicy,
+    PortBinding,
+    Protocol,
+    Rule,
+    Sandbox,
+)
 
 
 @pytest.mark.asyncio
@@ -25,3 +36,49 @@ async def test_network_policy_and_port_config_create(sandbox_factory):
 
     out = await sandbox.shell("true")
     assert out.success is True
+
+
+@pytest.mark.parametrize(
+    ("label", "destination"),
+    [
+        ("typed-ip", Destination.ip("1.1.1.1")),
+        ("string-ip", "1.1.1.1"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ip_destination_allows_specific_egress(label, destination, sandbox_factory):
+    sandbox = await sandbox_factory(
+        f"py-sdk-network-{label}",
+        network=Network(
+            policy=NetworkPolicy(
+                default_egress="deny",
+                default_ingress="deny",
+                rules=(
+                    Rule.allow(
+                        destination=destination,
+                        protocol=Protocol.TCP,
+                        port=443,
+                    ),
+                    Rule.allow(
+                        destination=Destination.group(DestGroup.LINK_LOCAL),
+                        protocol=Protocol.TCP,
+                        port=80,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    out = await sandbox.shell(
+        "nc -zv -w 5 1.1.1.1 443 >/dev/null 2>&1 || echo cloudflare-failed; "
+        "nc -zv -w 5 8.8.8.8 443 >/dev/null 2>&1 || echo google-failed"
+    )
+    combined = out.stdout_text + out.stderr_text
+
+    assert "cloudflare-failed" not in combined
+    assert "google-failed" in combined
+
+    handle = await Sandbox.get(await sandbox.name)
+    config = json.loads(handle.config_json)
+    destinations = [rule["destination"] for rule in config["network"]["policy"]["rules"]]
+    assert {"group": "link_local"} in destinations

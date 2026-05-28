@@ -1312,10 +1312,18 @@ fn parse_destination(
             Destination::Cidr(cidr)
         }
         Some(s) => {
-            let name = s
-                .parse()
-                .map_err(|e| FfiError::invalid_argument(format!("invalid domain {s:?}: {e}")))?;
-            Destination::Domain(name)
+            if let Ok(ip) = s.parse::<IpAddr>() {
+                let prefix = if ip.is_ipv4() { 32 } else { 128 };
+                let cidr = ipnetwork::IpNetwork::new(ip, prefix).map_err(|e| {
+                    FfiError::invalid_argument(format!("invalid IP address {s:?}: {e}"))
+                })?;
+                Destination::Cidr(cidr)
+            } else {
+                let name = s.parse().map_err(|e| {
+                    FfiError::invalid_argument(format!("invalid domain {s:?}: {e}"))
+                })?;
+                Destination::Domain(name)
+            }
         }
     })
 }
@@ -5378,5 +5386,44 @@ mod tests {
         let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, None);
+    }
+
+    #[test]
+    fn parse_destination_bare_ipv4_becomes_cidr() {
+        let destination =
+            parse_destination(Some("1.1.1.1")).unwrap_or_else(|e| panic!("{}", e.message));
+
+        match destination {
+            microsandbox_network::policy::Destination::Cidr(cidr) => {
+                assert_eq!(cidr.to_string(), "1.1.1.1/32");
+            }
+            other => panic!("expected CIDR destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_destination_bare_ipv6_becomes_cidr() {
+        let destination = parse_destination(Some("2001:4860:4860::8888"))
+            .unwrap_or_else(|e| panic!("{}", e.message));
+
+        match destination {
+            microsandbox_network::policy::Destination::Cidr(cidr) => {
+                assert_eq!(cidr.to_string(), "2001:4860:4860::8888/128");
+            }
+            other => panic!("expected CIDR destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_destination_domain_stays_domain() {
+        let destination =
+            parse_destination(Some("GitHub.com.")).unwrap_or_else(|e| panic!("{}", e.message));
+
+        match destination {
+            microsandbox_network::policy::Destination::Domain(name) => {
+                assert_eq!(name.as_str(), "github.com");
+            }
+            other => panic!("expected domain destination, got {other:?}"),
+        }
     }
 }
