@@ -1,8 +1,8 @@
 ---
-title: Configuration
-sidebarTitle: Configuration
+title: Reference
+sidebarTitle: Reference
 description: Flags, emitted metrics, attributes, and operational notes for msb-metrics
-icon: "gear"
+icon: "book"
 ---
 
 Reference for the [`msb-metrics`](/observability/msb-metrics) sidecar:
@@ -32,20 +32,21 @@ every running sandbox there.
 
 ## Metrics emitted
 
-All metrics are namespaced under `microsandbox.*` so they don't collide
-with OTel semantic-convention `system.*` host metrics in the same
-backend tenant.
+All metrics are emitted under the `microsandbox.*` namespace so they
+don't collide with OTel semantic-convention `system.*` host metrics in
+the same backend tenant. The table below shows the suffix only; the
+fully-qualified name is `microsandbox.<suffix>`.
 
-| Metric | Type | Unit | Notes |
+| Suffix | Type | Unit | Notes |
 |---|---|---|---|
-| `microsandbox.cpu.utilization` | gauge | `1` (0.0–1.0) | Source is 0–100 percent; divided by 100 on emit. |
-| `microsandbox.memory.usage` | gauge | `By` | Resident memory in bytes. |
-| `microsandbox.memory.limit` | gauge | `By` | Configured guest memory limit. |
-| `microsandbox.disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
-| `microsandbox.disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
-| `microsandbox.network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
-| `microsandbox.network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
-| `microsandbox.uptime` | gauge | `s` | Sandbox uptime at sample time. |
+| `cpu.utilization` | gauge | `1` (0.0–1.0) | Source is 0–100 percent; divided by 100 on emit. |
+| `memory.usage` | gauge | `By` | Resident memory in bytes. |
+| `memory.limit` | gauge | `By` | Configured guest memory limit. |
+| `disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
+| `disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
+| `network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
+| `network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
+| `uptime` | gauge | `s` | Sandbox uptime at sample time. |
 
 Cumulative byte fields are emitted as gauges carrying the absolute
 cumulative value. Use `rate()` (PromQL, OTel-flavored Prom) for
@@ -55,25 +56,17 @@ per-sandbox deltas across runs.
 
 ## Transport
 
-<Tabs>
-  <Tab title="gRPC (default)">
-    Default port `4317`. Recommended for most local OTLP collectors and
-    sidecars.
+`msb-metrics` defaults to OTLP over gRPC on port `4317`, which suits
+most local collectors and sidecars. To switch to HTTP/Protobuf, set
+`--protocol=http`:
 
-    ```sh
-    msb-metrics otel --endpoint=http://localhost:4317 --protocol=grpc
-    ```
-  </Tab>
-  <Tab title="HTTP/Protobuf">
-    Default port `4318`. Use when the backend's gRPC port isn't
-    reachable, or when the gateway expects HTTP (e.g. Grafana Cloud's
-    OTLP gateway over HTTPS).
+```sh
+msb-metrics otel --endpoint=https://example.com/otlp --protocol=http
+```
 
-    ```sh
-    msb-metrics otel --endpoint=https://example.com/otlp --protocol=http
-    ```
-  </Tab>
-</Tabs>
+HTTP/Protobuf's default port is `4318`. Some backends (Grafana Cloud's
+OTLP gateway is the common case) require an explicit `/v1/metrics` path
+on the endpoint URL.
 
 ## Attributes
 
@@ -140,15 +133,19 @@ Or just run `msb-metrics otel --help` for the full prose.
 
 ## Tuning at scale
 
-With ~1000 sandboxes per host:
+At ~1000 sandboxes per host:
 
-- Heap is dominated by the per-exporter buffer. At 1000 sandboxes with
-  the default `--max-buffered=60`, worst-case heap when the backend is
-  slow is roughly `60 × 1000 × ~350B ≈ 21 MB` per exporter. Drop
-  `--max-buffered` to `~20` if you want a tighter cap.
-- The shm registry itself is fixed at ~512 KiB regardless of active
-  count.
-- No sqlite read is on the hot path; `msb-metrics` is pure-shm.
+**Heap.** Dominated by the per-exporter buffer. Plan for
+`--max-buffered × active sandboxes × ~350B`:
+
+| `--max-buffered` | Worst-case heap (1000 sandboxes) |
+|---|---|
+| `60` (default) | ~21 MB per exporter |
+| `20` | ~7 MB per exporter |
+
+**Shm registry.** Fixed at ~512 KiB regardless of sandbox count.
+
+**Hot path.** `msb-metrics` is pure-shm; no sqlite read on the hot path.
 
 ## Shutdown behavior
 

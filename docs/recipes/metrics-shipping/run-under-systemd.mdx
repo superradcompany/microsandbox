@@ -7,8 +7,8 @@ icon: "screwdriver-wrench"
 <Note>
 This recipe runs [`msb-metrics`](/observability/msb-metrics) as a
 managed system service. See the
-[Configuration](/observability/configuration) page for flag details
-and deployment constraints.
+[Reference](/observability/reference) page for flag details and
+deployment constraints.
 </Note>
 
 Drop this unit at `/etc/systemd/system/msb-metrics.service`:
@@ -45,7 +45,7 @@ buffers, calls each exporter's `shutdown()`, and exits cleanly.
 
 - **`User=`** must match the user that runs the `msb` runtime, otherwise
   `EACCES` on shm attach. See
-  [Configuration → Deployment constraints](/observability/configuration#deployment-constraints).
+  [Reference → Deployment constraints](/observability/reference#deployment-constraints).
 - **`Environment=MSB_HOME=`** must match the runtime's `$MSB_HOME`, or
   set `--msb-home=` explicitly in `ExecStart`.
 - The `--endpoint=` in this example targets a local Alloy or
