@@ -48,8 +48,8 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
 use opentelemetry_sdk::runtime;
 
+use crate::core::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
-use crate::types::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

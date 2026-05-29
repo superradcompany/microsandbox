@@ -2,10 +2,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crate::driver::{CollectorConfig, MetricsCollector, MetricsErrorPolicy};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
-use crate::reader::{CollectFn, registry_collect_fn};
-use crate::types::MetricsExporter;
+
+use super::driver::{CollectorConfig, MetricsCollector, MetricsErrorPolicy};
+use super::reader::{CollectFn, registry_collect_fn};
+use super::types::MetricsExporter;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -243,7 +244,7 @@ impl MetricsCollectorBuilder {
     pub(crate) fn collect_with<F, Fut>(mut self, collect: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = MetricsCollectorResult<crate::types::MetricsCollection>>
+        Fut: std::future::Future<Output = MetricsCollectorResult<super::types::MetricsCollection>>
             + Send
             + 'static,
     {
@@ -258,8 +259,8 @@ impl MetricsCollectorBuilder {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::MetricsExportBatch;
     use super::*;
-    use crate::types::MetricsExportBatch;
 
     #[test]
     fn builder_rejects_zero_collect_interval() {

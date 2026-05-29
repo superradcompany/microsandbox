@@ -22,14 +22,15 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-use crate::builder::{MetricsCollectorBuilder, MetricsExporterConfig};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
-use crate::reader::CollectFn;
-use crate::types::MetricsExporter;
-use crate::worker::ExporterWorker;
+
+use super::builder::{MetricsCollectorBuilder, MetricsExporterConfig};
+use super::reader::CollectFn;
+use super::types::MetricsExporter;
+use super::worker::ExporterWorker;
 
 #[cfg(test)]
-use crate::types::MetricsCollection;
+use super::types::MetricsCollection;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -254,9 +255,9 @@ mod tests {
         time::Duration,
     };
 
+    use super::super::builder::MetricsExporterConfig;
+    use super::super::mocks::{RecordingExporter, collection};
     use super::*;
-    use crate::builder::MetricsExporterConfig;
-    use crate::mocks::{RecordingExporter, collection};
 
     #[tokio::test]
     async fn injected_collections_are_exported_on_shutdown() {

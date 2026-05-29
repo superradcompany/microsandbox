@@ -11,7 +11,8 @@ use futures::future::BoxFuture;
 use microsandbox_metrics::{MetricsError, MetricsRegistry};
 
 use crate::error::MetricsCollectorResult;
-use crate::types::{MetricsCollection, SandboxMetricSnapshot};
+
+use super::types::{MetricsCollection, SandboxMetricSnapshot};
 
 //--------------------------------------------------------------------------------------------------
 // Types

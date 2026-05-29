@@ -19,10 +19,11 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use tokio::sync::broadcast;
 
-use crate::builder::MetricsExporterConfig;
-use crate::driver::MetricsErrorPolicy;
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
-use crate::types::{MetricsCollection, MetricsExportBatch, MetricsExporter};
+
+use super::builder::MetricsExporterConfig;
+use super::driver::MetricsErrorPolicy;
+use super::types::{MetricsCollection, MetricsExportBatch, MetricsExporter};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -205,8 +206,8 @@ impl ExporterWorker {
 
 #[cfg(test)]
 mod tests {
+    use super::super::mocks::collection;
     use super::*;
-    use crate::mocks::collection;
     use tokio::sync::mpsc;
 
     fn worker_with_cap(cap: usize) -> ExporterWorker {

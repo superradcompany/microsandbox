@@ -61,26 +61,19 @@
 
 #![warn(missing_docs)]
 
-mod builder;
-mod driver;
+pub mod core;
 mod error;
 pub mod exporters;
-mod reader;
-mod types;
-mod worker;
-
-#[cfg(test)]
-mod mocks;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use builder::{
+pub use core::{
     DEFAULT_COLLECT_INTERVAL, DEFAULT_EXPORT_TIMEOUT, DEFAULT_FLUSH_INTERVAL,
-    DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollectorBuilder, MetricsExporterConfig,
+    DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollection, MetricsCollector, MetricsCollectorBuilder,
+    MetricsErrorPolicy, MetricsExportBatch, MetricsExporter, MetricsExporterConfig,
+    RunningCollector, SandboxMetricSnapshot,
 };
-pub use driver::{MetricsCollector, MetricsErrorPolicy, RunningCollector};
 pub use error::{MetricsCollectorError, MetricsCollectorResult};
-pub use microsandbox_metrics::{SandboxMetricSnapshot, SandboxMetrics};
-pub use types::{MetricsCollection, MetricsExportBatch, MetricsExporter};
+pub use microsandbox_metrics::SandboxMetrics;
