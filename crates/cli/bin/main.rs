@@ -74,7 +74,8 @@ enum Commands {
     Exec(exec::ExecArgs),
 
     /// Copy files between the host and a sandbox.
-    Cp(cp::CpArgs),
+    #[command(visible_alias = "cp")]
+    Copy(cp::CpArgs),
 
     /// Show captured output from a sandbox.
     Logs(logs::LogsArgs),
@@ -317,7 +318,7 @@ fn run_async_command_anyhow(
             Commands::Metrics(args) => metrics::run(args).await,
             Commands::Remove(args) => remove::run(args).await,
             Commands::Exec(args) => exec::run(args).await,
-            Commands::Cp(args) => cp::run(args).await,
+            Commands::Copy(args) => cp::run(args).await,
             Commands::Logs(args) => logs::run(args).await,
             Commands::Image(args) => image::run(args).await,
             Commands::Pull(args) => image::run_pull(args).await,

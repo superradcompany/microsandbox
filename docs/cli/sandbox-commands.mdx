@@ -116,7 +116,7 @@ patches:
   - rm: /etc/motd
 ```
 
-Use `msb cp` for live file transfer after a sandbox exists.
+Use `msb copy` for live file transfer after a sandbox exists.
 
 When no `--` command is given, the image's `entrypoint` and `cmd` are used as the default process. If the image has neither, an interactive shell is started. When a command is given via `--`, it replaces the image `cmd` but the `entrypoint` is preserved. See [Image config inheritance](/images/overview#image-config-inheritance) for details.
 
@@ -234,19 +234,19 @@ msb exec devbox -- ls -la /app
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
 </Tip>
 
-## msb cp
+## msb copy
 
 Copy files between the host and a sandbox.
 
 ```bash
-msb cp ./local.txt devbox:/tmp/local.txt
-msb cp devbox:/tmp/out.txt ./out.txt
-msb cp devbox:/tmp/a devbox:/tmp/b
+msb copy ./local.txt devbox:/tmp/local.txt
+msb copy devbox:/tmp/out.txt ./out.txt
+msb copy devbox:/tmp/a devbox:/tmp/b
 ```
 
 Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. The same-sandbox form is a microsandbox extension. Cross-sandbox copies are not supported yet; copy through the host if you need to move data between two sandboxes.
 
-`msb cp` connects to an existing sandbox and starts it temporarily if needed, following the same lifecycle ownership behavior as `msb exec`.
+`msb copy` connects to an existing sandbox and starts it temporarily if needed, following the same lifecycle ownership behavior as `msb exec`. The shorter `msb cp` form is available as an alias.
 
 | Flag | Description |
 |------|-------------|
