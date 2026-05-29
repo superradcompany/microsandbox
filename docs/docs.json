@@ -76,18 +76,11 @@
               "images/overview",
               "images/disk-images"
             ]
-          },
-          {
-            "group": "Configuration",
-            "icon": "gear",
-            "pages": [
-              "configuration"
-            ]
           }
         ]
       },
       {
-        "tab": "SDK Reference",
+        "tab": "References",
         "groups": [
           {
             "group": "Getting Started",
@@ -171,12 +164,7 @@
                 ]
               }
             ]
-          }
-        ]
-      },
-      {
-        "tab": "CLI Reference",
-        "groups": [
+          },
           {
             "group": "CLI",
             "icon": "terminal",
@@ -186,6 +174,13 @@
               "cli/ssh-commands",
               "cli/volume-commands",
               "cli/image-commands"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "icon": "gear",
+            "pages": [
+              "configuration"
             ]
           }
         ]
