@@ -10,7 +10,7 @@
 export declare class AgentClient {
   /**
    * Connect to a sandbox by name. Resolves the agent socket from the
-   * SDK's configured sandboxes directory. Sandbox names are limited to
+   * SDK's configured runtime directory. Sandbox names are limited to
    * 128 UTF-8 bytes.
    */
   static connectSandbox(name: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
@@ -1167,7 +1167,7 @@ export declare class SecretBuilder {
   /** Configure violation behavior for this secret. */
   onViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
   /**
-   * Materialize into a `SecretEntry`. Panics if `env` or `value` weren't
+   * Materialize into a `SecretEntry`. Panics if required fields are not
    * set (matches the underlying Rust builder's contract; surface as a
    * typed error here).
    */

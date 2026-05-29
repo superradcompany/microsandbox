@@ -18,7 +18,7 @@ path = "lib/lib.rs"
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true
-microsandbox-protocol = { version = "0.5.2", path = "../protocol" }
+microsandbox-protocol = { version = "0.5.3", path = "../protocol" }
 nix = { workspace = true, features = [
     "fs",
     "hostname",
