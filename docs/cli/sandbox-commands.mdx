@@ -67,7 +67,6 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--copy-dir` | Copy a host directory into the guest rootfs before boot (`SRC:DST`) |
 | `--mkdir` | Create a directory in the guest rootfs before boot |
 | `--rm` | Hide/remove a path from the guest rootfs before boot |
-| `--patch-file` | Load rootfs patch operations from a YAML file |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-net` | Disable all network access by default. Sugar for `--net-default deny`. Combine with `--net-rule allow@<target>` entries to build an allowlist |
@@ -104,16 +103,6 @@ msb run alpine \
   --copy-dir ./certs:/etc/app/certs \
   --mkdir /var/cache/app \
   --rm /etc/motd
-```
-
-Patch files use the same operation names:
-
-```yaml
-patches:
-  - copy: ./config.toml:/etc/app/config.toml
-  - copy_dir: ./certs:/etc/app/certs
-  - mkdir: /var/cache/app
-  - rm: /etc/motd
 ```
 
 Use `msb copy` for live file transfer after a sandbox exists.

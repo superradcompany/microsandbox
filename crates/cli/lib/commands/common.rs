@@ -1,10 +1,9 @@
 //! Common sandbox configuration flags shared between commands.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Args;
 use microsandbox::sandbox::{Patch, SandboxBuilder};
-use serde::Deserialize;
 
 use crate::ui;
 
@@ -102,10 +101,6 @@ pub struct SandboxOpts {
     /// Hide/remove a path from the guest rootfs before boot.
     #[arg(long = "rm", value_name = "PATH")]
     pub rm: Vec<String>,
-
-    /// Load rootfs patch operations from a YAML file.
-    #[arg(long = "patch-file", value_name = "PATH")]
-    pub patch_file: Vec<PathBuf>,
 
     // --- Image/Runtime overrides ---
     /// Override the image's default entrypoint command.
@@ -332,86 +327,12 @@ struct CliMountOptionSupport {
     size: bool,
 }
 
-/// YAML patch-file document.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PatchFileDocument {
-    Object { patches: Vec<PatchSpec> },
-    List(Vec<PatchSpec>),
-}
-
-/// One rootfs patch operation in a patch file.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PatchSpec {
-    Copy { copy: CopyPatchValue },
-    CopyFile { copy_file: CopyPatchValue },
-    CopyDir { copy_dir: CopyDirPatchValue },
-    Mkdir { mkdir: MkdirPatchValue },
-    Rm { rm: RemovePatchValue },
-    Remove { remove: RemovePatchValue },
-}
-
-/// Patch value for file-or-directory and file copy operations.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum CopyPatchValue {
-    Scalar(String),
-    Detailed {
-        src: PathBuf,
-        dst: String,
-        mode: Option<ModeSpec>,
-        #[serde(default)]
-        replace: bool,
-    },
-}
-
-/// Patch value for directory copy operations.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum CopyDirPatchValue {
-    Scalar(String),
-    Detailed {
-        src: PathBuf,
-        dst: String,
-        #[serde(default)]
-        replace: bool,
-    },
-}
-
-/// Patch value for mkdir operations.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum MkdirPatchValue {
-    Scalar(String),
-    Detailed {
-        path: String,
-        mode: Option<ModeSpec>,
-    },
-}
-
-/// Patch value for remove operations.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RemovePatchValue {
-    Scalar(String),
-    Detailed { path: String },
-}
-
 /// File or directory copy behavior.
 #[derive(Debug, Clone, Copy)]
 enum CopyKind {
     Infer,
     File,
     Directory,
-}
-
-/// Permission mode parsed from YAML.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ModeSpec {
-    String(String),
-    Number(u32),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -436,7 +357,6 @@ impl SandboxOpts {
             || !self.copy_dir.is_empty()
             || !self.mkdir.is_empty()
             || !self.rm.is_empty()
-            || !self.patch_file.is_empty()
             || self.entrypoint.is_some()
             || self.init.is_some()
             || !self.init_arg.is_empty()
@@ -621,12 +541,6 @@ fn apply_rootfs_patches(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
 ) -> anyhow::Result<SandboxBuilder> {
-    for patch_file in &opts.patch_file {
-        for patch in load_patch_file(patch_file)? {
-            builder = builder.add_patch(patch);
-        }
-    }
-
     for spec in &opts.copy {
         builder = builder.add_patch(parse_copy_arg("--copy", spec, CopyKind::Infer)?);
     }
@@ -651,120 +565,14 @@ fn apply_rootfs_patches(
     Ok(builder)
 }
 
-/// Load patches from a YAML patch file.
-fn load_patch_file(path: &Path) -> anyhow::Result<Vec<Patch>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("read patch file {}: {e}", path.display()))?;
-    let doc: PatchFileDocument = serde_yaml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("parse patch file {}: {e}", path.display()))?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-    let specs = match doc {
-        PatchFileDocument::Object { patches } => patches,
-        PatchFileDocument::List(patches) => patches,
-    };
-
-    specs
-        .into_iter()
-        .enumerate()
-        .map(|(idx, spec)| patch_spec_to_patch(spec, base, &format!("{}[{idx}]", path.display())))
-        .collect()
-}
-
-/// Convert a patch-file operation into an SDK patch.
-fn patch_spec_to_patch(spec: PatchSpec, base: &Path, context: &str) -> anyhow::Result<Patch> {
-    match spec {
-        PatchSpec::Copy { copy } => patch_from_copy_value(context, copy, CopyKind::Infer, base),
-        PatchSpec::CopyFile { copy_file } => {
-            patch_from_copy_value(context, copy_file, CopyKind::File, base)
-        }
-        PatchSpec::CopyDir { copy_dir } => {
-            patch_from_copy_dir_value(context, copy_dir, CopyKind::Directory, base)
-        }
-        PatchSpec::Mkdir { mkdir } => match mkdir {
-            MkdirPatchValue::Scalar(path) => {
-                validate_guest_path(context, &path)?;
-                Ok(Patch::Mkdir { path, mode: None })
-            }
-            MkdirPatchValue::Detailed { path, mode } => {
-                validate_guest_path(context, &path)?;
-                Ok(Patch::Mkdir {
-                    path,
-                    mode: parse_mode(mode, context)?,
-                })
-            }
-        },
-        PatchSpec::Rm { rm } => patch_from_remove_value(context, rm),
-        PatchSpec::Remove { remove } => patch_from_remove_value(context, remove),
-    }
-}
-
-/// Convert a copy-like patch value into an SDK patch.
-fn patch_from_copy_value(
-    context: &str,
-    value: CopyPatchValue,
-    kind: CopyKind,
-    base: &Path,
-) -> anyhow::Result<Patch> {
-    match value {
-        CopyPatchValue::Scalar(spec) => {
-            let (src, dst) = parse_patch_src_dst(context, &spec, base)?;
-            build_copy_patch(context, src, dst, kind, None, false)
-        }
-        CopyPatchValue::Detailed {
-            src,
-            dst,
-            mode,
-            replace,
-        } => {
-            validate_guest_path(context, &dst)?;
-            let src = resolve_patch_host_path(base, src);
-            build_copy_patch(context, src, dst, kind, parse_mode(mode, context)?, replace)
-        }
-    }
-}
-
-/// Convert a directory-copy patch value into an SDK patch.
-fn patch_from_copy_dir_value(
-    context: &str,
-    value: CopyDirPatchValue,
-    kind: CopyKind,
-    base: &Path,
-) -> anyhow::Result<Patch> {
-    match value {
-        CopyDirPatchValue::Scalar(spec) => {
-            let (src, dst) = parse_patch_src_dst(context, &spec, base)?;
-            build_copy_patch(context, src, dst, kind, None, false)
-        }
-        CopyDirPatchValue::Detailed { src, dst, replace } => {
-            validate_guest_path(context, &dst)?;
-            let src = resolve_patch_host_path(base, src);
-            build_copy_patch(context, src, dst, kind, None, replace)
-        }
-    }
-}
-
-/// Convert a remove patch value into an SDK patch.
-fn patch_from_remove_value(context: &str, value: RemovePatchValue) -> anyhow::Result<Patch> {
-    let path = match value {
-        RemovePatchValue::Scalar(path) => path,
-        RemovePatchValue::Detailed { path } => path,
-    };
-    validate_guest_path(context, &path)?;
-    Ok(Patch::Remove { path })
-}
-
 /// Parse a CLI copy patch argument.
 fn parse_copy_arg(context: &str, spec: &str, kind: CopyKind) -> anyhow::Result<Patch> {
-    let (src, dst) = parse_patch_src_dst(context, spec, Path::new("."))?;
-    build_copy_patch(context, src, dst, kind, None, false)
+    let (src, dst) = parse_patch_src_dst(context, spec)?;
+    build_copy_patch(context, src, dst, kind)
 }
 
 /// Parse `SRC:DST` into a host path and guest destination.
-fn parse_patch_src_dst(
-    context: &str,
-    spec: &str,
-    base: &Path,
-) -> anyhow::Result<(PathBuf, String)> {
+fn parse_patch_src_dst(context: &str, spec: &str) -> anyhow::Result<(PathBuf, String)> {
     let (src, dst) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("{context} must use SRC:DST"))?;
@@ -772,19 +580,7 @@ fn parse_patch_src_dst(
         anyhow::bail!("{context} source path cannot be empty");
     }
     validate_guest_path(context, dst)?;
-    Ok((
-        resolve_patch_host_path(base, PathBuf::from(src)),
-        dst.to_string(),
-    ))
-}
-
-/// Resolve a patch host path against its patch-file directory.
-fn resolve_patch_host_path(base: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        base.join(path)
-    }
+    Ok((PathBuf::from(src), dst.to_string()))
 }
 
 /// Build a copy patch, validating host path kind.
@@ -793,64 +589,34 @@ fn build_copy_patch(
     src: PathBuf,
     dst: String,
     kind: CopyKind,
-    mode: Option<u32>,
-    replace: bool,
 ) -> anyhow::Result<Patch> {
     let metadata = std::fs::metadata(&src)
         .map_err(|e| anyhow::anyhow!("{context}: stat {}: {e}", src.display()))?;
 
     match kind {
-        CopyKind::Infer if metadata.is_dir() => {
-            if mode.is_some() {
-                anyhow::bail!("{context}: mode is only valid when copying a file");
-            }
-            Ok(Patch::CopyDir { src, dst, replace })
-        }
+        CopyKind::Infer if metadata.is_dir() => Ok(Patch::CopyDir {
+            src,
+            dst,
+            replace: false,
+        }),
         CopyKind::Infer | CopyKind::File if metadata.is_file() => Ok(Patch::CopyFile {
             src,
             dst,
-            mode,
-            replace,
+            mode: None,
+            replace: false,
         }),
         CopyKind::File => anyhow::bail!("{context}: {} is not a file", src.display()),
-        CopyKind::Directory if metadata.is_dir() => {
-            if mode.is_some() {
-                anyhow::bail!("{context}: mode is not valid for directory copies");
-            }
-            Ok(Patch::CopyDir { src, dst, replace })
-        }
+        CopyKind::Directory if metadata.is_dir() => Ok(Patch::CopyDir {
+            src,
+            dst,
+            replace: false,
+        }),
         CopyKind::Directory => anyhow::bail!("{context}: {} is not a directory", src.display()),
         CopyKind::Infer => anyhow::bail!(
             "{context}: {} is not a regular file or directory",
             src.display()
         ),
     }
-}
-
-/// Parse an optional permission mode.
-fn parse_mode(mode: Option<ModeSpec>, context: &str) -> anyhow::Result<Option<u32>> {
-    let Some(mode) = mode else {
-        return Ok(None);
-    };
-    let parsed = match mode {
-        ModeSpec::Number(value) => value,
-        ModeSpec::String(value) => {
-            let value = value.trim();
-            let value = value
-                .strip_prefix("0o")
-                .or_else(|| value.strip_prefix("0O"))
-                .unwrap_or(value);
-            if value.is_empty() || !value.chars().all(|c| matches!(c, '0'..='7')) {
-                anyhow::bail!("{context}: mode must be an octal permission string");
-            }
-            u32::from_str_radix(value, 8)
-                .map_err(|e| anyhow::anyhow!("{context}: invalid mode: {e}"))?
-        }
-    };
-    if parsed > 0o7777 {
-        anyhow::bail!("{context}: mode must be <= 07777");
-    }
-    Ok(Some(parsed))
 }
 
 /// Validate a guest patch path.
@@ -1801,63 +1567,6 @@ mod tests {
         ));
 
         let _ = std::fs::remove_file(file);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn apply_sandbox_opts_loads_patch_file_relative_paths() {
-        let dir = make_temp_dir("msb-patch-file");
-        let src = dir.join("config.toml");
-        std::fs::write(&src, "config").unwrap();
-        let patch_file = dir.join("rootfs.yaml");
-        std::fs::write(
-            &patch_file,
-            r#"
-patches:
-  - copy:
-      src: config.toml
-      dst: /etc/app/config.toml
-      mode: "0644"
-      replace: true
-  - mkdir:
-      path: /var/cache/app
-      mode: "0755"
-  - rm: /etc/motd
-"#,
-        )
-        .unwrap();
-
-        let opts = SandboxOpts {
-            patch_file: vec![patch_file],
-            ..Default::default()
-        };
-        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            &config.patches[0],
-            Patch::CopyFile {
-                src: patch_src,
-                dst,
-                mode: Some(0o644),
-                replace: true,
-            } if patch_src == &src && dst == "/etc/app/config.toml"
-        ));
-        assert!(matches!(
-            &config.patches[1],
-            Patch::Mkdir {
-                path,
-                mode: Some(0o755),
-            } if path == "/var/cache/app"
-        ));
-        assert!(matches!(
-            &config.patches[2],
-            Patch::Remove { path } if path == "/etc/motd"
-        ));
-
         let _ = std::fs::remove_dir_all(dir);
     }
 
