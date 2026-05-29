@@ -18,6 +18,34 @@ Think of it the way you'd run `otel-collector`,
 `prometheus-node-exporter`, or `fluent-bit`: one process per host,
 lifecycle managed independently.
 
+## Where it fits
+
+```mermaid
+flowchart TD
+    classDef store fill:#f5f5f5,stroke:#9d9d9d,color:#333
+    classDef thispage fill:#bf84fe,color:#fff,stroke:#9d5fe0
+
+    SB1[Sandbox A]
+    SB2[Sandbox B]
+    SB3[Sandbox N]
+    SB1 -->|writes samples| SHM
+    SB2 -->|writes samples| SHM
+    SB3 -->|writes samples| SHM
+    SHM[("Shared-memory<br/>registry")]:::store
+
+    SHM -->|read| CLI["msb metrics<br/>(CLI, one-shot)"]
+    SHM -->|read| SDK["Sandbox::metrics<br/>(SDK, in-process)"]
+    SHM -->|read| MSB["msb-metrics<br/>(sidecar, continuous)"]:::thispage
+
+    CLI --> TERM[Terminal output]
+    SDK --> APP[Your application]
+    MSB -->|OTLP gRPC/HTTP| BACKEND["Backend<br/>(Grafana / Datadog / …)"]:::thispage
+```
+
+Three surfaces read the same shared-memory registry. This page is
+about the highlighted path: a continuous push to an OTel-compatible
+backend.
+
 ## Quick start
 
 <Steps>

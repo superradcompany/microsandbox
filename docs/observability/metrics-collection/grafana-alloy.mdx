@@ -11,6 +11,17 @@ deal with retries, batching, credential rotation, or backend hiccups.
 
 This is the recommended setup for production deployments.
 
+```mermaid
+flowchart LR
+    MSB[msb-metrics] -->|OTLP<br/>localhost:4317| ALLOY[Alloy]
+    ALLOY -->|OTLP HTTP<br/>+ Basic auth| GC[Grafana Cloud<br/>OTLP gateway]
+    ALLOY -.->|buffers,<br/>retries,<br/>fan-out| OTHER[Other backends<br/>(optional)]
+```
+
+Alloy sits between `msb-metrics` and the upstream backend. `msb-metrics`
+ships locally over plain OTLP with no auth; Alloy owns the credentials,
+the upstream connection, and the buffering through hiccups.
+
 <Steps>
   <Step title="Install Alloy">
     Follow the [Alloy install guide](https://grafana.com/docs/alloy/latest/set-up/install/)
