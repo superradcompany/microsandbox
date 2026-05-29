@@ -9,6 +9,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 pub mod common;
+pub mod copy;
 pub mod create;
 pub mod exec;
 pub mod image;
