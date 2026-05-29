@@ -28,6 +28,7 @@ const CAP_WORD_BITS: u32 = 32;
 const PR_CAPBSET_DROP: libc::c_int = 24;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
+const DEFAULT_USER_SPEC: &str = "0:0";
 
 //--------------------------------------------------------------------------------------------------
 // Functions: classify
@@ -319,7 +320,7 @@ impl ExecSession {
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
         let resolved_user = resolve_requested_user(req, default_user)?;
-        let default_home = default_home_dir(req, resolved_user.as_ref()).map(CStr::to_owned);
+        let default_home = default_home_dir(req, resolved_user.as_ref())?;
         let home_key = default_home
             .as_ref()
             .map(|_| {
@@ -471,7 +472,7 @@ impl ExecSession {
         }
 
         let resolved_user = resolve_requested_user(req, default_user)?;
-        if let Some(home) = default_home_dir(req, resolved_user.as_ref()) {
+        if let Some(home) = default_home_dir(req, resolved_user.as_ref())? {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
 
@@ -639,6 +640,9 @@ fn resolve_requested_user(
     req: &ExecRequest,
     default_user: Option<&str>,
 ) -> AgentdResult<Option<ResolvedUser>> {
+    let default_user = default_user
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let requested = req
         .user
         .as_deref()
@@ -858,12 +862,19 @@ fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
     Ok(())
 }
 
-fn default_home_dir<'a>(req: &ExecRequest, user: Option<&'a ResolvedUser>) -> Option<&'a CStr> {
+fn default_home_dir(
+    req: &ExecRequest,
+    user: Option<&ResolvedUser>,
+) -> AgentdResult<Option<CString>> {
     if env_contains_key(&req.env, "HOME") {
-        return None;
+        return Ok(None);
     }
 
-    user.and_then(|user| user.home_dir.as_deref())
+    if let Some(user) = user {
+        return Ok(user.home_dir.clone());
+    }
+
+    Ok(resolve_user_spec(DEFAULT_USER_SPEC)?.home_dir)
 }
 
 fn env_contains_key(env: &[String], key: &str) -> bool {
@@ -1193,6 +1204,24 @@ mod tests {
     }
 
     #[test]
+    fn test_request_without_user_does_not_apply_user_switch() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let resolved = resolve_requested_user(&req, None).expect("resolve absent user");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
     fn test_default_user_absent_resolves_to_root() {
         let resolved = resolve_default_user(None).expect("resolve absent default user");
         assert_eq!(resolved, (0, 0));
@@ -1219,8 +1248,35 @@ mod tests {
         };
 
         assert_eq!(
-            default_home_dir(&req, Some(&user)).map(CStr::to_string_lossy),
+            default_home_dir(&req, Some(&user))
+                .expect("resolve default home")
+                .as_deref()
+                .map(CStr::to_string_lossy),
             Some("/home/tester".into()),
+        );
+    }
+
+    #[test]
+    fn test_default_home_dir_uses_root_when_user_absent() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let root = resolve_user_spec(DEFAULT_USER_SPEC).expect("resolve implicit root");
+
+        assert_eq!(
+            default_home_dir(&req, None)
+                .expect("resolve default home")
+                .as_deref()
+                .map(CStr::to_string_lossy),
+            root.home_dir.as_deref().map(CStr::to_string_lossy),
         );
     }
 
@@ -1244,7 +1300,11 @@ mod tests {
             home_dir: Some(CString::new("/home/tester").unwrap()),
         };
 
-        assert!(default_home_dir(&req, Some(&user)).is_none());
+        assert!(
+            default_home_dir(&req, Some(&user))
+                .expect("resolve default home")
+                .is_none()
+        );
     }
 
     #[tokio::test]
