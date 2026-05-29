@@ -35,15 +35,15 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# OTel deps land alongside the OTel exporter in a follow-on commit, so we
-# don't compile them until we actually use them:
-#   opentelemetry, opentelemetry_sdk, opentelemetry-otlp
-
-# Deferred: a dep on the umbrella crate would drag in microsandbox-filesystem
-# + microsandbox-runtime via the transitive graph, which require `agentd` to
-# be prebuilt. Instead we'll either lift SandboxMetrics / MicrosandboxError
-# into crates/metrics, or define them locally here. Decision lands with the
-# orchestrator move (task #19).
+# OTel exporter (backs the `msb-metrics otel` subcommand).
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = [
+    "metrics",
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-blocking-client",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

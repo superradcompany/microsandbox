@@ -64,6 +64,7 @@
 mod builder;
 mod driver;
 mod error;
+pub mod exporters;
 mod reader;
 mod types;
 mod worker;
