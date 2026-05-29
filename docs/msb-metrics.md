@@ -1,0 +1,298 @@
+# `msb-metrics`
+
+`msb-metrics` is a sibling-process metrics collector. It reads the
+microsandbox shared-memory registry on a fixed interval and ships
+per-sandbox metrics to an OpenTelemetry-compatible backend (Grafana
+Cloud, Grafana Alloy, otel-collector, Datadog, etc.).
+
+It is not part of the `msb` runtime; you run it separately. Think of it
+the way you'd run `otel-collector`, `prometheus-node-exporter`, or
+`fluent-bit` — one process per host, lifecycle managed independently.
+
+## Deployment model
+
+`msb-metrics` reads the shm registry directly. Two constraints follow:
+
+- **Same Unix user as `msb`.** The shm object is mode `0600` (owner
+  read/write only). If `msb-metrics` runs as a different user, it gets
+  `EACCES` on attach.
+- **Same `$MSB_HOME`.** The shm name is derived from `stable_hash($MSB_HOME)`,
+  so both processes must agree on it. Pass `--msb-home` explicitly if your
+  environment doesn't set `$MSB_HOME`; the default is `~/.microsandbox`.
+
+The registry is per-host. One `msb-metrics` process per host covers
+every running sandbox there.
+
+## Quick start
+
+Ship to a local otel-collector on the default OTLP gRPC port:
+
+```sh
+msb-metrics otel --endpoint=http://localhost:4317
+```
+
+That's the whole minimum. The collector now polls shm every second and
+ships batched metrics to `localhost:4317` over OTLP/gRPC.
+
+Press Ctrl+C to stop. The collector drains its buffer, runs each
+exporter's final flush, and exits cleanly.
+
+## The `otel` subcommand
+
+```text
+msb-metrics otel --endpoint=<URL>
+                 [--protocol=grpc|http]
+                 [--header=KEY=VALUE]...
+                 [--resource=KEY=VALUE]...
+                 [--emit-run-id] [--emit-pid]
+                 [--collect-interval=<dur>]
+                 [--flush-interval=<dur>]
+                 [--max-buffered=<n>]
+                 [--export-timeout=<dur>]
+                 [--msb-home=<path>]
+```
+
+Run `msb-metrics otel --help` for the full prose.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--endpoint` | (required) | OTLP endpoint URL. |
+| `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). |
+| `--header` | none | `KEY=VALUE`, repeatable. For auth (`Authorization`, `api-key`, …). Applied via `OTEL_EXPORTER_OTLP_HEADERS`. |
+| `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
+| `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |
+| `--emit-pid` | off | Add `sandbox.pid` to every datapoint. Opt-in: high cardinality. |
+| `--collect-interval` | `1s` | How often shm is read. `humantime` durations (`1s`, `500ms`, `2m`). |
+| `--flush-interval` | `10s` | Per-exporter scheduled flush cadence. |
+| `--max-buffered` | `60` | Per-exporter buffer cap. On overflow, the oldest collection is dropped and the drop count surfaces on the next batch. |
+| `--export-timeout` | `30s` | Per-call timeout for a single OTLP export. |
+| `--msb-home` | `$MSB_HOME` ∨ `~/.microsandbox` | Used to derive the shm registry name. |
+
+Global flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG` env var wins if set. |
+
+## Metric reference
+
+All metrics are namespaced under `microsandbox.*` to avoid colliding with
+OTel semantic-convention `system.*` host metrics in the same backend tenant.
+
+| Metric | Type | Unit | Notes |
+|---|---|---|---|
+| `microsandbox.cpu.utilization` | gauge | `1` (0.0–1.0) | Source field is 0–100 percent; divided by 100 on emit. |
+| `microsandbox.memory.usage` | gauge | `By` | Resident memory in bytes. |
+| `microsandbox.memory.limit` | gauge | `By` | Configured guest memory limit. |
+| `microsandbox.disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
+| `microsandbox.disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
+| `microsandbox.network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
+| `microsandbox.network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
+| `microsandbox.uptime` | gauge | `s` | Sandbox uptime at sample time. |
+
+Cumulative byte fields are emitted as gauges carrying the absolute
+cumulative value. Use `rate()` (PromQL / OTel-flavored Prom) for
+throughput. We use gauges rather than monotonic counters because each
+shm snapshot already carries an absolute value, and counter `add()`
+semantics would require us to track per-sandbox deltas across runs.
+
+## Resource attributes
+
+Set automatically; `--resource KEY=VALUE` overrides or adds:
+
+| Key | Default |
+|---|---|
+| `service.name` | `microsandbox` |
+| `service.instance.id` | hostname (best-effort, read from `HOSTNAME` / `COMPUTERNAME` env vars) |
+
+To override, just pass another value:
+
+```sh
+msb-metrics otel --endpoint=... \
+                 --resource=service.namespace=prod \
+                 --resource=service.instance.id=worker-12
+```
+
+## Identity attributes
+
+Every datapoint carries a configurable subset of sandbox identity:
+
+| Attribute | Default | Notes |
+|---|---|---|
+| `sandbox.name` | on | Low cardinality. |
+| `sandbox.id` | on | Catalog id; low cardinality. |
+| `sandbox.run_id` | off | Opt-in via `--emit-run-id`. Fresh series per restart. |
+| `sandbox.pid` | off | Opt-in via `--emit-pid`. Fresh series per restart. |
+
+Why the opt-in: backends like Grafana Cloud and Prometheus bill on
+active series. A series is identified by its label tuple. Including
+`run_id` or `pid` creates a new series every time a sandbox restarts,
+which on high-churn workloads (ephemeral sandboxes) inflates cost.
+Leaving them off keeps series count proportional to distinct sandboxes,
+not total runs.
+
+## Recipes
+
+### Grafana Cloud (direct OTLP)
+
+Grafana Cloud exposes an OTLP gateway with per-region URLs and basic
+auth via `Authorization` header.
+
+```sh
+GC_ID=...      # numeric instance id
+GC_TOKEN=...   # API token with metrics:write
+AUTH="Basic $(printf '%s:%s' "$GC_ID" "$GC_TOKEN" | base64 | tr -d '\n')"
+
+msb-metrics otel \
+  --endpoint=https://otlp-gateway-prod-us-east-2.grafana.net/otlp \
+  --protocol=http \
+  --header="Authorization=${AUTH}"
+```
+
+Sub the region in the URL for yours.
+
+### Grafana Alloy (recommended for production)
+
+Run [Alloy](https://grafana.com/oss/alloy/) locally with an OTLP
+receiver and a Grafana Cloud exporter. Point `msb-metrics` at Alloy and
+let Alloy own batching, retries, credential rotation, and the upstream
+connection.
+
+```sh
+msb-metrics otel --endpoint=http://localhost:4317
+```
+
+Alloy handles the rest. Buffers in Alloy survive Grafana Cloud
+hiccups. Credential changes don't require touching `msb-metrics`.
+
+### Local otel-collector (development)
+
+Stand up an [otel-collector](https://opentelemetry.io/docs/collector/)
+with `otlp` receiver + `logging` exporter for development:
+
+```yaml
+# otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+exporters:
+  logging:
+    verbosity: detailed
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [logging]
+```
+
+```sh
+otelcol --config=otel-collector.yaml &
+msb-metrics otel --endpoint=http://localhost:4317 --log-level=debug
+```
+
+Boot a sandbox and watch metrics scroll past in the otel-collector
+log.
+
+### Datadog (via OTLP)
+
+Datadog accepts OTLP via its agent or its OTLP intake. With the
+datadog-agent running locally with OTLP enabled:
+
+```sh
+msb-metrics otel --endpoint=http://localhost:4317
+```
+
+For Datadog's direct OTLP intake, supply the API key header:
+
+```sh
+msb-metrics otel --endpoint=https://api.datadoghq.com/api/v0.2/series \
+                 --protocol=http \
+                 --header="DD-API-KEY=${DATADOG_API_KEY}"
+```
+
+(Datadog's intake URL/format may differ by region and product; consult
+Datadog's OTLP intake docs for current details.)
+
+## Running it under systemd
+
+```ini
+# /etc/systemd/system/msb-metrics.service
+[Unit]
+Description=microsandbox metrics collector
+After=network-online.target
+
+[Service]
+Type=simple
+User=msb                                       # same user that runs msb
+Environment=MSB_HOME=/var/lib/microsandbox
+ExecStart=/usr/local/bin/msb-metrics otel \
+          --endpoint=http://localhost:4317
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Systemd sends SIGTERM on `systemctl stop`; the collector drains
+buffers, calls each exporter's `shutdown()`, and exits cleanly.
+
+## Operational notes
+
+**Tuning at scale.** With ~1000 sandboxes per host:
+
+- Heap is dominated by the per-exporter buffer. At 1000 sandboxes
+  with the default `--max-buffered=60`, worst-case heap when the
+  backend is slow is roughly `60 × 1000 × ~350B ≈ 21 MB` per exporter.
+  Drop `--max-buffered` to `~20` if you want a tighter cap.
+- The shm registry itself is fixed at ~512 KiB regardless of active
+  count.
+- One sqlite read isn't on the path — `msb-metrics` is pure-shm.
+
+**Shutdown behavior.** SIGINT or SIGTERM triggers a clean drain:
+
+1. Stop the collect ticker.
+2. Push any buffered collections through one final export.
+3. Call each exporter's `shutdown()` (OTel: flushes and closes the
+   OTLP transport).
+4. Exit.
+
+If an exporter's final export hangs, it's bounded by
+`--export-timeout`.
+
+**Backend unreachable.** Failed exports are retried on the next flush
+(the failed batch is restored to the front of the buffer). If failures
+keep arriving, oldest collections drop first and the next successful
+export's `droppedCollectionCount` reports how many were lost. The
+collector itself does not crash.
+
+## Troubleshooting
+
+**`EACCES` opening the shm region.**
+You're running `msb-metrics` as a different Unix user from the one
+that owns the registry. Switch users or use `sudo -u <msb-user>`.
+
+**Empty metrics / no sandboxes show up.**
+Either no sandboxes are running, or `msb-metrics` is reading a
+different registry than `msb` writes. Check `--msb-home` matches the
+runtime's `$MSB_HOME`. Use `--log-level=debug` to see the registry
+name and collect cadence.
+
+**OTLP backend rejects the request (HTTP 401/403/422).**
+Auth or schema mismatch. Verify the `--header` value (especially
+`Authorization` base64 encoding) and that the endpoint URL matches
+the protocol — gRPC endpoints typically end at `4317`, HTTP/Protobuf
+at `4318` with an explicit `/v1/metrics` path on some backends.
+
+**Sandbox restarts produce fresh series.**
+Expected if `--emit-run-id` or `--emit-pid` is on. Drop them if you
+want a single series per sandbox name across restarts.
+
+## See also
+
+- `docs/sandboxes/metrics.mdx` — per-sandbox `Sandbox::metrics()` read
+  API in the Rust SDK.
+- `docs/msb-metrics-binary-plan.md`, `docs/sandbox-labels-plan.md`,
+  `docs/metrics-perf-optimizations.md` — design notes for the
+  refactor that introduced this binary.
