@@ -30,10 +30,21 @@ const MAX_HTTP_BODY_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Maximum HTTP/2 frame payload the handler buffers at once.
-const MAX_HTTP2_FRAME_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// This is the largest value representable in the protocol's 24-bit
+/// frame-length field.
+const MAX_HTTP2_FRAME_PAYLOAD_BYTES: usize = 0x00ff_ffff;
 
 /// Maximum accumulated HTTP/2 HPACK header block.
 const MAX_HTTP2_HEADER_BLOCK_BYTES: usize = 64 * 1024;
+
+/// Maximum decoded HTTP/2 header bytes accepted after HPACK expansion.
+const MAX_HTTP2_DECODED_HEADER_BYTES: usize = 64 * 1024;
+
+/// Maximum decoded HTTP/2 header fields accepted in one HEADERS block.
+const MAX_HTTP2_HEADER_FIELDS: usize = 1024;
+
+/// Maximum concurrently open HTTP/2 request streams tracked by the secret handler.
+const MAX_HTTP2_TRACKED_STREAMS: usize = 1024;
 
 /// Conservative outbound HTTP/2 frame payload size. This is the protocol
 /// default and is valid even before seeing the upstream peer's SETTINGS.
@@ -127,7 +138,7 @@ struct Http2State {
     preface_seen: bool,
     buffer: Vec<u8>,
     header_block: Option<Http2HeaderBlock>,
-    request_headers_seen: HashSet<u32>,
+    open_request_streams: HashSet<u32>,
     data_tails: HashMap<u32, Vec<u8>>,
     decoder: HpackDecoder<'static>,
     encoder: HpackEncoder<'static>,
@@ -339,7 +350,7 @@ impl Default for Http2State {
             preface_seen: false,
             buffer: Vec::new(),
             header_block: None,
-            request_headers_seen: HashSet::new(),
+            open_request_streams: HashSet::new(),
             data_tails: HashMap::new(),
             decoder: HpackDecoder::with_dynamic_size(4096),
             encoder: HpackEncoder::with_dynamic_size(4096),
@@ -1397,7 +1408,7 @@ impl Http2State {
         frame: Http2Frame<'_>,
         output: &mut Vec<u8>,
     ) -> Result<(), ViolationAction> {
-        if frame.stream_id == 0 {
+        if frame.stream_id == 0 || !self.open_request_streams.contains(&frame.stream_id) {
             return Err(ViolationAction::Block);
         }
 
@@ -1422,6 +1433,7 @@ impl Http2State {
         );
         if frame.flags & HTTP2_FLAG_END_STREAM != 0 {
             self.data_tails.remove(&frame.stream_id);
+            self.open_request_streams.remove(&frame.stream_id);
         }
         output.extend_from_slice(frame.raw);
         Ok(())
@@ -1434,7 +1446,15 @@ impl Http2State {
         output: &mut Vec<u8>,
     ) -> Result<(), ViolationAction> {
         let mut headers = self.decode_headers(&block.block)?;
-        let is_initial_request = self.request_headers_seen.insert(block.stream_id);
+        let is_initial_request = !self.open_request_streams.contains(&block.stream_id);
+        if is_initial_request {
+            if self.open_request_streams.len() >= MAX_HTTP2_TRACKED_STREAMS {
+                return Err(ViolationAction::Block);
+            }
+            self.open_request_streams.insert(block.stream_id);
+        } else if !block.end_stream {
+            return Err(ViolationAction::Block);
+        }
 
         if let Some(sni) = handler.http_sni.as_deref() {
             validate_http2_authority(&headers, sni, is_initial_request)?;
@@ -1454,20 +1474,46 @@ impl Http2State {
         append_http2_header_frames(output, block.stream_id, block.end_stream, &encoded)?;
         if block.end_stream {
             self.data_tails.remove(&block.stream_id);
+            self.open_request_streams.remove(&block.stream_id);
         }
         Ok(())
     }
 
     fn decode_headers(&mut self, block: &[u8]) -> Result<Http2Headers, ViolationAction> {
         let mut block = block.to_vec();
-        let mut decoded = Vec::new();
-        self.decoder
-            .decode(&mut block, &mut decoded)
-            .map_err(|_| ViolationAction::Block)?;
-        Ok(decoded
-            .into_iter()
-            .map(|(name, value, _flags)| (name, value))
-            .collect())
+        let mut headers = Vec::new();
+        let mut decoded_bytes = 0usize;
+
+        while !block.is_empty() {
+            let before_len = block.len();
+            let mut decoded = Vec::with_capacity(1);
+            self.decoder
+                .decode_exact(&mut block, &mut decoded)
+                .map_err(|_| ViolationAction::Block)?;
+            if decoded.is_empty() {
+                if block.len() == before_len {
+                    return Err(ViolationAction::Block);
+                }
+                continue;
+            }
+
+            if headers.len() >= MAX_HTTP2_HEADER_FIELDS {
+                return Err(ViolationAction::Block);
+            }
+            let (name, value, _flags) = decoded.pop().expect("decoded one header");
+            decoded_bytes = decoded_bytes
+                .checked_add(name.len())
+                .and_then(|len| len.checked_add(value.len()))
+                .and_then(|len| len.checked_add(4))
+                .ok_or(ViolationAction::Block)?;
+            if decoded_bytes > MAX_HTTP2_DECODED_HEADER_BYTES {
+                return Err(ViolationAction::Block);
+            }
+
+            headers.push((name, value));
+        }
+
+        Ok(headers)
     }
 
     fn encode_headers(
@@ -4070,6 +4116,181 @@ mod tests {
             b"Y",
         )
         .unwrap();
+
+        assert!(handler.substitute(&request).is_ok());
+    }
+
+    #[test]
+    fn tls_intercepted_http2_large_data_frame_without_placeholder_passes() {
+        let ip = Ipv4Addr::new(203, 0, 113, 41);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let payload = vec![b'a'; 1024 * 1024];
+
+        let request = h2_request_with_data(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+            ],
+            &payload,
+        );
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+        assert!(output.ends_with(&payload));
+    }
+
+    #[test]
+    fn tls_intercepted_http2_data_before_headers_is_blocked() {
+        let ip = Ipv4Addr::new(203, 0, 113, 42);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_frame(
+            &mut request,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            1,
+            b"body",
+        )
+        .unwrap();
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_decoded_header_list_size_is_bounded() {
+        let ip = Ipv4Addr::new(203, 0, 113, 43);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+
+        let mut first_block = Vec::new();
+        for (name, value) in [
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":scheme".as_slice(), b"https".as_slice()),
+            (b":authority".as_slice(), b"api.openai.com".as_slice()),
+            (b":path".as_slice(), b"/".as_slice()),
+        ] {
+            encoder
+                .encode(
+                    (name.to_vec(), value.to_vec(), HpackEncoder::NEVER_INDEXED),
+                    &mut first_block,
+                )
+                .unwrap();
+        }
+        encoder
+            .encode(
+                (
+                    b"x-fill".to_vec(),
+                    vec![b'a'; 4000],
+                    HpackEncoder::WITH_INDEXING,
+                ),
+                &mut first_block,
+            )
+            .unwrap();
+
+        let mut second_block = Vec::new();
+        for (name, value) in [
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":scheme".as_slice(), b"https".as_slice()),
+            (b":authority".as_slice(), b"api.openai.com".as_slice()),
+            (b":path".as_slice(), b"/".as_slice()),
+        ] {
+            encoder
+                .encode(
+                    (name.to_vec(), value.to_vec(), HpackEncoder::NEVER_INDEXED),
+                    &mut second_block,
+                )
+                .unwrap();
+        }
+        for _ in 0..20 {
+            encoder.encode(62u32, &mut second_block).unwrap();
+        }
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &first_block).unwrap();
+        append_http2_header_frames(&mut request, 3, true, &second_block).unwrap();
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_limits_concurrent_open_streams() {
+        let ip = Ipv4Addr::new(203, 0, 113, 44);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        for i in 0..=MAX_HTTP2_TRACKED_STREAMS {
+            append_h2_headers(
+                &mut request,
+                1 + (i as u32 * 2),
+                &[
+                    (b":method", b"POST"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"api.openai.com"),
+                    (b":path", b"/"),
+                ],
+                false,
+            );
+        }
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_closed_streams_release_tracking_state() {
+        let ip = Ipv4Addr::new(203, 0, 113, 45);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        for i in 0..=MAX_HTTP2_TRACKED_STREAMS {
+            append_h2_headers(
+                &mut request,
+                1 + (i as u32 * 2),
+                &[
+                    (b":method", b"GET"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"api.openai.com"),
+                    (b":path", b"/"),
+                ],
+                true,
+            );
+        }
 
         assert!(handler.substitute(&request).is_ok());
     }

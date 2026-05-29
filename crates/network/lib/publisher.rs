@@ -603,19 +603,19 @@ async fn udp_listener_task(
                     continue;
                 }
 
-                    let Some(guest_peer) =
-                        resolve_udp_guest_peer(peer, gateway_ip, &peers, &ephemeral_port)
-                    else {
-                        tracing::debug!(
-                            peer = %peer,
-                            guest_port,
-                            "UDP ingress dropped because published-port peer table is full",
-                        );
-                        continue;
-                    };
-                    inject_udp_datagram_to_guest(
-                        guest_peer,
-                        SocketAddr::new(guest_ip, guest_port),
+                let Some(guest_peer) =
+                    resolve_udp_guest_peer(peer, gateway_ip, &peers, &ephemeral_port)
+                else {
+                    tracing::debug!(
+                        peer = %peer,
+                        guest_port,
+                        "UDP ingress dropped because published-port peer table is full",
+                    );
+                    continue;
+                };
+                inject_udp_datagram_to_guest(
+                    guest_peer,
+                    SocketAddr::new(guest_ip, guest_port),
                     &buf[..n],
                     &shared,
                     gateway_mac,

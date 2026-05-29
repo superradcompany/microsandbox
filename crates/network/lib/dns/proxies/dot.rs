@@ -169,7 +169,9 @@ impl DotProxy {
 
         // Build the guest-facing TLS session with the per-domain
         // intercept cert.
-        let domain_cert = tls_state.get_or_generate_cert(&sni);
+        let domain_cert = tls_state
+            .get_or_generate_cert(&sni)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let guest_tls = rustls::ServerConnection::new(domain_cert.server_config.clone())
             .map_err(io::Error::other)?;
 

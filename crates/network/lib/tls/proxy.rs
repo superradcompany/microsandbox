@@ -214,7 +214,9 @@ async fn intercept_relay(
         SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
-    let domain_cert = tls_state.get_or_generate_cert(sni_name);
+    let domain_cert = tls_state
+        .get_or_generate_cert(sni_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     // Reuse cached ServerConfig — avoids cert chain clone + key clone + rebuild per connection.
     let mut guest_tls = rustls::ServerConnection::new(domain_cert.server_config.clone())

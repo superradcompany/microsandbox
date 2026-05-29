@@ -11,7 +11,7 @@ use time::{Duration, OffsetDateTime};
 use tokio_rustls::TlsConnector;
 
 use super::ca::CertAuthority;
-use super::certgen::{self, DomainCert};
+use super::certgen::{self, DomainCert, DomainCertError};
 use super::config::TlsConfig;
 use crate::secrets::config::SecretsConfig;
 
@@ -105,21 +105,27 @@ impl TlsState {
     }
 
     /// Get or generate a certificate for the given domain.
-    pub fn get_or_generate_cert(&self, domain: &str) -> Arc<DomainCert> {
-        let mut cache = self.cert_cache.lock().unwrap();
+    pub fn get_or_generate_cert(&self, domain: &str) -> Result<Arc<DomainCert>, DomainCertError> {
+        let mut cache = match self.cert_cache.lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                tracing::warn!("TLS certificate cache was poisoned; recovering");
+                poisoned.into_inner()
+            }
+        };
         if let Some(cert) = cache.get(domain)
             && cert.expires_at > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW
         {
-            return cert.clone();
+            return Ok(cert.clone());
         }
 
         let cert = Arc::new(certgen::generate_domain_cert(
             domain,
             &self.intercept_ca,
             self.config.cache.validity_hours,
-        ));
+        )?);
         cache.put(domain.to_string(), cert.clone());
-        cert
+        Ok(cert)
     }
 
     /// Check if a domain should bypass TLS interception.
@@ -148,7 +154,7 @@ mod tests {
     fn regenerates_cached_domain_cert_when_near_expiry() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
-        let first = state.get_or_generate_cert("openrouter.ai");
+        let first = state.get_or_generate_cert("openrouter.ai").unwrap();
         let original_expires_at = first.expires_at;
 
         {
@@ -162,9 +168,18 @@ mod tests {
             cache.put("openrouter.ai".to_string(), stale);
         }
 
-        let refreshed = state.get_or_generate_cert("openrouter.ai");
+        let refreshed = state.get_or_generate_cert("openrouter.ai").unwrap();
         assert!(refreshed.expires_at > OffsetDateTime::now_utc() + Duration::hours(23));
         assert!(refreshed.expires_at > original_expires_at - Duration::minutes(10));
+    }
+
+    #[test]
+    fn invalid_domain_cert_request_does_not_poison_cache() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+
+        assert!(state.get_or_generate_cert("snowman.☃").is_err());
+        assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
     }
 }
 
