@@ -73,7 +73,7 @@ Even without rebinding tricks, a classic time-of-check/time-of-use race exists. 
 
 Domain-based policy rules close this by maintaining a pin set of observed DNS answers. A connection only matches a domain rule if its destination IP was actually returned as an answer to a DNS query for that domain from this sandbox. A guest that hard-codes an IP it didn't resolve through the interceptor can't slip past a domain-based allowlist.
 
-The same mechanism gates host-scoped secret injection. When a `SecretEntry` is restricted via `allowed_hosts`, the secret is only injected into outbound requests whose destination IP the interceptor tied to one of those hosts. An exfiltration attempt that POSTs the secret to an arbitrary IP won't receive the injection in the first place.
+The same mechanism gates host-scoped secret injection. When a `SecretEntry` is restricted via `allowed_hosts`, the secret is only injected when both checks pass: the TLS SNI matches an allowed host pattern, and the original guest destination IP is in the DNS pin set for that host. `HostPattern::Any` is the explicit opt-out from host pinning. An exfiltration attempt that hard-codes an arbitrary IP and claims an allowed SNI won't receive the injection in the first place.
 
 ## SNI spoofing
 
@@ -89,6 +89,8 @@ To prevent this, domain rules check two things when SNI is present, and both mus
 Real traffic clears check 2 because the client calls `getaddrinfo` before connecting, and the interceptor records the answer. The spoof fails it because no DNS lookup ever tied the claimed name to that IP.
 
 One legitimate pattern this rejects: hard-coding an IP and forging a non-matching SNI (e.g. `curl --resolve allowed.com:443:<ip>`). Route the lookup through the gateway, or add a `tls.bypass` entry for that name.
+
+For intercepted HTTP/1 traffic, microsandbox also checks the decrypted request authority: each request's `Host` header must match the TLS SNI, ignoring case and an optional port. This closes domain-fronting attempts where the TLS layer claims one host but the HTTP request is addressed to another. Bypassed TLS remains opaque, so this request-level check only applies to intercepted connections.
 
 ## DNS bypass surface
 

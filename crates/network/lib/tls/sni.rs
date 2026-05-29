@@ -21,14 +21,19 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
     }
 
     let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
-    let record = data.get(5..5 + record_len)?;
+    let record_end = 5usize.checked_add(record_len)?;
+    let record = data.get(5..record_end)?;
 
     // Handshake header: type(1) + length(3).
     if record.first() != Some(&0x01) {
         return None; // Not ClientHello.
     }
+    if record.len() < 4 {
+        return None;
+    }
     let hs_len = (record[1] as usize) << 16 | (record[2] as usize) << 8 | (record[3] as usize);
-    let hello = record.get(4..4 + hs_len)?;
+    let hello_end = 4usize.checked_add(hs_len)?;
+    let hello = record.get(4..hello_end)?;
 
     // ClientHello: version(2) + random(32) = 34 bytes.
     if hello.len() < 34 {
@@ -58,7 +63,7 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
     let extensions_len = u16::from_be_bytes([hello[pos], hello[pos + 1]]) as usize;
     pos += 2;
 
-    let extensions_end = pos + extensions_len;
+    let extensions_end = pos.checked_add(extensions_len)?;
     while pos + 4 <= extensions_end && pos + 4 <= hello.len() {
         let ext_type = u16::from_be_bytes([hello[pos], hello[pos + 1]]);
         let ext_len = u16::from_be_bytes([hello[pos + 2], hello[pos + 3]]) as usize;
@@ -66,10 +71,11 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 
         if ext_type == 0x0000 {
             // SNI extension.
-            return parse_sni_extension(hello.get(pos..pos + ext_len)?);
+            let ext_end = pos.checked_add(ext_len)?;
+            return parse_sni_extension(hello.get(pos..ext_end)?);
         }
 
-        pos += ext_len;
+        pos = pos.checked_add(ext_len)?;
     }
 
     None
@@ -209,5 +215,21 @@ mod tests {
     fn extract_sni_returns_none_for_garbage() {
         assert_eq!(extract_sni(&[]), None);
         assert_eq!(extract_sni(&[0x17, 0x03, 0x01, 0x00, 0x05]), None);
+    }
+
+    #[test]
+    fn extract_sni_returns_none_for_short_client_hello_record() {
+        assert_eq!(extract_sni(&[0x16, 0x03, 0x01, 0x00, 0x01, 0x01]), None);
+    }
+
+    #[test]
+    fn extract_sni_returns_none_for_fragmented_client_hello_prefixes() {
+        let hello = build_client_hello("example.com");
+
+        for len in 0..hello.len() {
+            assert_eq!(extract_sni(&hello[..len]), None, "prefix length {len}");
+        }
+
+        assert_eq!(extract_sni(&hello), Some("example.com".to_string()));
     }
 }

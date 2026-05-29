@@ -4,11 +4,20 @@
 //! with real secret values, but only when the destination host is allowed.
 
 use std::borrow::Cow;
+use std::net::IpAddr;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use percent_encoding::percent_decode;
 
-use super::config::{SecretsConfig, ViolationAction};
+use super::config::{HostPattern, SecretEntry, SecretsConfig, ViolationAction};
+use crate::shared::SharedState;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum bytes to buffer while waiting for HTTP request headers.
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -35,6 +44,11 @@ pub struct SecretsHandler {
     /// chunk should be parsed as a request start (headers) or treated as a
     /// continuation of the current request's body.
     http_state: HttpState,
+    /// SNI to require in HTTP/1 `Host` headers for DNS-pinned intercepted TLS.
+    http_sni: Option<String>,
+    /// Buffered HTTP bytes while waiting for complete headers or a complete
+    /// body-rewriteable request.
+    http_pending: Vec<u8>,
 }
 
 /// HTTP request framing state for the guest→server byte stream.
@@ -42,10 +56,53 @@ pub struct SecretsHandler {
 enum HttpState {
     /// Scanning for the start of a request. The next `\r\n\r\n` ends headers.
     AwaitingHeaders,
-    /// Inside a request body. `remaining` is the number of body bytes left
-    /// per Content-Length; `None` means unknown framing (chunked or
-    /// connection-close).
-    InBody { remaining: Option<usize> },
+    /// Inside a fixed-length request body. `remaining` is the number of body
+    /// bytes left per Content-Length.
+    InBody { remaining: usize },
+    /// Inside a chunked request body.
+    InChunkedBody { state: ChunkedBodyState },
+    /// Buffering a fixed-length body so body substitution can update
+    /// `Content-Length` against the complete rewritten request.
+    BufferingBody { remaining: usize },
+}
+
+/// Stateful chunked transfer parser for request bodies.
+#[derive(Debug, Clone, Default)]
+struct ChunkedBodyState {
+    phase: ChunkedPhase,
+    line: Vec<u8>,
+}
+
+/// Current chunked-body parser phase.
+#[derive(Debug, Clone, Default)]
+enum ChunkedPhase {
+    /// Reading a chunk-size line.
+    #[default]
+    SizeLine,
+    /// Reading exactly `remaining` chunk-data bytes.
+    Data { remaining: usize },
+    /// Reading the CRLF after chunk data.
+    DataCrlf { seen_cr: bool },
+    /// Reading trailer lines until the empty line.
+    TrailerLine,
+}
+
+/// DNS-pinned destination identity for a proxied connection.
+struct SecretHostIdentity<'a> {
+    guest_ip: IpAddr,
+    shared: &'a SharedState,
+}
+
+/// Parsed HTTP/1 request metadata needed for validation and framing.
+struct HttpRequestMetadata {
+    host_headers: Vec<String>,
+}
+
+/// HTTP request framing decision for a complete header block.
+struct RequestFraming {
+    state: HttpState,
+    body_in_request: usize,
+    body_substitution_allowed: bool,
 }
 
 /// A secret that passed host matching for this connection.
@@ -128,6 +185,12 @@ impl EligibleSecret {
     /// `None` if the line is not in scope for any of the requested injection
     /// modes.
     fn substitute_in_header_line(&self, line: &str, is_request_line: bool) -> Option<String> {
+        if is_request_line {
+            return self
+                .inject_query_params
+                .then(|| line.replace(&self.placeholder, &self.value));
+        }
+
         if self.inject_basic_auth
             && is_authorization_header(line)
             && let Some(replaced) = self.substitute_basic_auth_header(line)
@@ -135,9 +198,6 @@ impl EligibleSecret {
             return Some(replaced);
         }
         if self.inject_headers {
-            return Some(line.replace(&self.placeholder, &self.value));
-        }
-        if is_request_line && self.inject_query_params {
             return Some(line.replace(&self.placeholder, &self.value));
         }
         None
@@ -189,6 +249,34 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
+        Self::new_inner(config, sni, tls_intercepted, None)
+    }
+
+    /// Create a handler for a TLS-intercepted connection.
+    ///
+    /// Host-scoped secrets require both an SNI match and a DNS cache binding
+    /// from the original guest destination IP to the allowed host.
+    pub fn new_tls_intercepted(
+        config: &SecretsConfig,
+        sni: &str,
+        guest_ip: IpAddr,
+        shared: &SharedState,
+    ) -> Self {
+        Self::new_inner(
+            config,
+            sni,
+            true,
+            Some(SecretHostIdentity { guest_ip, shared }),
+        )
+    }
+
+    fn new_inner(
+        config: &SecretsConfig,
+        sni: &str,
+        tls_intercepted: bool,
+        identity: Option<SecretHostIdentity<'_>>,
+    ) -> Self {
+        let enforce_http_authority = identity.is_some();
         let mut eligible_for_substitution = Vec::new();
         let mut ineligible_for_substitution = Vec::new();
         let mut max_placeholder_len = 0;
@@ -196,8 +284,7 @@ impl SecretsHandler {
         for secret in &config.secrets {
             max_placeholder_len = max_placeholder_len.max(secret.placeholder.len());
 
-            let host_allowed = secret.allowed_hosts.is_empty()
-                || secret.allowed_hosts.iter().any(|p| p.matches(sni));
+            let host_allowed = secret_host_allowed(secret, sni, identity.as_ref());
 
             // If the SNI matches an allowed host for this secret, add it to the
             // eligible list for substitution, and skip violation checks for this secret.
@@ -215,11 +302,13 @@ impl SecretsHandler {
                 continue;
             }
 
-            let action = secret.on_violation.as_ref().unwrap_or(&config.on_violation);
+            let action = effective_violation_action(secret, config, sni, identity.as_ref());
 
             // Passthrough means the placeholder can be forwarded unchanged to this SNI.
             if let ViolationAction::Passthrough(hosts) = action
-                && hosts.iter().any(|p| p.matches(sni))
+                && hosts
+                    .iter()
+                    .any(|p| host_pattern_allowed(p, sni, identity.as_ref()))
             {
                 continue;
             }
@@ -238,6 +327,8 @@ impl SecretsHandler {
             max_placeholder_len,
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
+            http_sni: enforce_http_authority.then(|| sni.to_string()),
+            http_pending: Vec::new(),
         }
     }
 
@@ -252,12 +343,55 @@ impl SecretsHandler {
     /// Returns the violation action if a placeholder is detected going to a
     /// disallowed host.
     pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
-        // Body-continuation chunk: previous chunk(s) already contained the
-        // request line and headers.
-        if let HttpState::InBody { remaining } = self.http_state {
-            return self.substitute_body_chunk(data, remaining);
+        match std::mem::replace(&mut self.http_state, HttpState::AwaitingHeaders) {
+            HttpState::BufferingBody { remaining } => {
+                return self.substitute_buffered_body(data, remaining);
+            }
+            HttpState::InBody { remaining } => {
+                return self.substitute_body_chunk(data, remaining);
+            }
+            HttpState::InChunkedBody { state } => {
+                return self.substitute_chunked_body_chunk(data, state);
+            }
+            HttpState::AwaitingHeaders => {}
         }
 
+        if !self.http_pending.is_empty() {
+            self.http_pending.extend_from_slice(data);
+            if self.http_pending.len() > MAX_HTTP_HEADER_BYTES {
+                return Err(ViolationAction::Block);
+            }
+            if find_header_boundary(&self.http_pending).is_none() {
+                if first_line_is_not_http_request(&self.http_pending)
+                    || !looks_like_http_request_prefix(&self.http_pending)
+                {
+                    let pending = std::mem::take(&mut self.http_pending);
+                    let output = self.substitute_ready(&pending)?.into_owned();
+                    return Ok(Cow::Owned(output));
+                }
+                return Ok(Cow::Owned(Vec::new()));
+            }
+
+            let pending = std::mem::take(&mut self.http_pending);
+            let output = self.substitute_ready(&pending)?.into_owned();
+            return Ok(Cow::Owned(output));
+        }
+
+        if find_header_boundary(data).is_none()
+            && looks_like_http_request_prefix(data)
+            && !first_line_is_not_http_request(data)
+        {
+            if data.len() > MAX_HTTP_HEADER_BYTES {
+                return Err(ViolationAction::Block);
+            }
+            self.http_pending.extend_from_slice(data);
+            return Ok(Cow::Owned(Vec::new()));
+        }
+
+        self.substitute_ready(data)
+    }
+
+    fn substitute_ready<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
         // Split raw bytes at the header boundary BEFORE converting to owned strings.
         // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
@@ -271,13 +405,41 @@ impl SecretsHandler {
         // THIS request; the rest is spillover that gets its own recursive
         // pass through `substitute()` so its headers are substituted and
         // its violations are detected.
+        let mut body_substitution_allowed = false;
         let (body_bytes, spillover) = if boundary.is_some() {
-            let (next_state, body_in_request) = next_state_after_headers(
-                String::from_utf8_lossy(header_bytes).as_ref(),
-                after_headers.len(),
-            );
-            self.http_state = next_state;
-            after_headers.split_at(body_in_request)
+            let header_text = String::from_utf8_lossy(header_bytes);
+            if let Some(sni) = self.http_sni.as_deref() {
+                match parse_http_request_metadata(header_bytes)? {
+                    Some(metadata) => {
+                        if !metadata
+                            .host_headers
+                            .iter()
+                            .all(|host| authority_matches_sni(host, sni))
+                        {
+                            return Err(ViolationAction::Block);
+                        }
+                    }
+                    None => {
+                        self.http_sni = None;
+                    }
+                }
+            }
+
+            let framing = next_state_after_headers(header_text.as_ref(), after_headers)?;
+            if self.needs_body_injection()
+                && framing.body_substitution_allowed
+                && let HttpState::InBody { remaining } = &framing.state
+            {
+                self.http_pending.extend_from_slice(data);
+                self.http_state = HttpState::BufferingBody {
+                    remaining: *remaining,
+                };
+                return Ok(Cow::Owned(Vec::new()));
+            }
+
+            body_substitution_allowed = framing.body_substitution_allowed;
+            self.http_state = framing.state;
+            after_headers.split_at(framing.body_in_request)
         } else {
             (after_headers, &[] as &[u8])
         };
@@ -329,7 +491,7 @@ impl SecretsHandler {
             }
 
             // Body substitution works on bytes so encoded payloads stay valid.
-            if boundary.is_some() && secret.inject_body {
+            if body_substitution_allowed && secret.inject_body {
                 let source = body.as_deref().unwrap_or(body_bytes);
                 if let Some(replaced) = replace_bytes(
                     source,
@@ -360,11 +522,6 @@ impl SecretsHandler {
 
         let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
         // Update Content-Length only when body substitution changed the size.
-        //
-        // FIXME: `body_bytes_out.len()` is the chunk's substituted body length,
-        // not the request's total. If `inject_body=true` and the body spans
-        // multiple `substitute()` calls, continuation chunks are forwarded
-        // as-is past this rewritten Content-Length.
         if body_changed && body_bytes_out.len() != body_bytes.len() {
             let headers = match header_str {
                 Some(headers) => update_content_length(&headers, body_bytes_out.len()),
@@ -386,6 +543,33 @@ impl SecretsHandler {
             let next_out = self.substitute(spillover)?;
             output.extend_from_slice(next_out.as_ref());
         }
+        Ok(Cow::Owned(output))
+    }
+
+    fn substitute_buffered_body<'a>(
+        &mut self,
+        data: &'a [u8],
+        remaining: usize,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        let take = remaining.min(data.len());
+        self.http_pending.extend_from_slice(&data[..take]);
+
+        if take < remaining {
+            self.http_state = HttpState::BufferingBody {
+                remaining: remaining - take,
+            };
+            return Ok(Cow::Owned(Vec::new()));
+        }
+
+        self.http_state = HttpState::AwaitingHeaders;
+        let request = std::mem::take(&mut self.http_pending);
+        let mut output = self.substitute_ready(&request)?.into_owned();
+
+        if data.len() > take {
+            let spillover = self.substitute(&data[take..])?;
+            output.extend_from_slice(spillover.as_ref());
+        }
+
         Ok(Cow::Owned(output))
     }
 
@@ -431,21 +615,13 @@ impl SecretsHandler {
     fn substitute_body_chunk<'a>(
         &mut self,
         data: &'a [u8],
-        remaining: Option<usize>,
+        remaining: usize,
     ) -> Result<Cow<'a, [u8]>, ViolationAction> {
         // Determine where this request's body ends inside the chunk.
         //
-        // - Content-Length framing (`remaining = Some(n)`): split at `n`.
-        //   Trailing bytes are a pipelined next request.
-        // - Chunked framing (`remaining = None`): scan for the terminator
-        //   `0\r\n\r\n`. Trailing bytes are a pipelined next request.
-        // - No detected terminator under chunked framing: stay in body
-        //   mode; no spillover this chunk.
-        let body_end = match remaining {
-            Some(n) if data.len() > n => Some(n),
-            Some(_) => None,
-            None => find_chunked_body_end(data),
-        };
+        // Content-Length framing splits at `remaining`. Trailing bytes are a
+        // pipelined next request.
+        let body_end = (data.len() >= remaining).then_some(remaining);
         let (body_part, spillover) = match body_end {
             Some(end) => data.split_at(end),
             None => (data, &[] as &[u8]),
@@ -470,12 +646,49 @@ impl SecretsHandler {
 
         // Advance framing state. If the body completes within this chunk,
         // the spillover below is the start of a fresh request.
-        self.http_state = match (remaining, body_end) {
-            (_, Some(_)) => HttpState::AwaitingHeaders,
-            (Some(n), None) => HttpState::InBody {
-                remaining: Some(n - body_part.len()),
+        self.http_state = match body_end {
+            Some(_) => HttpState::AwaitingHeaders,
+            None => HttpState::InBody {
+                remaining: remaining - body_part.len(),
             },
-            (None, None) => HttpState::InBody { remaining: None },
+        };
+
+        self.append_pipelined_spillover(data, body_part, spillover)
+    }
+
+    /// Handle continuation bytes for a chunked request body.
+    fn substitute_chunked_body_chunk<'a>(
+        &mut self,
+        data: &'a [u8],
+        mut state: ChunkedBodyState,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        let body_end = consume_chunked_body(&mut state, data)?;
+        let (body_part, spillover) = match body_end {
+            Some(end) => data.split_at(end),
+            None => (data, &[] as &[u8]),
+        };
+
+        if let Some(action) = self.detect_blocking_action(body_part, "") {
+            match action {
+                BlockingAction::Block => return Err(action.into_violation_action()),
+                BlockingAction::BlockAndLog => {
+                    tracing::warn!("secret violation: placeholder detected for disallowed host");
+                    return Err(action.into_violation_action());
+                }
+                BlockingAction::BlockAndTerminate => {
+                    tracing::error!(
+                        "secret violation: placeholder detected for disallowed host - terminating"
+                    );
+                    return Err(action.into_violation_action());
+                }
+            }
+        }
+        self.update_tail(body_part);
+
+        self.http_state = if body_end.is_some() {
+            HttpState::AwaitingHeaders
+        } else {
+            HttpState::InChunkedBody { state }
         };
 
         self.append_pipelined_spillover(data, body_part, spillover)
@@ -483,7 +696,17 @@ impl SecretsHandler {
 
     /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
-        self.eligible_for_substitution.is_empty() && self.ineligible_for_substitution.is_empty()
+        self.http_sni.is_none()
+            && self.http_pending.is_empty()
+            && matches!(self.http_state, HttpState::AwaitingHeaders)
+            && self.eligible_for_substitution.is_empty()
+            && self.ineligible_for_substitution.is_empty()
+    }
+
+    fn needs_body_injection(&self) -> bool {
+        self.eligible_for_substitution.iter().any(|secret| {
+            secret.inject_body && (!secret.require_tls_identity || self.tls_intercepted)
+        })
     }
 
     /// Returns the strongest blocking action for any placeholder appearing in data
@@ -557,6 +780,193 @@ fn is_authorization_header(line: &str) -> bool {
         .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
 }
 
+fn parse_http_request_metadata(
+    header_bytes: &[u8],
+) -> Result<Option<HttpRequestMetadata>, ViolationAction> {
+    let headers = String::from_utf8_lossy(header_bytes);
+    let mut lines = headers.split("\r\n");
+    let Some(request_line) = lines.next() else {
+        return Ok(None);
+    };
+    if request_line.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(version) = http_request_version(request_line) else {
+        return Ok(None);
+    };
+    if version == "HTTP/2.0" {
+        return Err(ViolationAction::Block);
+    }
+    if !version.starts_with("HTTP/1.") {
+        return Ok(None);
+    }
+
+    let mut host_headers = Vec::new();
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+
+        if name.eq_ignore_ascii_case("host") {
+            host_headers.push(value.to_string());
+        }
+    }
+
+    if host_headers.is_empty() {
+        return Err(ViolationAction::Block);
+    }
+
+    Ok(Some(HttpRequestMetadata { host_headers }))
+}
+
+fn http_request_version(request_line: &str) -> Option<&str> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    let _target = parts.next()?;
+    let version = parts.next()?;
+    if parts.next().is_some() || !method.bytes().all(is_http_token_byte) {
+        return None;
+    }
+    Some(version)
+}
+
+fn looks_like_http_request_prefix(data: &[u8]) -> bool {
+    if data.is_empty() || b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".starts_with(data) {
+        return true;
+    }
+
+    let method_end = data.iter().position(|b| *b == b' ');
+    let method = match method_end {
+        Some(end) => &data[..end],
+        None => data,
+    };
+
+    !method.is_empty() && method.iter().copied().all(is_http_token_byte)
+}
+
+fn first_line_is_not_http_request(data: &[u8]) -> bool {
+    let Some(line_end) = data.windows(2).position(|window| window == b"\r\n") else {
+        return false;
+    };
+    let line = String::from_utf8_lossy(&data[..line_end]);
+    http_request_version(line.as_ref()).is_none()
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+            | b'0'..=b'9'
+            | b'A'..=b'Z'
+            | b'a'..=b'z'
+    )
+}
+
+fn authority_matches_sni(authority: &str, sni: &str) -> bool {
+    authority_hostname(authority)
+        .is_some_and(|hostname| hostname.eq_ignore_ascii_case(sni.trim_end_matches('.')))
+}
+
+fn authority_hostname(authority: &str) -> Option<&str> {
+    let authority = authority.trim().trim_end_matches('.');
+    if authority.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, _port) = rest.split_once(']')?;
+        return Some(host.trim_end_matches('.'));
+    }
+
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.parse::<u16>().is_ok() => {
+            Some(host.trim_end_matches('.'))
+        }
+        _ => Some(authority),
+    }
+}
+
+fn secret_host_allowed(
+    secret: &SecretEntry,
+    sni: &str,
+    identity: Option<&SecretHostIdentity<'_>>,
+) -> bool {
+    secret
+        .allowed_hosts
+        .iter()
+        .any(|pattern| host_pattern_allowed(pattern, sni, identity))
+}
+
+fn host_pattern_allowed(
+    pattern: &HostPattern,
+    sni: &str,
+    identity: Option<&SecretHostIdentity<'_>>,
+) -> bool {
+    if !pattern.matches(sni) {
+        return false;
+    }
+    if matches!(pattern, HostPattern::Any) {
+        return true;
+    }
+    let Some(identity) = identity else {
+        return true;
+    };
+
+    host_alias_matches(pattern, sni, identity)
+        || identity
+            .shared
+            .any_resolved_hostname(identity.guest_ip, |hostname| pattern.matches(hostname))
+}
+
+fn host_alias_matches(pattern: &HostPattern, sni: &str, identity: &SecretHostIdentity<'_>) -> bool {
+    if !sni.eq_ignore_ascii_case(crate::HOST_ALIAS) || !pattern.matches(crate::HOST_ALIAS) {
+        return false;
+    }
+
+    identity
+        .shared
+        .gateway_ipv4()
+        .is_some_and(|ip| identity.guest_ip == IpAddr::V4(ip))
+        || identity
+            .shared
+            .gateway_ipv6()
+            .is_some_and(|ip| identity.guest_ip == IpAddr::V6(ip))
+}
+
+fn effective_violation_action<'a>(
+    secret: &'a SecretEntry,
+    config: &'a SecretsConfig,
+    sni: &str,
+    identity: Option<&SecretHostIdentity<'_>>,
+) -> &'a ViolationAction {
+    match &secret.on_violation {
+        Some(ViolationAction::Passthrough(hosts))
+            if !hosts
+                .iter()
+                .any(|pattern| host_pattern_allowed(pattern, sni, identity)) =>
+        {
+            &config.on_violation
+        }
+        Some(action) => action,
+        None => &config.on_violation,
+    }
+}
+
 /// Decode the credentials of a `Basic` `Authorization` header line. Returns
 /// `None` if the line is not `Basic`-scheme or the payload is not valid
 /// base64 / UTF-8.
@@ -601,41 +1011,72 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// the number of bytes that followed `\r\n\r\n` in this chunk; the
 /// returned `body_in_request` is at most `body_in_chunk`, and any
 /// remaining bytes are spillover from a pipelined next request.
-fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> (HttpState, usize) {
+fn next_state_after_headers(
+    headers: &str,
+    body_bytes: &[u8],
+) -> Result<RequestFraming, ViolationAction> {
+    let body_in_chunk = body_bytes.len();
     if is_transfer_chunked(headers) {
-        // Chunked framing doesn't expose a Content-Length up front. The
-        // chunked body terminator (`0\r\n\r\n`) is detected later by
-        // `substitute_body_chunk` so the connection can return to
-        // `AwaitingHeaders` for subsequent keep-alive requests.
-        return (HttpState::InBody { remaining: None }, body_in_chunk);
+        let mut chunked_state = ChunkedBodyState::default();
+        let (state, body_in_request) = match consume_chunked_body(&mut chunked_state, body_bytes)? {
+            Some(end) => (HttpState::AwaitingHeaders, end),
+            _ => (
+                HttpState::InChunkedBody {
+                    state: chunked_state,
+                },
+                body_in_chunk,
+            ),
+        };
+        return Ok(RequestFraming {
+            state,
+            body_in_request,
+            body_substitution_allowed: false,
+        });
     }
-    match parse_content_length(headers) {
-        Some(cl) if body_in_chunk >= cl => (HttpState::AwaitingHeaders, cl),
-        Some(cl) => (
-            HttpState::InBody {
-                remaining: Some(cl - body_in_chunk),
+    match parse_content_length(headers)? {
+        Some(cl) if body_in_chunk >= cl => Ok(RequestFraming {
+            state: HttpState::AwaitingHeaders,
+            body_in_request: cl,
+            body_substitution_allowed: true,
+        }),
+        Some(cl) => Ok(RequestFraming {
+            state: HttpState::InBody {
+                remaining: cl - body_in_chunk,
             },
-            body_in_chunk,
-        ),
+            body_in_request: body_in_chunk,
+            body_substitution_allowed: true,
+        }),
         // Per RFC 9112 §6.3 case 6, a request with neither `Content-Length`
         // nor `Transfer-Encoding` has a zero-length body. Any trailing
         // bytes are the start of a pipelined next request.
-        None => (HttpState::AwaitingHeaders, 0),
+        None => Ok(RequestFraming {
+            state: HttpState::AwaitingHeaders,
+            body_in_request: 0,
+            body_substitution_allowed: false,
+        }),
     }
 }
 
 /// Parse a `Content-Length:` value from the headers block. Case-insensitive
-/// header name match; returns `None` if absent or unparseable.
-fn parse_content_length(headers: &str) -> Option<usize> {
+/// header name match; rejects malformed or conflicting values.
+fn parse_content_length(headers: &str) -> Result<Option<usize>, ViolationAction> {
+    let mut content_length = None;
     for line in headers.split("\r\n") {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         if name.eq_ignore_ascii_case("content-length") {
-            return value.trim().parse().ok();
+            let parsed = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| ViolationAction::Block)?;
+            if content_length.is_some_and(|existing| existing != parsed) {
+                return Err(ViolationAction::Block);
+            }
+            content_length = Some(parsed);
         }
     }
-    None
+    Ok(content_length)
 }
 
 /// True if the headers contain `Transfer-Encoding: chunked` (case-insensitive,
@@ -752,27 +1193,95 @@ fn find_header_boundary(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
-/// Locate the end of a chunked-encoded request body inside `data` and
-/// return the byte position right after the terminator.
-///
-/// Looks for the zero-size last chunk with an empty trailer section:
-/// either `\r\n0\r\n\r\n` (the common case, where the preceding chunk's
-/// closing `\r\n` is still in this slice) or a chunk that starts directly
-/// with `0\r\n\r\n` (TLS reads aligning so the closing `\r\n` ended the
-/// previous slice).
-///
-/// Trailers in the last chunk (`0\r\n<Trailer>:<value>\r\n\r\n`) are not
-/// supported and will not be detected here; they are exceedingly rare
-/// in request direction. Terminators that straddle a TLS read boundary
-/// are likewise not detected (would need a small dedicated lookahead).
-fn find_chunked_body_end(data: &[u8]) -> Option<usize> {
-    if let Some(pos) = data.windows(7).position(|w| w == b"\r\n0\r\n\r\n") {
-        return Some(pos + 7);
+/// Consume chunked body bytes and return the position after the body when the
+/// terminating zero chunk and trailers are complete.
+fn consume_chunked_body(
+    state: &mut ChunkedBodyState,
+    data: &[u8],
+) -> Result<Option<usize>, ViolationAction> {
+    let mut cursor = 0;
+    while cursor < data.len() {
+        let phase = std::mem::replace(&mut state.phase, ChunkedPhase::SizeLine);
+        match phase {
+            ChunkedPhase::SizeLine => {
+                state.line.push(data[cursor]);
+                cursor += 1;
+                if state.line.len() > MAX_HTTP_HEADER_BYTES {
+                    return Err(ViolationAction::Block);
+                }
+                if state.line.ends_with(b"\r\n") {
+                    let line = &state.line[..state.line.len() - 2];
+                    let size = parse_chunk_size(line)?;
+                    state.line.clear();
+                    state.phase = if size == 0 {
+                        ChunkedPhase::TrailerLine
+                    } else {
+                        ChunkedPhase::Data { remaining: size }
+                    };
+                } else {
+                    state.phase = ChunkedPhase::SizeLine;
+                }
+            }
+            ChunkedPhase::Data { mut remaining } => {
+                let take = remaining.min(data.len() - cursor);
+                cursor += take;
+                remaining -= take;
+                if remaining == 0 {
+                    state.phase = ChunkedPhase::DataCrlf { seen_cr: false };
+                } else {
+                    state.phase = ChunkedPhase::Data { remaining };
+                }
+            }
+            ChunkedPhase::DataCrlf { mut seen_cr } => {
+                if !seen_cr {
+                    if data[cursor] != b'\r' {
+                        return Err(ViolationAction::Block);
+                    }
+                    seen_cr = true;
+                    cursor += 1;
+                    state.phase = ChunkedPhase::DataCrlf { seen_cr };
+                } else {
+                    if data[cursor] != b'\n' {
+                        return Err(ViolationAction::Block);
+                    }
+                    state.phase = ChunkedPhase::SizeLine;
+                    cursor += 1;
+                }
+            }
+            ChunkedPhase::TrailerLine => {
+                state.line.push(data[cursor]);
+                cursor += 1;
+                if state.line.len() > MAX_HTTP_HEADER_BYTES {
+                    return Err(ViolationAction::Block);
+                }
+                if state.line.ends_with(b"\r\n") {
+                    let is_empty = state.line.len() == 2;
+                    state.line.clear();
+                    if is_empty {
+                        return Ok(Some(cursor));
+                    }
+                    state.phase = ChunkedPhase::TrailerLine;
+                } else {
+                    state.phase = ChunkedPhase::TrailerLine;
+                }
+            }
+        }
     }
-    if data.starts_with(b"0\r\n\r\n") {
-        return Some(5);
+
+    Ok(None)
+}
+
+fn parse_chunk_size(line: &[u8]) -> Result<usize, ViolationAction> {
+    let size = line
+        .split(|byte| *byte == b';')
+        .next()
+        .unwrap_or_default()
+        .trim_ascii();
+    if size.is_empty() {
+        return Err(ViolationAction::Block);
     }
-    None
+    let size = std::str::from_utf8(size).map_err(|_| ViolationAction::Block)?;
+    usize::from_str_radix(size, 16).map_err(|_| ViolationAction::Block)
 }
 
 /// Returns the stricter of two blocking actions, where
@@ -800,6 +1309,10 @@ fn strictest_violation_action(
 mod tests {
     use super::*;
     use crate::secrets::config::*;
+    use crate::shared::{ResolvedHostnameFamily, SharedState};
+
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     fn make_config(secrets: Vec<SecretEntry>) -> SecretsConfig {
         SecretsConfig {
@@ -818,6 +1331,15 @@ mod tests {
             on_violation: None,
             require_tls_identity: true,
         }
+    }
+
+    fn cache_host(shared: &SharedState, host: &str, ip: Ipv4Addr) {
+        shared.cache_resolved_hostname(
+            host,
+            ResolvedHostnameFamily::Ipv4,
+            [IpAddr::V4(ip)],
+            Duration::from_secs(60),
+        );
     }
 
     fn basic_auth_only() -> SecretInjection {
@@ -945,7 +1467,7 @@ mod tests {
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
         assert_eq!(
             handler.substitute(input).unwrap_err(),
-            ViolationAction::BlockAndLog
+            ViolationAction::Block
         );
     }
 
@@ -1041,6 +1563,60 @@ mod tests {
     }
 
     #[test]
+    fn body_injection_buffers_until_content_length_complete() {
+        let mut secret = make_secret("$KEY", "longer-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = b"{\"key\":\"$KEY\"}";
+        let mut chunk1 = format!(
+            "POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        chunk1.extend_from_slice(&body[..5]);
+
+        let out1 = handler.substitute(&chunk1).unwrap();
+        assert!(out1.is_empty());
+
+        let out2 = handler.substitute(&body[5..]).unwrap();
+        let result = String::from_utf8(out2.into_owned()).unwrap();
+        let expected_body = "{\"key\":\"longer-secret\"}";
+        assert!(result.contains(expected_body));
+        assert!(result.contains(&format!("Content-Length: {}", expected_body.len())));
+    }
+
+    #[test]
+    fn invalid_content_length_is_blocked() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input =
+            b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: nope\r\n\r\nxx$KEYyy";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn conflicting_content_lengths_are_blocked() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 8\r\nContent-Length: 9\r\n\r\nxx$KEYyy";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn body_injection_no_content_length_header() {
         let mut secret = make_secret("$KEY", "longer-secret", "api.openai.com");
         secret.injection.body = true;
@@ -1051,7 +1627,8 @@ mod tests {
         let input = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{\"key\": \"$KEY\"}";
         let output = handler.substitute(input).unwrap();
         let result = String::from_utf8(output.into_owned()).unwrap();
-        assert!(result.contains("longer-secret"));
+        assert!(result.contains("$KEY"));
+        assert!(!result.contains("longer-secret"));
         assert!(!result.contains("Content-Length"));
     }
 
@@ -1244,6 +1821,17 @@ mod tests {
     }
 
     #[test]
+    fn header_injection_does_not_substitute_request_line_query() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET /api?key=$KEY HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert_eq!(output.as_ref(), input);
+    }
+
+    #[test]
     fn url_encoded_placeholder_in_query_blocks_for_wrong_host() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
         let mut handler = SecretsHandler::new(&config, "evil.com", true);
@@ -1298,6 +1886,23 @@ mod tests {
             handler.substitute(second).unwrap_err(),
             ViolationAction::Block
         );
+    }
+
+    #[test]
+    fn split_headers_do_not_leak_header_secret_into_body() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let chunk1 = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 8\r\n";
+        let out1 = handler.substitute(chunk1).unwrap();
+        assert!(out1.is_empty());
+
+        let chunk2 = b"\r\nxx$KEYyy";
+        let out2 = handler.substitute(chunk2).unwrap();
+        let result = String::from_utf8(out2.into_owned()).unwrap();
+
+        assert!(result.contains("xx$KEYyy"));
+        assert!(!result.contains("real-secret"));
     }
 
     #[test]
@@ -1628,5 +2233,163 @@ mod tests {
             b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
         );
         assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn exact_host_requires_dns_pin_for_tls_intercepted_secret() {
+        let ip = Ipv4Addr::new(203, 0, 113, 10);
+        let shared = SharedState::new(16);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+
+        cache_host(&shared, "api.openai.com", ip);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(input).unwrap();
+
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn any_host_bypasses_dns_pin_for_tls_intercepted_secret() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.allowed_hosts = vec![HostPattern::Any];
+        let config = make_config(vec![secret]);
+        let shared = SharedState::new(16);
+        let mut handler = SecretsHandler::new_tls_intercepted(
+            &config,
+            "unresolved.example",
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)),
+            &shared,
+        );
+
+        let input =
+            b"GET / HTTP/1.1\r\nHost: unresolved.example\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn host_alias_matches_gateway_without_dns_pin() {
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let shared = SharedState::new(16);
+        shared.set_gateway_ips(Some(gateway), None);
+
+        let config = make_config(vec![make_secret("$KEY", "real-secret", crate::HOST_ALIAS)]);
+        let mut handler = SecretsHandler::new_tls_intercepted(
+            &config,
+            crate::HOST_ALIAS,
+            IpAddr::V4(gateway),
+            &shared,
+        );
+
+        let input = format!(
+            "GET / HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer $KEY\r\n\r\n",
+            crate::HOST_ALIAS
+        );
+        let output = handler.substitute(input.as_bytes()).unwrap();
+
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_host_must_match_sni() {
+        let ip = Ipv4Addr::new(203, 0, 113, 30);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nHost: evil.com\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_host_validation_buffers_split_headers() {
+        let ip = Ipv4Addr::new(203, 0, 113, 31);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let out1 = handler
+            .substitute(b"GET / HTTP/1.1\r\nHost: evil.com\r\n")
+            .unwrap();
+        assert!(out1.is_empty());
+        assert_eq!(
+            handler
+                .substitute(b"Authorization: Bearer $KEY\r\n\r\n")
+                .unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn chunked_body_internal_terminator_bytes_do_not_end_request() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let chunk1 = b"POST /a HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        let mut chunk2 = b"B\r\nAA\r\n0\r\n\r\nBB\r\n0\r\n\r\n".to_vec();
+        chunk2.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
+
+        let out = handler.substitute(&chunk2).unwrap();
+
+        let mut expected = b"B\r\nAA\r\n0\r\n\r\nBB\r\n0\r\n\r\n".to_vec();
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn split_chunked_terminator_resumes_next_request() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let chunk1 = b"POST /a HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        let chunk2 = b"5\r\nhello\r\n0\r";
+        let out2 = handler.substitute(chunk2).unwrap();
+        assert_eq!(out2.as_ref(), chunk2.as_slice());
+
+        let mut chunk3 = b"\n\r\n".to_vec();
+        chunk3.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
+
+        let out3 = handler.substitute(&chunk3).unwrap();
+
+        let mut expected = b"\n\r\n".to_vec();
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out3.as_ref(), expected.as_slice());
     }
 }

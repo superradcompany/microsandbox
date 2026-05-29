@@ -506,8 +506,16 @@ impl SandboxBuilder {
     ///
     /// Automatically enables TLS interception if not already enabled.
     #[cfg(feature = "net")]
-    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
-        let entry = f(SecretBuilder::new()).build();
+    pub fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        self.secret_entry(f(SecretBuilder::new()).build())
+    }
+
+    /// Add a materialized secret entry.
+    #[cfg(feature = "net")]
+    pub fn secret_entry(
+        mut self,
+        entry: microsandbox_network::secrets::config::SecretEntry,
+    ) -> Self {
         self.config.network.secrets.secrets.push(entry);
         // Auto-enable TLS when secrets are configured.
         if !self.config.network.tls.enabled {

@@ -165,9 +165,9 @@ impl JsNetworkBuilder {
     ) -> Result<&Self> {
         let initial = JsSecretBuilder::new().into_instance(env)?;
         let mut returned = configure.call(initial)?;
-        let secret_builder = returned.take_inner_builder()?;
+        let entry = returned.take_built()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.secret(|_default| secret_builder));
+        self.inner = Some(prev.secret_entry(entry));
         Ok(self)
     }
 

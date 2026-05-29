@@ -164,11 +164,13 @@ impl NetworkBuilder {
     ///     .allow_host("api.openai.com")
     /// )
     /// ```
-    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
-        self.config
-            .secrets
-            .secrets
-            .push(f(SecretBuilder::new()).build());
+    pub fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        self.secret_entry(f(SecretBuilder::new()).build())
+    }
+
+    /// Add a materialized secret entry.
+    pub fn secret_entry(mut self, entry: SecretEntry) -> Self {
+        self.config.secrets.secrets.push(entry);
         self
     }
 
@@ -470,10 +472,14 @@ impl SecretBuilder {
     /// Consume the builder and return a [`SecretEntry`].
     ///
     /// # Panics
-    /// Panics if `env` or `value` was not set.
+    /// Panics if `env`, `value`, or at least one allowed host was not set.
     pub fn build(self) -> SecretEntry {
         let env_var = self.env_var.expect("SecretBuilder: .env() is required");
         let value = self.value.expect("SecretBuilder: .value() is required");
+        assert!(
+            !self.allowed_hosts.is_empty(),
+            "SecretBuilder: at least one allowed host is required; use .allow_any_host_dangerous(true) for an explicit any-host secret"
+        );
         let placeholder = self
             .placeholder
             .unwrap_or_else(|| format!("$MSB_{env_var}"));
@@ -653,6 +659,15 @@ mod tests {
                 HostPattern::Wildcard("*.anthropic.com".into()),
             ])),
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "SecretBuilder: at least one allowed host is required")]
+    fn secret_builder_rejects_empty_allowed_hosts() {
+        let _ = SecretBuilder::new()
+            .env("TOKEN")
+            .value("secret-value")
+            .build();
     }
 
     #[test]

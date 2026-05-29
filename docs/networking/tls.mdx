@@ -10,12 +10,12 @@ Enable HTTPS traffic inspection so policy rules, logging, and other controls can
 
 When you enable TLS interception:
 
-1. A CA key and certificate are generated for the sandbox at creation time. The CA is scoped to that sandbox: it's not shared across sandboxes or with the host.
+1. microsandbox loads the interception CA. By default this is a host-global development CA persisted under `~/.microsandbox/tls/ca.{crt,key}` so repeated sandboxes can reuse the same trusted root. You can provide custom CA paths with `intercept_ca_cert()` and `intercept_ca_key()` when a sandbox or environment needs its own CA.
 2. The guest's trust store is updated to trust this CA.
-3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the per-sandbox CA.
+3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the configured interception CA.
 4. The proxy opens its own TLS connection to the upstream server and bridges the two.
 
-Because the CA lives only for the sandbox's lifetime, nothing signed by it is trusted anywhere else.
+The default CA is intentionally local to the host, not to one sandbox lifetime. Remove `~/.microsandbox/tls/ca.crt` and `~/.microsandbox/tls/ca.key` if you want microsandbox to generate a fresh default CA. Use explicit CA paths when you do not want to share the default across sandboxes on the same machine.
 
 ## Enabling interception
 
@@ -87,7 +87,7 @@ Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`,
 ## Limits
 
 - **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.
-- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`) don't apply on bypassed domains.
+- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`, and HTTP `Host` / SNI alignment checks) don't apply on bypassed domains.
 - **Client certificates are not proxied.** mTLS flows where the guest is the one presenting a client certificate aren't supported through interception; add those hosts to the bypass list.
 
 ## Trusting host CAs

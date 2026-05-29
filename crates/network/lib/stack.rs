@@ -439,10 +439,11 @@ pub fn smoltcp_poll_loop(
                     .contains(&conn.dst.port())
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
-                let conn_dst = resolve_host_dst(conn.dst, config.gateway);
+                let connect_dst = resolve_host_dst(conn.dst, config.gateway);
                 tls_proxy::spawn_tls_proxy(
                     &tokio_handle,
-                    conn_dst,
+                    conn.dst,
+                    connect_dst,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
                     shared.clone(),

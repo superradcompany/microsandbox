@@ -3,6 +3,7 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use microsandbox::{NetworkPolicy, Sandbox};
 use rcgen::CertificateParams;
@@ -90,6 +91,30 @@ async fn spawn_curl_sandbox(name: &str, port: u16) -> Sandbox {
         .memory(256)
         .user("0")
         .replace()
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all())
+                .tls(|t| t.intercepted_ports(vec![port]).verify_upstream(false))
+        })
+        .create()
+        .await
+        .expect("create sandbox")
+}
+
+/// Boot a curl sandbox with one body-injected secret and TLS interception on the fixture port.
+async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) -> Sandbox {
+    let allowed_host = allowed_host.to_string();
+    Sandbox::builder(name)
+        .image("curlimages/curl")
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value("real-secret")
+                .allow_host(allowed_host)
+                .inject_body(true)
+        })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all())
                 .tls(|t| t.intercepted_ports(vec![port]).verify_upstream(false))
@@ -224,6 +249,120 @@ curl -k --http1.1 -m 30 -sS -o /tmp/response \
     let received = server.received_body().await.expect("read fixture body");
     assert_eq!(received.len(), LARGE_POST_BODY_LEN);
     assert!(received.iter().all(|b| *b == b'a'));
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_rejects_http_host_sni_mismatch() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-host-sni-mismatch";
+    let sb = spawn_curl_sandbox(name, port).await;
+
+    let out = sb
+        .shell(format!(
+            r#"set +e
+curl -k --http1.1 -m 10 -sS -o /tmp/response \
+  -w 'code=%{{http_code}}' \
+  -H 'Host: target.example.test' \
+  https://host.microsandbox.internal:{port}/fronted
+status=$?
+echo "status=$status"
+"#
+        ))
+        .await
+        .expect("curl host mismatch fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        !stdout.contains("status=0"),
+        "expected curl to fail, stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let received = tokio::time::timeout(Duration::from_secs(5), server.received_body()).await;
+    assert!(
+        received.is_err() || received.expect("timeout checked").is_err(),
+        "upstream fixture should not receive a valid HTTP request"
+    );
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_substitutes_secret_for_host_alias() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-secret-host-alias";
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+body=/tmp/secret-body
+printf 'token=%s' "$API_KEY" > "$body"
+curl -k --http1.1 -m 30 -sS -o /tmp/response \
+  -w 'code=%{{http_code}} upload=%{{size_upload}}' \
+  -H 'content-type: text/plain' \
+  --data-binary @"$body" \
+  https://host.microsandbox.internal:{port}/secret
+"#
+        ))
+        .await
+        .expect("curl secret host alias fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        stdout.contains("code=200"),
+        "expected curl to receive 200, stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let received = server.received_body().await.expect("read fixture body");
+    assert_eq!(received, b"token=real-secret");
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_denies_secret_without_dns_pin() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-secret-dns-pin";
+    let sb = spawn_secret_curl_sandbox(name, port, "api.allowed.test").await;
+
+    let out = sb
+        .shell(format!(
+            r#"set +e
+host_ip="$(getent ahostsv4 host.microsandbox.internal | awk '{{print $1; exit}}')"
+body=/tmp/secret-body
+printf 'token=%s' "$API_KEY" > "$body"
+curl -k --http1.1 -m 10 -sS -o /tmp/response \
+  -w 'code=%{{http_code}}' \
+  --resolve "api.allowed.test:{port}:$host_ip" \
+  -H 'content-type: text/plain' \
+  --data-binary @"$body" \
+  https://api.allowed.test:{port}/secret
+status=$?
+echo "status=$status"
+"#
+        ))
+        .await
+        .expect("curl secret dns pin fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        !stdout.contains("status=0"),
+        "expected curl to fail without DNS pin, stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let received = tokio::time::timeout(Duration::from_secs(5), server.received_body()).await;
+    assert!(
+        received.is_err() || received.expect("timeout checked").is_err(),
+        "upstream fixture should not receive a valid HTTP request"
+    );
 
     teardown(sb, name).await;
 }

@@ -957,6 +957,11 @@ fn apply_secret(
     let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
     let allow_host_patterns: Vec<String> =
         extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
+    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "SecretEntry requires at least one allowed host or allowed host pattern",
+        ));
+    }
     let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
         && !violation_obj.is_none()
     {

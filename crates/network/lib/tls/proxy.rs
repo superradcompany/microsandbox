@@ -34,6 +34,19 @@ const CLIENT_HELLO_BUF_SIZE: usize = 16384;
 const RELAY_BUF_SIZE: usize = 16384;
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct TlsProxyContext {
+    guest_dst: SocketAddr,
+    connect_dst: SocketAddr,
+    shared: Arc<SharedState>,
+    tls_state: Arc<TlsState>,
+    network_policy: Arc<NetworkPolicy>,
+    upstream_connected: Arc<AtomicBool>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -45,7 +58,8 @@ const RELAY_BUF_SIZE: usize = 16384;
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tls_proxy(
     handle: &tokio::runtime::Handle,
-    dst: SocketAddr,
+    guest_dst: SocketAddr,
+    connect_dst: SocketAddr,
     from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
@@ -54,32 +68,36 @@ pub fn spawn_tls_proxy(
     upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
-        if let Err(e) = tls_proxy_task(
-            dst,
-            from_smoltcp,
-            to_smoltcp,
+        let context = TlsProxyContext {
+            guest_dst,
+            connect_dst,
             shared,
             tls_state,
             network_policy,
             upstream_connected,
-        )
-        .await
-        {
-            tracing::debug!(dst = %dst, error = %e, "TLS proxy task ended");
+        };
+
+        if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp).await {
+            tracing::debug!(dst = %connect_dst, guest_dst = %guest_dst, error = %e, "TLS proxy task ended");
         }
     });
 }
 
 /// Core TLS proxy task.
 async fn tls_proxy_task(
-    dst: SocketAddr,
+    context: TlsProxyContext,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
-    shared: Arc<SharedState>,
-    tls_state: Arc<TlsState>,
-    network_policy: Arc<NetworkPolicy>,
-    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
+    let TlsProxyContext {
+        guest_dst,
+        connect_dst,
+        shared,
+        tls_state,
+        network_policy,
+        upstream_connected,
+    } = context;
+
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
     // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
     let sni_name = tokio::time::timeout(
@@ -95,20 +113,24 @@ async fn tls_proxy_task(
 
     // Apply Domain / DomainSuffix rules against the SNI.
     let eval = network_policy.evaluate_egress_with_source(
-        dst,
+        guest_dst,
         Protocol::Tcp,
         &shared,
         HostnameSource::Sni(&sni_name),
     );
-    if matches!(eval, EgressEvaluation::Deny) {
-        tracing::debug!(sni = %sni_name, dst = %dst, "TLS egress denied by domain policy");
+    if !matches!(eval, EgressEvaluation::Allow) {
+        tracing::debug!(
+            sni = %sni_name,
+            dst = %guest_dst,
+            "TLS egress denied by domain policy",
+        );
         return Ok(());
     }
 
     if tls_state.should_bypass(&sni_name) {
-        tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
+        tracing::debug!(sni = %sni_name, dst = %connect_dst, guest_dst = %guest_dst, "TLS bypass");
         bypass_relay(
-            dst,
+            connect_dst,
             initial_buf,
             from_smoltcp,
             to_smoltcp,
@@ -117,9 +139,10 @@ async fn tls_proxy_task(
         )
         .await
     } else {
-        tracing::debug!(sni = %sni_name, dst = %dst, "TLS intercept");
+        tracing::debug!(sni = %sni_name, dst = %connect_dst, guest_dst = %guest_dst, "TLS intercept");
         intercept_relay(
-            dst,
+            guest_dst,
+            connect_dst,
             &sni_name,
             initial_buf,
             from_smoltcp,
@@ -177,7 +200,8 @@ async fn bypass_relay(
 /// Intercept mode: MITM with guest-facing rustls + server-facing tokio_rustls.
 #[allow(clippy::too_many_arguments)]
 async fn intercept_relay(
-    dst: SocketAddr,
+    guest_dst: SocketAddr,
+    connect_dst: SocketAddr,
     sni_name: &str,
     initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
@@ -186,9 +210,8 @@ async fn intercept_relay(
     tls_state: Arc<TlsState>,
     upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
-    // Create secrets handler for this connection (filters by SNI).
-    // tls_intercepted = true because we're in intercept_relay (not bypass).
-    let mut secrets_handler = SecretsHandler::new(&tls_state.secrets, sni_name, true);
+    let mut secrets_handler =
+        SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state.get_or_generate_cert(sni_name);
@@ -236,7 +259,7 @@ async fn intercept_relay(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
 
     // Connect to real server with TLS.
-    let server_stream = TcpStream::connect(dst).await?;
+    let server_stream = TcpStream::connect(connect_dst).await?;
     upstream_connected.store(true, Ordering::Release);
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -364,8 +387,10 @@ async fn forward_plaintext(
 
         match secrets_handler.substitute(&buf[..n]) {
             Ok(data) => {
-                server_tls.write_all(&data).await?;
-                wrote_plaintext = true;
+                if !data.is_empty() {
+                    server_tls.write_all(&data).await?;
+                    wrote_plaintext = true;
+                }
             }
             Err(action) => {
                 // Violation: placeholder going to disallowed host. Drop the connection.

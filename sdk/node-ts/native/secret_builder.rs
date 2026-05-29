@@ -168,7 +168,7 @@ impl JsSecretBuilder {
         Ok(self)
     }
 
-    /// Materialize into a `SecretEntry`. Panics if `env` or `value` weren't
+    /// Materialize into a `SecretEntry`. Panics if required fields are not
     /// set (matches the underlying Rust builder's contract; surface as a
     /// typed error here).
     #[napi]

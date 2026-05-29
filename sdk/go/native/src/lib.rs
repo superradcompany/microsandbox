@@ -1453,6 +1453,11 @@ fn apply_secret(
     let value = s.value.clone();
     let allow_hosts = s.allow_hosts.clone();
     let allow_host_patterns = s.allow_host_patterns.clone();
+    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+        return Err(FfiError::invalid_argument(
+            "secret requires at least one allowed host or allowed host pattern",
+        ));
+    }
     let placeholder = s.placeholder.clone();
     let require_tls = s.require_tls;
     let on_violation = s
