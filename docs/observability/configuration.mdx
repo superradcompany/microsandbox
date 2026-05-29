@@ -12,20 +12,23 @@ quick start.
 
 ## Deployment constraints
 
-<Warning>
-`msb-metrics` reads the shm registry directly. Two constraints follow:
+`msb-metrics` reads the shm registry directly. Two constraints follow.
 
-- **Same Unix user as `msb`.** The shm object is mode `0600` (owner
-  read/write only). Running `msb-metrics` as a different user produces
-  `EACCES` on attach.
-- **Same `$MSB_HOME`.** The shm name is derived from
-  `stable_hash($MSB_HOME)`, so both processes must agree on it. Pass
-  `--msb-home` explicitly if your environment doesn't set `$MSB_HOME`;
-  the default is `~/.microsandbox`.
+### Same Unix user as `msb`
+
+The shm object is mode `0600` (owner read/write only). Running
+`msb-metrics` as a different user produces `EACCES` on attach.
+
+### Same `$MSB_HOME`
+
+The shm name is derived from `stable_hash($MSB_HOME)`, so both
+processes must agree on it. Pass `--msb-home` explicitly if your
+environment doesn't set `$MSB_HOME`; the default is `~/.microsandbox`.
+
+### Per-host
 
 The registry is per-host. One `msb-metrics` process per host covers
 every running sandbox there.
-</Warning>
 
 ## Metrics emitted
 
