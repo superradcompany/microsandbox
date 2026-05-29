@@ -299,7 +299,7 @@ pub struct SandboxOpts {
     pub tls_upstream_ca_cert: Vec<PathBuf>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to an allowed host (ENV=VALUE@HOST).
+    /// Inject a secret that is only sent to an allowed host (ENV@HOST or ENV=VALUE@HOST).
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
@@ -1133,24 +1133,47 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a secret spec: `ENV=VALUE@HOST`.
+/// Parse a secret spec: `ENV@HOST` or `ENV=VALUE@HOST`.
 #[cfg(feature = "net")]
 fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
-    let eq_pos = spec
-        .find('=')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV=VALUE@HOST"))?;
-    let env_var = spec[..eq_pos].to_string();
-    let rest = &spec[eq_pos + 1..];
+    if let Some(eq_pos) = spec.find('=') {
+        let env_var = spec[..eq_pos].to_string();
+        let rest = &spec[eq_pos + 1..];
+        let at_pos = rest.rfind('@').ok_or_else(|| {
+            anyhow::anyhow!("secret must be in format ENV@HOST or ENV=VALUE@HOST")
+        })?;
+        let value = rest[..at_pos].to_string();
+        let host = rest[at_pos + 1..].to_string();
 
-    let at_pos = rest
-        .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV=VALUE@HOST"))?;
-    let value = rest[..at_pos].to_string();
-    let host = rest[at_pos + 1..].to_string();
+        if env_var.is_empty() || value.is_empty() || host.is_empty() {
+            anyhow::bail!(
+                "secret must be in format ENV@HOST or ENV=VALUE@HOST (all parts required)"
+            );
+        }
 
-    if env_var.is_empty() || value.is_empty() || host.is_empty() {
-        anyhow::bail!("secret must be in format ENV=VALUE@HOST (all parts required)");
+        return Ok((env_var, value, host));
     }
+
+    let at_pos = spec
+        .rfind('@')
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST or ENV=VALUE@HOST"))?;
+    let env_var = spec[..at_pos].to_string();
+    let host = spec[at_pos + 1..].to_string();
+
+    if env_var.is_empty() || host.is_empty() {
+        anyhow::bail!("secret must be in format ENV@HOST or ENV=VALUE@HOST (all parts required)");
+    }
+
+    let value = match std::env::var(&env_var) {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) => anyhow::bail!("secret environment variable `{env_var}` is empty"),
+        Err(std::env::VarError::NotPresent) => {
+            anyhow::bail!("secret environment variable `{env_var}` is not set")
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("secret environment variable `{env_var}` is not valid UTF-8")
+        }
+    };
 
     Ok((env_var, value, host))
 }
@@ -1497,6 +1520,92 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    static SECRET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "net")]
+    struct SecretEnvCleanup<'a> {
+        name: &'a str,
+    }
+
+    #[cfg(feature = "net")]
+    impl Drop for SecretEnvCleanup<'_> {
+        fn drop(&mut self) {
+            // SAFETY: these tests use unique variable names and serialize
+            // mutations within this module.
+            unsafe { std::env::remove_var(self.name) };
+        }
+    }
+
+    #[cfg(feature = "net")]
+    fn with_secret_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _lock = SECRET_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: these tests use unique variable names and serialize
+        // mutations within this module.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _cleanup = SecretEnvCleanup { name };
+        f()
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_secret_reads_value_from_same_named_env() {
+        with_secret_env("MSB_PARSE_SECRET_TOKEN", Some("from-env"), || {
+            let (env_var, value, host) =
+                parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com").unwrap();
+
+            assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
+            assert_eq!(value, "from-env");
+            assert_eq!(host, "api.example.com");
+        });
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_secret_preserves_explicit_value_syntax() {
+        let (env_var, value, host) =
+            parse_secret("API_KEY=literal@with-at@api.example.com").unwrap();
+
+        assert_eq!(env_var, "API_KEY");
+        assert_eq!(value, "literal@with-at");
+        assert_eq!(host, "api.example.com");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_secret_rejects_missing_env_source() {
+        let err = with_secret_env("MSB_PARSE_SECRET_MISSING", None, || {
+            parse_secret("MSB_PARSE_SECRET_MISSING@api.example.com")
+                .unwrap_err()
+                .to_string()
+        });
+
+        assert_eq!(
+            err,
+            "secret environment variable `MSB_PARSE_SECRET_MISSING` is not set"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_secret_rejects_empty_env_source() {
+        let err = with_secret_env("MSB_PARSE_SECRET_EMPTY", Some(""), || {
+            parse_secret("MSB_PARSE_SECRET_EMPTY@api.example.com")
+                .unwrap_err()
+                .to_string()
+        });
+
+        assert_eq!(
+            err,
+            "secret environment variable `MSB_PARSE_SECRET_EMPTY` is empty"
+        );
+    }
 
     #[cfg(feature = "net")]
     #[test]
