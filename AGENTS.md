@@ -255,7 +255,7 @@ pending guest traffic can make progress without waiting for another timer.
 
 ## Branches And Pull Requests
 
-- Do not work directly on `main`. Start from the latest `main` when creating a contribution branch.
+- You may make local edits while on `main`, but do not commit directly to `main`. Start from the latest `main` when creating a contribution branch.
 - Use short, descriptive, kebab-case branch names. Avoid personal prefixes in shared documentation unless the maintainer asks for one.
 - Before opening a PR, compare against the intended base branch and inspect the actual diff:
 
