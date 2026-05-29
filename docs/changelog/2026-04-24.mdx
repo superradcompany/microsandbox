@@ -1,0 +1,25 @@
+---
+title: "Week of April 24, 2026"
+description: "Block-backed OCI rootfs, guest rlimits, and TypeScript SDK improvements."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.3.14](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.14)
+</Tip>
+
+## New features
+
+**Block-backed OCI rootfs**
+
+Image rootfs now ships as a packed VMDK with EROFS metadata and copy-on-write overlays instead of an extracted directory, cutting boot time and host disk usage. See the [images overview](/images/overview).
+
+**Other features**
+
+- **Sandbox-wide guest rlimits.** Apply default `RLIMIT_*` values to every process inside the guest.
+- **`execStreamWithConfig` in the TypeScript SDK.** Stream stdout/stderr while passing the same per-exec options as `execWithConfig`.
+- **Run microsandbox via cargo, npx, and pipx.** `cargo install microsandbox`, `npx microsandbox`, and `pipx run microsandbox` all bring up a working CLI.
+
+## Bug fixes
+
+- The SDK now self-heals when the bundled `msb` binary is missing, re-downloading it on demand.

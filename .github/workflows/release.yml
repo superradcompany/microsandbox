@@ -366,6 +366,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Sync mintlify branch to the released commit
+  #
+  # mintlify is the docs deploy branch. it tracks the released commit but may
+  # also carry docs that were merged into it directly. we merge the release
+  # commit forward instead of hard-resetting, so those docs survive. a clean
+  # merge is pushed straight to mintlify; a conflicting merge opens a pr so the
+  # releaser resolves it by hand instead of losing work silently.
   # ---------------------------------------------------------------------------
   sync-mintlify:
     name: Sync mintlify branch
@@ -373,11 +379,44 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: mintlify
+          fetch-depth: 0
 
-      - name: Hard reset mintlify to release commit
-        run: git push --force origin ${{ github.sha }}:refs/heads/mintlify
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge release commit into mintlify
+        id: merge
+        run: |
+          if git merge --no-edit ${{ github.sha }}; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push merged mintlify
+        if: steps.merge.outputs.result == 'clean'
+        run: git push origin HEAD:refs/heads/mintlify
+
+      - name: Open reconciliation PR on conflict
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="mintlify-sync-${{ github.ref_name }}"
+          git push --force origin ${{ github.sha }}:refs/heads/"$branch"
+          gh pr create \
+            --base mintlify \
+            --head "$branch" \
+            --title "sync mintlify to ${{ github.ref_name }}" \
+            --body "Releasing ${{ github.ref_name }} could not merge into mintlify cleanly. mintlify carries docs that conflict with this release. Resolve the conflicts and merge to publish the released docs."
 
   # ---------------------------------------------------------------------------
   # Publish Node SDK to npm

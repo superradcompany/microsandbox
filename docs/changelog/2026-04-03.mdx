@@ -1,0 +1,35 @@
+---
+title: "Week of April 3, 2026"
+description: "The microsandbox rewrite around an embeddable SDK, smoltcp networking, and a composable filesystem."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.3.3](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.3) through [v0.3.10](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.10)
+</Tip>
+
+## New features
+
+**Microsandbox rewrite**
+
+Rewritten around an embeddable SDK, smoltcp-based networking, and a composable filesystem:
+
+- First-class Rust SDK that the CLI is built on.
+- User-space network stack (smoltcp) with an in-sandbox DNS resolver and TLS proxy.
+- Composable filesystem layering OCI images, host volumes, and writable overlays through one VFS.
+- Redesigned policy and config model shared across CLI, SDK, and `Sandboxfile`.
+
+Breaking change.
+
+**Other features**
+
+- **Per-command exec flags for `msb run`.** Pass `--env`, `--workdir`, `--tty`, `--timeout`, etc. directly without a `Sandboxfile`.
+
+## Bug fixes
+
+- VM logs split into `guest.log` and `host.log` instead of interleaving.
+- Reopening inodes via `/.vol` on macOS no longer fails under `O_RESOLVE_BENEATH`.
+- Overlay `readdir` resolves real inode numbers instead of surfacing `0`.
+- `ExecTimeout` is returned consistently when an exec call hits its timeout.
+- Sandbox creation validates `workdir` up front and defaults `cwd` to `/` when unset.
+- `msb self update` resolves the latest version before downloading the bundle.

@@ -200,6 +200,18 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Changelog",
+        "pages": [
+          "changelog/2026-05-22",
+          "changelog/2026-05-15",
+          "changelog/2026-05-01",
+          "changelog/2026-04-24",
+          "changelog/2026-04-17",
+          "changelog/2026-04-10",
+          "changelog/2026-04-03"
+        ]
       }
     ]
   },
