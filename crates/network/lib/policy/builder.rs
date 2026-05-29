@@ -33,6 +33,8 @@ use std::str::FromStr;
 
 use ipnetwork::IpNetwork;
 
+use crate::secrets::config::SecretConfigError;
+
 use super::{
     Action, Destination, DestinationGroup, Direction, DomainName, DomainNameError, NetworkPolicy,
     PortRange, Protocol, Rule,
@@ -104,6 +106,14 @@ pub enum BuildError {
         "rule #{rule_index}: ICMP protocols are egress-only; ingress and any-direction rules cannot include icmpv4 or icmpv6"
     )]
     IngressDoesNotSupportIcmp { rule_index: usize },
+
+    /// A secret entry failed validation.
+    #[error("{source}")]
+    InvalidSecretConfig {
+        /// Underlying secret validation error.
+        #[from]
+        source: SecretConfigError,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------

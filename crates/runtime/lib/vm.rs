@@ -817,6 +817,10 @@ fn build_vm(
     #[cfg(feature = "net")]
     if vm.network.enabled {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        vm.network
+            .secrets
+            .validate()
+            .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
 
         let mut network =
             microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);

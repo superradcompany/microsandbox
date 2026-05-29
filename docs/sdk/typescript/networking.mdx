@@ -1143,9 +1143,9 @@ Four-arg explicit-placeholder shorthand for adding a secret without opening a bu
 
 | Name | Type | Description |
 |------|------|-------------|
-| envVar | `string` | Environment variable name |
+| envVar | `string` | Environment variable name (non-empty, no `=` or NUL) |
 | value | `string` | Real secret value |
-| placeholder | `string` | Placeholder string surfaced to the guest |
+| placeholder | `string` | Placeholder string: non-empty, up to 1024 bytes, no NUL/CR/LF |
 | allowedHost | `string` | Single hostname allowed to receive the real value |
 
 ---

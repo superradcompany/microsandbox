@@ -478,9 +478,7 @@ async fn icmpv4_echo_task(
     );
 
     let frame_len = frame.len();
-    if shared.rx_ring.push(frame).is_ok() {
-        shared.add_rx_bytes(frame_len);
-        shared.rx_wake.wake();
+    if shared.push_rx_frame_and_wake(frame) {
         tracing::debug!(dst = %dst_ip, seq_no = reply_seq, frame_len, "ICMPv4 echo reply injected");
     } else {
         tracing::debug!("ICMP echo reply dropped — rx_ring full");
@@ -538,9 +536,7 @@ async fn icmpv6_echo_task(
     );
 
     let frame_len = frame.len();
-    if shared.rx_ring.push(frame).is_ok() {
-        shared.add_rx_bytes(frame_len);
-        shared.rx_wake.wake();
+    if shared.push_rx_frame_and_wake(frame) {
         tracing::debug!(dst = %dst_ip, seq_no = reply_seq, frame_len, "ICMPv6 echo reply injected");
     } else {
         tracing::debug!("ICMPv6 echo reply dropped — rx_ring full");

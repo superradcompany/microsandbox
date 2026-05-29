@@ -274,9 +274,8 @@ async fn udp_relay_task(
                             &recv_buf[..n],
                             gateway_mac,
                             guest_mac,
-                        ) {
-                            let _ = shared.rx_ring.push(frame);
-                            shared.rx_wake.wake();
+                        ) && !shared.push_rx_frame_and_wake(frame) {
+                            tracing::debug!("UDP relay response dropped because rx_ring is full");
                         }
                     }
                     Err(e) => {
@@ -433,7 +432,7 @@ fn construct_udp_response_v6(
 }
 
 /// Extract the UDP payload from a raw ethernet frame.
-fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
+pub(crate) fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
     let eth = EthernetFrame::new_checked(frame).ok()?;
     match eth.ethertype() {
         EthernetProtocol::Ipv4 => {

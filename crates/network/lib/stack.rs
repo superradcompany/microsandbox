@@ -239,6 +239,10 @@ pub fn smoltcp_poll_loop(
         &published_ports,
         config.guest_ipv4,
         config.guest_ipv6,
+        config.gateway.ipv4,
+        config.gateway.ipv6,
+        config.gateway_mac,
+        config.guest_mac,
         network_policy.clone(),
         shared.clone(),
         &tokio_handle,
@@ -341,6 +345,11 @@ pub fn smoltcp_poll_loop(
                 }
 
                 FrameAction::UdpRelay { src, dst } => {
+                    if port_publisher.relay_udp_outbound(frame, src, dst) {
+                        device.drop_staged_frame();
+                        continue;
+                    }
+
                     // QUIC blocking: drop UDP to intercepted ports when
                     // TLS interception is active.
                     if let Some(ref tls) = tls_state
@@ -622,11 +631,7 @@ fn handle_gateway_icmp_echo(frame: &[u8], config: &PollLoopConfig, shared: &Shar
         return false;
     };
 
-    let reply_len = reply.len();
-    if shared.rx_ring.push(reply).is_ok() {
-        shared.add_rx_bytes(reply_len);
-        shared.rx_wake.wake();
-    }
+    shared.push_rx_frame_and_wake(reply);
 
     true
 }

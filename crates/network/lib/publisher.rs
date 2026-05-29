@@ -1,27 +1,31 @@
 //! Published port handling: host-side listeners that forward connections
 //! into the guest VM via smoltcp.
 //!
-//! For each configured [`PublishedPort`], a tokio TCP or UDP listener binds
-//! on the host. When a connection arrives, the poll loop creates a smoltcp
-//! socket that connects to the guest, and a relay task bridges the host
-//! socket to the smoltcp socket via channels.
+//! For each configured [`PublishedPort`], a tokio TCP listener or UDP socket
+//! binds on the host. TCP connections are queued for the poll loop to create
+//! smoltcp sockets into the guest. UDP datagrams are injected as guest-visible
+//! packets, and guest replies to active peers are sent back through the same
+//! host socket.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
-use smoltcp::wire::IpEndpoint;
+use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::config::{PortProtocol, PublishedPort};
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::shared::SharedState;
+use crate::udp_relay::{construct_udp_response, extract_udp_payload};
 
 //--------------------------------------------------------------------------------------------------
 // Helpers
@@ -55,6 +59,19 @@ const CHANNEL_CAPACITY: usize = 32;
 /// Buffer size for reading from host sockets.
 const RELAY_BUF_SIZE: usize = 16384;
 
+/// Buffer size for host-side UDP published-port sockets.
+const UDP_RELAY_BUF_SIZE: usize = 65535;
+
+/// Idle timeout for UDP peers that have contacted a published port.
+const UDP_PEER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// First ephemeral source port used to represent host UDP peers inside the guest.
+const UDP_EPHEMERAL_PORT_START: u16 = 49152;
+
+/// Number of usable ephemeral ports from [`UDP_EPHEMERAL_PORT_START`] through `u16::MAX`.
+const UDP_EPHEMERAL_PORT_COUNT: usize =
+    (u16::MAX as usize) - (UDP_EPHEMERAL_PORT_START as usize) + 1;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -76,10 +93,16 @@ pub struct PortPublisher {
     /// of which accept v4) and falls back to IPv6 for v6-only sandboxes.
     /// `None` when neither family is active; listeners are not spawned.
     guest_ip: Option<IpAddr>,
+    /// Guest IPv4, when active.
+    guest_ipv4: Option<Ipv4Addr>,
+    /// Guest IPv6, when active.
+    guest_ipv6: Option<Ipv6Addr>,
     /// Ephemeral port counter.
     ephemeral_port: Arc<AtomicU16>,
     /// Maximum inbound connections (prevents resource exhaustion from host-side floods).
     max_inbound: usize,
+    /// UDP published-port routes, keyed by guest-side port.
+    udp_routes: PublishedUdpRoutes,
 }
 
 /// An accepted host-side connection waiting to be wired to the guest.
@@ -88,6 +111,38 @@ struct InboundConnection {
     stream: TcpStream,
     /// Guest port to connect to.
     guest_port: u16,
+}
+
+/// Shared UDP published-port route table.
+type PublishedUdpRoutes = Arc<Mutex<HashMap<u16, Vec<PublishedUdpRoute>>>>;
+
+/// A host UDP socket that can send replies for active peers.
+struct PublishedUdpRoute {
+    /// Host bind address for diagnostics.
+    bind_addr: SocketAddr,
+    /// Send guest reply payloads to the UDP listener task.
+    outbound_tx: mpsc::Sender<PublishedUdpOutbound>,
+    /// NAT mappings for peers that recently sent datagrams to this published port.
+    peers: Arc<Mutex<PublishedUdpPeers>>,
+}
+
+/// Guest response payload for a host peer.
+struct PublishedUdpOutbound {
+    peer: SocketAddr,
+    payload: Bytes,
+}
+
+/// Active UDP peer NAT mappings for one published route.
+#[derive(Default)]
+struct PublishedUdpPeers {
+    host_to_guest: HashMap<SocketAddr, PublishedUdpPeer>,
+    guest_to_host: HashMap<SocketAddr, SocketAddr>,
+}
+
+/// One host peer as represented on the guest-side virtual network.
+struct PublishedUdpPeer {
+    guest_addr: SocketAddr,
+    last_seen: Instant,
 }
 
 /// Maximum number of poll iterations to attempt flushing remaining data
@@ -120,22 +175,43 @@ impl PortPublisher {
     /// supplied [`NetworkPolicy`]'s `evaluate_ingress` before queuing
     /// them; rejected connections drop with TCP RST (zero-linger) so
     /// the peer observes `ECONNRESET`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ports: &[PublishedPort],
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
+        gateway_ipv4: Option<Ipv4Addr>,
+        gateway_ipv6: Option<Ipv6Addr>,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
         policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
+        let udp_routes = Arc::new(Mutex::new(HashMap::new()));
+        let ephemeral_port = Arc::new(AtomicU16::new(49152));
 
         let guest_ip = guest_ipv4
             .map(IpAddr::V4)
             .or_else(|| guest_ipv6.map(IpAddr::V6));
 
         if guest_ip.is_some() {
-            Self::spawn_listeners(ports, &inbound_tx, policy, shared, tokio_handle);
+            Self::spawn_listeners(
+                ports,
+                &inbound_tx,
+                udp_routes.clone(),
+                guest_ipv4,
+                guest_ipv6,
+                gateway_ipv4,
+                gateway_ipv6,
+                ephemeral_port.clone(),
+                gateway_mac,
+                guest_mac,
+                policy,
+                shared,
+                tokio_handle,
+            );
         } else if !ports.is_empty() {
             tracing::warn!(
                 count = ports.len(),
@@ -148,8 +224,11 @@ impl PortPublisher {
             _inbound_tx: inbound_tx,
             connections: Vec::new(),
             guest_ip,
-            ephemeral_port: Arc::new(AtomicU16::new(49152)),
+            guest_ipv4,
+            guest_ipv6,
+            ephemeral_port,
             max_inbound: 256,
+            udp_routes,
         }
     }
 
@@ -258,6 +337,51 @@ impl PortPublisher {
         }
     }
 
+    /// Relay a guest UDP datagram to a host peer that recently sent traffic
+    /// to a UDP published port.
+    ///
+    /// Returns `true` when the frame belongs to a published-port flow and
+    /// should be consumed by the caller.
+    pub fn relay_udp_outbound(&self, frame: &[u8], src: SocketAddr, dst: SocketAddr) -> bool {
+        if !self.is_guest_ip(src.ip()) {
+            return false;
+        }
+
+        let Some(payload) = extract_udp_payload(frame) else {
+            return false;
+        };
+
+        let routes = self.udp_routes.lock();
+        let Some(routes) = routes.get(&src.port()) else {
+            return false;
+        };
+
+        let now = Instant::now();
+        for route in routes {
+            let mut peers = route.peers.lock();
+            cleanup_udp_peer_mappings(&mut peers, now);
+            let Some(peer) = peers.guest_to_host.get(&dst).copied() else {
+                continue;
+            };
+            drop(peers);
+
+            let outbound = PublishedUdpOutbound {
+                peer,
+                payload: Bytes::copy_from_slice(payload),
+            };
+            if route.outbound_tx.try_send(outbound).is_err() {
+                tracing::debug!(
+                    bind = %route.bind_addr,
+                    peer = %peer,
+                    "published UDP reply dropped because outbound queue is unavailable",
+                );
+            }
+            return true;
+        }
+
+        false
+    }
+
     /// Remove closed inbound connections.
     ///
     /// Only removes sockets in `Closed` state. Sockets in `TimeWait` are
@@ -271,36 +395,103 @@ impl PortPublisher {
             }
             !closed
         });
+        self.cleanup_udp_peers();
     }
 
     /// Spawn one tokio listener task per TCP published port.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_listeners(
         ports: &[PublishedPort],
         inbound_tx: &mpsc::Sender<InboundConnection>,
+        udp_routes: PublishedUdpRoutes,
+        guest_ipv4: Option<Ipv4Addr>,
+        guest_ipv6: Option<Ipv6Addr>,
+        gateway_ipv4: Option<Ipv4Addr>,
+        gateway_ipv6: Option<Ipv6Addr>,
+        ephemeral_port: Arc<AtomicU16>,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
         policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) {
         for port in ports {
-            if port.protocol == PortProtocol::Tcp {
-                let tx = inbound_tx.clone();
-                let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
-                let guest_port = port.guest_port;
-                let policy = policy.clone();
-                let shared = shared.clone();
-                tokio_handle.spawn(async move {
-                    if let Err(e) =
-                        tcp_listener_task(bind_addr, guest_port, tx, policy, shared).await
-                    {
-                        tracing::error!(
+            let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
+            let guest_port = port.guest_port;
+
+            match port.protocol {
+                PortProtocol::Tcp => {
+                    let tx = inbound_tx.clone();
+                    let policy = policy.clone();
+                    let shared = shared.clone();
+                    tokio_handle.spawn(async move {
+                        if let Err(e) =
+                            tcp_listener_task(bind_addr, guest_port, tx, policy, shared).await
+                        {
+                            tracing::error!(
+                                bind = %bind_addr,
+                                error = %e,
+                                "published TCP port listener failed",
+                            );
+                        }
+                    });
+                }
+                PortProtocol::Udp => {
+                    let Some((guest_ip, gateway_ip)) = udp_ips_for_bind(
+                        port.host_bind,
+                        guest_ipv4,
+                        guest_ipv6,
+                        gateway_ipv4,
+                        gateway_ipv6,
+                    ) else {
+                        tracing::warn!(
                             bind = %bind_addr,
-                            error = %e,
-                            "published port listener failed",
+                            guest_port,
+                            "skipping UDP published port: guest has no matching gateway/guest IP family",
                         );
-                    }
-                });
+                        continue;
+                    };
+
+                    let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
+                    let peers = Arc::new(Mutex::new(PublishedUdpPeers::default()));
+                    udp_routes
+                        .lock()
+                        .entry(guest_port)
+                        .or_default()
+                        .push(PublishedUdpRoute {
+                            bind_addr,
+                            outbound_tx,
+                            peers: peers.clone(),
+                        });
+
+                    let policy = policy.clone();
+                    let shared = shared.clone();
+                    let ephemeral_port = ephemeral_port.clone();
+                    tokio_handle.spawn(async move {
+                        if let Err(e) = udp_listener_task(
+                            bind_addr,
+                            guest_ip,
+                            gateway_ip,
+                            guest_port,
+                            outbound_rx,
+                            peers,
+                            ephemeral_port.clone(),
+                            policy,
+                            shared,
+                            EthernetAddress(gateway_mac),
+                            EthernetAddress(guest_mac),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                bind = %bind_addr,
+                                error = %e,
+                                "published UDP port listener failed",
+                            );
+                        }
+                    });
+                }
             }
-            // TODO: UDP published ports.
         }
     }
 
@@ -308,11 +499,28 @@ impl PortPublisher {
         loop {
             let port = self.ephemeral_port.fetch_add(1, Ordering::Relaxed);
             // Wrap around in the ephemeral range.
-            if port == 0 || port < 49152 {
-                self.ephemeral_port.store(49152, Ordering::Relaxed);
+            if port == 0 || port < UDP_EPHEMERAL_PORT_START {
+                self.ephemeral_port
+                    .store(UDP_EPHEMERAL_PORT_START, Ordering::Relaxed);
                 continue;
             }
             return port;
+        }
+    }
+
+    fn cleanup_udp_peers(&self) {
+        let now = Instant::now();
+        for routes in self.udp_routes.lock().values() {
+            for route in routes {
+                cleanup_udp_peer_mappings(&mut route.peers.lock(), now);
+            }
+        }
+    }
+
+    fn is_guest_ip(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => self.guest_ipv4 == Some(ip),
+            IpAddr::V6(ip) => self.guest_ipv6 == Some(ip),
         }
     }
 }
@@ -361,6 +569,77 @@ async fn tcp_listener_task(
     Ok(())
 }
 
+/// UDP listener task: receives host datagrams, injects them into the guest,
+/// and sends guest replies back to active peers through the same socket.
+#[allow(clippy::too_many_arguments)]
+async fn udp_listener_task(
+    bind_addr: SocketAddr,
+    guest_ip: IpAddr,
+    gateway_ip: IpAddr,
+    guest_port: u16,
+    mut outbound_rx: mpsc::Receiver<PublishedUdpOutbound>,
+    peers: Arc<Mutex<PublishedUdpPeers>>,
+    ephemeral_port: Arc<AtomicU16>,
+    policy: Arc<NetworkPolicy>,
+    shared: Arc<SharedState>,
+    gateway_mac: EthernetAddress,
+    guest_mac: EthernetAddress,
+) -> std::io::Result<()> {
+    let socket = UdpSocket::bind(bind_addr).await?;
+    tracing::debug!(bind = %bind_addr, guest_port, "published UDP port listener started");
+
+    let mut buf = vec![0u8; UDP_RELAY_BUF_SIZE];
+    loop {
+        tokio::select! {
+            inbound = socket.recv_from(&mut buf) => {
+                let (n, peer) = inbound?;
+                let action = policy.evaluate_ingress(peer, guest_port, Protocol::Udp, &shared);
+                if action.is_deny() {
+                    tracing::debug!(
+                        peer = %peer,
+                        guest_port,
+                        "UDP ingress denied by policy",
+                    );
+                    continue;
+                }
+
+                    let Some(guest_peer) =
+                        resolve_udp_guest_peer(peer, gateway_ip, &peers, &ephemeral_port)
+                    else {
+                        tracing::debug!(
+                            peer = %peer,
+                            guest_port,
+                            "UDP ingress dropped because published-port peer table is full",
+                        );
+                        continue;
+                    };
+                    inject_udp_datagram_to_guest(
+                        guest_peer,
+                        SocketAddr::new(guest_ip, guest_port),
+                    &buf[..n],
+                    &shared,
+                    gateway_mac,
+                    guest_mac,
+                );
+            }
+            outbound = outbound_rx.recv() => {
+                let Some(outbound) = outbound else {
+                    break;
+                };
+                if let Err(e) = socket.send_to(&outbound.payload, outbound.peer).await {
+                    tracing::debug!(
+                        peer = %outbound.peer,
+                        error = %e,
+                        "published UDP send to host peer failed",
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn queue_inbound_connection<T>(
     inbound_tx: &mpsc::Sender<T>,
     conn: T,
@@ -372,6 +651,98 @@ async fn queue_inbound_connection<T>(
 
     shared.proxy_wake.wake();
     true
+}
+
+fn udp_ips_for_bind(
+    host_bind: IpAddr,
+    guest_ipv4: Option<Ipv4Addr>,
+    guest_ipv6: Option<Ipv6Addr>,
+    gateway_ipv4: Option<Ipv4Addr>,
+    gateway_ipv6: Option<Ipv6Addr>,
+) -> Option<(IpAddr, IpAddr)> {
+    match host_bind {
+        IpAddr::V4(_) => Some((IpAddr::V4(guest_ipv4?), IpAddr::V4(gateway_ipv4?))),
+        IpAddr::V6(_) => Some((IpAddr::V6(guest_ipv6?), IpAddr::V6(gateway_ipv6?))),
+    }
+}
+
+fn resolve_udp_guest_peer(
+    host_peer: SocketAddr,
+    gateway_ip: IpAddr,
+    peers: &Arc<Mutex<PublishedUdpPeers>>,
+    ephemeral_port: &AtomicU16,
+) -> Option<SocketAddr> {
+    let now = Instant::now();
+    let mut peers = peers.lock();
+    cleanup_udp_peer_mappings(&mut peers, now);
+
+    if let Some(peer) = peers.host_to_guest.get_mut(&host_peer) {
+        peer.last_seen = now;
+        return Some(peer.guest_addr);
+    }
+
+    let guest_addr = (0..UDP_EPHEMERAL_PORT_COUNT).find_map(|_| {
+        let candidate = SocketAddr::new(gateway_ip, next_ephemeral_port(ephemeral_port));
+        if !peers.guest_to_host.contains_key(&candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    })?;
+
+    peers.host_to_guest.insert(
+        host_peer,
+        PublishedUdpPeer {
+            guest_addr,
+            last_seen: now,
+        },
+    );
+    peers.guest_to_host.insert(guest_addr, host_peer);
+    Some(guest_addr)
+}
+
+fn cleanup_udp_peer_mappings(peers: &mut PublishedUdpPeers, now: Instant) {
+    peers
+        .host_to_guest
+        .retain(|_, peer| now.duration_since(peer.last_seen) <= UDP_PEER_TIMEOUT);
+    let host_to_guest = &peers.host_to_guest;
+    peers
+        .guest_to_host
+        .retain(|_, host_peer| host_to_guest.contains_key(host_peer));
+}
+
+fn next_ephemeral_port(ephemeral_port: &AtomicU16) -> u16 {
+    loop {
+        let port = ephemeral_port.fetch_add(1, Ordering::Relaxed);
+        if port == 0 || port < UDP_EPHEMERAL_PORT_START {
+            ephemeral_port.store(UDP_EPHEMERAL_PORT_START, Ordering::Relaxed);
+            continue;
+        }
+        return port;
+    }
+}
+
+fn inject_udp_datagram_to_guest(
+    peer: SocketAddr,
+    guest_dst: SocketAddr,
+    payload: &[u8],
+    shared: &SharedState,
+    gateway_mac: EthernetAddress,
+    guest_mac: EthernetAddress,
+) {
+    let Some(frame) = construct_udp_response(peer, guest_dst, payload, gateway_mac, guest_mac)
+    else {
+        tracing::debug!(
+            peer = %peer,
+            guest = %guest_dst,
+            "published UDP datagram dropped because address families differ",
+        );
+        return;
+    };
+
+    if !shared.push_rx_frame_and_wake(frame) {
+        tracing::debug!("published UDP datagram dropped because rx_ring is full");
+    }
 }
 
 /// Relay task: bridges a host TcpStream to channels connected to smoltcp.
@@ -490,5 +861,154 @@ mod tests {
         assert!(queue_inbound_connection(&tx, (), &shared).await);
         assert!(rx.try_recv().is_ok());
         assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
+    }
+
+    #[test]
+    fn inject_udp_datagram_to_guest_counts_rx_bytes() {
+        let shared = SharedState::new(4);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)), 50000);
+        let guest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 2)), 5353);
+
+        inject_udp_datagram_to_guest(
+            peer,
+            guest,
+            b"hello",
+            &shared,
+            EthernetAddress([0x02, 0, 0, 0, 0, 1]),
+            EthernetAddress([0x02, 0, 0, 0, 0, 2]),
+        );
+
+        let frame = shared.rx_ring.pop().expect("published UDP frame");
+        assert_eq!(shared.rx_bytes(), frame.len() as u64);
+    }
+
+    #[test]
+    fn relay_udp_outbound_queues_reply_for_active_peer() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let peers = Arc::new(Mutex::new(PublishedUdpPeers::default()));
+        let guest_ip = Ipv4Addr::new(172, 16, 0, 2);
+        let host_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+        let guest_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)), 49152);
+
+        {
+            let mut peers = peers.lock();
+            peers.host_to_guest.insert(
+                host_peer,
+                PublishedUdpPeer {
+                    guest_addr: guest_peer,
+                    last_seen: Instant::now(),
+                },
+            );
+            peers.guest_to_host.insert(guest_peer, host_peer);
+        }
+        routes.lock().insert(
+            5353,
+            vec![PublishedUdpRoute {
+                bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5353),
+                outbound_tx,
+                peers,
+            }],
+        );
+
+        let publisher = PortPublisher {
+            inbound_rx,
+            _inbound_tx: inbound_tx,
+            connections: Vec::new(),
+            guest_ip: Some(IpAddr::V4(guest_ip)),
+            guest_ipv4: Some(guest_ip),
+            guest_ipv6: None,
+            ephemeral_port: Arc::new(AtomicU16::new(49152)),
+            max_inbound: 256,
+            udp_routes: routes,
+        };
+        let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
+        let frame = construct_udp_response(
+            src,
+            guest_peer,
+            b"pong",
+            EthernetAddress([0x02, 0, 0, 0, 0, 1]),
+            EthernetAddress([0x02, 0, 0, 0, 0, 2]),
+        )
+        .unwrap();
+
+        assert!(publisher.relay_udp_outbound(&frame, src, guest_peer));
+        let outbound = outbound_rx.try_recv().unwrap();
+        assert_eq!(outbound.peer, host_peer);
+        assert_eq!(outbound.payload.as_ref(), b"pong");
+    }
+
+    #[test]
+    fn relay_udp_outbound_ignores_inactive_peer() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let guest_ip = Ipv4Addr::new(172, 16, 0, 2);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+
+        routes.lock().insert(
+            5353,
+            vec![PublishedUdpRoute {
+                bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5353),
+                outbound_tx,
+                peers: Arc::new(Mutex::new(PublishedUdpPeers::default())),
+            }],
+        );
+
+        let publisher = PortPublisher {
+            inbound_rx,
+            _inbound_tx: inbound_tx,
+            connections: Vec::new(),
+            guest_ip: Some(IpAddr::V4(guest_ip)),
+            guest_ipv4: Some(guest_ip),
+            guest_ipv6: None,
+            ephemeral_port: Arc::new(AtomicU16::new(49152)),
+            max_inbound: 256,
+            udp_routes: routes,
+        };
+        let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
+        let frame = construct_udp_response(
+            src,
+            peer,
+            b"pong",
+            EthernetAddress([0x02, 0, 0, 0, 0, 1]),
+            EthernetAddress([0x02, 0, 0, 0, 0, 2]),
+        )
+        .unwrap();
+
+        assert!(!publisher.relay_udp_outbound(&frame, src, peer));
+    }
+
+    #[test]
+    fn resolve_udp_guest_peer_returns_none_when_ephemeral_ports_exhausted() {
+        let peers = Arc::new(Mutex::new(PublishedUdpPeers::default()));
+        let gateway_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
+        let now = Instant::now();
+
+        {
+            let mut peers = peers.lock();
+            for port in UDP_EPHEMERAL_PORT_START..=u16::MAX {
+                let host_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+                let guest_addr = SocketAddr::new(gateway_ip, port);
+                peers.host_to_guest.insert(
+                    host_peer,
+                    PublishedUdpPeer {
+                        guest_addr,
+                        last_seen: now,
+                    },
+                );
+                peers.guest_to_host.insert(guest_addr, host_peer);
+            }
+        }
+
+        let next = resolve_udp_guest_peer(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000),
+            gateway_ip,
+            &peers,
+            &AtomicU16::new(UDP_EPHEMERAL_PORT_START),
+        );
+
+        assert!(next.is_none());
     }
 }

@@ -9,7 +9,9 @@ use std::net::IpAddr;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use percent_encoding::percent_decode;
 
-use super::config::{HostPattern, SecretEntry, SecretsConfig, ViolationAction};
+use super::config::{
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretsConfig, ViolationAction,
+};
 use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
@@ -18,6 +20,9 @@ use crate::shared::SharedState;
 
 /// Maximum bytes to buffer while waiting for HTTP request headers.
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+
+/// Maximum fixed-length HTTP body to buffer for body substitution.
+const MAX_HTTP_BODY_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -34,11 +39,17 @@ pub struct SecretsHandler {
     ineligible_for_substitution: Vec<IneligibleSecret>,
     /// Whether this connection is TLS-intercepted (not bypass).
     tls_intercepted: bool,
-    /// Longest placeholder length. Sizes the sliding-window tail.
-    max_placeholder_len: usize,
+    /// Longest raw or encoded placeholder representation. Sizes the
+    /// sliding-window tail used for cross-write violation detection.
+    max_detection_window_len: usize,
+    /// Longest active body-injection placeholder. Sizes the chunked body
+    /// substitution carry window.
+    max_body_placeholder_len: usize,
+    /// True when any configured placeholder exceeds the supported bound.
+    placeholder_limit_exceeded: bool,
     /// Trailing bytes carried over from the previous `substitute` call so a
     /// placeholder split across TCP writes still trips the violation check.
-    /// Capped at `max_placeholder_len - 1` bytes.
+    /// Capped at `max_detection_window_len - 1` bytes.
     prev_tail: Vec<u8>,
     /// HTTP framing state for the request stream. Tracks whether the next
     /// chunk should be parsed as a request start (headers) or treated as a
@@ -61,6 +72,9 @@ enum HttpState {
     InBody { remaining: usize },
     /// Inside a chunked request body.
     InChunkedBody { state: ChunkedBodyState },
+    /// Inside a chunked request body that is being decoded and re-encoded so
+    /// body placeholders can be substituted safely.
+    InChunkedRewriteBody { state: ChunkedRewriteState },
     /// Buffering a fixed-length body so body substitution can update
     /// `Content-Length` against the complete rewritten request.
     BufferingBody { remaining: usize },
@@ -71,6 +85,14 @@ enum HttpState {
 struct ChunkedBodyState {
     phase: ChunkedPhase,
     line: Vec<u8>,
+    decoded_tail: Vec<u8>,
+}
+
+/// Stateful chunked transfer rewriter for request bodies.
+#[derive(Debug, Clone, Default)]
+struct ChunkedRewriteState {
+    parser: ChunkedBodyState,
+    substitution_tail: Vec<u8>,
 }
 
 /// Current chunked-body parser phase.
@@ -103,6 +125,19 @@ struct RequestFraming {
     state: HttpState,
     body_in_request: usize,
     body_substitution_allowed: bool,
+}
+
+/// Output from processing one chunked-body plaintext fragment.
+struct ChunkedRewriteResult {
+    output: Vec<u8>,
+    body_end: Option<usize>,
+}
+
+/// Event emitted by the chunked transfer parser.
+enum ChunkedBodyEvent<'a> {
+    Payload(&'a [u8]),
+    ZeroChunk,
+    TrailerLine(&'a [u8]),
 }
 
 /// A secret that passed host matching for this connection.
@@ -188,7 +223,8 @@ impl EligibleSecret {
         if is_request_line {
             return self
                 .inject_query_params
-                .then(|| line.replace(&self.placeholder, &self.value));
+                .then(|| substitute_query_in_request_line(line, &self.placeholder, &self.value))
+                .flatten();
         }
 
         if self.inject_basic_auth
@@ -279,16 +315,27 @@ impl SecretsHandler {
         let enforce_http_authority = identity.is_some();
         let mut eligible_for_substitution = Vec::new();
         let mut ineligible_for_substitution = Vec::new();
-        let mut max_placeholder_len = 0;
+        let mut max_detection_window_len = 0;
+        let mut max_body_placeholder_len = 0;
+        let mut placeholder_limit_exceeded = false;
 
         for secret in &config.secrets {
-            max_placeholder_len = max_placeholder_len.max(secret.placeholder.len());
+            if secret.placeholder.len() > MAX_SECRET_PLACEHOLDER_BYTES {
+                placeholder_limit_exceeded = true;
+            }
+            max_detection_window_len = max_detection_window_len.max(max_placeholder_detection_len(
+                secret.placeholder.len().min(MAX_SECRET_PLACEHOLDER_BYTES),
+            ));
 
             let host_allowed = secret_host_allowed(secret, sni, identity.as_ref());
 
             // If the SNI matches an allowed host for this secret, add it to the
             // eligible list for substitution, and skip violation checks for this secret.
             if host_allowed {
+                if secret.injection.body {
+                    max_body_placeholder_len = max_body_placeholder_len
+                        .max(secret.placeholder.len().min(MAX_SECRET_PLACEHOLDER_BYTES));
+                }
                 eligible_for_substitution.push(EligibleSecret {
                     placeholder: secret.placeholder.clone(),
                     value: secret.value.clone(),
@@ -324,7 +371,9 @@ impl SecretsHandler {
             eligible_for_substitution,
             ineligible_for_substitution,
             tls_intercepted,
-            max_placeholder_len,
+            max_detection_window_len,
+            max_body_placeholder_len,
+            placeholder_limit_exceeded,
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
             http_sni: enforce_http_authority.then(|| sni.to_string()),
@@ -343,6 +392,14 @@ impl SecretsHandler {
     /// Returns the violation action if a placeholder is detected going to a
     /// disallowed host.
     pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        if self.placeholder_limit_exceeded {
+            tracing::error!(
+                "secret configuration rejected: placeholder exceeds {} bytes",
+                MAX_SECRET_PLACEHOLDER_BYTES
+            );
+            return Err(ViolationAction::Block);
+        }
+
         match std::mem::replace(&mut self.http_state, HttpState::AwaitingHeaders) {
             HttpState::BufferingBody { remaining } => {
                 return self.substitute_buffered_body(data, remaining);
@@ -352,6 +409,9 @@ impl SecretsHandler {
             }
             HttpState::InChunkedBody { state } => {
                 return self.substitute_chunked_body_chunk(data, state);
+            }
+            HttpState::InChunkedRewriteBody { state } => {
+                return self.substitute_chunked_rewrite_body_chunk(data, state);
             }
             HttpState::AwaitingHeaders => {}
         }
@@ -408,24 +468,32 @@ impl SecretsHandler {
         let mut body_substitution_allowed = false;
         let (body_bytes, spillover) = if boundary.is_some() {
             let header_text = String::from_utf8_lossy(header_bytes);
-            if let Some(sni) = self.http_sni.as_deref() {
-                match parse_http_request_metadata(header_bytes)? {
-                    Some(metadata) => {
-                        if !metadata
-                            .host_headers
-                            .iter()
-                            .all(|host| authority_matches_sni(host, sni))
-                        {
-                            return Err(ViolationAction::Block);
-                        }
-                    }
-                    None => {
-                        self.http_sni = None;
-                    }
-                }
+            if let Some(sni) = self.http_sni.as_deref()
+                && let Some(metadata) = parse_http_request_metadata(header_bytes)?
+                && !metadata
+                    .host_headers
+                    .iter()
+                    .all(|host| authority_matches_sni(host, sni))
+            {
+                return Err(ViolationAction::Block);
+            }
+
+            if is_transfer_chunked(header_text.as_ref()) {
+                return self.substitute_chunked_ready(
+                    data,
+                    header_bytes,
+                    after_headers,
+                    header_text.as_ref(),
+                );
             }
 
             let framing = next_state_after_headers(header_text.as_ref(), after_headers)?;
+            if self.needs_body_injection()
+                && framing.body_substitution_allowed
+                && content_length_exceeds_buffer_limit(header_text.as_ref())?
+            {
+                return Err(ViolationAction::Block);
+            }
             if self.needs_body_injection()
                 && framing.body_substitution_allowed
                 && let HttpState::InBody { remaining } = &framing.state
@@ -603,6 +671,104 @@ impl SecretsHandler {
         Ok(Cow::Owned(out))
     }
 
+    /// Handle a chunked request whose headers are complete in `parent`.
+    fn substitute_chunked_ready<'a>(
+        &mut self,
+        parent: &'a [u8],
+        header_bytes: &'a [u8],
+        after_headers: &'a [u8],
+        headers: &str,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        if self.needs_body_injection() && !has_non_identity_content_encoding(headers) {
+            return self.substitute_chunked_rewrite_ready(
+                parent,
+                header_bytes,
+                after_headers,
+                headers,
+            );
+        }
+
+        let mut state = ChunkedBodyState::default();
+        let body_end =
+            self.consume_chunked_body_with_violation_detection(&mut state, after_headers)?;
+        let (body_part, spillover) = match body_end {
+            Some(end) => after_headers.split_at(end),
+            None => (after_headers, &[] as &[u8]),
+        };
+        let this_request = &parent[..header_bytes.len() + body_part.len()];
+
+        self.apply_blocking_action(self.detect_blocking_action(this_request, headers))?;
+        self.update_tail(this_request);
+
+        self.http_state = if body_end.is_some() {
+            HttpState::AwaitingHeaders
+        } else {
+            HttpState::InChunkedBody { state }
+        };
+
+        if let Some(headers) = self.substitute_header_bytes(header_bytes) {
+            let mut output = Vec::with_capacity(headers.len() + body_part.len() + spillover.len());
+            output.extend_from_slice(headers.as_bytes());
+            output.extend_from_slice(body_part);
+            if !spillover.is_empty() {
+                let next_out = self.substitute(spillover)?;
+                output.extend_from_slice(next_out.as_ref());
+            }
+            return Ok(Cow::Owned(output));
+        }
+
+        self.append_pipelined_spillover(parent, this_request, spillover)
+    }
+
+    /// Handle a chunked request that needs body substitution.
+    fn substitute_chunked_rewrite_ready<'a>(
+        &mut self,
+        parent: &'a [u8],
+        header_bytes: &'a [u8],
+        after_headers: &'a [u8],
+        headers: &str,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        let mut state = ChunkedRewriteState::default();
+        let rewrite = self.rewrite_chunked_body_part(&mut state, after_headers)?;
+        let (body_part, spillover) = match rewrite.body_end {
+            Some(end) => after_headers.split_at(end),
+            None => (after_headers, &[] as &[u8]),
+        };
+        let this_request = &parent[..header_bytes.len() + body_part.len()];
+
+        self.apply_blocking_action(self.detect_blocking_action(this_request, headers))?;
+        self.update_tail(this_request);
+
+        self.http_state = if rewrite.body_end.is_some() {
+            HttpState::AwaitingHeaders
+        } else {
+            HttpState::InChunkedRewriteBody { state }
+        };
+
+        let header_len = header_bytes.len();
+        let header_out = self.substitute_header_bytes(header_bytes);
+        let mut output = Vec::with_capacity(
+            header_out
+                .as_ref()
+                .map_or(header_len, |headers| headers.len())
+                + rewrite.output.len()
+                + spillover.len(),
+        );
+        if let Some(headers) = header_out {
+            output.extend_from_slice(headers.as_bytes());
+        } else {
+            output.extend_from_slice(header_bytes);
+        }
+        output.extend_from_slice(&rewrite.output);
+
+        if !spillover.is_empty() {
+            let next_out = self.substitute(spillover)?;
+            output.extend_from_slice(next_out.as_ref());
+        }
+
+        Ok(Cow::Owned(output))
+    }
+
     /// Handle a chunk that is the continuation of the current request's
     /// body (no headers present at the start). The body bytes are
     /// forwarded as-is after a violation scan. If the body ends inside
@@ -662,7 +828,7 @@ impl SecretsHandler {
         data: &'a [u8],
         mut state: ChunkedBodyState,
     ) -> Result<Cow<'a, [u8]>, ViolationAction> {
-        let body_end = consume_chunked_body(&mut state, data)?;
+        let body_end = self.consume_chunked_body_with_violation_detection(&mut state, data)?;
         let (body_part, spillover) = match body_end {
             Some(end) => data.split_at(end),
             None => (data, &[] as &[u8]),
@@ -694,6 +860,37 @@ impl SecretsHandler {
         self.append_pipelined_spillover(data, body_part, spillover)
     }
 
+    /// Handle continuation bytes for a chunked request body that is being
+    /// decoded and re-encoded for body substitution.
+    fn substitute_chunked_rewrite_body_chunk<'a>(
+        &mut self,
+        data: &'a [u8],
+        mut state: ChunkedRewriteState,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        let rewrite = self.rewrite_chunked_body_part(&mut state, data)?;
+        let (body_part, spillover) = match rewrite.body_end {
+            Some(end) => data.split_at(end),
+            None => (data, &[] as &[u8]),
+        };
+
+        self.apply_blocking_action(self.detect_blocking_action(body_part, ""))?;
+        self.update_tail(body_part);
+
+        self.http_state = if rewrite.body_end.is_some() {
+            HttpState::AwaitingHeaders
+        } else {
+            HttpState::InChunkedRewriteBody { state }
+        };
+
+        let mut output = rewrite.output;
+        if !spillover.is_empty() {
+            let next_out = self.substitute(spillover)?;
+            output.extend_from_slice(next_out.as_ref());
+        }
+
+        Ok(Cow::Owned(output))
+    }
+
     /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
         self.http_sni.is_none()
@@ -709,6 +906,168 @@ impl SecretsHandler {
         })
     }
 
+    fn substitute_header_bytes(&self, header_bytes: &[u8]) -> Option<String> {
+        let mut header_str: Option<String> = None;
+        for secret in &self.eligible_for_substitution {
+            if secret.require_tls_identity && !self.tls_intercepted {
+                continue;
+            }
+            if secret.may_substitute_in_headers(header_bytes) {
+                let current = header_str
+                    .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
+                *current = secret.substitute_in_headers(current);
+            }
+        }
+
+        header_str.filter(|headers| headers.as_bytes() != header_bytes)
+    }
+
+    fn consume_chunked_body_with_violation_detection(
+        &self,
+        state: &mut ChunkedBodyState,
+        data: &[u8],
+    ) -> Result<Option<usize>, ViolationAction> {
+        let mut decoded_tail = std::mem::take(&mut state.decoded_tail);
+        let body_end = process_chunked_body(state, data, |event| {
+            let ChunkedBodyEvent::Payload(payload) = event else {
+                return Ok(());
+            };
+            self.apply_blocking_action(detect_blocking_action_with_tail(
+                &self.ineligible_for_substitution,
+                &decoded_tail,
+                payload,
+                "",
+            ))?;
+            update_tail_buffer(
+                &mut decoded_tail,
+                payload,
+                self.max_detection_window_len.saturating_sub(1),
+            );
+            Ok(())
+        });
+        state.decoded_tail = decoded_tail;
+        body_end
+    }
+
+    fn rewrite_chunked_body_part(
+        &self,
+        state: &mut ChunkedRewriteState,
+        data: &[u8],
+    ) -> Result<ChunkedRewriteResult, ViolationAction> {
+        let mut output = Vec::new();
+        let mut decoded_tail = std::mem::take(&mut state.parser.decoded_tail);
+        let mut substitution_tail = std::mem::take(&mut state.substitution_tail);
+
+        let body_end = process_chunked_body(&mut state.parser, data, |event| {
+            match event {
+                ChunkedBodyEvent::Payload(payload) => {
+                    self.apply_blocking_action(detect_blocking_action_with_tail(
+                        &self.ineligible_for_substitution,
+                        &decoded_tail,
+                        payload,
+                        "",
+                    ))?;
+                    update_tail_buffer(
+                        &mut decoded_tail,
+                        payload,
+                        self.max_detection_window_len.saturating_sub(1),
+                    );
+                    self.append_rewritten_chunked_payload(
+                        &mut substitution_tail,
+                        payload,
+                        &mut output,
+                    );
+                }
+                ChunkedBodyEvent::ZeroChunk => {
+                    self.flush_rewritten_chunked_payload(&mut substitution_tail, &mut output);
+                    output.extend_from_slice(b"0\r\n");
+                }
+                ChunkedBodyEvent::TrailerLine(trailer_line) => {
+                    output.extend_from_slice(trailer_line);
+                }
+            }
+            Ok(())
+        })?;
+
+        state.parser.decoded_tail = decoded_tail;
+        state.substitution_tail = substitution_tail;
+
+        Ok(ChunkedRewriteResult { output, body_end })
+    }
+
+    fn append_rewritten_chunked_payload(
+        &self,
+        substitution_tail: &mut Vec<u8>,
+        payload: &[u8],
+        output: &mut Vec<u8>,
+    ) {
+        substitution_tail.extend_from_slice(payload);
+        let carry_len = self.max_body_placeholder_len.saturating_sub(1);
+        self.append_rewritten_chunked_prefix(substitution_tail, carry_len, output);
+    }
+
+    fn flush_rewritten_chunked_payload(
+        &self,
+        substitution_tail: &mut Vec<u8>,
+        output: &mut Vec<u8>,
+    ) {
+        self.append_rewritten_chunked_prefix(substitution_tail, 0, output);
+    }
+
+    fn append_rewritten_chunked_prefix(
+        &self,
+        substitution_tail: &mut Vec<u8>,
+        keep_len: usize,
+        output: &mut Vec<u8>,
+    ) {
+        let safe_len = substitution_tail.len().saturating_sub(keep_len);
+        if safe_len == 0 {
+            return;
+        }
+
+        let mut cursor = 0;
+        let mut chunk_payload = Vec::with_capacity(safe_len);
+        while cursor < safe_len {
+            if let Some(secret) = self.matching_body_secret_at(&substitution_tail[cursor..]) {
+                chunk_payload.extend_from_slice(secret.value.as_bytes());
+                cursor += secret.placeholder.len();
+            } else {
+                chunk_payload.push(substitution_tail[cursor]);
+                cursor += 1;
+            }
+        }
+
+        let kept = substitution_tail.split_off(cursor);
+        *substitution_tail = kept;
+        append_chunk(output, &chunk_payload);
+    }
+
+    fn matching_body_secret_at(&self, data: &[u8]) -> Option<&EligibleSecret> {
+        self.eligible_for_substitution.iter().find(|secret| {
+            secret.inject_body
+                && !secret.placeholder.is_empty()
+                && (!secret.require_tls_identity || self.tls_intercepted)
+                && data.starts_with(secret.placeholder.as_bytes())
+        })
+    }
+
+    fn apply_blocking_action(&self, action: Option<BlockingAction>) -> Result<(), ViolationAction> {
+        match action {
+            Some(BlockingAction::Block) => Err(ViolationAction::Block),
+            Some(BlockingAction::BlockAndLog) => {
+                tracing::warn!("secret violation: placeholder detected for disallowed host");
+                Err(ViolationAction::BlockAndLog)
+            }
+            Some(BlockingAction::BlockAndTerminate) => {
+                tracing::error!(
+                    "secret violation: placeholder detected for disallowed host - terminating"
+                );
+                Err(ViolationAction::BlockAndTerminate)
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Returns the strongest blocking action for any placeholder appearing in data
     /// for a host that isn't allowed to receive either the real secret or the placeholder.
     ///
@@ -717,54 +1076,23 @@ impl SecretsHandler {
     /// encoded-placeholder bypass attempts, plus base64-decoded Basic auth
     /// credentials.
     fn detect_blocking_action(&self, data: &[u8], headers: &str) -> Option<BlockingAction> {
-        if self.ineligible_for_substitution.is_empty() {
-            return None;
-        }
-
-        let scan_buf: Cow<[u8]> = if self.prev_tail.is_empty() {
-            Cow::Borrowed(data)
-        } else {
-            let mut stitched = Vec::with_capacity(self.prev_tail.len() + data.len());
-            stitched.extend_from_slice(&self.prev_tail);
-            stitched.extend_from_slice(data);
-            Cow::Owned(stitched)
-        };
-        let scan = scan_buf.as_ref();
-
-        let mut detected = None;
-        for secret in &self.ineligible_for_substitution {
-            let needle = secret.placeholder.as_bytes();
-            if contains_bytes(scan, needle)
-                || url_decoded_contains(scan, needle)
-                || json_escaped_contains(scan, needle)
-                || basic_auth_decoded_contains(headers, &secret.placeholder)
-            {
-                detected = Some(strictest_violation_action(detected, secret.action));
-            }
-        }
-
-        detected
+        detect_blocking_action_with_tail(
+            &self.ineligible_for_substitution,
+            &self.prev_tail,
+            data,
+            headers,
+        )
     }
 
     /// Update the sliding-window tail with the trailing bytes of `data`, so
     /// the next `substitute` call can detect placeholders split across the
     /// boundary.
     fn update_tail(&mut self, data: &[u8]) {
-        let tail_size = self.max_placeholder_len.saturating_sub(1);
-        if tail_size == 0 {
-            return;
-        }
-        if data.len() >= tail_size {
-            self.prev_tail.clear();
-            self.prev_tail
-                .extend_from_slice(&data[data.len() - tail_size..]);
-            return;
-        }
-        self.prev_tail.extend_from_slice(data);
-        let overflow = self.prev_tail.len().saturating_sub(tail_size);
-        if overflow > 0 {
-            self.prev_tail.drain(..overflow);
-        }
+        update_tail_buffer(
+            &mut self.prev_tail,
+            data,
+            self.max_detection_window_len.saturating_sub(1),
+        );
     }
 }
 
@@ -988,14 +1316,47 @@ fn split_auth_scheme(header_value: &str) -> Option<(&str, &str)> {
     Some((scheme, rest.trim_start()))
 }
 
+fn substitute_query_in_request_line(line: &str, placeholder: &str, value: &str) -> Option<String> {
+    if placeholder.is_empty() {
+        return None;
+    }
+
+    let method_end = line.find(' ')?;
+    let target_start = method_end + 1;
+    let version_start = line[target_start..].rfind(' ')? + target_start;
+    if version_start <= target_start {
+        return None;
+    }
+
+    let target = &line[target_start..version_start];
+    let query_start = target.find('?')? + 1;
+    let query = &target[query_start..];
+    if !query.contains(placeholder) {
+        return None;
+    }
+
+    let mut result = String::with_capacity(line.len());
+    result.push_str(&line[..target_start + query_start]);
+    result.push_str(&query.replace(placeholder, value));
+    result.push_str(&line[version_start..]);
+    Some(result)
+}
+
 /// Returns true if any `Authorization: Basic` line in `headers` decodes to
 /// credentials containing `placeholder`.
 fn basic_auth_decoded_contains(headers: &str, placeholder: &str) -> bool {
+    decoded_basic_auth_credentials(headers)
+        .iter()
+        .any(|decoded| decoded.contains(placeholder))
+}
+
+/// Decode all Basic authorization credentials in an HTTP header block.
+fn decoded_basic_auth_credentials(headers: &str) -> Vec<String> {
     headers
         .split("\r\n")
         .filter(|line| is_authorization_header(line))
         .filter_map(decode_basic_credentials)
-        .any(|decoded| decoded.contains(placeholder))
+        .collect()
 }
 
 /// Byte-slice substring check.
@@ -1004,6 +1365,13 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Longest representation the violation detector may need to carry across
+/// write boundaries for a placeholder. Percent encoding can expand one byte
+/// to `%XX`; JSON unicode escaping can expand one byte to `\u00XX`.
+fn max_placeholder_detection_len(placeholder_len: usize) -> usize {
+    placeholder_len.saturating_mul(6)
 }
 
 /// Compute the framing state for the next chunk and how many of the
@@ -1016,6 +1384,7 @@ fn next_state_after_headers(
     body_bytes: &[u8],
 ) -> Result<RequestFraming, ViolationAction> {
     let body_in_chunk = body_bytes.len();
+    let body_substitution_allowed = !has_non_identity_content_encoding(headers);
     if is_transfer_chunked(headers) {
         let mut chunked_state = ChunkedBodyState::default();
         let (state, body_in_request) = match consume_chunked_body(&mut chunked_state, body_bytes)? {
@@ -1037,14 +1406,14 @@ fn next_state_after_headers(
         Some(cl) if body_in_chunk >= cl => Ok(RequestFraming {
             state: HttpState::AwaitingHeaders,
             body_in_request: cl,
-            body_substitution_allowed: true,
+            body_substitution_allowed,
         }),
         Some(cl) => Ok(RequestFraming {
             state: HttpState::InBody {
                 remaining: cl - body_in_chunk,
             },
             body_in_request: body_in_chunk,
-            body_substitution_allowed: true,
+            body_substitution_allowed,
         }),
         // Per RFC 9112 §6.3 case 6, a request with neither `Content-Length`
         // nor `Transfer-Encoding` has a zero-length body. Any trailing
@@ -1079,6 +1448,10 @@ fn parse_content_length(headers: &str) -> Result<Option<usize>, ViolationAction>
     Ok(content_length)
 }
 
+fn content_length_exceeds_buffer_limit(headers: &str) -> Result<bool, ViolationAction> {
+    Ok(parse_content_length(headers)?.is_some_and(|len| len > MAX_HTTP_BODY_BUFFER_BYTES))
+}
+
 /// True if the headers contain `Transfer-Encoding: chunked` (case-insensitive,
 /// last value in the comma-list per RFC 7230).
 fn is_transfer_chunked(headers: &str) -> bool {
@@ -1092,6 +1465,25 @@ fn is_transfer_chunked(headers: &str) -> bool {
                 .next_back()
                 .map(|s| s.trim().eq_ignore_ascii_case("chunked"))
                 .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the request body is encoded and cannot be rewritten byte-for-byte.
+fn has_non_identity_content_encoding(headers: &str) -> bool {
+    for line in headers.split("\r\n") {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("content-encoding") {
+            continue;
+        }
+        if value
+            .split(',')
+            .any(|encoding| !encoding.trim().eq_ignore_ascii_case("identity"))
         {
             return true;
         }
@@ -1123,6 +1515,7 @@ fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<V
 }
 
 /// Returns true if `haystack`, after URL percent-decoding, contains `needle`.
+#[cfg(test)]
 fn url_decoded_contains(haystack: &[u8], needle: &[u8]) -> bool {
     let decoded: Vec<u8> = percent_decode(haystack).collect();
     contains_bytes(&decoded, needle)
@@ -1131,7 +1524,14 @@ fn url_decoded_contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Returns true if `haystack`, after JSON `\uXXXX` decoding, contains `needle`.
 /// Only `\uXXXX` escapes are expanded (sufficient to detect ASCII placeholders
 /// hidden via unicode escapes); other JSON escapes pass through.
+#[cfg(test)]
 fn json_escaped_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let decoded = json_unescape(haystack);
+    contains_bytes(&decoded, needle)
+}
+
+/// Decode JSON `\uXXXX` escapes in a byte slice.
+fn json_unescape(haystack: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::with_capacity(haystack.len());
     let mut i = 0;
     while i < haystack.len() {
@@ -1156,7 +1556,7 @@ fn json_escaped_contains(haystack: &[u8], needle: &[u8]) -> bool {
         decoded.push(haystack[i]);
         i += 1;
     }
-    contains_bytes(&decoded, needle)
+    decoded
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -1193,12 +1593,101 @@ fn find_header_boundary(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
+fn append_chunk(output: &mut Vec<u8>, payload: &[u8]) {
+    if payload.is_empty() {
+        return;
+    }
+    output.extend_from_slice(format!("{:X}\r\n", payload.len()).as_bytes());
+    output.extend_from_slice(payload);
+    output.extend_from_slice(b"\r\n");
+}
+
+fn detect_blocking_action_with_tail(
+    ineligible_for_substitution: &[IneligibleSecret],
+    prev_tail: &[u8],
+    data: &[u8],
+    headers: &str,
+) -> Option<BlockingAction> {
+    if ineligible_for_substitution.is_empty() {
+        return None;
+    }
+
+    let scan_buf: Cow<[u8]> = if prev_tail.is_empty() {
+        Cow::Borrowed(data)
+    } else {
+        let mut stitched = Vec::with_capacity(prev_tail.len() + data.len());
+        stitched.extend_from_slice(prev_tail);
+        stitched.extend_from_slice(data);
+        Cow::Owned(stitched)
+    };
+    let scan = scan_buf.as_ref();
+    let url_decoded = scan
+        .contains(&b'%')
+        .then(|| percent_decode(scan).collect::<Vec<u8>>());
+    let json_decoded = scan
+        .windows(2)
+        .any(|window| window == b"\\u")
+        .then(|| json_unescape(scan));
+    let basic_auth_credentials = decoded_basic_auth_credentials(headers);
+
+    let mut detected = None;
+    for secret in ineligible_for_substitution {
+        let needle = secret.placeholder.as_bytes();
+        if contains_bytes(scan, needle)
+            || url_decoded
+                .as_deref()
+                .is_some_and(|decoded| contains_bytes(decoded, needle))
+            || json_decoded
+                .as_deref()
+                .is_some_and(|decoded| contains_bytes(decoded, needle))
+            || basic_auth_credentials
+                .iter()
+                .any(|decoded| decoded.contains(&secret.placeholder))
+        {
+            detected = Some(strictest_violation_action(detected, secret.action));
+        }
+    }
+
+    detected
+}
+
+fn update_tail_buffer(tail: &mut Vec<u8>, data: &[u8], tail_size: usize) {
+    if tail_size == 0 {
+        tail.clear();
+        return;
+    }
+    if data.len() >= tail_size {
+        tail.clear();
+        tail.extend_from_slice(&data[data.len() - tail_size..]);
+        return;
+    }
+    tail.extend_from_slice(data);
+    let overflow = tail.len().saturating_sub(tail_size);
+    if overflow > 0 {
+        tail.drain(..overflow);
+    }
+}
+
 /// Consume chunked body bytes and return the position after the body when the
 /// terminating zero chunk and trailers are complete.
 fn consume_chunked_body(
     state: &mut ChunkedBodyState,
     data: &[u8],
 ) -> Result<Option<usize>, ViolationAction> {
+    process_chunked_body(state, data, |_| Ok(()))
+}
+
+/// Process chunked body bytes and call `on_payload` with decoded chunk payload
+/// slices, `on_zero_chunk` when the terminating chunk is parsed, and
+/// `on_trailer_line` with each complete trailer line including its CRLF.
+fn process_chunked_body<E>(
+    state: &mut ChunkedBodyState,
+    data: &[u8],
+    mut on_event: E,
+) -> Result<Option<usize>, ViolationAction>
+where
+    E: FnMut(ChunkedBodyEvent<'_>) -> Result<(), ViolationAction>,
+{
     let mut cursor = 0;
     while cursor < data.len() {
         let phase = std::mem::replace(&mut state.phase, ChunkedPhase::SizeLine);
@@ -1214,6 +1703,7 @@ fn consume_chunked_body(
                     let size = parse_chunk_size(line)?;
                     state.line.clear();
                     state.phase = if size == 0 {
+                        on_event(ChunkedBodyEvent::ZeroChunk)?;
                         ChunkedPhase::TrailerLine
                     } else {
                         ChunkedPhase::Data { remaining: size }
@@ -1224,6 +1714,7 @@ fn consume_chunked_body(
             }
             ChunkedPhase::Data { mut remaining } => {
                 let take = remaining.min(data.len() - cursor);
+                on_event(ChunkedBodyEvent::Payload(&data[cursor..cursor + take]))?;
                 cursor += take;
                 remaining -= take;
                 if remaining == 0 {
@@ -1256,6 +1747,7 @@ fn consume_chunked_body(
                 }
                 if state.line.ends_with(b"\r\n") {
                     let is_empty = state.line.len() == 2;
+                    on_event(ChunkedBodyEvent::TrailerLine(&state.line))?;
                     state.line.clear();
                     if is_empty {
                         return Ok(Some(cursor));
@@ -1348,6 +1840,48 @@ mod tests {
             basic_auth: true,
             query_params: false,
             body: false,
+        }
+    }
+
+    fn split_http_body(data: &[u8]) -> (&[u8], &[u8]) {
+        let boundary = find_header_boundary(data).expect("HTTP header boundary");
+        data.split_at(boundary)
+    }
+
+    fn decode_chunked_payload(data: &[u8]) -> (Vec<u8>, Vec<u8>, usize) {
+        let mut cursor = 0;
+        let mut decoded = Vec::new();
+        let mut trailers = Vec::new();
+
+        loop {
+            let line_end = data[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .map(|pos| cursor + pos)
+                .expect("chunk size line");
+            let size = parse_chunk_size(&data[cursor..line_end]).expect("valid chunk size");
+            cursor = line_end + 2;
+
+            if size == 0 {
+                loop {
+                    let trailer_end = data[cursor..]
+                        .windows(2)
+                        .position(|window| window == b"\r\n")
+                        .map(|pos| cursor + pos + 2)
+                        .expect("trailer line");
+                    trailers.extend_from_slice(&data[cursor..trailer_end]);
+                    let empty = trailer_end - cursor == 2;
+                    cursor = trailer_end;
+                    if empty {
+                        return (decoded, trailers, cursor);
+                    }
+                }
+            }
+
+            decoded.extend_from_slice(&data[cursor..cursor + size]);
+            cursor += size;
+            assert_eq!(&data[cursor..cursor + 2], b"\r\n");
+            cursor += 2;
         }
     }
 
@@ -1588,6 +2122,24 @@ mod tests {
     }
 
     #[test]
+    fn body_injection_blocks_content_length_over_buffer_limit() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = format!(
+            "POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: {}\r\n\r\n",
+            MAX_HTTP_BODY_BUFFER_BYTES + 1
+        );
+
+        assert_eq!(
+            handler.substitute(input.as_bytes()).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn invalid_content_length_is_blocked() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.injection.body = true;
@@ -1623,13 +2175,117 @@ mod tests {
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        // No Content-Length header (e.g. chunked).
-        let input = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{\"key\": \"$KEY\"}";
+        // Chunked requests do not carry Content-Length; body injection
+        // decodes and re-encodes chunked framing instead.
+        let input =
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nF\r\n{\"key\": \"$KEY\"}\r\n0\r\n\r\n";
         let output = handler.substitute(input).unwrap();
         let result = String::from_utf8(output.into_owned()).unwrap();
-        assert!(result.contains("$KEY"));
-        assert!(!result.contains("longer-secret"));
+        assert!(!result.contains("$KEY"));
+        assert!(result.contains("longer-secret"));
         assert!(!result.contains("Content-Length"));
+    }
+
+    #[test]
+    fn chunked_body_injection_rewrites_split_placeholder_across_chunks() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nxx$K\r\n2\r\nEY\r\n0\r\n\r\n";
+        let output = handler.substitute(input).unwrap().into_owned();
+        let (_, body) = split_http_body(&output);
+        let (decoded, trailers, consumed) = decode_chunked_payload(body);
+
+        assert_eq!(decoded, b"xxreal-secret");
+        assert_eq!(trailers, b"\r\n");
+        assert_eq!(consumed, body.len());
+    }
+
+    #[test]
+    fn chunked_body_injection_rewrites_placeholder_split_across_tls_reads() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let chunk1 = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nxx$K\r\n";
+        let chunk2 = b"2\r\nEY\r\n0\r\n\r\n";
+
+        let mut output = handler.substitute(chunk1).unwrap().into_owned();
+        output.extend_from_slice(handler.substitute(chunk2).unwrap().as_ref());
+        let (_, body) = split_http_body(&output);
+        let (decoded, trailers, consumed) = decode_chunked_payload(body);
+
+        assert_eq!(decoded, b"xxreal-secret");
+        assert_eq!(trailers, b"\r\n");
+        assert_eq!(consumed, body.len());
+    }
+
+    #[test]
+    fn chunked_body_injection_preserves_trailers_and_recurses_to_next_request() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let mut input = b"POST /a HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n$KEY\r\n0\r\nX-Trailer: yes\r\n\r\n".to_vec();
+        input.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: api.openai.com\r\nAuth: $KEY\r\n\r\n");
+
+        let output = handler.substitute(&input).unwrap().into_owned();
+        let (_, body_and_next) = split_http_body(&output);
+        let (decoded, trailers, consumed) = decode_chunked_payload(body_and_next);
+        let next_request = &body_and_next[consumed..];
+
+        assert_eq!(decoded, b"real-secret");
+        assert_eq!(trailers, b"X-Trailer: yes\r\n\r\n");
+        assert_eq!(
+            next_request,
+            b"GET /b HTTP/1.1\r\nHost: api.openai.com\r\nAuth: real-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn chunked_body_injection_skips_content_encoded_body() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n4\r\n$KEY\r\n0\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert_eq!(output.as_ref(), input);
+    }
+
+    #[test]
+    fn split_chunked_body_payload_blocks_for_wrong_host() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n$K\r\n2\r\nEY\r\n0\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn oversized_secret_placeholder_is_rejected() {
+        let placeholder = "x".repeat(MAX_SECRET_PLACEHOLDER_BYTES + 1);
+        let config = make_config(vec![make_secret(
+            &placeholder,
+            "real-secret",
+            "api.openai.com",
+        )]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        assert_eq!(
+            handler.substitute(b"GET / HTTP/1.1\r\n\r\n").unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -1658,6 +2314,25 @@ mod tests {
         )
         .into_bytes();
         input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap();
+        assert_eq!(&*output, input.as_slice());
+    }
+
+    #[test]
+    fn body_injection_skips_content_encoded_body() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = b"compressed-looking-$KEY-bytes";
+        let mut input = format!(
+            "POST /git-upload-pack HTTP/1.1\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        input.extend_from_slice(body);
 
         let output = handler.substitute(&input).unwrap();
         assert_eq!(&*output, input.as_slice());
@@ -1821,6 +2496,25 @@ mod tests {
     }
 
     #[test]
+    fn query_params_do_not_substitute_path() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = SecretInjection {
+            headers: false,
+            basic_auth: false,
+            query_params: true,
+            body: false,
+        };
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET /path/$KEY?token=$KEY HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
+
+        assert!(result.contains("GET /path/$KEY?token=real-secret HTTP/1.1"));
+    }
+
+    #[test]
     fn header_injection_does_not_substitute_request_line_query() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
@@ -1866,6 +2560,37 @@ mod tests {
             b"POST / HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"k\":\"\\u0024KEY\"}";
         assert_eq!(
             handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_url_encoded_placeholder_blocks_for_wrong_host() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let chunk1 = b"POST / HTTP/1.1\r\nHost: evil.com\r\nContent-Length: 14\r\n\r\nkey=%24K";
+        let chunk2 = b"EY&x=1";
+
+        assert!(handler.substitute(chunk1).is_ok());
+        assert_eq!(
+            handler.substitute(chunk2).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_json_escaped_placeholder_blocks_for_wrong_host() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let chunk1 =
+            b"POST / HTTP/1.1\r\nHost: evil.com\r\nContent-Length: 17\r\n\r\n{\"k\":\"\\u0024K";
+        let chunk2 = b"EY\"}";
+
+        assert!(handler.substitute(chunk1).is_ok());
+        assert_eq!(
+            handler.substitute(chunk2).unwrap_err(),
             ViolationAction::Block
         );
     }
@@ -2344,6 +3069,27 @@ mod tests {
         assert_eq!(
             handler
                 .substitute(b"Authorization: Bearer $KEY\r\n\r\n")
+                .unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_host_validation_survives_leading_empty_block() {
+        let ip = Ipv4Addr::new(203, 0, 113, 32);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        assert_eq!(
+            handler.substitute(b"\r\n\r\n").unwrap().as_ref(),
+            b"\r\n\r\n"
+        );
+        assert_eq!(
+            handler
+                .substitute(b"GET / HTTP/1.1\r\nHost: evil.com\r\nAuth: $KEY\r\n\r\n")
                 .unwrap_err(),
             ViolationAction::Block
         );

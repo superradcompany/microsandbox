@@ -303,16 +303,15 @@ async fn intercept_relay(
                     guest_tls
                         .process_new_packets()
                         .map_err(io::Error::other)?;
+                    forward_plaintext(
+                        &mut guest_tls,
+                        &mut server_tls,
+                        &mut secrets_handler,
+                        &shared,
+                        &mut plaintext_buf,
+                    )
+                    .await?;
                 }
-
-                forward_plaintext(
-                    &mut guest_tls,
-                    &mut server_tls,
-                    &mut secrets_handler,
-                    &shared,
-                    &mut plaintext_buf,
-                )
-                .await?;
             }
 
             // Server → guest: read plaintext, encrypt, send via channel.

@@ -859,7 +859,7 @@ Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(
 
 | Name | Type | Description |
 |------|------|-------------|
-| env_var | `impl Into<String>` | Environment variable name |
+| env_var | `impl Into<String>` | Environment variable name (non-empty, no `=` or NUL) |
 | value | `impl Into<String>` | Secret value |
 | allowed_host | `impl Into<String>` | Allowed destination host |
 

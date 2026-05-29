@@ -262,6 +262,7 @@ impl NetworkBuilder {
         if let Some(err) = self.errors.drain(..).next() {
             return Err(err);
         }
+        self.config.secrets.validate()?;
         Ok(self.config)
     }
 }
@@ -390,6 +391,9 @@ impl SecretBuilder {
     }
 
     /// Set the environment variable to expose the placeholder as (required).
+    ///
+    /// Names must be non-empty and must not contain `=` or NUL. They are
+    /// not restricted to shell-identifier syntax.
     pub fn env(mut self, var: impl Into<String>) -> Self {
         self.env_var = Some(var.into());
         self
@@ -402,6 +406,9 @@ impl SecretBuilder {
     }
 
     /// Set a custom placeholder string.
+    ///
+    /// Placeholders must be non-empty, at most 1024 bytes, and must not
+    /// contain NUL, CR, or LF.
     /// If not set, auto-generated as `$MSB_<env_var>`.
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = Some(placeholder.into());
@@ -463,7 +470,12 @@ impl SecretBuilder {
         self
     }
 
-    /// Configure body injection (default: false).
+    /// Configure HTTP/1 body injection (default: false).
+    ///
+    /// Fixed-length bodies up to 16 MiB update `Content-Length`; larger
+    /// fixed-length bodies are blocked. Chunked bodies are decoded and
+    /// re-encoded with fresh chunk sizes. Encoded bodies pass through
+    /// unchanged.
     pub fn inject_body(mut self, enabled: bool) -> Self {
         self.injection.body = enabled;
         self
@@ -668,6 +680,24 @@ mod tests {
             .env("TOKEN")
             .value("secret-value")
             .build();
+    }
+
+    #[test]
+    fn network_builder_rejects_invalid_secret_config() {
+        let err = NetworkBuilder::new()
+            .secret_entry(SecretEntry {
+                env_var: "API=KEY".into(),
+                value: "secret-value".into(),
+                placeholder: "$MSB_API_KEY".into(),
+                allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+                injection: SecretInjection::default(),
+                on_violation: None,
+                require_tls_identity: true,
+            })
+            .build()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("env_var must not contain `=`"));
     }
 
     #[test]

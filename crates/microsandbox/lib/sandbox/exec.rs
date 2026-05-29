@@ -345,6 +345,7 @@ impl ExecHandle {
     }
 
     /// Consume this handle into separately owned control, stdin, and event parts.
+    #[cfg(feature = "ssh")]
     pub(crate) fn into_parts(
         self,
     ) -> (

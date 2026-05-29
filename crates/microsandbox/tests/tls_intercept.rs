@@ -19,6 +19,8 @@ use tokio_rustls::TlsAcceptor;
 //--------------------------------------------------------------------------------------------------
 
 const LARGE_POST_BODY_LEN: usize = 135_000; // 135 kb, above the old ~128 kib failure threshold.
+const LARGE_SECRET_PAD_LEN: usize = 1024 * 1024; // 1 MiB on each side of the placeholder.
+const REAL_SECRET: &[u8] = b"real-secret";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -27,7 +29,12 @@ const LARGE_POST_BODY_LEN: usize = 135_000; // 135 kb, above the old ~128 kib fa
 /// Minimal HTTPS server bound to `127.0.0.1` and `::1` on the same port.
 struct HostHttps {
     port: u16,
-    handle: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    handle: Option<JoinHandle<io::Result<ReceivedRequest>>>,
+}
+
+struct ReceivedRequest {
+    headers: Vec<u8>,
+    body: Vec<u8>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -62,12 +69,16 @@ impl HostHttps {
         self.port
     }
 
-    async fn received_body(&mut self) -> io::Result<Vec<u8>> {
+    async fn received_request(&mut self) -> io::Result<ReceivedRequest> {
         self.handle
             .take()
             .expect("https fixture already consumed")
             .await
             .map_err(io::Error::other)?
+    }
+
+    async fn received_body(&mut self) -> io::Result<Vec<u8>> {
+        self.received_request().await.map(|request| request.body)
     }
 }
 
@@ -132,7 +143,7 @@ async fn teardown(sb: Sandbox, name: &str) {
 
 async fn handle_https_request(
     mut stream: tokio_rustls::server::TlsStream<TcpStream>,
-) -> io::Result<Vec<u8>> {
+) -> io::Result<ReceivedRequest> {
     let mut request = Vec::new();
     let header_end = loop {
         let mut buf = [0; 8192];
@@ -149,28 +160,22 @@ async fn handle_https_request(
         }
     };
 
-    let content_length = parse_content_length(&request[..header_end])?;
     let body_start = header_end + 4;
-    let mut body = request[body_start..].to_vec();
-    while body.len() < content_length {
-        let mut buf = [0; 8192];
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "connection closed before body",
-            ));
-        }
-        body.extend_from_slice(&buf[..n]);
-    }
-    body.truncate(content_length);
+    let headers = request[..header_end].to_vec();
+    let body = if is_transfer_chunked(&headers)? {
+        read_chunked_body(&mut stream, request[body_start..].to_vec()).await?
+    } else {
+        let content_length = parse_content_length(&headers)?;
+        read_content_length_body(&mut stream, request[body_start..].to_vec(), content_length)
+            .await?
+    };
 
     stream
         .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
         .await?;
     stream.shutdown().await?;
 
-    Ok(body)
+    Ok(ReceivedRequest { headers, body })
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -190,6 +195,125 @@ fn parse_content_length(headers: &[u8]) -> io::Result<usize> {
         .transpose()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing content-length"))
+}
+
+fn is_transfer_chunked(headers: &[u8]) -> io::Result<bool> {
+    let headers =
+        std::str::from_utf8(headers).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(headers.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .next_back()
+                .is_some_and(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    }))
+}
+
+async fn read_content_length_body(
+    stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
+    mut body: Vec<u8>,
+    content_length: usize,
+) -> io::Result<Vec<u8>> {
+    while body.len() < content_length {
+        read_more(stream, &mut body, "connection closed before body").await?;
+    }
+    body.truncate(content_length);
+    Ok(body)
+}
+
+async fn read_chunked_body(
+    stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
+    mut raw: Vec<u8>,
+) -> io::Result<Vec<u8>> {
+    let mut cursor = 0;
+    let mut decoded = Vec::new();
+
+    loop {
+        let line_end = read_until_crlf(stream, &mut raw, cursor, "chunk size line").await?;
+        let size = parse_chunk_size(&raw[cursor..line_end])?;
+        cursor = line_end + 2;
+
+        if size == 0 {
+            loop {
+                let trailer_end =
+                    read_until_crlf(stream, &mut raw, cursor, "chunk trailer").await?;
+                let empty = trailer_end == cursor;
+                cursor = trailer_end + 2;
+                if empty {
+                    return Ok(decoded);
+                }
+            }
+        }
+
+        while raw.len() < cursor + size + 2 {
+            read_more(stream, &mut raw, "connection closed before chunk data").await?;
+        }
+        decoded.extend_from_slice(&raw[cursor..cursor + size]);
+        cursor += size;
+        if raw.get(cursor..cursor + 2) != Some(b"\r\n") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chunk data missing CRLF",
+            ));
+        }
+        cursor += 2;
+    }
+}
+
+async fn read_until_crlf(
+    stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
+    raw: &mut Vec<u8>,
+    start: usize,
+    context: &str,
+) -> io::Result<usize> {
+    loop {
+        if let Some(pos) = raw[start..].windows(2).position(|window| window == b"\r\n") {
+            return Ok(start + pos);
+        }
+        read_more(stream, raw, context).await?;
+    }
+}
+
+async fn read_more(
+    stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
+    buf: &mut Vec<u8>,
+    context: &str,
+) -> io::Result<()> {
+    let mut chunk = [0; 8192];
+    let n = stream.read(&mut chunk).await?;
+    if n == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, context));
+    }
+    buf.extend_from_slice(&chunk[..n]);
+    Ok(())
+}
+
+fn parse_chunk_size(line: &[u8]) -> io::Result<usize> {
+    let size = line
+        .split(|byte| *byte == b';')
+        .next()
+        .unwrap_or_default()
+        .trim_ascii();
+    let size =
+        std::str::from_utf8(size).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    usize::from_str_radix(size, 16).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn assert_large_secret_body(body: &[u8]) {
+    assert_eq!(body.len(), LARGE_SECRET_PAD_LEN * 2 + REAL_SECRET.len());
+    assert!(body[..LARGE_SECRET_PAD_LEN].iter().all(|b| *b == b'a'));
+    assert_eq!(
+        &body[LARGE_SECRET_PAD_LEN..LARGE_SECRET_PAD_LEN + REAL_SECRET.len()],
+        REAL_SECRET,
+    );
+    assert!(
+        body[LARGE_SECRET_PAD_LEN + REAL_SECRET.len()..]
+            .iter()
+            .all(|b| *b == b'b')
+    );
 }
 
 fn test_server_config() -> Arc<rustls::ServerConfig> {
@@ -321,6 +445,144 @@ curl -k --http1.1 -m 30 -sS -o /tmp/response \
 
     let received = server.received_body().await.expect("read fixture body");
     assert_eq!(received, b"token=real-secret");
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_substitutes_secret_in_chunked_body() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-secret-chunked-body";
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+body=/tmp/chunked-secret-body
+printf 'prefix-%s-suffix' "$API_KEY" > "$body"
+curl -k --http1.1 -m 30 -sS -o /tmp/response \
+  -w 'code=%{{http_code}} upload=%{{size_upload}}' \
+  -H 'content-type: text/plain' \
+  -H 'Transfer-Encoding: chunked' \
+  --data-binary @"$body" \
+  https://host.microsandbox.internal:{port}/chunked-secret
+"#
+        ))
+        .await
+        .expect("curl chunked secret fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        stdout.contains("code=200"),
+        "expected curl to receive 200, stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let received = server.received_request().await.expect("read fixture body");
+    assert!(
+        is_transfer_chunked(&received.headers).expect("headers are utf8"),
+        "expected upstream fixture to receive a chunked request, headers: {}",
+        String::from_utf8_lossy(&received.headers)
+    );
+    assert_eq!(received.body, b"prefix-real-secret-suffix");
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_substitutes_secret_in_large_content_length_body() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-large-secret-cl";
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+body=/tmp/large-secret-cl-body
+head -c {LARGE_SECRET_PAD_LEN} /dev/zero | tr '\000' a > "$body"
+printf '%s' "$API_KEY" >> "$body"
+head -c {LARGE_SECRET_PAD_LEN} /dev/zero | tr '\000' b >> "$body"
+curl -k --http1.1 -m 60 -sS -o /tmp/response \
+  -w 'code=%{{http_code}} upload=%{{size_upload}}' \
+  -H 'content-type: text/plain' \
+  --data-binary @"$body" \
+  https://host.microsandbox.internal:{port}/large-secret-cl
+"#
+        ))
+        .await
+        .expect("curl large content-length secret fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        stdout.contains("code=200"),
+        "expected curl to receive 200, stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let received = server.received_request().await.expect("read fixture body");
+    assert!(
+        !is_transfer_chunked(&received.headers).expect("headers are utf8"),
+        "expected upstream fixture to receive a fixed-length request, headers: {}",
+        String::from_utf8_lossy(&received.headers)
+    );
+    assert_large_secret_body(&received.body);
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn tls_intercept_substitutes_secret_in_large_chunked_body() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-large-secret-chunked";
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+body=/tmp/large-secret-chunked-body
+head -c {LARGE_SECRET_PAD_LEN} /dev/zero | tr '\000' a > "$body"
+printf '%s' "$API_KEY" >> "$body"
+head -c {LARGE_SECRET_PAD_LEN} /dev/zero | tr '\000' b >> "$body"
+curl -k --http1.1 -m 60 -sS -o /tmp/response \
+  -w 'code=%{{http_code}} upload=%{{size_upload}}' \
+  -H 'content-type: text/plain' \
+  -H 'Transfer-Encoding: chunked' \
+  --data-binary @"$body" \
+  https://host.microsandbox.internal:{port}/large-secret-chunked
+"#
+        ))
+        .await
+        .expect("curl large chunked secret fixture");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    if !stdout.contains("code=200") {
+        let server_status =
+            tokio::time::timeout(Duration::from_secs(5), server.received_request()).await;
+        let server_status = match server_status {
+            Ok(Ok(request)) => format!(
+                "server received headers={} body={}",
+                request.headers.len(),
+                request.body.len()
+            ),
+            Ok(Err(e)) => format!("server error: {e}"),
+            Err(_) => "server timed out".to_string(),
+        };
+        panic!(
+            "expected curl to receive 200, stdout: {stdout}, stderr: {}, {server_status}",
+            out.stderr().unwrap_or_default()
+        );
+    }
+
+    let received = server.received_request().await.expect("read fixture body");
+    assert!(
+        is_transfer_chunked(&received.headers).expect("headers are utf8"),
+        "expected upstream fixture to receive a chunked request, headers: {}",
+        String::from_utf8_lossy(&received.headers)
+    );
+    assert_large_secret_body(&received.body);
 
     teardown(sb, name).await;
 }

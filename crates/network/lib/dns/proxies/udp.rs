@@ -173,9 +173,7 @@ fn inject_dns_response(
         return;
     };
 
-    if shared.rx_ring.push(frame).is_ok() {
-        shared.rx_wake.wake();
-    } else {
+    if !shared.push_rx_frame_and_wake(frame) {
         tracing::debug!("dns/udp: response dropped because rx_ring is full");
     }
 }
@@ -218,5 +216,26 @@ mod tests {
             smoltcp_endpoint_to_std(endpoint),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 4242)
         );
+    }
+
+    #[test]
+    fn injected_dns_response_counts_rx_bytes() {
+        let shared = Arc::new(SharedState::new(4));
+        let dest = IpEndpoint {
+            addr: smoltcp::wire::IpAddress::Ipv4(Ipv4Addr::new(172, 16, 0, 2)),
+            port: 49152,
+        };
+
+        inject_dns_response(
+            dest,
+            Some(smoltcp::wire::IpAddress::Ipv4(Ipv4Addr::new(8, 8, 8, 8))),
+            b"dns-payload",
+            shared.clone(),
+            EthernetAddress([0x02, 0, 0, 0, 0, 1]),
+            EthernetAddress([0x02, 0, 0, 0, 0, 2]),
+        );
+
+        let frame = shared.rx_ring.pop().expect("DNS response frame");
+        assert_eq!(shared.rx_bytes(), frame.len() as u64);
     }
 }

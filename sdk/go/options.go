@@ -488,7 +488,8 @@ func (networkPolicyFactory) NonLocal() *NetworkConfig {
 // substitutes at the transport layer. The value never reaches the guest VM.
 type SecretEntry struct {
 	// EnvVar is the environment variable name that holds the placeholder inside
-	// the sandbox.
+	// the sandbox. It must be non-empty and cannot contain '=' or NUL; shell
+	// identifier syntax is not required.
 	EnvVar string
 
 	// Value is the actual secret; it never crosses the FFI into the guest.
@@ -502,7 +503,8 @@ type SecretEntry struct {
 	AllowHostPatterns []string
 
 	// Placeholder is the string used inside the sandbox in place of the secret.
-	// Auto-generated from EnvVar when empty.
+	// Auto-generated from EnvVar when empty. Custom values must be non-empty,
+	// at most 1024 bytes, and cannot contain NUL, CR, or LF.
 	Placeholder string
 
 	// RequireTLS requires a verified TLS identity before substituting.

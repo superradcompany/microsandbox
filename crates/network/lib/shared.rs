@@ -214,6 +214,27 @@ impl SharedState {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Push a runtime -> guest ethernet frame and update RX metrics on success.
+    pub(crate) fn push_rx_frame(&self, frame: Vec<u8>) -> bool {
+        let frame_len = frame.len();
+        if self.rx_ring.push(frame).is_err() {
+            return false;
+        }
+
+        self.add_rx_bytes(frame_len);
+        true
+    }
+
+    /// Push a runtime -> guest ethernet frame, update RX metrics, and wake libkrun.
+    pub(crate) fn push_rx_frame_and_wake(&self, frame: Vec<u8>) -> bool {
+        if !self.push_rx_frame(frame) {
+            return false;
+        }
+
+        self.rx_wake.wake();
+        true
+    }
+
     /// Total bytes transmitted by the guest into the runtime.
     pub fn tx_bytes(&self) -> u64 {
         self.metrics.tx_bytes.load(Ordering::Relaxed)
@@ -268,6 +289,17 @@ mod tests {
         state.rx_ring.push(vec![2]).unwrap();
         // Queue is full — push returns the frame back.
         assert!(state.rx_ring.push(vec![3]).is_err());
+    }
+
+    #[test]
+    fn push_rx_frame_counts_only_successful_pushes() {
+        let state = SharedState::new(1);
+
+        assert!(state.push_rx_frame(vec![1, 2, 3]));
+        assert_eq!(state.rx_bytes(), 3);
+
+        assert!(!state.push_rx_frame(vec![4, 5]));
+        assert_eq!(state.rx_bytes(), 3);
     }
 
     #[test]
