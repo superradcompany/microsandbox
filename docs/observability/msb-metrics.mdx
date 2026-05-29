@@ -9,8 +9,10 @@ icon: "gauge"
 shared-memory metrics registry on a fixed interval and ships
 per-sandbox metrics to any OpenTelemetry-compatible backend.
 
-Think of it the way you'd run `otel-collector`,
-`prometheus-node-exporter`, or `fluent-bit`: one process per host,
+Think of it the way you'd run
+[`otel-collector`](https://opentelemetry.io/docs/collector/),
+[`prometheus-node-exporter`](https://github.com/prometheus/node_exporter),
+or [`fluent-bit`](https://docs.fluentbit.io/): one process per host,
 lifecycle managed independently.
 
 It's one of three ways to read sandbox metrics. For one-shot
