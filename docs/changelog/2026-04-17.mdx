@@ -1,0 +1,37 @@
+---
+title: "Week of April 17, 2026"
+description: "New Python SDK, Docker image publishing, and TLS proxy fixes."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.3.13](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.13)
+</Tip>
+
+## New features
+
+**Python SDK**
+
+PyO3 bindings exposing the same sandbox, exec, networking, and filesystem APIs as the Rust and TypeScript SDKs.
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    out = await sb.shell("echo hello")
+    print(out.stdout_text)
+```
+
+Install with `pip install microsandbox`. See the [Python SDK reference](/sdk/python/sandbox).
+
+**Other features**
+
+- **Docker image publishing.** Releases now publish a `microsandbox` Docker image alongside the binary artifacts.
+- **Interactive `msb self uninstall`** with a multi-select prompt over CLI, SDK shims, cached images, and state directory.
+- **Interactive `msb exec`.** Running without a command opens a picker over registered scripts and recent exec history.
+- **Upstream CA trust config.** Point the TLS proxy at a custom upstream CA bundle; the old `--tls-ca` flag names are deprecated but still resolve.
+- **`--allow-private-ips`** opts permissive policies into RFC1918 ranges without disabling policy entirely.
+
+## Bug fixes
+
+- Concurrent TLS connections through the in-sandbox MITM proxy no longer interleave plaintext between sessions.
+- TLS 1.3 connections no longer drop bytes that arrived in the same TCP segment as the final handshake message.
+- Sandboxes that boot faster than host clock convergence no longer reject internal TLS traffic with `CERT_NOT_YET_VALID`.

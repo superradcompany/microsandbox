@@ -1,0 +1,85 @@
+---
+title: "Week of May 15, 2026"
+description: "Go SDK, file-first disk snapshots, guest init handoff, exec and boot logs, and DNS egress policy."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.4.4](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.4) · [v0.4.5](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.5) · [v0.4.6](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.6)
+</Tip>
+
+## New features
+
+**Go SDK**
+
+A first-class Go SDK with full parity to the Rust, TypeScript, and Python SDKs: sandbox lifecycle, exec and PTY, filesystem, networking, secrets, snapshots, volumes, images, and event streams. The library uses CGO over a runtime-loaded FFI bundle, so `go get` works without a Rust toolchain.
+
+```go
+ctx := context.Background()
+sb, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
+    microsandbox.WithImage("alpine:latest"),
+    microsandbox.WithCPUs(2),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer sb.Close()
+```
+
+See the [Go SDK reference](/sdk/go/sandbox).
+
+**File-first disk snapshots**
+
+Stopped sandboxes can be snapshotted to a content-addressed directory and used to boot fresh sandboxes on any compatible host. Snapshots stay sparse via reflink and `SEEK_DATA`/`SEEK_HOLE` copying, so create and inspect stay fast. The CLI ships `msb snapshot create | open | list | list-dir | remove | reindex | export | import | verify`, and `msb run --from <name|path>` boots a fork. The same surface is available in all four SDKs.
+
+```bash
+msb snapshot create my-sandbox --name baseline
+msb run alpine --from baseline --name fork
+```
+
+See [Sandbox snapshots](/sandboxes/snapshots).
+
+**Guest init handoff**
+
+`--init` hands PID 1 inside the guest off to systemd, OpenRC, s6, or any other init binary while the agent continues serving the host channel from a child process. Shutdown adapts to the new PID 1 (for example, `SIGRTMIN+4` for systemd) with a `SIGTERM` fallback. All three SDKs gained matching `init` / `initWith` surfaces.
+
+```bash
+msb run debian:12 \
+  --init /lib/systemd/systemd \
+  --init-arg --unit=multi-user.target \
+  --init-env container=microsandbox
+```
+
+See the [systemd services recipe](/recipes/systemd-services).
+
+**Exec logs and structured boot errors**
+
+Each sandbox now writes a per-session `exec.log` (JSON Lines) capturing stdout, stderr, and PTY output, readable via the new `msb logs` command and `logs()` SDK methods. Sandboxes that fail before the agent is ready now emit a structured `boot-error.json` that the CLI renders as a typed error block instead of a generic "process exited" message. Spawn-time exec failures are now reported through a typed `ExecFailed` message with kinds such as `NotFound`, `PermissionDenied`, `NotExecutable`, and `OutOfMemory`. The CLI exits 127, 126, or 1 per POSIX convention.
+
+See [Sandbox logs](/sandboxes/logs).
+
+**DNS queries are subject to egress policy**
+
+DNS lookups are now treated as a regular egress action rather than an exception. Under a deny-by-default policy with no rules, DNS is blocked; `allow DomainSuffix(".good.com")` only permits lookups for `*.good.com`; `allow host udp/53 + tcp/53` grants resolution wholesale. The `public_only` and `non_local` presets prepend a DNS-allow rule so default sandboxes still resolve names, and `Rule.allowDns()` / `Rule.allow_dns()` is available across SDKs.
+
+See [Networking DNS](/networking/dns).
+
+**Other features**
+
+- **Ingress policy gate on published ports.** Inbound TCP connections on published ports are now evaluated against the network policy before the listener accepts them; denied peers receive a TCP RST instead of a graceful close. See the [networking overview](/networking/overview).
+- **`MSB_HOME` env override.** Point a sandbox at an isolated state directory without touching `$HOME`, useful for CI jobs that share a runner. The build script honors the same variable, so build-time and runtime paths agree.
+- **Secret injection for Basic auth.** Placeholders inside `Authorization: Basic <base64>` headers are now decoded, substituted, and re-encoded. The proxy also detects bypass attempts via URL percent-encoding, JSON unicode escapes, and placeholders split across TCP writes. The Python SDK gained the same `SecretInjection` options (`headers`, `basic_auth`, `query_params`, `body`) as the Node SDK.
+- **`createWithProgress` in the Node TS SDK.** Stream image pull events (layer downloads, extraction) while creating a sandbox; the returned `PullSession` resolves to the live sandbox. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+- **`--replace-grace` flag.** Configure how long `replace()` waits for the previous sandbox to shut down before escalating, exposed in the CLI and all SDKs.
+
+## Bug fixes
+
+- `replace()` no longer hangs for 30 seconds when the previous sandbox is mid-shutdown; it now escalates from `SIGTERM` to `SIGKILL` after the grace period.
+- Stdin payloads larger than the kernel pipe buffer (about 64 KiB on Linux) are delivered correctly, and broken-pipe errors surface as a new `stdin_error` exec event instead of being silently dropped.
+- Address families are gated on host route availability, so v4-only hosts no longer advertise an IPv6 address into the guest and v6-only hosts can publish ports.
+- Connection timeouts during the relay handshake now respect the 30-second deadline and prefer `boot-error.json` over a raw IO error when available.
+- Prebuilt runtime downloads use the platform certificate store, so builds behind enterprise TLS proxies with custom CAs succeed instead of failing with `UnknownIssuer`.
+- OCI digests with path traversal components are rejected, keeping cache filenames safe.
+- The Node SDK accepts kebab-case `link-local` in plain-object network policies, matching the documented public form.
+- The Node SDK's `msb` path resolution works under Bun, which does not propagate JS-side `process.env` mutations to native code.
+- Bind-mounting host directories the caller does not own (for example `/tmp`, `/var`, mounted USB drives) no longer fails with `Operation not permitted` before the VM boots.
