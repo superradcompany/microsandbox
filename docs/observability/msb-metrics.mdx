@@ -55,9 +55,25 @@ backend.
 
 <Steps>
   <Step title="Run msb-metrics against a local OTLP receiver">
-    ```sh
-    msb-metrics otel --endpoint=http://localhost:4317
-    ```
+    <Tabs>
+      <Tab title="gRPC (default)">
+        Default port `4317`. Recommended for most local OTLP collectors
+        and sidecars.
+
+        ```sh
+        msb-metrics otel --endpoint=http://localhost:4317
+        ```
+      </Tab>
+      <Tab title="HTTP/Protobuf">
+        Default port `4318`. Use when the backend's gRPC port isn't
+        reachable, or when the gateway expects HTTP (e.g. Grafana
+        Cloud's OTLP gateway over HTTPS).
+
+        ```sh
+        msb-metrics otel --endpoint=https://example.com/otlp --protocol=http
+        ```
+      </Tab>
+    </Tabs>
   </Step>
   <Step title="Boot a sandbox">
     ```sh

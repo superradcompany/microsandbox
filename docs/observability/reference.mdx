@@ -54,20 +54,6 @@ throughput. The reason: each shm snapshot already carries an absolute
 value, and counter `add()` semantics would require us to track
 per-sandbox deltas across runs.
 
-## Transport
-
-`msb-metrics` defaults to OTLP over gRPC on port `4317`, which suits
-most local collectors and sidecars. To switch to HTTP/Protobuf, set
-`--protocol=http`:
-
-```sh
-msb-metrics otel --endpoint=https://example.com/otlp --protocol=http
-```
-
-HTTP/Protobuf's default port is `4318`. Some backends (Grafana Cloud's
-OTLP gateway is the common case) require an explicit `/v1/metrics` path
-on the endpoint URL.
-
 ## Attributes
 
 Every datapoint carries a configurable set of attributes.
