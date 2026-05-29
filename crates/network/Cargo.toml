@@ -21,6 +21,7 @@ hickory-client = { workspace = true }
 # upstream DoT client. The workspace already uses rustls with the ring
 # crypto provider, so no new dependency is introduced.
 hickory-proto = { workspace = true, features = ["tls-ring"] }
+httlib-hpack = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }

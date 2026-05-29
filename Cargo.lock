@@ -2267,6 +2267,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "httlib-hpack"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40cf60e5e8567c6ff914a590f1452821de9377a560338a562e570a6ff052aae3"
+dependencies = [
+ "httlib-huffman",
+]
+
+[[package]]
+name = "httlib-huffman"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a9fcbcc408c5526c3ab80d534e5c86e7967c1fb7aa0a8c76abd1edc27deb877"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3273,6 +3288,7 @@ dependencies = [
  "futures",
  "hickory-client",
  "hickory-proto",
+ "httlib-hpack",
  "ipnetwork",
  "libc",
  "lru",

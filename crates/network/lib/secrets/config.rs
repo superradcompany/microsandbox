@@ -162,9 +162,10 @@ pub struct SecretInjection {
     /// Substitute in request body (default: false).
     ///
     /// Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
-    /// larger fixed-length bodies are blocked. Chunked bodies are decoded
-    /// and re-encoded with fresh chunk sizes. Encoded bodies pass through
-    /// unchanged.
+    /// larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
+    /// decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
+    /// through unchanged. HTTP/2 DATA-frame body substitution is not
+    /// supported; matching body placeholders are blocked.
     #[serde(default)]
     pub body: bool,
 }

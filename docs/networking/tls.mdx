@@ -87,7 +87,7 @@ Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`,
 ## Limits
 
 - **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.
-- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`, and HTTP `Host` / SNI alignment checks) don't apply on bypassed domains.
+- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`, and HTTP `Host` / `:authority` / SNI alignment checks) don't apply on bypassed domains.
 - **Client certificates are not proxied.** mTLS flows where the guest is the one presenting a client certificate aren't supported through interception; add those hosts to the bypass list.
 
 ## Trusting host CAs

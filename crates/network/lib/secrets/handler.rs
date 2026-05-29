@@ -4,9 +4,11 @@
 //! with real secret values, but only when the destination host is allowed.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
 use percent_encoding::percent_decode;
 
 use super::config::{
@@ -23,6 +25,29 @@ const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
 /// Maximum fixed-length HTTP body to buffer for body substitution.
 const MAX_HTTP_BODY_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// HTTP/2 client connection preface.
+const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Maximum HTTP/2 frame payload the handler buffers at once.
+const MAX_HTTP2_FRAME_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum accumulated HTTP/2 HPACK header block.
+const MAX_HTTP2_HEADER_BLOCK_BYTES: usize = 64 * 1024;
+
+/// Conservative outbound HTTP/2 frame payload size. This is the protocol
+/// default and is valid even before seeing the upstream peer's SETTINGS.
+const HTTP2_OUTBOUND_FRAME_PAYLOAD_BYTES: usize = 16 * 1024;
+
+const HTTP2_FRAME_DATA: u8 = 0x0;
+const HTTP2_FRAME_HEADERS: u8 = 0x1;
+const HTTP2_FRAME_PUSH_PROMISE: u8 = 0x5;
+const HTTP2_FRAME_CONTINUATION: u8 = 0x9;
+
+const HTTP2_FLAG_END_STREAM: u8 = 0x1;
+const HTTP2_FLAG_END_HEADERS: u8 = 0x4;
+const HTTP2_FLAG_PADDED: u8 = 0x8;
+const HTTP2_FLAG_PRIORITY: u8 = 0x20;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -60,6 +85,8 @@ pub struct SecretsHandler {
     /// Buffered HTTP bytes while waiting for complete headers or a complete
     /// body-rewriteable request.
     http_pending: Vec<u8>,
+    /// HTTP/2 parser/rewriter state once an HTTP/2 preface is observed.
+    http2_state: Option<Http2State>,
 }
 
 /// HTTP request framing state for the guest→server byte stream.
@@ -94,6 +121,35 @@ struct ChunkedRewriteState {
     parser: ChunkedBodyState,
     substitution_tail: Vec<u8>,
 }
+
+/// Stateful HTTP/2 client-to-server frame parser.
+struct Http2State {
+    preface_seen: bool,
+    buffer: Vec<u8>,
+    header_block: Option<Http2HeaderBlock>,
+    request_headers_seen: HashSet<u32>,
+    data_tails: HashMap<u32, Vec<u8>>,
+    decoder: HpackDecoder<'static>,
+    encoder: HpackEncoder<'static>,
+}
+
+/// Accumulated HEADERS/CONTINUATION block for one stream.
+struct Http2HeaderBlock {
+    stream_id: u32,
+    end_stream: bool,
+    block: Vec<u8>,
+}
+
+/// Parsed HTTP/2 frame view.
+struct Http2Frame<'a> {
+    kind: u8,
+    flags: u8,
+    stream_id: u32,
+    payload: &'a [u8],
+    raw: &'a [u8],
+}
+
+type Http2Headers = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// Current chunked-body parser phase.
 #[derive(Debug, Clone, Default)]
@@ -277,6 +333,20 @@ impl BlockingAction {
     }
 }
 
+impl Default for Http2State {
+    fn default() -> Self {
+        Self {
+            preface_seen: false,
+            buffer: Vec::new(),
+            header_block: None,
+            request_headers_seen: HashSet::new(),
+            data_tails: HashMap::new(),
+            decoder: HpackDecoder::with_dynamic_size(4096),
+            encoder: HpackEncoder::with_dynamic_size(4096),
+        }
+    }
+}
+
 impl SecretsHandler {
     /// Create a handler for a specific connection.
     ///
@@ -378,6 +448,7 @@ impl SecretsHandler {
             http_state: HttpState::AwaitingHeaders,
             http_sni: enforce_http_authority.then(|| sni.to_string()),
             http_pending: Vec::new(),
+            http2_state: None,
         }
     }
 
@@ -398,6 +469,34 @@ impl SecretsHandler {
                 MAX_SECRET_PLACEHOLDER_BYTES
             );
             return Err(ViolationAction::Block);
+        }
+
+        if self.http2_state.is_some() {
+            return self.substitute_http2(data);
+        }
+
+        if self.http_pending.is_empty() {
+            if has_complete_http2_preface(data) {
+                self.http2_state = Some(Http2State::default());
+                return self.substitute_http2(data);
+            }
+            if is_http2_preface_prefix(data) {
+                self.http_pending.extend_from_slice(data);
+                return Ok(Cow::Owned(Vec::new()));
+            }
+        } else {
+            let mut pending_prefix = Vec::with_capacity(self.http_pending.len() + data.len());
+            pending_prefix.extend_from_slice(&self.http_pending);
+            pending_prefix.extend_from_slice(data);
+            if has_complete_http2_preface(&pending_prefix) {
+                self.http_pending.clear();
+                self.http2_state = Some(Http2State::default());
+                return self.substitute_http2(&pending_prefix);
+            }
+            if is_http2_preface_prefix(&pending_prefix) {
+                self.http_pending = pending_prefix;
+                return Ok(Cow::Owned(Vec::new()));
+            }
         }
 
         match std::mem::replace(&mut self.http_state, HttpState::AwaitingHeaders) {
@@ -449,6 +548,13 @@ impl SecretsHandler {
         }
 
         self.substitute_ready(data)
+    }
+
+    fn substitute_http2<'a>(&mut self, data: &[u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        let mut state = self.http2_state.take().unwrap_or_default();
+        let output = state.process(self, data)?;
+        self.http2_state = Some(state);
+        Ok(Cow::Owned(output))
     }
 
     fn substitute_ready<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
@@ -895,6 +1001,7 @@ impl SecretsHandler {
     pub fn is_empty(&self) -> bool {
         self.http_sni.is_none()
             && self.http_pending.is_empty()
+            && self.http2_state.is_none()
             && matches!(self.http_state, HttpState::AwaitingHeaders)
             && self.eligible_for_substitution.is_empty()
             && self.ineligible_for_substitution.is_empty()
@@ -904,6 +1011,71 @@ impl SecretsHandler {
         self.eligible_for_substitution.iter().any(|secret| {
             secret.inject_body && (!secret.require_tls_identity || self.tls_intercepted)
         })
+    }
+
+    fn contains_eligible_http2_body_placeholder(&self, prev_tail: &[u8], data: &[u8]) -> bool {
+        if !self.needs_body_injection() {
+            return false;
+        }
+
+        let scan_buf: Cow<[u8]> = if prev_tail.is_empty() {
+            Cow::Borrowed(data)
+        } else {
+            let mut stitched = Vec::with_capacity(prev_tail.len() + data.len());
+            stitched.extend_from_slice(prev_tail);
+            stitched.extend_from_slice(data);
+            Cow::Owned(stitched)
+        };
+        let scan = scan_buf.as_ref();
+        self.eligible_for_substitution.iter().any(|secret| {
+            secret.inject_body
+                && !secret.placeholder.is_empty()
+                && (!secret.require_tls_identity || self.tls_intercepted)
+                && contains_bytes(scan, secret.placeholder.as_bytes())
+        })
+    }
+
+    fn substitute_http2_headers(&self, headers: &mut [(Vec<u8>, Vec<u8>)]) {
+        for secret in &self.eligible_for_substitution {
+            if secret.require_tls_identity && !self.tls_intercepted {
+                continue;
+            }
+
+            for (name, value) in headers.iter_mut() {
+                let is_pseudo = name.starts_with(b":");
+
+                if name.eq_ignore_ascii_case(b":path")
+                    && secret.inject_query_params
+                    && let Ok(path) = std::str::from_utf8(value)
+                    && let Some(replaced) =
+                        substitute_query_in_target(path, &secret.placeholder, &secret.value)
+                {
+                    *value = replaced.into_bytes();
+                }
+
+                if !is_pseudo
+                    && name.eq_ignore_ascii_case(b"authorization")
+                    && secret.inject_basic_auth
+                    && let Ok(header_value) = std::str::from_utf8(value)
+                    && let Some(replaced) = substitute_basic_auth_value(
+                        header_value,
+                        &secret.placeholder,
+                        &secret.value,
+                    )
+                {
+                    *value = replaced.into_bytes();
+                }
+
+                if !is_pseudo
+                    && secret.inject_headers
+                    && contains_bytes(value, secret.placeholder.as_bytes())
+                {
+                    let replaced =
+                        String::from_utf8_lossy(value).replace(&secret.placeholder, &secret.value);
+                    *value = replaced.into_bytes();
+                }
+            }
+        }
     }
 
     fn substitute_header_bytes(&self, header_bytes: &[u8]) -> Option<String> {
@@ -1096,6 +1268,225 @@ impl SecretsHandler {
     }
 }
 
+impl Http2State {
+    fn process(
+        &mut self,
+        handler: &mut SecretsHandler,
+        data: &[u8],
+    ) -> Result<Vec<u8>, ViolationAction> {
+        self.buffer.extend_from_slice(data);
+        let mut output = Vec::new();
+
+        if !self.preface_seen {
+            if self.buffer.len() < HTTP2_PREFACE.len() {
+                return Ok(output);
+            }
+            if !self.buffer.starts_with(HTTP2_PREFACE) {
+                return Err(ViolationAction::Block);
+            }
+            output.extend_from_slice(HTTP2_PREFACE);
+            self.buffer.drain(..HTTP2_PREFACE.len());
+            self.preface_seen = true;
+        }
+
+        loop {
+            if self.buffer.len() < 9 {
+                break;
+            }
+
+            let frame_len = http2_frame_payload_len(&self.buffer[..9]);
+            if frame_len > MAX_HTTP2_FRAME_PAYLOAD_BYTES {
+                return Err(ViolationAction::Block);
+            }
+            let full_len = 9 + frame_len;
+            if self.buffer.len() < full_len {
+                break;
+            }
+
+            let frame = self.buffer[..full_len].to_vec();
+            self.buffer.drain(..full_len);
+            self.process_frame(handler, &frame, &mut output)?;
+        }
+
+        Ok(output)
+    }
+
+    fn process_frame(
+        &mut self,
+        handler: &mut SecretsHandler,
+        raw: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<(), ViolationAction> {
+        let frame = parse_http2_frame(raw)?;
+
+        if self.header_block.is_some() && frame.kind != HTTP2_FRAME_CONTINUATION {
+            return Err(ViolationAction::Block);
+        }
+
+        match frame.kind {
+            HTTP2_FRAME_HEADERS => self.process_headers_frame(handler, frame, output),
+            HTTP2_FRAME_CONTINUATION => self.process_continuation_frame(handler, frame, output),
+            HTTP2_FRAME_DATA => self.process_data_frame(handler, frame, output),
+            HTTP2_FRAME_PUSH_PROMISE => Err(ViolationAction::Block),
+            _ => {
+                output.extend_from_slice(frame.raw);
+                Ok(())
+            }
+        }
+    }
+
+    fn process_headers_frame(
+        &mut self,
+        handler: &mut SecretsHandler,
+        frame: Http2Frame<'_>,
+        output: &mut Vec<u8>,
+    ) -> Result<(), ViolationAction> {
+        if frame.stream_id == 0 || frame.stream_id.is_multiple_of(2) || self.header_block.is_some()
+        {
+            return Err(ViolationAction::Block);
+        }
+
+        let fragment = http2_headers_fragment(frame.flags, frame.payload)?;
+        if fragment.len() > MAX_HTTP2_HEADER_BLOCK_BYTES {
+            return Err(ViolationAction::Block);
+        }
+
+        let block = Http2HeaderBlock {
+            stream_id: frame.stream_id,
+            end_stream: frame.flags & HTTP2_FLAG_END_STREAM != 0,
+            block: fragment.to_vec(),
+        };
+
+        if frame.flags & HTTP2_FLAG_END_HEADERS != 0 {
+            self.finish_header_block(handler, block, output)
+        } else {
+            self.header_block = Some(block);
+            Ok(())
+        }
+    }
+
+    fn process_continuation_frame(
+        &mut self,
+        handler: &mut SecretsHandler,
+        frame: Http2Frame<'_>,
+        output: &mut Vec<u8>,
+    ) -> Result<(), ViolationAction> {
+        let Some(mut block) = self.header_block.take() else {
+            return Err(ViolationAction::Block);
+        };
+        if frame.stream_id == 0 || frame.stream_id != block.stream_id {
+            return Err(ViolationAction::Block);
+        }
+
+        block.block.extend_from_slice(frame.payload);
+        if block.block.len() > MAX_HTTP2_HEADER_BLOCK_BYTES {
+            return Err(ViolationAction::Block);
+        }
+
+        if frame.flags & HTTP2_FLAG_END_HEADERS != 0 {
+            self.finish_header_block(handler, block, output)
+        } else {
+            self.header_block = Some(block);
+            Ok(())
+        }
+    }
+
+    fn process_data_frame(
+        &mut self,
+        handler: &mut SecretsHandler,
+        frame: Http2Frame<'_>,
+        output: &mut Vec<u8>,
+    ) -> Result<(), ViolationAction> {
+        if frame.stream_id == 0 {
+            return Err(ViolationAction::Block);
+        }
+
+        let data = http2_data_payload(frame.flags, frame.payload)?;
+        let tail = self.data_tails.entry(frame.stream_id).or_default();
+        if handler.contains_eligible_http2_body_placeholder(tail, data) {
+            tracing::warn!(
+                "secret substitution in HTTP/2 DATA frames is unsupported; blocking placeholder"
+            );
+            return Err(ViolationAction::Block);
+        }
+        handler.apply_blocking_action(detect_blocking_action_with_tail(
+            &handler.ineligible_for_substitution,
+            tail,
+            data,
+            "",
+        ))?;
+        update_tail_buffer(
+            tail,
+            data,
+            handler.max_detection_window_len.saturating_sub(1),
+        );
+        if frame.flags & HTTP2_FLAG_END_STREAM != 0 {
+            self.data_tails.remove(&frame.stream_id);
+        }
+        output.extend_from_slice(frame.raw);
+        Ok(())
+    }
+
+    fn finish_header_block(
+        &mut self,
+        handler: &mut SecretsHandler,
+        block: Http2HeaderBlock,
+        output: &mut Vec<u8>,
+    ) -> Result<(), ViolationAction> {
+        let mut headers = self.decode_headers(&block.block)?;
+        let is_initial_request = self.request_headers_seen.insert(block.stream_id);
+
+        if let Some(sni) = handler.http_sni.as_deref() {
+            validate_http2_authority(&headers, sni, is_initial_request)?;
+        }
+
+        let detection_bytes = http2_header_detection_bytes(&headers);
+        let detection_text = String::from_utf8_lossy(&detection_bytes);
+        handler.apply_blocking_action(detect_blocking_action_with_tail(
+            &handler.ineligible_for_substitution,
+            &[],
+            &detection_bytes,
+            detection_text.as_ref(),
+        ))?;
+
+        handler.substitute_http2_headers(&mut headers);
+        let encoded = self.encode_headers(&headers)?;
+        append_http2_header_frames(output, block.stream_id, block.end_stream, &encoded)?;
+        if block.end_stream {
+            self.data_tails.remove(&block.stream_id);
+        }
+        Ok(())
+    }
+
+    fn decode_headers(&mut self, block: &[u8]) -> Result<Http2Headers, ViolationAction> {
+        let mut block = block.to_vec();
+        let mut decoded = Vec::new();
+        self.decoder
+            .decode(&mut block, &mut decoded)
+            .map_err(|_| ViolationAction::Block)?;
+        Ok(decoded
+            .into_iter()
+            .map(|(name, value, _flags)| (name, value))
+            .collect())
+    }
+
+    fn encode_headers(
+        &mut self,
+        headers: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Vec<u8>, ViolationAction> {
+        let mut encoded = Vec::new();
+        for (name, value) in headers {
+            self.encoder
+                .encode(
+                    (name.clone(), value.clone(), HpackEncoder::NEVER_INDEXED),
+                    &mut encoded,
+                )
+                .map_err(|_| ViolationAction::Block)?;
+        }
+        Ok(encoded)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -1106,6 +1497,180 @@ fn is_authorization_header(line: &str) -> bool {
     line.as_bytes()
         .get(..14)
         .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
+}
+
+fn is_http2_preface_prefix(data: &[u8]) -> bool {
+    !data.is_empty()
+        && if data.len() <= HTTP2_PREFACE.len() {
+            HTTP2_PREFACE.starts_with(data)
+        } else {
+            data.starts_with(HTTP2_PREFACE)
+        }
+}
+
+fn has_complete_http2_preface(data: &[u8]) -> bool {
+    data.len() >= HTTP2_PREFACE.len() && data.starts_with(HTTP2_PREFACE)
+}
+
+fn http2_frame_payload_len(header: &[u8]) -> usize {
+    ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize
+}
+
+fn parse_http2_frame(raw: &[u8]) -> Result<Http2Frame<'_>, ViolationAction> {
+    if raw.len() < 9 {
+        return Err(ViolationAction::Block);
+    }
+    let len = http2_frame_payload_len(raw);
+    if raw.len() != 9 + len {
+        return Err(ViolationAction::Block);
+    }
+
+    let stream_id = u32::from_be_bytes([raw[5], raw[6], raw[7], raw[8]]) & 0x7fff_ffff;
+    Ok(Http2Frame {
+        kind: raw[3],
+        flags: raw[4],
+        stream_id,
+        payload: &raw[9..],
+        raw,
+    })
+}
+
+fn http2_headers_fragment(flags: u8, payload: &[u8]) -> Result<&[u8], ViolationAction> {
+    let mut start = 0;
+    let pad_len = if flags & HTTP2_FLAG_PADDED != 0 {
+        let Some(pad_len) = payload.first() else {
+            return Err(ViolationAction::Block);
+        };
+        start = 1;
+        *pad_len as usize
+    } else {
+        0
+    };
+
+    if flags & HTTP2_FLAG_PRIORITY != 0 {
+        start += 5;
+    }
+    if payload.len() < start + pad_len {
+        return Err(ViolationAction::Block);
+    }
+
+    Ok(&payload[start..payload.len() - pad_len])
+}
+
+fn http2_data_payload(flags: u8, payload: &[u8]) -> Result<&[u8], ViolationAction> {
+    if flags & HTTP2_FLAG_PADDED == 0 {
+        return Ok(payload);
+    }
+
+    let Some(pad_len) = payload.first() else {
+        return Err(ViolationAction::Block);
+    };
+    let pad_len = *pad_len as usize;
+    if payload.len() < 1 + pad_len {
+        return Err(ViolationAction::Block);
+    }
+
+    Ok(&payload[1..payload.len() - pad_len])
+}
+
+fn append_http2_header_frames(
+    output: &mut Vec<u8>,
+    stream_id: u32,
+    end_stream: bool,
+    block: &[u8],
+) -> Result<(), ViolationAction> {
+    let mut first = true;
+    let mut offset = 0;
+
+    while first || offset < block.len() {
+        let remaining = block.len().saturating_sub(offset);
+        let take = remaining.min(HTTP2_OUTBOUND_FRAME_PAYLOAD_BYTES);
+        let payload = &block[offset..offset + take];
+        offset += take;
+
+        let kind = if first {
+            HTTP2_FRAME_HEADERS
+        } else {
+            HTTP2_FRAME_CONTINUATION
+        };
+        let mut flags = 0;
+        if offset == block.len() {
+            flags |= HTTP2_FLAG_END_HEADERS;
+        }
+        if first && end_stream {
+            flags |= HTTP2_FLAG_END_STREAM;
+        }
+
+        append_http2_frame(output, kind, flags, stream_id, payload)?;
+        first = false;
+    }
+
+    Ok(())
+}
+
+fn append_http2_frame(
+    output: &mut Vec<u8>,
+    kind: u8,
+    flags: u8,
+    stream_id: u32,
+    payload: &[u8],
+) -> Result<(), ViolationAction> {
+    if payload.len() > 0x00ff_ffff || stream_id & 0x8000_0000 != 0 {
+        return Err(ViolationAction::Block);
+    }
+
+    output.push(((payload.len() >> 16) & 0xff) as u8);
+    output.push(((payload.len() >> 8) & 0xff) as u8);
+    output.push((payload.len() & 0xff) as u8);
+    output.push(kind);
+    output.push(flags);
+    output.extend_from_slice(&stream_id.to_be_bytes());
+    output.extend_from_slice(payload);
+    Ok(())
+}
+
+fn validate_http2_authority(
+    headers: &[(Vec<u8>, Vec<u8>)],
+    sni: &str,
+    require_authority: bool,
+) -> Result<(), ViolationAction> {
+    let mut authority_count = 0usize;
+
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case(b":authority") {
+            authority_count += 1;
+            let authority = String::from_utf8_lossy(value);
+            if !authority_matches_sni(authority.as_ref(), sni) {
+                return Err(ViolationAction::Block);
+            }
+        } else if name.eq_ignore_ascii_case(b"host") {
+            let host = String::from_utf8_lossy(value);
+            if !authority_matches_sni(host.as_ref(), sni) {
+                return Err(ViolationAction::Block);
+            }
+        }
+    }
+
+    if require_authority && authority_count != 1 {
+        return Err(ViolationAction::Block);
+    }
+
+    Ok(())
+}
+
+fn http2_header_detection_bytes(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let len = headers
+        .iter()
+        .map(|(name, value)| name.len() + value.len() + 4)
+        .sum();
+    let mut out = Vec::with_capacity(len);
+    for (name, value) in headers {
+        out.extend_from_slice(name);
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value);
+        out.extend_from_slice(b"\r\n");
+    }
+    out
 }
 
 fn parse_http_request_metadata(
@@ -1340,6 +1905,41 @@ fn substitute_query_in_request_line(line: &str, placeholder: &str, value: &str) 
     result.push_str(&query.replace(placeholder, value));
     result.push_str(&line[version_start..]);
     Some(result)
+}
+
+fn substitute_query_in_target(target: &str, placeholder: &str, value: &str) -> Option<String> {
+    if placeholder.is_empty() {
+        return None;
+    }
+
+    let query_start = target.find('?')? + 1;
+    let query = &target[query_start..];
+    if !query.contains(placeholder) {
+        return None;
+    }
+
+    let mut result = String::with_capacity(target.len());
+    result.push_str(&target[..query_start]);
+    result.push_str(&query.replace(placeholder, value));
+    Some(result)
+}
+
+fn substitute_basic_auth_value(
+    header_value: &str,
+    placeholder: &str,
+    value: &str,
+) -> Option<String> {
+    let (scheme, encoded) = split_auth_scheme(header_value.trim_start())?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let bytes = BASE64.decode(encoded.trim()).ok()?;
+    let decoded = String::from_utf8(bytes).ok()?;
+    if !decoded.contains(placeholder) {
+        return None;
+    }
+    let replaced = decoded.replace(placeholder, value);
+    Some(format!("Basic {}", BASE64.encode(replaced.as_bytes())))
 }
 
 /// Returns true if any `Authorization: Basic` line in `headers` decodes to
@@ -1885,6 +2485,111 @@ mod tests {
         }
     }
 
+    fn encode_h2_header_block(headers: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+        let mut block = Vec::new();
+        for (name, value) in headers {
+            encoder
+                .encode(
+                    (name.to_vec(), value.to_vec(), HpackEncoder::NEVER_INDEXED),
+                    &mut block,
+                )
+                .unwrap();
+        }
+        block
+    }
+
+    fn h2_request(headers: &[(&[u8], &[u8])], end_stream: bool) -> Vec<u8> {
+        let encoded = encode_h2_header_block(headers);
+        let mut out = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut out, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut out, 1, end_stream, &encoded).unwrap();
+        out
+    }
+
+    fn h2_request_with_split_headers(headers: &[(&[u8], &[u8])], split_at: usize) -> Vec<u8> {
+        let encoded = encode_h2_header_block(headers);
+        let split_at = split_at.min(encoded.len());
+        let mut out = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut out, 0x4, 0, 0, &[]).unwrap();
+        append_http2_frame(&mut out, HTTP2_FRAME_HEADERS, 0, 1, &encoded[..split_at]).unwrap();
+        append_http2_frame(
+            &mut out,
+            HTTP2_FRAME_CONTINUATION,
+            HTTP2_FLAG_END_HEADERS | HTTP2_FLAG_END_STREAM,
+            1,
+            &encoded[split_at..],
+        )
+        .unwrap();
+        out
+    }
+
+    fn h2_request_with_data(headers: &[(&[u8], &[u8])], data: &[u8]) -> Vec<u8> {
+        let mut out = h2_request(headers, false);
+        append_http2_frame(&mut out, HTTP2_FRAME_DATA, HTTP2_FLAG_END_STREAM, 1, data).unwrap();
+        out
+    }
+
+    fn append_h2_headers(
+        out: &mut Vec<u8>,
+        stream_id: u32,
+        headers: &[(&[u8], &[u8])],
+        end_stream: bool,
+    ) {
+        let encoded = encode_h2_header_block(headers);
+        append_http2_header_frames(out, stream_id, end_stream, &encoded).unwrap();
+    }
+
+    fn decode_first_h2_headers(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        assert!(data.starts_with(HTTP2_PREFACE));
+        let mut cursor = HTTP2_PREFACE.len();
+        let mut decoder = HpackDecoder::with_dynamic_size(4096);
+        let mut header_block = Vec::new();
+        let mut in_headers = false;
+
+        while cursor + 9 <= data.len() {
+            let len = http2_frame_payload_len(&data[cursor..cursor + 9]);
+            let raw = &data[cursor..cursor + 9 + len];
+            cursor += 9 + len;
+            let frame = parse_http2_frame(raw).unwrap();
+            match frame.kind {
+                HTTP2_FRAME_HEADERS => {
+                    header_block.extend_from_slice(
+                        http2_headers_fragment(frame.flags, frame.payload).unwrap(),
+                    );
+                    if frame.flags & HTTP2_FLAG_END_HEADERS != 0 {
+                        break;
+                    }
+                    in_headers = true;
+                }
+                HTTP2_FRAME_CONTINUATION if in_headers => {
+                    header_block.extend_from_slice(frame.payload);
+                    if frame.flags & HTTP2_FLAG_END_HEADERS != 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut encoded = header_block;
+        let mut headers = Vec::new();
+        decoder.decode(&mut encoded, &mut headers).unwrap();
+        headers
+            .into_iter()
+            .map(|(name, value, _flags)| (name, value))
+            .collect()
+    }
+
+    fn h2_header_value(headers: &[(Vec<u8>, Vec<u8>)], name: &[u8]) -> String {
+        let value = headers
+            .iter()
+            .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_slice())
+            .expect("header present");
+        String::from_utf8(value.to_vec()).unwrap()
+    }
+
     #[test]
     fn substitute_in_headers() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
@@ -1907,6 +2612,22 @@ mod tests {
         assert_eq!(
             handler.substitute(input).unwrap_err(),
             ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_http1_post_is_not_misclassified_as_http2_preface() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        assert_eq!(handler.substitute(b"P").unwrap().as_ref(), b"");
+
+        let output = handler
+            .substitute(b"OST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n")
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "POST / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
         );
     }
 
@@ -3093,6 +3814,264 @@ mod tests {
                 .unwrap_err(),
             ViolationAction::Block
         );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_authority_must_match_sni() {
+        let ip = Ipv4Addr::new(203, 0, 113, 33);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"evil.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_substitutes_header_secret() {
+        let ip = Ipv4Addr::new(203, 0, 113, 34);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_preface_can_span_tls_reads() {
+        let ip = Ipv4Addr::new(203, 0, 113, 38);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(handler.substitute(&request[..1]).unwrap().as_ref(), b"");
+
+        let output = handler.substitute(&request[1..]).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_substitutes_query_and_basic_auth() {
+        let ip = Ipv4Addr::new(203, 0, 113, 35);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = SecretInjection {
+            headers: false,
+            basic_auth: true,
+            query_params: true,
+            body: false,
+        };
+        let config = make_config(vec![secret]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let auth = format!("Basic {}", BASE64.encode(b"user:$KEY"));
+
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/v1/$KEY?token=$KEY"),
+                (b"authorization", auth.as_bytes()),
+            ],
+            true,
+        );
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b":path"),
+            "/v1/$KEY?token=real-secret"
+        );
+        let auth = h2_header_value(&headers, b"authorization");
+        let decoded = split_auth_scheme(&auth)
+            .and_then(|(_, encoded)| BASE64.decode(encoded).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap();
+        assert_eq!(decoded, "user:real-secret");
+    }
+
+    #[test]
+    fn tls_intercepted_http2_split_header_block_is_validated() {
+        let ip = Ipv4Addr::new(203, 0, 113, 36);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request_with_split_headers(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"evil.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            8,
+        );
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_body_placeholder_blocks_until_body_rewrite_exists() {
+        let ip = Ipv4Addr::new(203, 0, 113, 37);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request_with_data(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+            ],
+            b"{\"key\":\"$KEY\"}",
+        );
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_body_placeholder_split_across_data_frames_blocks() {
+        let ip = Ipv4Addr::new(203, 0, 113, 39);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_h2_headers(
+            &mut request,
+            1,
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+            ],
+            false,
+        );
+        append_http2_frame(&mut request, HTTP2_FRAME_DATA, 0, 1, b"$KE").unwrap();
+        append_http2_frame(
+            &mut request,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            1,
+            b"Y",
+        )
+        .unwrap();
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_data_tails_are_tracked_per_stream() {
+        let ip = Ipv4Addr::new(203, 0, 113, 40);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        for stream_id in [1, 3] {
+            append_h2_headers(
+                &mut request,
+                stream_id,
+                &[
+                    (b":method", b"POST"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"api.openai.com"),
+                    (b":path", b"/"),
+                ],
+                false,
+            );
+        }
+        append_http2_frame(&mut request, HTTP2_FRAME_DATA, 0, 1, b"$KE").unwrap();
+        append_http2_frame(
+            &mut request,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            3,
+            b"Y",
+        )
+        .unwrap();
+
+        assert!(handler.substitute(&request).is_ok());
     }
 
     #[test]

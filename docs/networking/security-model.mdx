@@ -90,7 +90,7 @@ Real traffic clears check 2 because the client calls `getaddrinfo` before connec
 
 One legitimate pattern this rejects: hard-coding an IP and forging a non-matching SNI (e.g. `curl --resolve allowed.com:443:<ip>`). Route the lookup through the gateway, or add a `tls.bypass` entry for that name.
 
-For intercepted HTTP/1 traffic, microsandbox also checks the decrypted request authority: each request's `Host` header must match the TLS SNI, ignoring case and an optional port. This closes domain-fronting attempts where the TLS layer claims one host but the HTTP request is addressed to another. Bypassed TLS remains opaque, so this request-level check only applies to intercepted connections.
+For intercepted HTTP traffic, microsandbox also checks the decrypted request authority: each HTTP/1 request's `Host` header, and each observed HTTP/2 request's `:authority` pseudo-header, must match the TLS SNI, ignoring case and an optional port. This closes domain-fronting attempts where the TLS layer claims one host but the HTTP request is addressed to another. Bypassed TLS remains opaque, so this request-level check only applies to intercepted connections.
 
 ## DNS bypass surface
 
