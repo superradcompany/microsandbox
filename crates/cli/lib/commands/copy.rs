@@ -1,4 +1,4 @@
-//! `msb cp` command — copy files between the host and a sandbox.
+//! `msb copy` command — copy files between the host and a sandbox.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Copy files between the host and a sandbox.
 #[derive(Debug, Args)]
-pub struct CpArgs {
+pub struct CopyArgs {
     /// Source path. Use SANDBOX:/absolute/path for a sandbox path.
     pub source: String,
 
@@ -61,8 +61,8 @@ impl Endpoint {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Execute the `msb cp` command.
-pub async fn run(args: CpArgs) -> anyhow::Result<()> {
+/// Execute the `msb copy` command.
+pub async fn run(args: CopyArgs) -> anyhow::Result<()> {
     let source = Endpoint::parse(&args.source)?;
     let destination = Endpoint::parse(&args.destination)?;
 
@@ -91,19 +91,32 @@ pub async fn run(args: CpArgs) -> anyhow::Result<()> {
                 path: dst_path,
             },
         ) => {
-            if src_name != dst_name {
-                anyhow::bail!(
-                    "cross-sandbox copies are not supported yet; copy through the host instead"
-                );
+            if src_name == dst_name {
+                let sandbox = super::resolve_and_start(&src_name, args.quiet).await?;
+                let fs = sandbox.fs();
+                let result = copy_sandbox_to_sandbox(&fs, &src_path, &dst_path).await;
+                super::maybe_stop(&sandbox).await;
+                return result;
             }
-            let sandbox = super::resolve_and_start(&src_name, args.quiet).await?;
-            let fs = sandbox.fs();
-            let result = copy_sandbox_to_sandbox(&fs, &src_path, &dst_path).await;
-            super::maybe_stop(&sandbox).await;
+
+            let src_sandbox = super::resolve_and_start(&src_name, args.quiet).await?;
+            let dst_sandbox = match super::resolve_and_start(&dst_name, args.quiet).await {
+                Ok(sandbox) => sandbox,
+                Err(e) => {
+                    super::maybe_stop(&src_sandbox).await;
+                    return Err(e);
+                }
+            };
+            let src_fs = src_sandbox.fs();
+            let dst_fs = dst_sandbox.fs();
+            let result =
+                copy_sandbox_to_other_sandbox(&src_fs, &src_path, &dst_fs, &dst_path).await;
+            super::maybe_stop(&dst_sandbox).await;
+            super::maybe_stop(&src_sandbox).await;
             result
         }
         (Endpoint::Local(_), Endpoint::Local(_)) => {
-            anyhow::bail!("msb cp requires at least one sandbox endpoint (SANDBOX:/path)")
+            anyhow::bail!("msb copy requires at least one sandbox endpoint (SANDBOX:/path)")
         }
     }
 }
@@ -138,6 +151,22 @@ async fn copy_sandbox_to_sandbox(fs: &SandboxFs, src: &str, dst: &str) -> anyhow
     let basename = guest_basename(src)?;
     let dst = sandbox_destination(fs, dst, basename).await?;
     copy_sandbox_entry_to_sandbox(fs, src.to_string(), dst, metadata).await
+}
+
+/// Copy a sandbox path into another sandbox.
+async fn copy_sandbox_to_other_sandbox(
+    src_fs: &SandboxFs,
+    src: &str,
+    dst_fs: &SandboxFs,
+    dst: &str,
+) -> anyhow::Result<()> {
+    let metadata = src_fs
+        .stat_with_follow(src, false)
+        .await
+        .with_context(|| format!("stat {src}"))?;
+    let basename = guest_basename(src)?;
+    let dst = sandbox_destination(dst_fs, dst, basename).await?;
+    copy_sandbox_entry_to_other_sandbox(src_fs, src.to_string(), dst_fs, dst, metadata).await
 }
 
 /// Recursively copy a host entry into a sandbox.
@@ -265,6 +294,52 @@ fn copy_sandbox_entry_to_sandbox<'a>(
     })
 }
 
+/// Recursively copy a sandbox entry into another sandbox.
+fn copy_sandbox_entry_to_other_sandbox<'a>(
+    src_fs: &'a SandboxFs,
+    src: String,
+    dst_fs: &'a SandboxFs,
+    dst: String,
+    metadata: FsMetadata,
+) -> BoxFuture<'a, anyhow::Result<()>> {
+    Box::pin(async move {
+        match metadata.kind {
+            FsEntryKind::Directory => {
+                dst_fs.mkdir(&dst).await?;
+                set_guest_mode(dst_fs, &dst, metadata.mode, true).await?;
+
+                for entry in src_fs.list(&src).await? {
+                    let child_name = guest_basename(&entry.path)?;
+                    let child_src = guest_join(&src, child_name);
+                    let child_dst = guest_join(&dst, child_name);
+                    let child_metadata = src_fs.stat_with_follow(&child_src, false).await?;
+                    copy_sandbox_entry_to_other_sandbox(
+                        src_fs,
+                        child_src,
+                        dst_fs,
+                        child_dst,
+                        child_metadata,
+                    )
+                    .await?;
+                }
+            }
+            FsEntryKind::Symlink => {
+                let target = src_fs.read_link(&src).await?;
+                dst_fs.symlink(&target, &dst).await?;
+            }
+            FsEntryKind::File => {
+                copy_sandbox_file_to_sandbox(src_fs, &src, dst_fs, &dst).await?;
+                set_guest_mode(dst_fs, &dst, metadata.mode, true).await?;
+            }
+            FsEntryKind::Other => {
+                anyhow::bail!("unsupported file type: {src}");
+            }
+        }
+
+        Ok(())
+    })
+}
+
 /// Copy a host file into a sandbox using streaming I/O.
 async fn copy_local_file_to_sandbox(fs: &SandboxFs, src: &Path, dst: &str) -> anyhow::Result<()> {
     let mut file = tokio::fs::File::open(src)
@@ -297,6 +372,24 @@ async fn copy_sandbox_file_to_local(fs: &SandboxFs, src: &str, dst: &Path) -> an
     }
 
     file.flush().await?;
+    Ok(())
+}
+
+/// Copy a sandbox file into another sandbox using streaming I/O.
+async fn copy_sandbox_file_to_sandbox(
+    src_fs: &SandboxFs,
+    src: &str,
+    dst_fs: &SandboxFs,
+    dst: &str,
+) -> anyhow::Result<()> {
+    let mut stream = src_fs.read_stream(src).await?;
+    let sink = dst_fs.write_stream(dst).await?;
+
+    while let Some(chunk) = stream.recv().await? {
+        sink.write(&chunk).await?;
+    }
+
+    sink.close().await?;
     Ok(())
 }
 

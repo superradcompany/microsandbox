@@ -5,8 +5,8 @@ use std::io::IsTerminal;
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        cp, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry, remove,
-        run, self_cmd, snapshot, start, stop, uninstall, volume,
+        copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
+        remove, run, self_cmd, snapshot, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -75,7 +75,7 @@ enum Commands {
 
     /// Copy files between the host and a sandbox.
     #[command(visible_alias = "cp")]
-    Copy(cp::CpArgs),
+    Copy(copy::CopyArgs),
 
     /// Show captured output from a sandbox.
     Logs(logs::LogsArgs),
@@ -318,7 +318,7 @@ fn run_async_command_anyhow(
             Commands::Metrics(args) => metrics::run(args).await,
             Commands::Remove(args) => remove::run(args).await,
             Commands::Exec(args) => exec::run(args).await,
-            Commands::Copy(args) => cp::run(args).await,
+            Commands::Copy(args) => copy::run(args).await,
             Commands::Logs(args) => logs::run(args).await,
             Commands::Image(args) => image::run(args).await,
             Commands::Pull(args) => image::run_pull(args).await,

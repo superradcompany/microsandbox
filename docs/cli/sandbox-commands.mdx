@@ -231,9 +231,10 @@ Copy files between the host and a sandbox.
 msb copy ./local.txt devbox:/tmp/local.txt
 msb copy devbox:/tmp/out.txt ./out.txt
 msb copy devbox:/tmp/a devbox:/tmp/b
+msb copy devbox:/tmp/a otherbox:/tmp/a
 ```
 
-Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. The same-sandbox form is a microsandbox extension. Cross-sandbox copies are not supported yet; copy through the host if you need to move data between two sandboxes.
+Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbox and cross-sandbox forms are microsandbox extensions.
 
 `msb copy` connects to an existing sandbox and starts it temporarily if needed, following the same lifecycle ownership behavior as `msb exec`. The shorter `msb cp` form is available as an alias.
 
