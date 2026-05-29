@@ -15,6 +15,7 @@ pub mod config;
 pub(crate) mod db;
 pub mod image;
 pub mod logs;
+pub mod metrics;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;

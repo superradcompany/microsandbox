@@ -3269,6 +3269,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-metrics-collector"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "microsandbox-metrics",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "microsandbox-migration"
 version = "0.5.2"
 dependencies = [

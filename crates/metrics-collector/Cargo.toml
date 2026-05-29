@@ -1,0 +1,48 @@
+[package]
+name = "microsandbox-metrics-collector"
+description = "Metrics collector orchestrator and `msb-metrics` binary. Polls the shared-memory metrics registry and ships data to backends (OTLP, …)."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "microsandbox_metrics_collector"
+path = "lib/lib.rs"
+
+[[bin]]
+name = "msb-metrics"
+path = "bin/main.rs"
+
+[dependencies]
+# Shared-memory primitives — the read source for every tick.
+microsandbox-metrics = { version = "0.5.2", path = "../metrics" }
+# Async runtime + primitives (broadcast, mpsc, JoinSet, time).
+tokio = { workspace = true }
+# BoxFuture, StreamExt — used by the MetricsExporter trait + worker.
+futures.workspace = true
+# Wall-clock timestamps on each collection.
+chrono.workspace = true
+# Binary CLI.
+clap.workspace = true
+# Error plumbing.
+anyhow.workspace = true
+thiserror.workspace = true
+# Structured logging.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# OTel deps land alongside the OTel exporter in a follow-on commit, so we
+# don't compile them until we actually use them:
+#   opentelemetry, opentelemetry_sdk, opentelemetry-otlp
+
+# Deferred: a dep on the umbrella crate would drag in microsandbox-filesystem
+# + microsandbox-runtime via the transitive graph, which require `agentd` to
+# be prebuilt. Instead we'll either lift SandboxMetrics / MicrosandboxError
+# into crates/metrics, or define them locally here. Decision lands with the
+# orchestrator move (task #19).
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

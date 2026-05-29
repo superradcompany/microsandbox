@@ -23,4 +23,4 @@ pub use registry::{
     ActivateSlot, MetricsRegistry, MetricsSlotWriter, ReleaseMode, ReserveSlot, SampleWrite,
     SlotReservation, default_capacity,
 };
-pub use snapshot::LiveMetric;
+pub use snapshot::{LiveMetric, SandboxMetricSnapshot, SandboxMetrics};
