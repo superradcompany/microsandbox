@@ -17,7 +17,12 @@
 //! skips the xattr read for real host symlinks (detected via `S_IFLNK` in the unpatched stat).
 //! File-backed symlinks (regular files with S_IFLNK in xattr) are handled normally.
 
-use std::{ffi::CStr, io, os::fd::RawFd};
+use std::{
+    ffi::CStr,
+    io,
+    os::fd::RawFd,
+    sync::{Arc, OnceLock},
+};
 
 use crate::stat64;
 
@@ -36,6 +41,10 @@ const OVERRIDE_VERSION: u8 = 1;
 /// Size of the binary override struct.
 const OVERRIDE_SIZE: usize = std::mem::size_of::<OverrideStat>();
 
+/// Maximum length of `/proc/self/fd/{fd}\0` for any non-negative i32 fd.
+#[cfg(target_os = "linux")]
+const PROC_SELF_FD_PATH_BUF_LEN: usize = 32;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -52,6 +61,61 @@ pub(crate) struct OverrideStat {
     pub rdev: u32,
 }
 
+/// Guest-visible ownership mapping for host-backed user volume files.
+///
+/// The map is applied only when stat virtualization is enabled and no
+/// per-file override xattr exists. Files owned by the host user running
+/// microsandbox appear as the sandbox's effective guest user; files owned by
+/// other host users appear as the overflow identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindIdentityMap {
+    /// Host uid that owns ordinary caller-created files.
+    pub host_owner_uid: u32,
+
+    /// Guest uid to show for host-owner files.
+    pub guest_uid: u32,
+
+    /// Guest gid to show for host-owner files.
+    pub guest_gid: u32,
+
+    /// Guest uid to show for files not owned by [`host_owner_uid`](Self::host_owner_uid).
+    pub overflow_uid: u32,
+
+    /// Guest gid to show for files not owned by [`host_owner_uid`](Self::host_owner_uid).
+    pub overflow_gid: u32,
+}
+
+/// Shared bind identity map that can be installed after guest user resolution.
+pub type BindIdentityMapHandle = Arc<OnceLock<BindIdentityMap>>;
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl BindIdentityMap {
+    /// Create a map from one host owner uid to one guest uid/gid pair.
+    pub fn new(host_owner_uid: u32, guest_uid: u32, guest_gid: u32) -> Self {
+        Self {
+            host_owner_uid,
+            guest_uid,
+            guest_gid,
+            overflow_uid: 65534,
+            overflow_gid: 65534,
+        }
+    }
+
+    /// Apply this map to a stat result in place.
+    pub fn apply(&self, st: &mut stat64) {
+        if st.st_uid == self.host_owner_uid {
+            st.st_uid = self.guest_uid;
+            st.st_gid = self.guest_gid;
+        } else {
+            st.st_uid = self.overflow_uid;
+            st.st_gid = self.overflow_gid;
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -65,6 +129,7 @@ pub(crate) fn patched_stat(
     mut st: stat64,
     xattr_enabled: bool,
     strict: bool,
+    bind_identity_map: Option<&BindIdentityMapHandle>,
 ) -> io::Result<stat64> {
     if !xattr_enabled {
         return Ok(st);
@@ -73,6 +138,7 @@ pub(crate) fn patched_stat(
     // Real symlinks on host cannot have user xattrs on Linux.
     #[cfg(target_os = "linux")]
     if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        apply_bind_identity_map(&mut st, bind_identity_map);
         return Ok(st);
     }
 
@@ -104,7 +170,10 @@ pub(crate) fn patched_stat(
             }
             Ok(st)
         }
-        Ok(None) => Ok(st), // No override xattr
+        Ok(None) => {
+            apply_bind_identity_map(&mut st, bind_identity_map);
+            Ok(st)
+        } // No override xattr
         Err(e) => Err(e),
     }
 }
@@ -117,15 +186,15 @@ fn read_override(fd: RawFd, strict: bool) -> io::Result<Option<OverrideStat>> {
     let mut buf = [0u8; OVERRIDE_SIZE];
 
     #[cfg(target_os = "linux")]
-    let path = format!("/proc/self/fd/{fd}");
+    let mut path_buf = [0u8; PROC_SELF_FD_PATH_BUF_LEN];
 
     #[cfg(target_os = "linux")]
-    let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
+    let path = format_proc_self_fd_path(fd, &mut path_buf)?;
 
     #[cfg(target_os = "linux")]
     let ret = unsafe {
         libc::getxattr(
-            path_cstr.as_ptr(),
+            path,
             OVERRIDE_XATTR_KEY.as_ptr(),
             buf.as_mut_ptr() as *mut libc::c_void,
             OVERRIDE_SIZE,
@@ -190,6 +259,50 @@ fn handle_unsupported_xattr(strict: bool) -> io::Result<Option<OverrideStat>> {
     Ok(None)
 }
 
+#[cfg(target_os = "linux")]
+fn format_proc_self_fd_path(
+    fd: RawFd,
+    buf: &mut [u8; PROC_SELF_FD_PATH_BUF_LEN],
+) -> io::Result<*const libc::c_char> {
+    if fd < 0 {
+        return Err(platform::eio());
+    }
+
+    let prefix = b"/proc/self/fd/";
+    buf[..prefix.len()].copy_from_slice(prefix);
+
+    let mut digits = [0u8; 10];
+    let mut value = fd as u32;
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    let digits = &digits[start..];
+    let end = prefix.len() + digits.len();
+    if end + 1 > buf.len() {
+        return Err(platform::eio());
+    }
+
+    buf[prefix.len()..end].copy_from_slice(digits);
+    buf[end] = 0;
+    Ok(buf.as_ptr().cast())
+}
+
+pub(crate) fn apply_bind_identity_map(
+    st: &mut stat64,
+    bind_identity_map: Option<&BindIdentityMapHandle>,
+) {
+    if let Some(map) = bind_identity_map.and_then(|handle| handle.get().copied()) {
+        map.apply(st);
+    }
+}
+
 /// Set the override xattr on a file descriptor.
 pub(crate) fn set_override(fd: RawFd, uid: u32, gid: u32, mode: u32, rdev: u32) -> io::Result<()> {
     let ovr = OverrideStat {
@@ -207,11 +320,11 @@ pub(crate) fn set_override(fd: RawFd, uid: u32, gid: u32, mode: u32, rdev: u32) 
 
     #[cfg(target_os = "linux")]
     {
-        let path = format!("/proc/self/fd/{fd}");
-        let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
+        let mut path_buf = [0u8; PROC_SELF_FD_PATH_BUF_LEN];
+        let path = format_proc_self_fd_path(fd, &mut path_buf)?;
         let ret = unsafe {
             libc::setxattr(
-                path_cstr.as_ptr(),
+                path,
                 OVERRIDE_XATTR_KEY.as_ptr(),
                 buf.as_ptr() as *const libc::c_void,
                 OVERRIDE_SIZE,
@@ -305,11 +418,11 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        let path = format!("/proc/self/fd/{dirfd}");
-        let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
+        let mut path_buf = [0u8; PROC_SELF_FD_PATH_BUF_LEN];
+        let path = format_proc_self_fd_path(dirfd, &mut path_buf)?;
         let ret = unsafe {
             libc::setxattr(
-                path_cstr.as_ptr(),
+                path,
                 probe_key.as_ptr(),
                 probe_val.as_ptr() as *const libc::c_void,
                 1,
@@ -326,7 +439,7 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
         }
         // Clean up the probe xattr.
         unsafe {
-            libc::removexattr(path_cstr.as_ptr(), probe_key.as_ptr());
+            libc::removexattr(path, probe_key.as_ptr());
         }
     }
 

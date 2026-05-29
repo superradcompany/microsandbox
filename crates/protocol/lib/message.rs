@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -74,6 +74,12 @@ pub struct Message {
 pub enum MessageType {
     /// Guest agent is ready.
     Ready,
+
+    /// Guest reports init context before user mounts.
+    InitResolved,
+
+    /// Host acknowledges init-context setup.
+    InitAck,
 
     /// Host requests shutdown.
     Shutdown,
@@ -185,6 +191,8 @@ impl MessageType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Ready => "core.ready",
+            Self::InitResolved => "core.init.resolved",
+            Self::InitAck => "core.init.ack",
             Self::Shutdown => "core.shutdown",
             Self::RelayClientDisconnected => "core.relay.client.disconnected",
             Self::ClockSync => "core.clock.sync",
@@ -208,6 +216,8 @@ impl MessageType {
     pub fn from_wire_str(s: &str) -> Option<Self> {
         match s {
             "core.ready" => Some(Self::Ready),
+            "core.init.resolved" => Some(Self::InitResolved),
+            "core.init.ack" => Some(Self::InitAck),
             "core.shutdown" => Some(Self::Shutdown),
             "core.relay.client.disconnected" => Some(Self::RelayClientDisconnected),
             "core.clock.sync" => Some(Self::ClockSync),
@@ -265,6 +275,8 @@ mod tests {
     fn test_message_type_roundtrip() {
         let types = [
             (MessageType::Ready, "core.ready"),
+            (MessageType::InitResolved, "core.init.resolved"),
+            (MessageType::InitAck, "core.init.ack"),
             (MessageType::Shutdown, "core.shutdown"),
             (
                 MessageType::RelayClientDisconnected,
@@ -296,6 +308,8 @@ mod tests {
     fn test_message_type_serde_roundtrip() {
         let types = [
             MessageType::Ready,
+            MessageType::InitResolved,
+            MessageType::InitAck,
             MessageType::Shutdown,
             MessageType::RelayClientDisconnected,
             MessageType::ClockSync,
@@ -350,6 +364,8 @@ mod tests {
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::Ready.flags(), 0);
+        assert_eq!(MessageType::InitResolved.flags(), 0);
+        assert_eq!(MessageType::InitAck.flags(), 0);
         assert_eq!(MessageType::Shutdown.flags(), FLAG_SHUTDOWN);
         assert_eq!(MessageType::ClockSync.flags(), 0);
         assert_eq!(MessageType::ExecStarted.flags(), 0);

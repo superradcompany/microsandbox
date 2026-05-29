@@ -47,8 +47,14 @@ fn main() {
     let handoff_spec = boot.take_handoff_init();
 
     // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
+    let mut port_file = None;
     let init_start = clock::boottime_ns();
-    if let Err(e) = init::init(boot) {
+    if let Err(e) = init::init(boot, || {
+        let port = agent::open_serial_port()?;
+        agent::report_init_context(&port, config.user())?;
+        port_file = Some(port);
+        Ok(())
+    }) {
         eprintln!("agentd: init failed: {e}");
         process::exit(1);
     }
@@ -70,7 +76,14 @@ fn main() {
         .expect("agentd: failed to build tokio runtime");
 
     rt.block_on(async {
-        match agent::run(boot_time_ns, init_time_ns, &config).await {
+        match agent::run(
+            boot_time_ns,
+            init_time_ns,
+            &config,
+            port_file.expect("serial port opened during init"),
+        )
+        .await
+        {
             Ok(()) => {}
             Err(AgentdError::Shutdown) => {}
             Err(e) => {

@@ -1,9 +1,11 @@
 //! Tests for the `StatVirtualization` policy: Strict / Relaxed / Off semantics.
 
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
+use crate::backends::passthroughfs::{BindIdentityMap, HostPermissions, StatVirtualization};
 use crate::backends::shared::stat_override::OVERRIDE_XATTR_KEY;
 
 fn host_set_raw_xattr(path: &std::path::Path, data: &[u8]) {
@@ -49,6 +51,189 @@ fn override_blob(uid: u32, gid: u32, mode: u32, rdev: u32) -> [u8; 20] {
     buf[12..16].copy_from_slice(&mode.to_ne_bytes());
     buf[16..20].copy_from_slice(&rdev.to_ne_bytes());
     buf
+}
+
+fn current_host_uid() -> u32 {
+    unsafe { libc::getuid() as u32 }
+}
+
+fn distinct_uid(uid: u32) -> u32 {
+    if uid == 1234 { 4321 } else { 1234 }
+}
+
+fn identity_handle(map: BindIdentityMap) -> crate::backends::passthroughfs::BindIdentityMapHandle {
+    let handle = Arc::new(OnceLock::new());
+    handle.set(map).unwrap();
+    handle
+}
+
+#[test]
+fn test_identity_map_applies_to_no_xattr_host_owner() {
+    let host_uid = current_host_uid();
+    let guest_uid = distinct_uid(host_uid);
+    let guest_gid = 5678;
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            host_uid, guest_uid, guest_gid,
+        )));
+        cfg
+    });
+
+    sb.host_create_file("mapped.txt", b"data");
+
+    let entry = sb.lookup_root("mapped.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, guest_uid);
+    assert_eq!(entry.attr.st_gid, guest_gid);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, guest_uid);
+    assert_eq!(st.st_gid, guest_gid);
+}
+
+#[test]
+fn test_identity_map_preserves_xattr_precedence() {
+    let host_uid = current_host_uid();
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(host_uid, 1234, 5678)));
+        cfg
+    });
+
+    let host_path = sb.host_create_file("override-wins.txt", b"data");
+    host_set_raw_xattr(&host_path, &override_blob(4242, 4243, 0o100644, 0));
+
+    let entry = sb.lookup_root("override-wins.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 4242);
+    assert_eq!(entry.attr.st_gid, 4243);
+}
+
+#[test]
+fn test_identity_map_uses_overflow_for_other_host_owners() {
+    let host_uid = current_host_uid();
+    let non_matching_uid = if host_uid == 0 { 1 } else { 0 };
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            non_matching_uid,
+            1234,
+            5678,
+        )));
+        cfg
+    });
+
+    let host_path = sb.host_create_file("overflow.txt", b"data");
+    assert_ne!(host_path.metadata().unwrap().uid(), non_matching_uid);
+
+    let entry = sb.lookup_root("overflow.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 65534);
+    assert_eq!(entry.attr.st_gid, 65534);
+}
+
+#[test]
+fn test_identity_map_is_ignored_when_stat_virtualization_is_off() {
+    let host_uid = current_host_uid();
+    let guest_uid = distinct_uid(host_uid);
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Off;
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            host_uid, guest_uid, 5678,
+        )));
+        cfg
+    });
+
+    let host_path = sb.host_create_file("off-raw.txt", b"data");
+    let host_meta = host_path.metadata().unwrap();
+
+    let entry = sb.lookup_root("off-raw.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, host_meta.uid());
+    assert_eq!(entry.attr.st_gid, host_meta.gid());
+}
+
+#[test]
+fn test_identity_map_participates_in_access_checks() {
+    let host_uid = current_host_uid();
+    let guest_uid = distinct_uid(host_uid);
+    let guest_gid = 5678;
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            host_uid, guest_uid, guest_gid,
+        )));
+        cfg
+    });
+
+    let host_path = sb.host_create_file("writeable-for-mapped-owner.txt", b"data");
+    let mut perms = host_path.metadata().unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&host_path, perms).unwrap();
+
+    let entry = sb.lookup_root("writeable-for-mapped-owner.txt").unwrap();
+    sb.fs
+        .access(
+            sb.ctx_as(guest_uid, guest_gid),
+            entry.inode,
+            libc::W_OK as u32,
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_identity_map_preserves_owner_on_mode_setattr_without_xattr() {
+    let host_uid = current_host_uid();
+    let guest_uid = distinct_uid(host_uid);
+    let guest_gid = 5678;
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            host_uid, guest_uid, guest_gid,
+        )));
+        cfg
+    });
+
+    sb.host_create_file("chmod-preserves-owner.txt", b"data");
+    let entry = sb.lookup_root("chmod-preserves-owner.txt").unwrap();
+
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_mode = 0o600;
+    let (st, _) = sb
+        .fs
+        .setattr(sb.ctx(), entry.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
+
+    assert_eq!(st.st_uid, guest_uid);
+    assert_eq!(st.st_gid, guest_gid);
+    assert_eq!(st.st_mode as u32 & 0o777, 0o600);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, guest_uid);
+    assert_eq!(st.st_gid, guest_gid);
+}
+
+#[test]
+fn test_identity_map_preserves_gid_on_partial_chown_without_xattr() {
+    let host_uid = current_host_uid();
+    let guest_uid = distinct_uid(host_uid);
+    let guest_gid = 5678;
+    let new_uid = 2468;
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::new(
+            host_uid, guest_uid, guest_gid,
+        )));
+        cfg
+    });
+
+    sb.host_create_file("partial-chown-preserves-gid.txt", b"data");
+    let entry = sb.lookup_root("partial-chown-preserves-gid.txt").unwrap();
+
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_uid = new_uid;
+    let (st, _) = sb
+        .fs
+        .setattr(sb.ctx(), entry.inode, attr, None, SetattrValid::UID)
+        .unwrap();
+
+    assert_eq!(st.st_uid, new_uid);
+    assert_eq!(st.st_gid, guest_gid);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, new_uid);
+    assert_eq!(st.st_gid, guest_gid);
 }
 
 #[test]

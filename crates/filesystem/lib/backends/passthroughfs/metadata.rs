@@ -115,7 +115,11 @@ pub(crate) fn do_setattr(
             let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
                 Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
                 None => {
-                    let st = platform::fstat(*close_fd)?;
+                    let mut st = platform::fstat(*close_fd)?;
+                    stat_override::apply_bind_identity_map(
+                        &mut st,
+                        fs.cfg.bind_identity_map.as_ref(),
+                    );
                     let mode = platform::mode_u32(st.st_mode);
                     (st.st_uid, st.st_gid, mode, 0)
                 }
@@ -287,7 +291,13 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     let fd = file.as_raw_fd();
     let st = platform::fstat(fd)?;
 
-    stat_override::patched_stat(fd, st, fs.cfg.xattr_enabled(), fs.cfg.strict_enabled())
+    stat_override::patched_stat(
+        fd,
+        st,
+        fs.cfg.xattr_enabled(),
+        fs.cfg.strict_enabled(),
+        fs.cfg.bind_identity_map.as_ref(),
+    )
 }
 
 #[cfg(target_os = "macos")]

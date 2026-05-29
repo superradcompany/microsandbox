@@ -29,8 +29,8 @@ pub use backends::{
     },
     memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig},
     passthroughfs::{
-        CachePolicy, HostPermissions, PassthroughConfig, PassthroughFs, PassthroughFsBuilder,
-        StatVirtualization,
+        BindIdentityMap, BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughConfig,
+        PassthroughFs, PassthroughFsBuilder, StatVirtualization,
     },
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};

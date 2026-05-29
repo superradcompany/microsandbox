@@ -296,6 +296,11 @@ impl BootParams {
 }
 
 impl AgentdConfig {
+    /// Returns the configured default guest user, if any.
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
     /// Reads the runtime-config `MSB_*` environment variables.
     ///
     /// Empty or whitespace-only values are treated as absent (`None`).

@@ -17,13 +17,17 @@ use crate::{network, rlimit, tls};
 ///
 /// Consumes the [`BootParams`] by value — the data is one-shot and not
 /// needed after init returns.
-pub fn init(params: BootParams) -> AgentdResult<()> {
+pub fn init(
+    params: BootParams,
+    before_user_mounts: impl FnOnce() -> AgentdResult<()>,
+) -> AgentdResult<()> {
     rlimit::apply_baseline(&params.rlimits)?;
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
     if let Some(spec) = &params.block_root {
         linux::mount_block_root(spec)?;
     }
+    before_user_mounts()?;
     linux::apply_dir_mounts(&params.dir_mounts)?;
     linux::apply_file_mounts(&params.file_mounts)?;
     linux::apply_disk_mounts(&params.disk_mounts)?;
