@@ -65,7 +65,16 @@
             "group": "Observability",
             "icon": "gauge",
             "pages": [
-              "observability/msb-metrics"
+              {
+                "group": "Metrics Collection",
+                "icon": "gauge",
+                "pages": [
+                  "observability/metrics-collection/overview",
+                  "observability/metrics-collection/reference",
+                  "observability/metrics-collection/providers",
+                  "observability/metrics-collection/operations"
+                ]
+              }
             ]
           },
           {

@@ -1,0 +1,107 @@
+---
+title: Reference
+description: Flags, metric names, and attributes emitted by msb-metrics
+icon: "book"
+---
+
+This page documents the configurable surface of `msb-metrics`: the
+`otel` subcommand flags, the metric names emitted, and the resource
+and identity attributes attached to each datapoint.
+
+For the conceptual overview and a minimal first run, see
+[Overview](/observability/metrics-collection/overview).
+
+## The `otel` subcommand
+
+```text
+msb-metrics otel --endpoint=<URL>
+                 [--protocol=grpc|http]
+                 [--header=KEY=VALUE]...
+                 [--resource=KEY=VALUE]...
+                 [--emit-run-id] [--emit-pid]
+                 [--collect-interval=<dur>]
+                 [--flush-interval=<dur>]
+                 [--max-buffered=<n>]
+                 [--export-timeout=<dur>]
+                 [--msb-home=<path>]
+```
+
+Run `msb-metrics otel --help` for the full prose.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--endpoint` | (required) | OTLP endpoint URL. |
+| `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). |
+| `--header` | none | `KEY=VALUE`, repeatable. For auth (`Authorization`, `api-key`, etc.). Applied via `OTEL_EXPORTER_OTLP_HEADERS`. |
+| `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
+| `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |
+| `--emit-pid` | off | Add `sandbox.pid` to every datapoint. Opt-in: high cardinality. |
+| `--collect-interval` | `1s` | How often shm is read. `humantime` durations (`1s`, `500ms`, `2m`). |
+| `--flush-interval` | `10s` | Per-exporter scheduled flush cadence. |
+| `--max-buffered` | `60` | Per-exporter buffer cap. On overflow, the oldest collection is dropped and the drop count surfaces on the next batch. |
+| `--export-timeout` | `30s` | Per-call timeout for a single OTLP export. |
+| `--msb-home` | `$MSB_HOME` ∨ `~/.microsandbox` | Used to derive the shm registry name. |
+
+Global flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG` env var wins if set. |
+
+## Metric reference
+
+All metrics are namespaced under `microsandbox.*` to avoid colliding
+with OTel semantic-convention `system.*` host metrics in the same
+backend tenant.
+
+| Metric | Type | Unit | Notes |
+|---|---|---|---|
+| `microsandbox.cpu.utilization` | gauge | `1` (0.0–1.0) | Source field is 0–100 percent; divided by 100 on emit. |
+| `microsandbox.memory.usage` | gauge | `By` | Resident memory in bytes. |
+| `microsandbox.memory.limit` | gauge | `By` | Configured guest memory limit. |
+| `microsandbox.disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
+| `microsandbox.disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
+| `microsandbox.network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
+| `microsandbox.network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
+| `microsandbox.uptime` | gauge | `s` | Sandbox uptime at sample time. |
+
+Cumulative byte fields are emitted as gauges carrying the absolute
+cumulative value. Use `rate()` (PromQL / OTel-flavored Prom) for
+throughput. We use gauges rather than monotonic counters because each
+shm snapshot already carries an absolute value, and counter `add()`
+semantics would require us to track per-sandbox deltas across runs.
+
+## Resource attributes
+
+Set automatically; `--resource KEY=VALUE` overrides or adds:
+
+| Key | Default |
+|---|---|
+| `service.name` | `microsandbox` |
+| `service.instance.id` | hostname (best-effort, read from `HOSTNAME` / `COMPUTERNAME` env vars) |
+
+To override, just pass another value:
+
+```sh
+msb-metrics otel --endpoint=... \
+                 --resource=service.namespace=prod \
+                 --resource=service.instance.id=worker-12
+```
+
+## Identity attributes
+
+Every datapoint carries a configurable subset of sandbox identity:
+
+| Attribute | Default | Notes |
+|---|---|---|
+| `sandbox.name` | on | Low cardinality. |
+| `sandbox.id` | on | Catalog id; low cardinality. |
+| `sandbox.run_id` | off | Opt-in via `--emit-run-id`. Fresh series per restart. |
+| `sandbox.pid` | off | Opt-in via `--emit-pid`. Fresh series per restart. |
+
+Why the opt-in: backends like Grafana Cloud and Prometheus bill on
+active series. A series is identified by its label tuple. Including
+`run_id` or `pid` creates a new series every time a sandbox restarts,
+which on high-churn workloads (ephemeral sandboxes) inflates cost.
+Leaving them off keeps series count proportional to distinct sandboxes,
+not total runs.

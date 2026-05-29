@@ -1,0 +1,92 @@
+---
+title: Providers
+description: Backend-specific recipes for shipping microsandbox metrics over OTLP
+icon: "plug"
+---
+
+`msb-metrics` is backend-agnostic. Anything that speaks OTLP accepts
+its output. This page collects working recipes for common destinations.
+
+For the underlying flags and metric names, see
+[Reference](/observability/metrics-collection/reference).
+
+## Grafana Cloud (direct OTLP)
+
+Grafana Cloud exposes an OTLP gateway with per-region URLs and basic
+auth via `Authorization` header.
+
+```sh
+GC_ID=...      # numeric instance id
+GC_TOKEN=...   # API token with metrics:write
+AUTH="Basic $(printf '%s:%s' "$GC_ID" "$GC_TOKEN" | base64 | tr -d '\n')"
+
+msb-metrics otel \
+  --endpoint=https://otlp-gateway-prod-us-east-2.grafana.net/otlp \
+  --protocol=http \
+  --header="Authorization=${AUTH}"
+```
+
+Sub the region in the URL for yours.
+
+## Grafana Alloy (recommended for production)
+
+Run [Alloy](https://grafana.com/oss/alloy/) locally with an OTLP
+receiver and a Grafana Cloud exporter. Point `msb-metrics` at Alloy
+and let Alloy own batching, retries, credential rotation, and the
+upstream connection.
+
+```sh
+msb-metrics otel --endpoint=http://localhost:4317
+```
+
+Alloy handles the rest. Buffers in Alloy survive Grafana Cloud
+hiccups. Credential changes don't require touching `msb-metrics`.
+
+## Local otel-collector (development)
+
+Stand up an [otel-collector](https://opentelemetry.io/docs/collector/)
+with `otlp` receiver + `logging` exporter for development:
+
+```yaml
+# otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+exporters:
+  logging:
+    verbosity: detailed
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [logging]
+```
+
+```sh
+otelcol --config=otel-collector.yaml &
+msb-metrics otel --endpoint=http://localhost:4317 --log-level=debug
+```
+
+Boot a sandbox and watch metrics scroll past in the otel-collector
+log.
+
+## Datadog (via OTLP)
+
+Datadog accepts OTLP via its agent or its OTLP intake. With the
+datadog-agent running locally with OTLP enabled:
+
+```sh
+msb-metrics otel --endpoint=http://localhost:4317
+```
+
+For Datadog's direct OTLP intake, supply the API key header:
+
+```sh
+msb-metrics otel --endpoint=https://api.datadoghq.com/api/v0.2/series \
+                 --protocol=http \
+                 --header="DD-API-KEY=${DATADOG_API_KEY}"
+```
+
+(Datadog's intake URL and format differ by region and product; consult
+Datadog's OTLP intake docs for current details.)
