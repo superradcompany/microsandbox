@@ -62,6 +62,12 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--script` | Register a shell snippet as a named script (`NAME=BODY`). Decodes `\n`, `\t`, `\r`, `\\`, `\"`, `\'`; unknown escapes pass through. Wrapped with a shebang from `--shell` (default `/bin/sh`). Available at `/.msb/scripts/<name>` and on `PATH` |
 | `--script-raw` | Register exact inline script contents (`NAME=BODY`). No escape decoding or shebang is added; caller must include `#!` if direct execution is needed |
 | `--script-path` | Register a script from a host file (`NAME:PATH`). File contents are read verbatim |
+| `--copy` | Copy a host file or directory into the guest rootfs before boot (`SRC:DST`) |
+| `--copy-file` | Copy a host file into the guest rootfs before boot (`SRC:DST`) |
+| `--copy-dir` | Copy a host directory into the guest rootfs before boot (`SRC:DST`) |
+| `--mkdir` | Create a directory in the guest rootfs before boot |
+| `--rm` | Hide/remove a path from the guest rootfs before boot |
+| `--patch-file` | Load rootfs patch operations from a YAML file |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-net` | Disable all network access by default. Sugar for `--net-default deny`. Combine with `--net-rule allow@<target>` entries to build an allowlist |
@@ -89,6 +95,28 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 Volume options use Docker-style colon syntax: `SOURCE:DEST:ro,noexec`. Supported `-v` flags are `ro`, `rw`, `nosuid`, and `noexec`; `stat-virt=` and `host-perms=` remain key-value options for bind and named mounts. `nosuid` is always enforced for guest volume mounts, so passing it is only an explicit assertion. `ro` and `noexec` cannot be undone by user commands with a guest remount. `noexec` blocks direct execution from the mount, but interpreters can still read scripts from it, such as `sh /mnt/script.sh`.
 
 Tmpfs options use the same option block: `--tmpfs /tmp:1G:noexec` or `--tmpfs /seed:size=64,ro,noexec`.
+
+Rootfs patch flags are creation-time mutations. They apply before the sandbox starts and become part of the sandbox's initial writable layer:
+
+```bash
+msb run alpine \
+  --copy ./config.toml:/etc/app/config.toml \
+  --copy-dir ./certs:/etc/app/certs \
+  --mkdir /var/cache/app \
+  --rm /etc/motd
+```
+
+Patch files use the same operation names:
+
+```yaml
+patches:
+  - copy: ./config.toml:/etc/app/config.toml
+  - copy_dir: ./certs:/etc/app/certs
+  - mkdir: /var/cache/app
+  - rm: /etc/motd
+```
+
+Use `msb cp` for live file transfer after a sandbox exists.
 
 When no `--` command is given, the image's `entrypoint` and `cmd` are used as the default process. If the image has neither, an interactive shell is started. When a command is given via `--`, it replaces the image `cmd` but the `entrypoint` is preserved. See [Image config inheritance](/images/overview#image-config-inheritance) for details.
 
@@ -205,6 +233,24 @@ msb exec devbox -- ls -la /app
 <Tip>
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
 </Tip>
+
+## msb cp
+
+Copy files between the host and a sandbox.
+
+```bash
+msb cp ./local.txt devbox:/tmp/local.txt
+msb cp devbox:/tmp/out.txt ./out.txt
+msb cp devbox:/tmp/a devbox:/tmp/b
+```
+
+Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. The same-sandbox form is a microsandbox extension. Cross-sandbox copies are not supported yet; copy through the host if you need to move data between two sandboxes.
+
+`msb cp` connects to an existing sandbox and starts it temporarily if needed, following the same lifecycle ownership behavior as `msb exec`.
+
+| Flag | Description |
+|------|-------------|
+| `-q`, `--quiet` | Suppress progress output |
 
 ## msb logs
 
