@@ -623,6 +623,18 @@ fn drop_mount_admin_privileges() -> AgentdResult<()> {
     Ok(())
 }
 
+pub(crate) fn resolve_default_user(default_user: Option<&str>) -> AgentdResult<(u32, u32)> {
+    let Some(spec) = default_user
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok((0, 0));
+    };
+
+    let resolved = resolve_user_spec(spec)?;
+    Ok((resolved.uid, resolved.gid))
+}
+
 fn resolve_requested_user(
     req: &ExecRequest,
     default_user: Option<&str>,
@@ -1178,6 +1190,12 @@ mod tests {
         let resolved = resolved.expect("should resolve to a user");
         assert_eq!(resolved.uid, uid);
         assert_eq!(resolved.gid, gid);
+    }
+
+    #[test]
+    fn test_default_user_absent_resolves_to_root() {
+        let resolved = resolve_default_user(None).expect("resolve absent default user");
+        assert_eq!(resolved, (0, 0));
     }
 
     #[test]

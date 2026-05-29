@@ -146,6 +146,9 @@ pub struct PassthroughConfig {
 
     /// Whether to expose the synthetic `init.krun` entry at the mount root.
     pub inject_init: bool,
+
+    /// Optional user-volume identity map for host metadata fallback.
+    pub bind_identity_map: Option<stat_override::BindIdentityMapHandle>,
 }
 
 /// Passthrough filesystem backend.
@@ -440,9 +443,16 @@ impl Default for PassthroughConfig {
             cache_policy: CachePolicy::Auto,
             writeback: false,
             inject_init: true,
+            bind_identity_map: None,
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use stat_override::{BindIdentityMap, BindIdentityMapHandle};
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations

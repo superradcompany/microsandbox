@@ -283,6 +283,7 @@ fn do_lookup_linux(
         st,
         fs.cfg.xattr_enabled(),
         fs.cfg.strict_enabled(),
+        fs.cfg.bind_identity_map.as_ref(),
     )?;
 
     let mut inodes = fs.inodes.write().unwrap();
@@ -345,6 +346,7 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         st,
         fs.cfg.xattr_enabled(),
         fs.cfg.strict_enabled(),
+        fs.cfg.bind_identity_map.as_ref(),
     )?;
 
     // Fast path: most lookups hit an already-tracked inode and only need a
@@ -414,6 +416,7 @@ fn open_and_patch_stat_macos(
     st: stat64,
     xattr_enabled: bool,
     strict: bool,
+    bind_identity_map: Option<&crate::backends::shared::stat_override::BindIdentityMapHandle>,
 ) -> io::Result<stat64> {
     let path = vol_path(dev, ino);
 
@@ -421,13 +424,22 @@ fn open_and_patch_stat_macos(
     // O_SYMLINK so we can read override metadata from the link itself without
     // following it.
     if let Ok(fd) = open_macos_path_for_stat(path.as_ptr()) {
-        let result =
-            crate::backends::shared::stat_override::patched_stat(fd, st, xattr_enabled, strict);
+        let result = crate::backends::shared::stat_override::patched_stat(
+            fd,
+            st,
+            xattr_enabled,
+            strict,
+            bind_identity_map,
+        );
         unsafe { libc::close(fd) };
         return result;
     }
 
-    // Can't open — return unpatched stat.
+    // Can't open — return the safe mapped fallback when stat virtualization is on.
+    let mut st = st;
+    if xattr_enabled {
+        crate::backends::shared::stat_override::apply_bind_identity_map(&mut st, bind_identity_map);
+    }
     Ok(st)
 }
 
@@ -973,6 +985,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             st,
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),
+            fs.cfg.bind_identity_map.as_ref(),
         )
     }
 
@@ -990,6 +1003,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
                 st,
                 fs.cfg.xattr_enabled(),
                 fs.cfg.strict_enabled(),
+                fs.cfg.bind_identity_map.as_ref(),
             );
         }
 
@@ -1000,6 +1014,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
                     st,
                     fs.cfg.xattr_enabled(),
                     fs.cfg.strict_enabled(),
+                    fs.cfg.bind_identity_map.as_ref(),
                 )
             });
             unsafe { libc::close(fd) };
@@ -1018,6 +1033,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             st,
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),
+            fs.cfg.bind_identity_map.as_ref(),
         )
     }
 }

@@ -37,6 +37,34 @@ pub struct ClockSync {
     pub unix_time_nanos: u64,
 }
 
+/// Payload for `core.init.resolved` messages.
+///
+/// Sent by agentd after the guest rootfs is ready to resolve init-time facts,
+/// but before user volume mounts are attached. The host uses this to install
+/// early runtime state that depends on guest-resolved values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitResolved {
+    /// Default guest user for sandbox commands.
+    pub default_user: ResolvedUser,
+}
+
+/// A guest user and group resolved by agentd.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ResolvedUser {
+    /// Effective default guest user id for sandbox commands.
+    pub uid: u32,
+
+    /// Effective default guest group id for sandbox commands.
+    pub gid: u32,
+}
+
+/// Payload for `core.init.ack` messages.
+///
+/// Sent by the host after it has consumed the init context and completed any
+/// dependent setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitAck {}
+
 /// Payload for `core.relay.client.disconnected` messages.
 ///
 /// Sent by the host relay when one SDK client socket disconnects. The

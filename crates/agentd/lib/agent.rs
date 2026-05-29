@@ -1,8 +1,9 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
+use std::time::Instant;
 use std::{env, ptr};
 
 use chrono::Utc;
@@ -12,7 +13,9 @@ use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
-use microsandbox_protocol::core::{ClockSync, Ready, RelayClientDisconnected};
+use microsandbox_protocol::core::{
+    ClockSync, InitAck, InitResolved, Ready, RelayClientDisconnected, ResolvedUser,
+};
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
     ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
@@ -24,7 +27,7 @@ use crate::config::AgentdConfig;
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::serial::AGENT_PORT_NAME;
-use crate::session::{ExecSession, SessionOutput};
+use crate::session::{ExecSession, SessionOutput, resolve_default_user};
 use crate::{clock, fs, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
@@ -42,6 +45,9 @@ const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Maximum allowed input buffer size (frame size limit + 4 bytes for length prefix).
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
+
+/// Maximum time to wait for the host to acknowledge the init context.
+const INIT_ACK_TIMEOUT_SECS: u64 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,20 +67,19 @@ struct AgentState {
 
 /// Runs the main agent loop.
 ///
-/// Discovers the virtio serial port, sends `core.ready` with boot timing data,
+/// Reuses the already-open virtio serial port, sends `core.ready` with boot timing data,
 /// then enters the main select loop handling serial I/O, process output, and heartbeat.
 ///
 /// - `boot_time_ns`: `CLOCK_BOOTTIME` at `main()` start (kernel boot duration).
 /// - `init_time_ns`: nanoseconds spent in `init::init()`.
-pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) -> AgentdResult<()> {
-    // Discover serial port.
-    let port_path = serial::find_serial_port(AGENT_PORT_NAME)?;
-
-    // Open the port once with read+write. Virtio-console multiport devices
-    // only allow a single open; a second open returns EBUSY.
-    let port_file = OpenOptions::new().read(true).write(true).open(&port_path)?;
-
-    // Set non-blocking for async I/O.
+pub async fn run(
+    boot_time_ns: u64,
+    init_time_ns: u64,
+    config: &AgentdConfig,
+    port_file: File,
+) -> AgentdResult<()> {
+    // Set non-blocking for async I/O. Early boot handshakes use the same fd
+    // in blocking mode before it is moved into the async loop.
     let port_fd = port_file.as_raw_fd();
     set_nonblocking(port_fd)?;
 
@@ -212,6 +217,39 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
     }
 
     Ok(())
+}
+
+/// Opens the agent virtio-serial port once for early boot handshakes and the agent loop.
+pub fn open_serial_port() -> AgentdResult<File> {
+    // Discover serial port.
+    let port_path = serial::find_serial_port(AGENT_PORT_NAME)?;
+
+    // Open the port once with read+write. Virtio-console multiport devices
+    // only allow a single open; a second open returns EBUSY.
+    Ok(OpenOptions::new().read(true).write(true).open(&port_path)?)
+}
+
+/// Reports init-time guest context to the host and waits for an acknowledgement.
+pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> AgentdResult<()> {
+    let (uid, gid) = resolve_default_user(default_user)?;
+    let deadline = init_ack_deadline();
+    let fd = port_file.as_raw_fd();
+    set_nonblocking(fd)?;
+
+    let msg = Message::with_payload(
+        MessageType::InitResolved,
+        0,
+        &InitResolved {
+            default_user: ResolvedUser { uid, gid },
+        },
+    )
+    .map_err(|e| AgentdError::ExecSession(format!("encode init context: {e}")))?;
+
+    let mut out = Vec::new();
+    codec::encode_to_buf(&msg, &mut out)
+        .map_err(|e| AgentdError::ExecSession(format!("encode init context frame: {e}")))?;
+    write_all_to_fd(fd, &out, deadline)?;
+    wait_for_init_ack(fd, deadline)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -508,6 +546,95 @@ fn set_nonblocking(fd: i32) -> AgentdResult<()> {
     Ok(())
 }
 
+fn init_ack_deadline() -> Instant {
+    Instant::now() + std::time::Duration::from_secs(INIT_ACK_TIMEOUT_SECS)
+}
+
+fn init_ack_timeout() -> AgentdError {
+    AgentdError::ExecSession("timed out waiting for init ack".into())
+}
+
+fn wait_for_init_ack(fd: i32, deadline: Instant) -> AgentdResult<()> {
+    let mut serial_in_buf = Vec::new();
+    let mut read_buf = [0u8; 4096];
+
+    loop {
+        if let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
+            .map_err(|e| AgentdError::ExecSession(format!("decode init ack: {e}")))?
+        {
+            if msg.t == MessageType::InitAck {
+                let _: InitAck = msg.payload().map_err(|e| {
+                    AgentdError::ExecSession(format!("decode init ack payload: {e}"))
+                })?;
+                return Ok(());
+            }
+
+            return Err(AgentdError::ExecSession(format!(
+                "expected core.init.ack, got {}",
+                msg.t.as_str()
+            )));
+        }
+
+        if serial_in_buf.len() > MAX_INPUT_BUF_SIZE {
+            return Err(AgentdError::ExecSession(
+                "serial input buffer exceeded maximum size while waiting for init ack".into(),
+            ));
+        }
+
+        if !poll_fd_until(fd, libc::POLLIN, deadline)? {
+            return Err(init_ack_timeout());
+        }
+
+        let n = match read_from_fd(fd, &mut read_buf) {
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if n == 0 {
+            return Err(AgentdError::ExecSession(
+                "serial port closed while waiting for init ack".into(),
+            ));
+        }
+        serial_in_buf.extend_from_slice(&read_buf[..n]);
+    }
+}
+
+fn poll_fd_until(fd: i32, events: i16, deadline: Instant) -> AgentdResult<bool> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let timeout_ms = if timeout_ms == 0 { 1 } else { timeout_ms };
+        let mut pfd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret > 0 {
+            return Ok(true);
+        }
+        if ret == 0 {
+            return Ok(false);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(err.into());
+    }
+}
+
 /// Reads from a raw fd (non-blocking).
 fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -516,6 +643,24 @@ fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     } else {
         Ok(n as usize)
     }
+}
+
+fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Instant) -> AgentdResult<()> {
+    while !buf.is_empty() {
+        match write_to_fd(fd, buf) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if !poll_fd_until(fd, libc::POLLOUT, deadline)? {
+                    return Err(init_ack_timeout());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
 }
 
 /// Flushes the write buffer to the async fd.

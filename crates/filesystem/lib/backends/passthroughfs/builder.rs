@@ -23,7 +23,9 @@ use std::{
     time::Duration,
 };
 
-use super::{CachePolicy, HostPermissions, PassthroughFs, StatVirtualization};
+use super::{
+    BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughFs, StatVirtualization,
+};
 use crate::backends::shared::{
     init_binary, inode_table::MultikeyBTreeMap, platform, stat_override,
 };
@@ -43,6 +45,7 @@ pub struct PassthroughFsBuilder {
     cache_policy: CachePolicy,
     writeback: bool,
     inject_init: bool,
+    bind_identity_map: Option<BindIdentityMapHandle>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -62,6 +65,7 @@ impl PassthroughFsBuilder {
             cache_policy: CachePolicy::Auto,
             writeback: false,
             inject_init: true,
+            bind_identity_map: None,
         }
     }
 
@@ -86,6 +90,12 @@ impl PassthroughFsBuilder {
     /// Set whether mutating guest operations should be rejected.
     pub fn readonly(mut self, readonly: bool) -> Self {
         self.readonly = readonly;
+        self
+    }
+
+    /// Set the optional bind identity map handle.
+    pub fn bind_identity_map(mut self, handle: BindIdentityMapHandle) -> Self {
+        self.bind_identity_map = Some(handle);
         self
     }
 
@@ -152,6 +162,7 @@ impl PassthroughFsBuilder {
             cache_policy: self.cache_policy,
             writeback: self.writeback,
             inject_init: self.inject_init,
+            bind_identity_map: self.bind_identity_map,
         };
         if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
             let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;

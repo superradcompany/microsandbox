@@ -16,8 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
-use microsandbox_protocol::core::RelayClientDisconnected;
+use microsandbox_protocol::core::{InitAck, InitResolved, RelayClientDisconnected};
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
@@ -101,6 +102,8 @@ pub struct AgentRelay {
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
+    /// User-volume bind identity maps to install before `core.ready`.
+    bind_identity_maps: Vec<BindIdentityMapHandle>,
 }
 
 /// A frame extracted from the byte stream, kept as raw bytes for transparent
@@ -147,6 +150,7 @@ impl AgentRelay {
             sock_path: agent_sock_path.to_path_buf(),
             ready_frame: None,
             log_writer: None,
+            bind_identity_maps: Vec::new(),
         })
     }
 
@@ -165,6 +169,46 @@ impl AgentRelay {
         self
     }
 
+    /// Attach pending bind identity maps for the early init handshake.
+    pub fn with_bind_identity_maps(mut self, maps: Vec<BindIdentityMapHandle>) -> Self {
+        self.bind_identity_maps = maps;
+        self
+    }
+
+    fn install_bind_identity_maps(&self, resolved: InitResolved) -> RuntimeResult<()> {
+        let host_owner_uid = unsafe { libc::getuid() as u32 };
+        let map = BindIdentityMap::new(
+            host_owner_uid,
+            resolved.default_user.uid,
+            resolved.default_user.gid,
+        );
+
+        for handle in &self.bind_identity_maps {
+            handle
+                .set(map)
+                .map_err(|_| RuntimeError::Custom("bind identity map already installed".into()))?;
+        }
+
+        tracing::info!(
+            host_owner_uid,
+            guest_uid = resolved.default_user.uid,
+            guest_gid = resolved.default_user.gid,
+            mounts = self.bind_identity_maps.len(),
+            "agent relay: installed bind identity maps"
+        );
+
+        Ok(())
+    }
+
+    fn send_init_ack(&self) -> RuntimeResult<()> {
+        let msg = Message::with_payload(MessageType::InitAck, 0, &InitAck {})
+            .map_err(|e| RuntimeError::Custom(format!("encode init ack: {e}")))?;
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&msg, &mut frame)
+            .map_err(|e| RuntimeError::Custom(format!("encode init ack frame: {e}")))?;
+        push_guest_frame_blocking(&self.shared, frame)
+    }
+
     /// Read frames from the console ring buffer until `core.ready` is
     /// received.
     ///
@@ -175,6 +219,7 @@ impl AgentRelay {
         const READY_TIMEOUT_SECS: i32 = 60;
 
         let mut buf = BytesMut::new();
+        let mut init_resolved = false;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(READY_TIMEOUT_SECS as u64);
 
@@ -191,6 +236,12 @@ impl AgentRelay {
                 let msg = decode_frame(raw_data.clone())?;
 
                 if msg.t == MessageType::Ready {
+                    if !self.bind_identity_maps.is_empty() && !init_resolved {
+                        return Err(RuntimeError::Custom(
+                            "agent relay: received core.ready before init context resolution"
+                                .into(),
+                        ));
+                    }
                     tracing::info!("agent relay: received core.ready from agentd");
                     self.ready_frame = Some(raw_data);
                     // Now that agentd has signalled readiness, mark the
@@ -203,6 +254,16 @@ impl AgentRelay {
                         writer.write_system("--- sandbox started ---");
                     }
                     return Ok(());
+                }
+
+                if msg.t == MessageType::InitResolved {
+                    let resolved: InitResolved = msg.payload().map_err(|e| {
+                        RuntimeError::Custom(format!("decode init context payload: {e}"))
+                    })?;
+                    self.install_bind_identity_maps(resolved)?;
+                    init_resolved = true;
+                    self.send_init_ack()?;
+                    continue;
                 }
 
                 tracing::debug!(
@@ -443,6 +504,28 @@ fn poll_fd_readable_timeout(fd: RawFd, timeout_ms: i32) {
             return;
         }
         // EINTR — retry.
+    }
+}
+
+fn push_guest_frame_blocking(shared: &ConsoleSharedState, mut frame: Vec<u8>) -> RuntimeResult<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+
+    loop {
+        match shared.rx_ring.push(frame) {
+            Ok(()) => {
+                shared.rx_wake.wake();
+                return Ok(());
+            }
+            Err(returned) => {
+                frame = returned;
+                if std::time::Instant::now() >= deadline {
+                    return Err(RuntimeError::Custom(
+                        "timed out sending init ack to agentd".into(),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 }
 
@@ -933,6 +1016,15 @@ fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: 
 mod tests {
     use super::*;
 
+    use microsandbox_protocol::core::Ready;
+
+    fn encoded_message<T: serde::Serialize>(t: MessageType, payload: &T) -> Vec<u8> {
+        let msg = Message::with_payload(t, 0, payload).unwrap();
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&msg, &mut frame).unwrap();
+        frame
+    }
+
     #[test]
     fn client_frame_validation_allows_ids_in_assigned_range() {
         assert!(is_client_frame_allowed(10, 0, 10, 20));
@@ -949,5 +1041,86 @@ mod tests {
     #[test]
     fn client_frame_validation_allows_shutdown_control_id_zero() {
         assert!(is_client_frame_allowed(0, FLAG_SHUTDOWN, 10, 20));
+    }
+
+    #[tokio::test]
+    async fn wait_ready_rejects_ready_before_init_when_maps_are_pending() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let handle = Arc::new(std::sync::OnceLock::new());
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sock_path = sock_dir.path().join("agent.sock");
+        let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+            .await
+            .unwrap()
+            .with_bind_identity_maps(vec![Arc::clone(&handle)]);
+
+        shared
+            .tx_ring
+            .push(encoded_message(
+                MessageType::Ready,
+                &Ready {
+                    boot_time_ns: 0,
+                    init_time_ns: 0,
+                    ready_time_ns: 0,
+                },
+            ))
+            .unwrap();
+        shared.tx_wake.wake();
+
+        let err = relay.wait_ready().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("received core.ready before init context resolution")
+        );
+        assert!(handle.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_ready_installs_init_map_before_ready() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let handle = Arc::new(std::sync::OnceLock::new());
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sock_path = sock_dir.path().join("agent.sock");
+        let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+            .await
+            .unwrap()
+            .with_bind_identity_maps(vec![Arc::clone(&handle)]);
+
+        shared
+            .tx_ring
+            .push(encoded_message(
+                MessageType::InitResolved,
+                &InitResolved {
+                    default_user: microsandbox_protocol::core::ResolvedUser {
+                        uid: 1000,
+                        gid: 1001,
+                    },
+                },
+            ))
+            .unwrap();
+        shared
+            .tx_ring
+            .push(encoded_message(
+                MessageType::Ready,
+                &Ready {
+                    boot_time_ns: 0,
+                    init_time_ns: 0,
+                    ready_time_ns: 0,
+                },
+            ))
+            .unwrap();
+        shared.tx_wake.wake();
+
+        relay.wait_ready().unwrap();
+
+        assert_eq!(
+            handle.get().copied(),
+            Some(BindIdentityMap::new(
+                unsafe { libc::getuid() as u32 },
+                1000,
+                1001
+            ))
+        );
+        assert!(shared.rx_ring.pop().is_some(), "host should ack agentd");
     }
 }

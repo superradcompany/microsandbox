@@ -15,7 +15,8 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 use microsandbox_filesystem::{
-    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+    BindIdentityMapHandle, DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs,
+    StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use msb_krun::VmBuilder;
@@ -247,6 +248,13 @@ type NetworkMetricsHandle = microsandbox_network::network::MetricsHandle;
 #[cfg(not(feature = "net"))]
 type NetworkMetricsHandle = ();
 
+type VmBuildOutput = (
+    msb_krun::Vm,
+    Option<NetworkTerminationHandle>,
+    Option<NetworkMetricsHandle>,
+    Vec<BindIdentityMapHandle>,
+);
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -402,7 +410,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // without re-opening the registry (saving two mmap syscalls and a
     // potential `wait_for_ready` round-trip on the VMM's exit path).
     let exit_metrics_writer = metrics_writer.clone();
-    let (vm, _network_termination_handle, network_metrics_handle) = match build_vm(
+    let build_result = build_vm(
         &config,
         console_backend,
         move |exit_code: i32| {
@@ -472,22 +480,25 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let _ = std::fs::remove_file(&exit_sock_path);
         },
         tokio_rt.handle().clone(),
-    ) {
-        Ok(vm) => vm,
-        Err(e) => {
-            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
-            // Free the slot: build_vm never started the sampler, so no live
-            // sample is worth preserving. Prefer the writer (already holds
-            // the registry handle) when activation succeeded; otherwise
-            // open the registry once via the handoff fields.
-            if let Some(writer) = metrics_writer.clone() {
-                let _ = writer.release(ReleaseMode::Free);
-            } else {
-                release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+    );
+    let (vm, _network_termination_handle, network_metrics_handle, bind_identity_maps) =
+        match build_result {
+            Ok(vm) => vm,
+            Err(e) => {
+                let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                // Free the slot: build_vm never started the sampler, so no live
+                // sample is worth preserving. Prefer the writer (already holds
+                // the registry handle) when activation succeeded; otherwise
+                // open the registry once via the handoff fields.
+                if let Some(writer) = metrics_writer.clone() {
+                    let _ = writer.release(ReleaseMode::Free);
+                } else {
+                    release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
+    relay = relay.with_bind_identity_maps(bind_identity_maps);
     let exit_handle = vm.exit_handle();
 
     #[cfg(feature = "net")]
@@ -638,13 +649,10 @@ fn build_vm(
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-) -> RuntimeResult<(
-    msb_krun::Vm,
-    Option<NetworkTerminationHandle>,
-    Option<NetworkMetricsHandle>,
-)> {
+) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
+    let mut bind_identity_maps = Vec::new();
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
@@ -762,12 +770,20 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
+        let bind_identity_map = if matches!(parsed.stat_virtualization, StatVirtualization::Off) {
+            None
+        } else {
+            let handle = Arc::new(std::sync::OnceLock::new());
+            bind_identity_maps.push(Arc::clone(&handle));
+            Some(handle)
+        };
         let cfg = PassthroughConfig {
             root_dir: PathBuf::from(parsed.host_path),
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
+            bind_identity_map,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -885,7 +901,12 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
 
-    Ok((vm, network_termination_handle, network_metrics_handle))
+    Ok((
+        vm,
+        network_termination_handle,
+        network_metrics_handle,
+        bind_identity_maps,
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
