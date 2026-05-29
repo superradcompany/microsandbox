@@ -65,7 +65,8 @@
             "group": "Observability",
             "icon": "gauge",
             "pages": [
-              "observability/msb-metrics"
+              "observability/msb-metrics",
+              "observability/configuration"
             ]
           },
           {
@@ -210,7 +211,8 @@
               "recipes/metrics-shipping/grafana-cloud",
               "recipes/metrics-shipping/grafana-alloy",
               "recipes/metrics-shipping/otel-collector",
-              "recipes/metrics-shipping/datadog"
+              "recipes/metrics-shipping/datadog",
+              "recipes/metrics-shipping/run-under-systemd"
             ]
           }
         ]
