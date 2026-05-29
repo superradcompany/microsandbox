@@ -98,68 +98,78 @@
             ]
           },
           {
-            "group": "Rust SDK",
-            "icon": "rust",
+            "group": "SDKs",
+            "icon": "code",
             "pages": [
-              "sdk/rust/sandbox",
-              "sdk/rust/execution",
-              "sdk/rust/ssh",
-              "sdk/rust/filesystem",
-              "sdk/rust/volumes",
-              "sdk/rust/networking",
-              "sdk/rust/secrets",
-              "sdk/rust/snapshots",
-              "sdk/rust/events",
-              "sdk/rust/agent-client"
-            ]
-          },
-          {
-            "group": "TypeScript SDK",
-            "icon": "js",
-            "pages": [
-              "sdk/typescript/sandbox",
-              "sdk/typescript/execution",
-              "sdk/typescript/ssh",
-              "sdk/typescript/filesystem",
-              "sdk/typescript/volumes",
-              "sdk/typescript/networking",
-              "sdk/typescript/secrets",
-              "sdk/typescript/snapshots",
-              "sdk/typescript/events",
-              "sdk/typescript/agent-client"
-            ]
-          },
-          {
-            "group": "Python SDK",
-            "icon": "python",
-            "pages": [
-              "sdk/python/sandbox",
-              "sdk/python/execution",
-              "sdk/python/ssh",
-              "sdk/python/filesystem",
-              "sdk/python/volumes",
-              "sdk/python/networking",
-              "sdk/python/secrets",
-              "sdk/python/snapshots",
-              "sdk/python/events",
-              "sdk/python/agent-client"
-            ]
-          },
-          {
-            "group": "Go SDK",
-            "icon": "golang",
-            "pages": [
-              "sdk/go/sandbox",
-              "sdk/go/execution",
-              "sdk/go/ssh",
-              "sdk/go/filesystem",
-              "sdk/go/volumes",
-              "sdk/go/images",
-              "sdk/go/networking",
-              "sdk/go/secrets",
-              "sdk/go/snapshots",
-              "sdk/go/events",
-              "sdk/go/agent-client"
+              {
+                "group": "Rust",
+                "icon": "rust",
+                "expanded": false,
+                "pages": [
+                  "sdk/rust/sandbox",
+                  "sdk/rust/execution",
+                  "sdk/rust/ssh",
+                  "sdk/rust/filesystem",
+                  "sdk/rust/volumes",
+                  "sdk/rust/networking",
+                  "sdk/rust/secrets",
+                  "sdk/rust/snapshots",
+                  "sdk/rust/events",
+                  "sdk/rust/agent-client"
+                ]
+              },
+              {
+                "group": "TypeScript",
+                "icon": "js",
+                "expanded": false,
+                "pages": [
+                  "sdk/typescript/sandbox",
+                  "sdk/typescript/execution",
+                  "sdk/typescript/ssh",
+                  "sdk/typescript/filesystem",
+                  "sdk/typescript/volumes",
+                  "sdk/typescript/networking",
+                  "sdk/typescript/secrets",
+                  "sdk/typescript/snapshots",
+                  "sdk/typescript/events",
+                  "sdk/typescript/agent-client"
+                ]
+              },
+              {
+                "group": "Python",
+                "icon": "python",
+                "expanded": false,
+                "pages": [
+                  "sdk/python/sandbox",
+                  "sdk/python/execution",
+                  "sdk/python/ssh",
+                  "sdk/python/filesystem",
+                  "sdk/python/volumes",
+                  "sdk/python/networking",
+                  "sdk/python/secrets",
+                  "sdk/python/snapshots",
+                  "sdk/python/events",
+                  "sdk/python/agent-client"
+                ]
+              },
+              {
+                "group": "Go",
+                "icon": "golang",
+                "expanded": false,
+                "pages": [
+                  "sdk/go/sandbox",
+                  "sdk/go/execution",
+                  "sdk/go/ssh",
+                  "sdk/go/filesystem",
+                  "sdk/go/volumes",
+                  "sdk/go/images",
+                  "sdk/go/networking",
+                  "sdk/go/secrets",
+                  "sdk/go/snapshots",
+                  "sdk/go/events",
+                  "sdk/go/agent-client"
+                ]
+              }
             ]
           }
         ]
