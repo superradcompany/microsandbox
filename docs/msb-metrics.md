@@ -293,6 +293,3 @@ want a single series per sandbox name across restarts.
 
 - `docs/sandboxes/metrics.mdx` — per-sandbox `Sandbox::metrics()` read
   API in the Rust SDK.
-- `docs/msb-metrics-binary-plan.md`, `docs/sandbox-labels-plan.md`,
-  `docs/metrics-perf-optimizations.md` — design notes for the
-  refactor that introduced this binary.
