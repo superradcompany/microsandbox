@@ -35,6 +35,13 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Used by the binary to derive the shm registry name from `$MSB_HOME`.
+microsandbox-utils = { version = "0.5.2", path = "../utils" }
+# CLI duration parsing (e.g. "1s", "500ms").
+humantime = "2"
+# Resolving the default `~/.microsandbox` path when --msb-home is omitted.
+dirs.workspace = true
+
 # OTel exporter (backs the `msb-metrics otel` subcommand).
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
