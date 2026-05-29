@@ -4,6 +4,12 @@ description: Forward msb-metrics output to Grafana Cloud (or anywhere) via local
 icon: "route"
 ---
 
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
+
 [Grafana Alloy](https://grafana.com/oss/alloy/) is Grafana's
 OpenTelemetry Collector distribution with a programmable pipeline
 DSL. Run it locally as a forwarder so `msb-metrics` doesn't have to

@@ -1,8 +1,14 @@
 ---
 title: otel-collector
 description: Inspect msb-metrics output locally with the OpenTelemetry Collector
-icon: "laptop-code"
+icon: "terminal"
 ---
+
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
 
 Run the upstream [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/)
 locally with a `debug` exporter to see exactly what `msb-metrics` is

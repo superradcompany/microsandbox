@@ -1,8 +1,14 @@
 ---
 title: Datadog
 description: Ship msb-metrics output to Datadog via the Datadog Agent's OTLP receiver
-icon: "dog"
+icon: "chart-line"
 ---
+
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
 
 The recommended path is to point `msb-metrics` at the Datadog Agent
 with OTLP ingestion enabled. The agent handles temporality conversion,

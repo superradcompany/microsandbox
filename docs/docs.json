@@ -65,17 +65,7 @@
             "group": "Observability",
             "icon": "gauge",
             "pages": [
-              {
-                "group": "Metrics Collection",
-                "icon": "gauge",
-                "pages": [
-                  "observability/metrics-collection/msb-metrics",
-                  "observability/metrics-collection/grafana-cloud",
-                  "observability/metrics-collection/grafana-alloy",
-                  "observability/metrics-collection/otel-collector",
-                  "observability/metrics-collection/datadog"
-                ]
-              }
+              "observability/msb-metrics"
             ]
           },
           {
@@ -201,16 +191,26 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker",
-              "recipes/docker-in-sandbox",
-              "recipes/local-images"
+              "recipes/docker/docker",
+              "recipes/docker/docker-in-sandbox",
+              "recipes/docker/local-images"
             ]
           },
           {
             "group": "Guest",
             "icon": "server",
             "pages": [
-              "recipes/systemd-services"
+              "recipes/guest/systemd-services"
+            ]
+          },
+          {
+            "group": "Metrics shipping",
+            "icon": "paper-plane",
+            "pages": [
+              "recipes/metrics-shipping/grafana-cloud",
+              "recipes/metrics-shipping/grafana-alloy",
+              "recipes/metrics-shipping/otel-collector",
+              "recipes/metrics-shipping/datadog"
             ]
           }
         ]

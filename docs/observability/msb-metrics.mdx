@@ -67,17 +67,19 @@ backend.
 
 ## Pick your backend
 
+End-to-end setup walkthroughs live under [Recipes](/recipes):
+
 <CardGroup cols={2}>
-  <Card title="Grafana Cloud" icon="cloud" href="/observability/metrics-collection/grafana-cloud">
+  <Card title="Grafana Cloud" icon="cloud-arrow-up" href="/recipes/metrics-shipping/grafana-cloud">
     Direct OTLP to Grafana Cloud's gateway.
   </Card>
-  <Card title="Grafana Alloy" icon="route" href="/observability/metrics-collection/grafana-alloy">
+  <Card title="Grafana Alloy" icon="route" href="/recipes/metrics-shipping/grafana-alloy">
     Local Alloy as a forwarder. Recommended for production.
   </Card>
-  <Card title="otel-collector" icon="laptop-code" href="/observability/metrics-collection/otel-collector">
+  <Card title="otel-collector" icon="terminal" href="/recipes/metrics-shipping/otel-collector">
     Local development with the OpenTelemetry Collector.
   </Card>
-  <Card title="Datadog" icon="dog" href="/observability/metrics-collection/datadog">
+  <Card title="Datadog" icon="chart-line" href="/recipes/metrics-shipping/datadog">
     Via the Datadog Agent's OTLP receiver.
   </Card>
 </CardGroup>
