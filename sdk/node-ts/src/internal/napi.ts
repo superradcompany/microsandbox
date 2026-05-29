@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import type { NetworkConfig } from "../network-config.js";
+import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
 // Resolve the bundled runtime binary once and push it into the Rust
@@ -90,6 +92,7 @@ export interface NapiAgentClient {
 }
 
 export type NapiBuilderCtor<T> = new () => T;
+export type NapiSandboxConfig = Record<string, unknown>;
 
 export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
@@ -159,7 +162,7 @@ export interface NapiSandboxBuilderSetters {
   volume(guest: string, configure: (b: any) => any): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   patch(configure: (b: any) => any): this;
-  build(): Promise<string>;
+  build(): Promise<NapiSandboxConfig>;
 }
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
@@ -734,6 +737,7 @@ export interface NapiNetworkBuilder {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  policy(policy: NetworkPolicy | NapiNetworkPolicyBuilder): this;
   policyJson(json: string): this;
   policyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
   dns(configure: (b: NapiDnsBuilder) => NapiDnsBuilder): this;
@@ -751,6 +755,7 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  build(): NetworkConfig;
 }
 
 export interface NapiInterfaceOverridesBuilder {

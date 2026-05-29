@@ -8,6 +8,7 @@ import {
   type NapiPullProgressStream,
   type NapiSandbox,
   type NapiSandboxBuilderSetters,
+  type NapiSandboxConfig,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFs } from "./fs.js";
@@ -46,6 +47,8 @@ import { SandboxSsh } from "./ssh.js";
 // {...}` type alias would lose the override on every chained `this`
 // return, leaving `b.image(...).create()` inferred as
 // `Promise<NapiSandbox>`.
+export type SandboxConfig = NapiSandboxConfig;
+
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
   createDetached(): Promise<Sandbox>;
@@ -280,9 +283,9 @@ export class Sandbox implements AsyncDisposable {
    * The full configuration this sandbox was created with — image, cpus,
    * memory, env, mounts, etc. The shape mirrors `SandboxBuilder.build()`.
    */
-  async config(): Promise<unknown> {
+  async config(): Promise<SandboxConfig> {
     const json = await withMappedErrors(() => this.inner.configJson());
-    return remapKeysToCamel(JSON.parse(json));
+    return remapKeysToCamel(JSON.parse(json)) as SandboxConfig;
   }
 
   // -- logs ---------------------------------------------------------------

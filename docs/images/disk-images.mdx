@@ -20,7 +20,7 @@ Use disk images when you need a pre-built VM template, a custom kernel configura
 
 ## Usage
 
-When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox auto-detects the format. For ambiguous cases, specify the format and filesystem type explicitly.
+When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox auto-detects the format. For disk-image roots, rename ambiguous files with one of those extensions and set the filesystem type when auto-detection needs a hint.
 
 <CodeGroup>
 ```rust Rust
@@ -34,7 +34,7 @@ let sb = Sandbox::builder("custom-vm")
     .create()
     .await?;
 
-// Explicit
+// Explicit filesystem type
 let sb2 = Sandbox::builder("custom-vm")
     .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
     .cpus(1)
@@ -53,14 +53,9 @@ await using sb = await Sandbox.builder("custom-vm")
     .memory(2048)
     .create();
 
-// Explicit format / fstype via a RootfsSource literal
+// Explicit filesystem type via the ImageBuilder
 await using sb2 = await Sandbox.builder("custom-vm")
-    .image({
-        kind: "disk",
-        path: "./alpine.raw",
-        format: "raw",
-        fstype: "ext4",
-    })
+    .imageWith((i) => i.disk("./alpine.raw").fstype("ext4"))
     .cpus(1)
     .memory(512)
     .create();

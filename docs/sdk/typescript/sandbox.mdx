@@ -154,16 +154,6 @@ Sandbox name. Names are limited to 128 UTF-8 bytes.
 
 ---
 
-#### config
-
-```typescript
-readonly config: Readonly<SandboxConfig>
-```
-
-The frozen configuration the sandbox was built with.
-
----
-
 #### ownsLifecycle
 
 ```typescript
@@ -241,6 +231,16 @@ Get a point-in-time snapshot of the sandbox's resource usage.
 | Type | Description |
 |------|-------------|
 | [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
+
+---
+
+#### config()
+
+```typescript
+config(): Promise<SandboxConfig>
+```
+
+Get the configuration the sandbox was built with.
 
 ---
 
@@ -588,7 +588,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
 | `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
-| `build(): Promise<SandboxConfig>` | Materialize without booting |
+| `build(): Promise<SandboxConfig>` | Materialize without booting. Consumes the builder |
 | `create(): Promise<Sandbox>` | Build and boot in attached mode |
 | `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
 | `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
@@ -713,7 +713,7 @@ Async iterable creation handle returned by `Sandbox.builder(name).createWithPull
 
 ### SandboxConfig
 
-Frozen configuration object — produced by `SandboxBuilder.build()` and exposed as the `config` property on a `Sandbox`. You generally should not construct this by hand; use the builder.
+Configuration object produced by `SandboxBuilder.build()` and returned by `sandbox.config()`. You generally should not construct this by hand; use the builder.
 
 | Field | Type | Description |
 |-------|------|-------------|

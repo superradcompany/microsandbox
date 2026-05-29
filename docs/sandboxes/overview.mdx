@@ -417,39 +417,46 @@ msb create private.registry.io/org/app:v1 \
 
 ## Config inspection
 
-Build or inspect a sandbox configuration. Rust, TypeScript, and Python can build a config before boot; Go exposes the persisted config after creation through `SandboxHandle.ConfigJSON()`.
+Build or inspect a sandbox configuration. Rust and TypeScript can build a config before boot; Python and Go expose the persisted config after creation.
 
 <CodeGroup>
 ```rust Rust
 let config = Sandbox::builder("preview")
     .image("python")
     .memory(1024)
-    .build()?;
+    .build()
+    .await?;
 
 println!("{}", serde_json::to_string_pretty(&config)?);
 let sb = Sandbox::create(config).await?;
 ```
 
 ```typescript TypeScript
-const builder = Sandbox.builder("preview").image("python").memory(1024);
-const config = builder.build();
+const config = await Sandbox.builder("preview")
+    .image("python")
+    .memory(1024)
+    .build();
 
 console.log(JSON.stringify(config, null, 2));
-const sb = await builder.create();
+const sb = await Sandbox.builder("preview")
+    .image("python")
+    .memory(1024)
+    .create();
 ```
 
 ```python Python
 import json
 from microsandbox import Sandbox
 
-config = Sandbox.build_config(
+sb = await Sandbox.create(
     "preview",
     image="python",
     memory=1024,
 )
+handle = await Sandbox.get("preview")
+config = json.loads(handle.config_json)
 
 print(json.dumps(config, indent=2))
-sb = await Sandbox.create(**config)
 ```
 
 ```go Go

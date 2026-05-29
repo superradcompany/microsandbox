@@ -144,7 +144,7 @@ sb, err := m.CreateSandbox(ctx, "sandbox",
 
 </CodeGroup>
 
-### Programmable network layer <sup><sup>coming soon</sup></sup>
+### Programmable network layer
 
 Every packet leaving a sandbox passes through a networking stack controlled entirely from the host side, where policy is enforced at the IP, DNS, or HTTP level. From inside the sandbox it looks like a normal network interface, but on the host side you decide what gets through.
 
@@ -153,11 +153,14 @@ There's no underlying host network to bridge to, no rules to circumvent, and no 
 <CodeGroup>
 
 ```rust Rust
+let policy = NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e.allow_domains(["api.openai.com", "pypi.org"]))
+    .build()?;
+
 let sb = Sandbox::builder("sandbox")
     .image("python")
-    .network(|n| n
-        .policy(NetworkPolicy::allowlist(["api.openai.com", "pypi.org"]))
-    )
+    .network(|n| n.policy(policy))
     .create()
     .await?;
 ```
@@ -347,7 +350,7 @@ for i := range workers {
 ```
 
 ```bash CLI
-msb run --name baseline --detach python -- sleep 3600
+msb run --name baseline --detach python
 msb exec baseline -- pip install -r requirements.txt
 msb stop baseline
 
@@ -355,7 +358,7 @@ msb snapshot create after-pip-install --from baseline
 
 # Boot 10 workers from the snapshot
 for i in $(seq 1 10); do
-    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
+    msb run --name worker-$i --detach --snapshot after-pip-install
 done
 ```
 
