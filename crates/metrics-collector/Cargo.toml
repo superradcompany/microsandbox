@@ -18,6 +18,8 @@ path = "bin/main.rs"
 [dependencies]
 # Shared-memory primitives — the read source for every tick.
 microsandbox-metrics = { version = "0.5.2", path = "../metrics" }
+# ENOENT detection on shm_open failures.
+libc.workspace = true
 # Async runtime + primitives (broadcast, mpsc, JoinSet, time).
 tokio = { workspace = true }
 # BoxFuture, StreamExt — used by the MetricsExporter trait + worker.

@@ -3276,6 +3276,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "libc",
  "microsandbox-metrics",
  "tempfile",
  "thiserror 2.0.18",
