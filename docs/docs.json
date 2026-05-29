@@ -62,6 +62,13 @@
             ]
           },
           {
+            "group": "Observability",
+            "icon": "gauge",
+            "pages": [
+              "observability/msb-metrics"
+            ]
+          },
+          {
             "group": "Images",
             "icon": "layer-group",
             "pages": [

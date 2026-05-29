@@ -1,4 +1,14 @@
-# `msb-metrics`
+---
+title: msb-metrics
+description: Sidecar binary that ships microsandbox metrics to OpenTelemetry-compatible backends
+icon: "gauge"
+---
+
+<Note>
+There are three ways to read sandbox metrics in microsandbox. This page is about **`msb-metrics`**, the sidecar binary that ships metrics to observability backends over OTLP.
+
+For one-shot inspection from the terminal, use the [`msb metrics`](/cli/sandbox-commands#msb-metrics) CLI command. For programmatic per-sandbox reads from application code, use [`Sandbox::metrics()`](/sandboxes/metrics). All three read the same shared-memory registry and can coexist.
+</Note>
 
 `msb-metrics` is a sibling-process metrics collector. It reads the
 microsandbox shared-memory registry on a fixed interval and ships
@@ -291,5 +301,7 @@ want a single series per sandbox name across restarts.
 
 ## See also
 
-- `docs/sandboxes/metrics.mdx` — per-sandbox `Sandbox::metrics()` read
-  API in the Rust SDK.
+- [`Sandbox::metrics()`](/sandboxes/metrics) — read metrics for a single
+  sandbox from application code (alternative to shipping via OTLP).
+- [`msb metrics`](/cli/sandbox-commands#msb-metrics) — one-shot CLI
+  inspection of current per-sandbox metrics.
