@@ -1,0 +1,84 @@
+---
+title: otel-collector
+description: Inspect msb-metrics output locally with the OpenTelemetry Collector
+icon: "laptop-code"
+---
+
+Run the upstream [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/)
+locally with a `debug` exporter to see exactly what `msb-metrics` is
+sending. Useful for development and for verifying metric names,
+attributes, and protocols before pointing at a real backend.
+
+<Steps>
+  <Step title="Install the collector">
+    Download `otelcol` (or `otelcol-contrib`) from the
+    [official releases](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+    or run via Docker.
+  </Step>
+
+  <Step title="Configure the OTLP receiver + debug exporter">
+    Save as `otel-collector.yaml`:
+
+    ```yaml
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    exporters:
+      debug:
+        verbosity: detailed
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          exporters: [debug]
+    ```
+  </Step>
+
+  <Step title="Start the collector">
+    ```sh
+    otelcol --config=otel-collector.yaml
+    ```
+  </Step>
+
+  <Step title="Point msb-metrics at it">
+    ```sh
+    msb-metrics otel --endpoint=http://localhost:4317 --log-level=debug
+    ```
+
+    Boot a sandbox (`msb run alpine`) and watch metrics scroll past in
+    the otel-collector log. You should see records like
+    `microsandbox.cpu.utilization` with the configured resource and
+    identity attributes attached.
+  </Step>
+</Steps>
+
+<Note>
+The `debug` exporter replaced the older `logging` exporter in
+otel-collector v0.111.0. If your installation pre-dates that, use
+`exporters.logging` instead.
+</Note>
+
+## Verbosity levels
+
+The `verbosity` field controls how much detail the debug exporter
+prints:
+
+| Level | Output |
+|---|---|
+| `basic` (default) | one summary line per export |
+| `normal` | summary plus high-level metric names |
+| `detailed` | full datapoint values and all attributes |
+
+Use `detailed` while verifying that attributes and units are correct;
+drop to `basic` once you're confident the pipeline works.
+
+## Reference
+
+- [otel-collector debug exporter README](https://github.com/open-telemetry/opentelemetry-collector/blob/main/exporter/debugexporter/README.md)
+- [Collector configuration reference](https://opentelemetry.io/docs/collector/configuration/)

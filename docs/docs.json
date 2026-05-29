@@ -69,10 +69,11 @@
                 "group": "Metrics Collection",
                 "icon": "gauge",
                 "pages": [
-                  "observability/metrics-collection/overview",
-                  "observability/metrics-collection/reference",
-                  "observability/metrics-collection/providers",
-                  "observability/metrics-collection/operations"
+                  "observability/metrics-collection/msb-metrics",
+                  "observability/metrics-collection/grafana-cloud",
+                  "observability/metrics-collection/grafana-alloy",
+                  "observability/metrics-collection/otel-collector",
+                  "observability/metrics-collection/datadog"
                 ]
               }
             ]

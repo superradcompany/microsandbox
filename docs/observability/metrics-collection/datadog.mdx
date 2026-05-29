@@ -1,0 +1,66 @@
+---
+title: Datadog
+description: Ship msb-metrics output to Datadog via the Datadog Agent's OTLP receiver
+icon: "dog"
+---
+
+The recommended path is to point `msb-metrics` at the Datadog Agent
+with OTLP ingestion enabled. The agent handles temporality conversion,
+metric translation, and shipping to Datadog's backend.
+
+<Steps>
+  <Step title="Enable OTLP on the Datadog Agent">
+    Edit `datadog.yaml` to enable the OTLP receiver on standard ports:
+
+    ```yaml
+    otlp_config:
+      receiver:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    ```
+
+    Restart the agent.
+  </Step>
+
+  <Step title="Point msb-metrics at the agent">
+    ```sh
+    msb-metrics otel --endpoint=http://localhost:4317
+    ```
+  </Step>
+
+  <Step title="Verify">
+    Boot a sandbox and open Datadog → **Metrics → Explorer**. Query
+    `microsandbox.cpu.utilization`. Sandbox identity (`sandbox.name`,
+    `sandbox.id`) and any resource attributes (`service.name`, etc.)
+    appear as tags.
+  </Step>
+</Steps>
+
+## Direct OTLP intake: not supported out of the box
+
+Datadog also exposes a direct OTLP HTTP intake at
+`https://otlp.datadoghq.com/v1/metrics` (region-specific). It avoids
+the agent but has a hard requirement that **`msb-metrics` does not
+currently satisfy**:
+
+<Warning>
+The Datadog OTLP metrics intake [accepts only **delta** temporality](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest/metrics/).
+`msb-metrics` emits gauges with cumulative temporality (the upstream
+OTel default for the SDK we use). Sending our output directly will
+produce errors at the intake.
+
+If you need direct intake, put an
+[otel-collector](/observability/metrics-collection/otel-collector)
+with the `cumulativetodelta` processor between `msb-metrics` and
+Datadog. Or stick with the agent path above, which converts temporality
+for you.
+</Warning>
+
+## Reference
+
+- [Datadog OTLP Ingestion by the Agent](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest_in_the_agent/)
+- [Datadog OTLP Metrics Intake (direct)](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest/metrics/)
+- [`cumulativetodelta` processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/cumulativetodeltaprocessor)
