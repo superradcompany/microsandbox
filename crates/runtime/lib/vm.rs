@@ -9,7 +9,7 @@ use std::io::Write;
 use std::num::NonZero;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
@@ -236,6 +236,12 @@ struct StartupInfo {
     pid: u32,
 }
 
+/// Shared bind identity map registration for user-volume passthrough mounts.
+struct BindIdentityMapRegistration {
+    handle: Option<BindIdentityMapHandle>,
+    mount_count: usize,
+}
+
 #[cfg(feature = "net")]
 type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle;
 
@@ -252,7 +258,7 @@ type VmBuildOutput = (
     msb_krun::Vm,
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
-    Vec<BindIdentityMapHandle>,
+    BindIdentityMapRegistration,
 );
 
 //--------------------------------------------------------------------------------------------------
@@ -481,7 +487,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         },
         tokio_rt.handle().clone(),
     );
-    let (vm, _network_termination_handle, network_metrics_handle, bind_identity_maps) =
+    let (vm, _network_termination_handle, network_metrics_handle, bind_identity_map) =
         match build_result {
             Ok(vm) => vm,
             Err(e) => {
@@ -498,7 +504,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 return Err(e);
             }
         };
-    relay = relay.with_bind_identity_maps(bind_identity_maps);
+    relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let exit_handle = vm.exit_handle();
 
     #[cfg(feature = "net")]
@@ -652,7 +658,10 @@ fn build_vm(
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
-    let mut bind_identity_maps = Vec::new();
+    let mut bind_identity_map = BindIdentityMapRegistration {
+        handle: None,
+        mount_count: 0,
+    };
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
@@ -770,20 +779,15 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
-        let bind_identity_map = if matches!(parsed.stat_virtualization, StatVirtualization::Off) {
-            None
-        } else {
-            let handle = Arc::new(std::sync::OnceLock::new());
-            bind_identity_maps.push(Arc::clone(&handle));
-            Some(handle)
-        };
+        let mount_bind_identity_map =
+            bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
         let cfg = PassthroughConfig {
             root_dir: PathBuf::from(parsed.host_path),
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
-            bind_identity_map,
+            bind_identity_map: mount_bind_identity_map,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -905,7 +909,7 @@ fn build_vm(
         vm,
         network_termination_handle,
         network_metrics_handle,
-        bind_identity_maps,
+        bind_identity_map,
     ))
 }
 
@@ -953,6 +957,21 @@ fn release_metrics_slot(handoff: Option<&MetricsSlotHandoff>, mode: ReleaseMode)
     if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
         let _ = reg.release(handoff.slot, handoff.generation, mode);
     }
+}
+
+fn bind_identity_map_for_mount(
+    registration: &mut BindIdentityMapRegistration,
+    stat_virtualization: StatVirtualization,
+) -> Option<BindIdentityMapHandle> {
+    if matches!(stat_virtualization, StatVirtualization::Off) {
+        return None;
+    }
+
+    registration.mount_count += 1;
+    let handle = registration
+        .handle
+        .get_or_insert_with(|| Arc::new(OnceLock::new()));
+    Some(Arc::clone(handle))
 }
 
 /// Set up host log capture.
@@ -1301,9 +1320,11 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HostPermissions, StatVirtualization, append_block_root_env, parse_mount_spec,
-        prepend_scripts_path, validate_disk_format,
+        BindIdentityMapRegistration, HostPermissions, StatVirtualization, append_block_root_env,
+        bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path, validate_disk_format,
     };
+
+    use std::sync::Arc;
 
     #[test]
     fn test_parse_mount_spec_minimal() {
@@ -1391,6 +1412,24 @@ mod tests {
     fn test_parse_mount_spec_rejects_unsupported_flags() {
         let err = parse_mount_spec("foo:/host:exec").unwrap_err();
         assert!(err.contains("unsupported mount option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_bind_identity_map_registration_shares_handle_for_virtualized_mounts() {
+        let mut registration = BindIdentityMapRegistration {
+            handle: None,
+            mount_count: 0,
+        };
+
+        let first =
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict).unwrap();
+        let second =
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed).unwrap();
+        let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(off.is_none());
+        assert_eq!(registration.mount_count, 2);
     }
 
     #[test]

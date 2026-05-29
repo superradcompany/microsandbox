@@ -197,10 +197,29 @@ pub fn encode_to_buf(msg: &Message, buf: &mut Vec<u8>) -> ProtocolResult<()> {
 ///
 /// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
 pub fn try_decode_from_buf(buf: &mut Vec<u8>) -> ProtocolResult<Option<Message>> {
-    match try_decode_raw_from_buf(buf)? {
-        Some(frame) => Ok(Some(raw_frame_to_message(frame)?)),
-        None => Ok(None),
+    if buf.len() < 4 {
+        return Ok(None);
     }
+
+    let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+
+    let frame_len = frame_len as usize;
+    let total = 4 + frame_len;
+
+    if buf.len() < total {
+        return Ok(None);
+    }
+
+    let msg = decode_message_frame(&buf[..total])?;
+    buf.drain(..total);
+    Ok(Some(msg))
 }
 
 /// Reads a length-prefixed message from the given reader.
@@ -230,6 +249,42 @@ pub fn raw_frame_to_message(frame: RawFrame) -> ProtocolResult<Message> {
     let mut msg: Message = ciborium::from_reader(&frame.body[..])?;
     msg.id = frame.id;
     msg.flags = frame.flags;
+    Ok(msg)
+}
+
+/// Decodes one complete length-prefixed frame from a borrowed byte slice.
+///
+/// The input must include the 4-byte length prefix, frame header, and CBOR body.
+/// The slice is not consumed or copied.
+pub fn decode_message_frame(frame: &[u8]) -> ProtocolResult<Message> {
+    if frame.len() < 4 {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+
+    let frame_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+
+    let frame_len = frame_len as usize;
+    let total = 4 + frame_len;
+    if frame.len() < total {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+
+    if frame_len < FRAME_HEADER_SIZE {
+        return Err(ProtocolError::FrameTooShort {
+            size: frame_len as u32,
+            min: FRAME_HEADER_SIZE as u32,
+        });
+    }
+
+    let mut msg: Message = ciborium::from_reader(&frame[4 + FRAME_HEADER_SIZE..total])?;
+    msg.id = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
+    msg.flags = frame[8];
     Ok(msg)
 }
 
@@ -327,6 +382,35 @@ mod tests {
         let payload: ExecExited = decoded.payload().unwrap();
         assert_eq!(payload.code, 0);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_borrowed_decode_message_frame_roundtrip() {
+        use crate::exec::ExecExited;
+
+        let msg =
+            Message::with_payload(MessageType::ExecExited, 5, &ExecExited { code: 0 }).unwrap();
+
+        let mut buf = Vec::new();
+        encode_to_buf(&msg, &mut buf).unwrap();
+
+        let decoded = decode_message_frame(&buf).unwrap();
+        assert_eq!(decoded.t, MessageType::ExecExited);
+        assert_eq!(decoded.id, 5);
+        assert_eq!(decoded.flags, FLAG_TERMINAL);
+
+        let payload: ExecExited = decoded.payload().unwrap();
+        assert_eq!(payload.code, 0);
+        assert!(!buf.is_empty(), "borrowed decode must not consume input");
+    }
+
+    #[test]
+    fn test_borrowed_decode_message_frame_rejects_incomplete() {
+        let buf = vec![0, 0, 0, 10];
+        assert!(matches!(
+            decode_message_frame(&buf),
+            Err(ProtocolError::UnexpectedEof)
+        ));
     }
 
     #[test]

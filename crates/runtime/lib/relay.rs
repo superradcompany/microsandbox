@@ -102,8 +102,10 @@ pub struct AgentRelay {
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
-    /// User-volume bind identity maps to install before `core.ready`.
-    bind_identity_maps: Vec<BindIdentityMapHandle>,
+    /// Shared user-volume bind identity map to install before `core.ready`.
+    bind_identity_map: Option<BindIdentityMapHandle>,
+    /// Number of user-volume mounts that use the shared bind identity map.
+    bind_identity_map_mount_count: usize,
 }
 
 /// A frame extracted from the byte stream, kept as raw bytes for transparent
@@ -150,7 +152,8 @@ impl AgentRelay {
             sock_path: agent_sock_path.to_path_buf(),
             ready_frame: None,
             log_writer: None,
-            bind_identity_maps: Vec::new(),
+            bind_identity_map: None,
+            bind_identity_map_mount_count: 0,
         })
     }
 
@@ -169,13 +172,22 @@ impl AgentRelay {
         self
     }
 
-    /// Attach pending bind identity maps for the early init handshake.
-    pub fn with_bind_identity_maps(mut self, maps: Vec<BindIdentityMapHandle>) -> Self {
-        self.bind_identity_maps = maps;
+    /// Attach a pending bind identity map for the early init handshake.
+    pub fn with_bind_identity_map(
+        mut self,
+        handle: Option<BindIdentityMapHandle>,
+        mount_count: usize,
+    ) -> Self {
+        self.bind_identity_map = handle;
+        self.bind_identity_map_mount_count = mount_count;
         self
     }
 
-    fn install_bind_identity_maps(&self, resolved: InitResolved) -> RuntimeResult<()> {
+    fn install_bind_identity_map(&self, resolved: InitResolved) -> RuntimeResult<()> {
+        let Some(handle) = &self.bind_identity_map else {
+            return Ok(());
+        };
+
         let host_owner_uid = unsafe { libc::getuid() as u32 };
         let map = BindIdentityMap::new(
             host_owner_uid,
@@ -183,17 +195,15 @@ impl AgentRelay {
             resolved.default_user.gid,
         );
 
-        for handle in &self.bind_identity_maps {
-            handle
-                .set(map)
-                .map_err(|_| RuntimeError::Custom("bind identity map already installed".into()))?;
-        }
+        handle
+            .set(map)
+            .map_err(|_| RuntimeError::Custom("bind identity map already installed".into()))?;
 
         tracing::info!(
             host_owner_uid,
             guest_uid = resolved.default_user.uid,
             guest_gid = resolved.default_user.gid,
-            mounts = self.bind_identity_maps.len(),
+            mounts = self.bind_identity_map_mount_count,
             "agent relay: installed bind identity maps"
         );
 
@@ -232,18 +242,17 @@ impl AgentRelay {
 
             // Try to extract complete frames.
             while let Some(frame) = try_extract_frame(&mut buf) {
-                let raw_data = frame.data.to_vec();
-                let msg = decode_frame(raw_data.clone())?;
+                let msg = decode_frame(frame.data.as_ref())?;
 
                 if msg.t == MessageType::Ready {
-                    if !self.bind_identity_maps.is_empty() && !init_resolved {
+                    if self.bind_identity_map.is_some() && !init_resolved {
                         return Err(RuntimeError::Custom(
                             "agent relay: received core.ready before init context resolution"
                                 .into(),
                         ));
                     }
                     tracing::info!("agent relay: received core.ready from agentd");
-                    self.ready_frame = Some(raw_data);
+                    self.ready_frame = Some(frame.data.to_vec());
                     // Now that agentd has signalled readiness, mark the
                     // exec.log lifecycle. Doing this here (rather than
                     // in `with_log_writer`) means the marker only shows
@@ -260,7 +269,7 @@ impl AgentRelay {
                     let resolved: InitResolved = msg.payload().map_err(|e| {
                         RuntimeError::Custom(format!("decode init context payload: {e}"))
                     })?;
-                    self.install_bind_identity_maps(resolved)?;
+                    self.install_bind_identity_map(resolved)?;
                     init_resolved = true;
                     self.send_init_ack()?;
                     continue;
@@ -573,10 +582,8 @@ fn try_extract_frame(buf: &mut BytesMut) -> Option<RawFrame> {
 }
 
 /// Decode raw frame bytes into a protocol `Message`.
-fn decode_frame(mut buf: Vec<u8>) -> RuntimeResult<Message> {
-    codec::try_decode_from_buf(&mut buf)
-        .map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))?
-        .ok_or_else(|| RuntimeError::Custom("decode frame: incomplete frame".into()))
+fn decode_frame(buf: &[u8]) -> RuntimeResult<Message> {
+    codec::decode_message_frame(buf).map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))
 }
 
 /// Tap a guest-originated frame into `exec.log` if it belongs to the
@@ -586,7 +593,7 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
     // Decode the message envelope to learn the type. The full CBOR
     // decode is small (the envelope is a 3-field map; the heavy
     // payload is left as opaque bytes in `Message::p`).
-    let msg = match decode_frame(frame.data.to_vec()) {
+    let msg = match decode_frame(frame.data.as_ref()) {
         Ok(m) => m,
         Err(err) => {
             tracing::debug!(error = %err, "exec_log: skipping frame with decode error");
@@ -882,7 +889,7 @@ async fn client_reader_task(
         // so we decode the type to disambiguate.
         let mut is_exec_session_start = false;
         if is_session_start
-            && let Ok(msg) = decode_frame(frame.data.to_vec())
+            && let Ok(msg) = decode_frame(frame.data.as_ref())
             && msg.t == MessageType::ExecRequest
         {
             is_exec_session_start = true;
@@ -1052,7 +1059,7 @@ mod tests {
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
             .unwrap()
-            .with_bind_identity_maps(vec![Arc::clone(&handle)]);
+            .with_bind_identity_map(Some(Arc::clone(&handle)), 1);
 
         shared
             .tx_ring
@@ -1084,7 +1091,7 @@ mod tests {
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
             .unwrap()
-            .with_bind_identity_maps(vec![Arc::clone(&handle)]);
+            .with_bind_identity_map(Some(Arc::clone(&handle)), 2);
 
         shared
             .tx_ring
@@ -1122,5 +1129,35 @@ mod tests {
             ))
         );
         assert!(shared.rx_ring.pop().is_some(), "host should ack agentd");
+    }
+
+    #[tokio::test]
+    async fn wait_ready_skips_init_requirement_when_no_bind_map_pending() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sock_path = sock_dir.path().join("agent.sock");
+        let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+            .await
+            .unwrap()
+            .with_bind_identity_map(None, 0);
+
+        let ready = encoded_message(
+            MessageType::Ready,
+            &Ready {
+                boot_time_ns: 0,
+                init_time_ns: 0,
+                ready_time_ns: 0,
+            },
+        );
+        shared.tx_ring.push(ready.clone()).unwrap();
+        shared.tx_wake.wake();
+
+        relay.wait_ready().unwrap();
+
+        assert_eq!(relay.ready_frame, Some(ready));
+        assert!(
+            shared.rx_ring.pop().is_none(),
+            "no init context means no ack should be sent"
+        );
     }
 }
