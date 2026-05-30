@@ -48,22 +48,16 @@ metric translation, and shipping to Datadog's backend.
 ## Direct OTLP intake: not supported out of the box
 
 Datadog also exposes a direct OTLP HTTP intake at
-`https://otlp.datadoghq.com/v1/metrics` (region-specific). It avoids
-the agent but has a hard requirement that **`msb-metrics` does not
-currently satisfy**:
-
-<Warning>
-The Datadog OTLP metrics intake [accepts only **delta** temporality](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest/metrics/).
-`msb-metrics` emits gauges with cumulative temporality (the upstream
-OTel default for the SDK we use). Sending our output directly will
-produce errors at the intake.
+`https://otlp.datadoghq.com/v1/metrics` (region-specific) that avoids
+the agent. It [accepts only delta temporality](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest/metrics/),
+while `msb-metrics` emits cumulative, so sending output directly
+produces errors at the intake.
 
 If you need direct intake, put an
-[otel-collector](/recipes/metrics-backends/otel-collector)
-with the `cumulativetodelta` processor between `msb-metrics` and
-Datadog. Or stick with the agent path above, which converts temporality
+[otel-collector](/recipes/metrics-backends/otel-collector) with the
+`cumulativetodelta` processor between `msb-metrics` and Datadog.
+Otherwise, stick with the agent path above, which converts temporality
 for you.
-</Warning>
 
 ## Reference
 
