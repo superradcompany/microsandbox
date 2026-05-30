@@ -93,9 +93,9 @@ impl MetricsExporter for StdoutExporter {
                     batch.dropped_collection_count
                 ));
             }
-            let mut guard = sink.lock().map_err(|e| {
-                MetricsCollectorError::Custom(format!("stdout sink poisoned: {e}"))
-            })?;
+            let mut guard = sink
+                .lock()
+                .map_err(|e| MetricsCollectorError::Custom(format!("stdout sink poisoned: {e}")))?;
             guard
                 .write_all(buf.as_bytes())
                 .map_err(|e| MetricsCollectorError::Custom(format!("stdout write failed: {e}")))?;
@@ -168,8 +168,8 @@ mod tests {
 
     use chrono::TimeZone;
 
-    use crate::core::MetricsCollection;
     use crate::SandboxMetrics;
+    use crate::core::MetricsCollection;
     use std::time::Duration;
 
     fn snapshot(name: &str, id: i32) -> SandboxMetricSnapshot {

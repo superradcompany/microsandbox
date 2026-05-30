@@ -45,7 +45,6 @@ use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
     Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
 };
-use tonic::transport::{Certificate, ClientTlsConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
@@ -53,6 +52,7 @@ use opentelemetry_sdk::metrics::reader::MetricReader;
 use opentelemetry_sdk::metrics::{
     InstrumentKind, ManualReader, MetricResult, Pipeline, SdkMeterProvider, Temporality,
 };
+use tonic::transport::{Certificate, ClientTlsConfig};
 
 use crate::core::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
@@ -402,8 +402,8 @@ impl MetricsExporter for OtelExporter {
             match &result {
                 Ok(()) => {
                     self_instruments.exports_success.add(1, &[]);
-                    if let Ok(now) = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    if let Ok(now) =
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                     {
                         self_instruments
                             .last_success_timestamp

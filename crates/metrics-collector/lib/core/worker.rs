@@ -353,7 +353,9 @@ mod tests {
                 _batch: Arc<MetricsExportBatch>,
             ) -> futures::future::BoxFuture<'static, MetricsCollectorResult<()>> {
                 Box::pin(async {
-                    Err(MetricsCollectorError::Custom("simulated transport error".into()))
+                    Err(MetricsCollectorError::Custom(
+                        "simulated transport error".into(),
+                    ))
                 })
             }
         }

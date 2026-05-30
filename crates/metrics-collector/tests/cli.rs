@@ -22,7 +22,10 @@ fn help_lists_subcommands_and_global_flags() {
     assert!(out.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
     for sub in ["otel", "stdout"] {
-        assert!(stdout.contains(sub), "help should list the `{sub}` subcommand");
+        assert!(
+            stdout.contains(sub),
+            "help should list the `{sub}` subcommand"
+        );
     }
     for flag in ["--log-level", "--log-format"] {
         assert!(stdout.contains(flag), "expected `{flag}` in --help output");
