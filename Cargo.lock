@@ -3331,6 +3331,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
@@ -6724,13 +6725,16 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

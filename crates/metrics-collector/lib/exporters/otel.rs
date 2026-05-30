@@ -45,6 +45,7 @@ use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
     Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
 };
+use tonic::transport::{Certificate, ClientTlsConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
@@ -189,6 +190,7 @@ pub struct OtelExporterBuilder {
     endpoint: Option<String>,
     protocol: OtlpProtocol,
     compression: OtlpCompression,
+    ca_cert_pem: Option<Vec<u8>>,
     headers: Vec<(String, String)>,
     resource_attrs: Vec<KeyValue>,
     identity: IdentityAttributes,
@@ -226,6 +228,18 @@ impl OtelExporterBuilder {
     /// collector on the same host the CPU cost outweighs the gain.
     pub fn compression(mut self, compression: OtlpCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// PEM-encoded CA certificate to trust when negotiating TLS with the
+    /// OTLP endpoint. Added on top of webpki roots, so a corporate gateway
+    /// signed by a private CA works without disabling system trust.
+    ///
+    /// gRPC only — the `opentelemetry-otlp` 0.27 HTTP transport does not
+    /// expose a TLS configuration hook. Passing this with `--protocol=http`
+    /// is rejected at build time.
+    pub fn ca_cert_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.ca_cert_pem = Some(pem.into());
         self
     }
 
@@ -281,7 +295,12 @@ impl OtelExporterBuilder {
         })?;
 
         apply_headers_env(&self.headers);
-        let otlp_exporter = build_otlp_exporter(&endpoint, self.protocol, self.compression)?;
+        let otlp_exporter = build_otlp_exporter(
+            &endpoint,
+            self.protocol,
+            self.compression,
+            self.ca_cert_pem.as_deref(),
+        )?;
 
         let reader = SharedManualReader(Arc::new(
             ManualReader::builder()
@@ -375,32 +394,47 @@ fn build_otlp_exporter(
     endpoint: &str,
     protocol: OtlpProtocol,
     compression: OtlpCompression,
+    ca_cert_pem: Option<&[u8]>,
 ) -> MetricsCollectorResult<OtlpMetricExporter> {
-    let result = match (protocol, compression) {
-        (OtlpProtocol::Grpc, OtlpCompression::None) => OtlpMetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .with_temporality(Temporality::Cumulative)
-            .build(),
-        (OtlpProtocol::Grpc, OtlpCompression::Gzip) => OtlpMetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .with_compression(Compression::Gzip)
-            .with_temporality(Temporality::Cumulative)
-            .build(),
-        (OtlpProtocol::HttpProtobuf, OtlpCompression::None) => OtlpMetricExporter::builder()
+    if matches!(protocol, OtlpProtocol::HttpProtobuf) && ca_cert_pem.is_some() {
+        return Err(MetricsCollectorError::InvalidConfig(
+            "custom CA certificate is currently supported only with --protocol=grpc; \
+             opentelemetry-otlp 0.27 has no TLS configuration hook on the HTTP transport"
+                .into(),
+        ));
+    }
+    if matches!(protocol, OtlpProtocol::HttpProtobuf)
+        && matches!(compression, OtlpCompression::Gzip)
+    {
+        return Err(MetricsCollectorError::InvalidConfig(
+            "gzip compression is currently supported only with --protocol=grpc; \
+             opentelemetry-otlp 0.27 has no with_compression hook on the HTTP transport"
+                .into(),
+        ));
+    }
+    let result = match protocol {
+        OtlpProtocol::Grpc => {
+            let mut builder = OtlpMetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .with_temporality(Temporality::Cumulative);
+            if matches!(compression, OtlpCompression::Gzip) {
+                builder = builder.with_compression(Compression::Gzip);
+            }
+            if let Some(pem) = ca_cert_pem {
+                let tls = ClientTlsConfig::new()
+                    .with_webpki_roots()
+                    .ca_certificate(Certificate::from_pem(pem.to_vec()));
+                builder = builder.with_tls_config(tls);
+            }
+            builder.build()
+        }
+        OtlpProtocol::HttpProtobuf => OtlpMetricExporter::builder()
             .with_http()
             .with_endpoint(endpoint)
             .with_protocol(Protocol::HttpBinary)
             .with_temporality(Temporality::Cumulative)
             .build(),
-        (OtlpProtocol::HttpProtobuf, OtlpCompression::Gzip) => {
-            return Err(MetricsCollectorError::InvalidConfig(
-                "gzip compression is currently supported only with --protocol=grpc; \
-                 opentelemetry-otlp 0.27 has no with_compression hook on the HTTP transport"
-                    .into(),
-            ));
-        }
     };
     result.map_err(|e| MetricsCollectorError::Custom(format!("otel exporter build failed: {e}")))
 }

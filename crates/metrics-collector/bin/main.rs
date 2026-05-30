@@ -70,6 +70,13 @@ struct OtelArgs {
     #[arg(long, value_enum, default_value_t = OtlpCompressionArg::None)]
     compression: OtlpCompressionArg,
 
+    /// Path to a PEM-encoded CA certificate trusted when negotiating TLS
+    /// with the OTLP endpoint. Added on top of webpki roots, so a
+    /// corporate gateway signed by a private CA works without disabling
+    /// system trust. gRPC only; rejected at startup with `--protocol=http`.
+    #[arg(long, value_name = "PATH")]
+    ca_cert: Option<PathBuf>,
+
     /// OTLP request header. Repeat to add several. Format: `KEY=VALUE`.
     /// Use for authentication (e.g. `--header Authorization=Basic ...`,
     /// `--header api-key=...`).
@@ -206,6 +213,11 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
         .compression(args.compression.into())
         .emit_run_id(args.emit_run_id)
         .emit_pid(args.emit_pid);
+    if let Some(path) = args.ca_cert.as_deref() {
+        let pem = std::fs::read(path)
+            .with_context(|| format!("read --ca-cert from {}", path.display()))?;
+        exporter_builder = exporter_builder.ca_cert_pem(pem);
+    }
     for (k, v) in &args.headers {
         exporter_builder = exporter_builder.header(k, v);
     }

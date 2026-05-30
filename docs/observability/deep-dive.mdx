@@ -102,6 +102,7 @@ cardinality-billed backends.
 msb-metrics otel --endpoint=<URL>
                  [--protocol=grpc|http]
                  [--compression=none|gzip]
+                 [--ca-cert=<path>]
                  [--header=KEY=VALUE]...
                  [--resource=KEY=VALUE]...
                  [--emit-run-id] [--emit-pid]
@@ -117,6 +118,7 @@ msb-metrics otel --endpoint=<URL>
 | `--endpoint` | (required) | OTLP endpoint URL. |
 | `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). |
 | `--compression` | `none` | `gzip` or `none`. gRPC-only in `opentelemetry-otlp` 0.27; rejected at startup with `--protocol=http`. Meaningful bandwidth saving for direct provider gateways over public internet. |
+| `--ca-cert` | none | Path to a PEM-encoded CA certificate to trust when negotiating TLS. Added on top of webpki roots, so a corporate gateway signed by a private CA works without disabling system trust. gRPC only; rejected at startup with `--protocol=http`. |
 | `--header` | none | `KEY=VALUE`, repeatable. For auth (`Authorization`, `api-key`, etc.). Applied via `OTEL_EXPORTER_OTLP_HEADERS`. |
 | `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
 | `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |

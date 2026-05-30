@@ -51,6 +51,12 @@ opentelemetry-otlp = { version = "0.27", default-features = false, features = [
     "http-proto",
     "reqwest-blocking-client",
     "gzip-tonic",
+    "tls",
+    "tls-webpki-roots",
+] }
+tonic = { version = "0.12", default-features = false, features = [
+    "tls",
+    "tls-webpki-roots",
 ] }
 
 [dev-dependencies]

@@ -53,6 +53,7 @@ fn otel_help_lists_all_flags() {
         "--endpoint",
         "--protocol",
         "--compression",
+        "--ca-cert",
         "--header",
         "--resource",
         "--emit-run-id",
@@ -91,6 +92,24 @@ fn rejects_unknown_log_format() {
         .output()
         .expect("spawn with bad --log-format");
     assert!(!out.status.success(), "bad enum value should fail");
+}
+
+#[test]
+fn missing_ca_cert_file_errors_cleanly() {
+    let out = Command::new(bin())
+        .args([
+            "otel",
+            "--endpoint=https://127.0.0.1:65535",
+            "--ca-cert=/nonexistent/path/to/ca.pem",
+        ])
+        .output()
+        .expect("spawn msb-metrics with bad --ca-cert");
+    assert!(!out.status.success(), "missing ca-cert file should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--ca-cert") || stderr.contains("ca.pem"),
+        "error should mention --ca-cert or the bad path, got: {stderr}"
+    );
 }
 
 #[test]
