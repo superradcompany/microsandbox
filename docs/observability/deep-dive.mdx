@@ -62,6 +62,25 @@ the export stream. Downstream the series goes stale (no fresh
 datapoints), which is the standard "host gone" signal in Prometheus and
 most TSDBs. There is no explicit "stopped" event.
 
+### Failed exports back off exponentially
+
+When an export call fails (timeout, transport error, backend returning
+a non-2xx) the per-exporter worker doubles the delay before the next
+scheduled flush attempt: `flush_interval`, then `2× flush_interval`,
+`4×`, up to a `32× flush_interval` cap. At the default 10s flush
+interval that's a worst case of ~5 minutes between retries during a
+sustained outage, instead of hammering the backend every 10s.
+
+Explicit `RunningCollector::flush()` calls (and an embedding
+application's equivalent) bypass the backoff gate, so a caller that
+knows the upstream has recovered can force-retry immediately. On the
+first successful export the worker logs `metrics exporter recovered`
+at INFO and the multiplier resets to 1×.
+
+Data still accumulates in the buffer (subject to `--max-buffered`) while
+backoff is in effect, so a backend that returns within the buffer
+window loses no datapoints.
+
 ### Cumulative counters reset across sandbox restarts
 
 Disk and network byte fields are cumulative from the sandbox process's

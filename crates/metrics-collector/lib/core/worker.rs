@@ -15,7 +15,11 @@
 //!
 //! All buffer state is task-local — no `Mutex` required.
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::sync::broadcast;
 
@@ -37,7 +41,22 @@ pub(crate) struct ExporterWorker {
     dropped_count: u64,
     data_rx: broadcast::Receiver<Arc<MetricsCollection>>,
     flush_signal_rx: broadcast::Receiver<()>,
+    /// Number of consecutive failed exports since the last success.
+    /// Drives the exponential-backoff delay between retries.
+    consecutive_failures: u32,
+    /// When set, scheduled flushes are skipped until this deadline passes.
+    /// Cleared on the next successful export. Driver-triggered flushes
+    /// (explicit `RunningCollector::flush()`) bypass this gate so a
+    /// caller can force-retry after fixing the upstream problem.
+    next_retry_after: Option<Instant>,
 }
+
+/// Cap on the exponential backoff multiplier. With base = `flush_interval`,
+/// the worst-case delay between retries is `flush_interval × 2^MAX`. At
+/// the default 10s flush interval that's ~5 minutes, which is long enough
+/// to ride out a typical backend outage without hammering and short
+/// enough that recovery is visible to operators.
+const MAX_BACKOFF_EXP: u32 = 5;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -59,6 +78,8 @@ impl ExporterWorker {
             dropped_count: 0,
             data_rx,
             flush_signal_rx,
+            consecutive_failures: 0,
+            next_retry_after: None,
         }
     }
 
@@ -82,10 +103,18 @@ impl ExporterWorker {
                     Err(RecvError::Closed) => break,
                 },
                 signal = self.flush_signal_rx.recv() => match signal {
+                    // Explicit driver-triggered flushes bypass the backoff
+                    // gate; the caller's intent is "try right now, the
+                    // upstream may have recovered".
                     Ok(()) | Err(RecvError::Lagged(_)) => self.flush_now().await,
                     Err(RecvError::Closed) => break,
                 },
-                _ = flush_ticker.tick() => self.flush_now().await,
+                _ = flush_ticker.tick() => {
+                    if self.scheduled_flush_blocked_by_backoff() {
+                        continue;
+                    }
+                    self.flush_now().await;
+                }
             }
         }
 
@@ -102,13 +131,46 @@ impl ExporterWorker {
     /// driver-triggered flushes.
     async fn flush_now(&mut self) {
         self.drain_pending();
-        if let Err(error) = self.run_export().await {
-            match self.config.error_policy {
-                MetricsErrorPolicy::LogAndContinue => {
-                    tracing::warn!(%error, "metrics exporter export failed");
+        match self.run_export().await {
+            Ok(()) => {
+                if self.consecutive_failures > 0 || self.next_retry_after.is_some() {
+                    tracing::info!("metrics exporter recovered; resetting backoff");
                 }
+                self.consecutive_failures = 0;
+                self.next_retry_after = None;
             }
+            Err(error) => match self.config.error_policy {
+                MetricsErrorPolicy::LogAndContinue => {
+                    self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                    self.schedule_next_retry();
+                    tracing::warn!(
+                        consecutive_failures = self.consecutive_failures,
+                        %error,
+                        "metrics exporter export failed; backing off"
+                    );
+                }
+            },
         }
+    }
+
+    /// Decide whether a scheduled-flush tick should skip this round because
+    /// the backoff deadline hasn't elapsed yet. Data still accumulates in
+    /// the buffer (subject to the drop-oldest cap) until either an
+    /// explicit driver flush succeeds or the next eligible scheduled tick.
+    fn scheduled_flush_blocked_by_backoff(&self) -> bool {
+        self.next_retry_after
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    /// Compute and stash the next-retry deadline using exponential
+    /// backoff capped at `flush_interval × 2^MAX_BACKOFF_EXP`. The first
+    /// failure waits `2 × flush_interval` (so the next scheduled tick is
+    /// just skipped); subsequent failures double each time.
+    fn schedule_next_retry(&mut self) {
+        let exp = (self.consecutive_failures.saturating_sub(1)).min(MAX_BACKOFF_EXP);
+        let mult = 1u32 << exp;
+        let delay = self.config.flush_interval.saturating_mul(mult);
+        self.next_retry_after = Some(Instant::now() + delay);
     }
 
     /// Append a collection to the local buffer, evicting the oldest entry
@@ -229,6 +291,8 @@ mod tests {
             dropped_count: 0,
             data_rx,
             flush_signal_rx: flush_rx,
+            consecutive_failures: 0,
+            next_retry_after: None,
         }
     }
 
@@ -248,6 +312,87 @@ mod tests {
             .iter()
             .map(|c| c.sandboxes[0].sandbox_id)
             .collect()
+    }
+
+    fn worker_with_flush_interval(interval: Duration) -> ExporterWorker {
+        let mut w = worker_with_cap(8);
+        w.config.flush_interval = interval;
+        w
+    }
+
+    #[test]
+    fn schedule_next_retry_uses_capped_exponential_backoff() {
+        let mut worker = worker_with_flush_interval(Duration::from_secs(1));
+        // First failure → 1×.
+        worker.consecutive_failures = 1;
+        worker.schedule_next_retry();
+        let d = worker.next_retry_after.unwrap() - Instant::now();
+        assert!(d <= Duration::from_secs(1) + Duration::from_millis(10));
+        assert!(d > Duration::from_millis(990));
+
+        // Sixth failure → 2^5 = 32×.
+        worker.consecutive_failures = 6;
+        worker.schedule_next_retry();
+        let d = worker.next_retry_after.unwrap() - Instant::now();
+        assert!(d <= Duration::from_secs(32) + Duration::from_millis(10));
+        assert!(d > Duration::from_secs(31));
+
+        // Tenth failure stays at the same cap.
+        worker.consecutive_failures = 10;
+        worker.schedule_next_retry();
+        let d = worker.next_retry_after.unwrap() - Instant::now();
+        assert!(d <= Duration::from_secs(32) + Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn flush_now_increments_failures_and_arms_backoff_on_error() {
+        struct AlwaysFail;
+        impl MetricsExporter for AlwaysFail {
+            fn export(
+                &self,
+                _batch: Arc<MetricsExportBatch>,
+            ) -> futures::future::BoxFuture<'static, MetricsCollectorResult<()>> {
+                Box::pin(async {
+                    Err(MetricsCollectorError::Custom("simulated transport error".into()))
+                })
+            }
+        }
+        let mut worker = worker_with_flush_interval(Duration::from_secs(1));
+        worker.exporter = Arc::new(AlwaysFail);
+        worker.buffer_collection(collection(1));
+
+        worker.flush_now().await;
+        assert_eq!(worker.consecutive_failures, 1);
+        assert!(worker.next_retry_after.is_some());
+        // Batch is restored to the buffer front for the next attempt.
+        assert_eq!(sandbox_ids(&worker), vec![1]);
+
+        worker.flush_now().await;
+        assert_eq!(worker.consecutive_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn flush_now_resets_backoff_on_success() {
+        let mut worker = worker_with_flush_interval(Duration::from_secs(1));
+        worker.consecutive_failures = 3;
+        worker.next_retry_after = Some(Instant::now() + Duration::from_secs(10));
+        worker.buffer_collection(collection(1));
+
+        worker.flush_now().await; // NoopExporter returns Ok.
+
+        assert_eq!(worker.consecutive_failures, 0);
+        assert!(worker.next_retry_after.is_none());
+    }
+
+    #[test]
+    fn scheduled_flush_blocked_by_backoff_respects_deadline() {
+        let mut worker = worker_with_flush_interval(Duration::from_secs(10));
+        assert!(!worker.scheduled_flush_blocked_by_backoff());
+        worker.next_retry_after = Some(Instant::now() + Duration::from_secs(5));
+        assert!(worker.scheduled_flush_blocked_by_backoff());
+        // Past the deadline → flush is no longer blocked.
+        worker.next_retry_after = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!worker.scheduled_flush_blocked_by_backoff());
     }
 
     #[test]
