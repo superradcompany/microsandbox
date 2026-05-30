@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! 2026-05-30T00:48:22.713Z sandbox=devbox id=33 cpu=0.000086 \
-//!     mem=14.04MiB/512.00MiB disk_r=88.74MiB disk_w=614.20MiB \
+//!     mem=14.0 MiB / 512.0 MiB disk_r=88.7 MiB disk_w=614.2 MiB \
 //!     net_rx=48.00MiB net_tx=274.85KiB uptime=2345m3s
 //! ```
 //!
@@ -20,6 +20,7 @@ use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
+use microsandbox_utils::format::{format_bytes, format_duration};
 
 use crate::core::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
@@ -124,37 +125,20 @@ impl MetricsExporter for StdoutExporter {
 fn format_snapshot(ts: &str, s: &SandboxMetricSnapshot) -> String {
     let m = &s.metrics;
     format!(
-        "{ts} sandbox={name} id={id} cpu={cpu:.6} mem={mem}/{mem_lim} \
-         disk_r={dr} disk_w={dw} net_rx={nrx} net_tx={ntx} uptime={uptime:.1}s",
+        "{ts} sandbox={name} id={id} cpu={cpu:.6} mem={mem} / {mem_lim} \
+         disk_r={dr} disk_w={dw} net_rx={nrx} net_tx={ntx} uptime={uptime}",
         ts = ts,
         name = s.name,
         id = s.sandbox_id,
         cpu = f64::from(m.cpu_percent) / 100.0,
-        mem = humansize(m.memory_bytes),
-        mem_lim = humansize(m.memory_limit_bytes),
-        dr = humansize(m.disk_read_bytes),
-        dw = humansize(m.disk_write_bytes),
-        nrx = humansize(m.net_rx_bytes),
-        ntx = humansize(m.net_tx_bytes),
-        uptime = m.uptime.as_secs_f64(),
+        mem = format_bytes(m.memory_bytes),
+        mem_lim = format_bytes(m.memory_limit_bytes),
+        dr = format_bytes(m.disk_read_bytes),
+        dw = format_bytes(m.disk_write_bytes),
+        nrx = format_bytes(m.net_rx_bytes),
+        ntx = format_bytes(m.net_tx_bytes),
+        uptime = format_duration(m.uptime),
     )
-}
-
-/// 1024-based human size with two decimals. Matches what `msb metrics`
-/// renders, so output cross-references one-to-one with the CLI.
-fn humansize(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
-        format!("{:.2}GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2}MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2}KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes}B")
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -225,7 +209,7 @@ mod tests {
         assert!(lines[0].contains("sandbox=devbox"));
         assert!(lines[0].contains("id=33"));
         assert!(lines[0].contains("cpu=0.125000"));
-        assert!(lines[0].contains("mem=14.00MiB/512.00MiB"));
+        assert!(lines[0].contains("mem=14.0 MiB / 512.0 MiB"));
         assert!(lines[1].contains("sandbox=devenv"));
     }
 

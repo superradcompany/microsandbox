@@ -392,35 +392,10 @@ pub fn generate_name() -> String {
     format!("msb-{id:08x}")
 }
 
-/// Format a duration for display.
-pub fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else {
-        let mins = secs as u64 / 60;
-        let remaining = secs as u64 % 60;
-        format!("{mins}m{remaining}s")
-    }
-}
-
-/// Format a byte count with binary units.
-pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
+// Re-exports of the canonical formatters from `microsandbox-utils::format`
+// so existing `ui::format_bytes(...)` / `ui::format_duration(...)` call
+// sites keep working. New callers should prefer the utils path directly.
+pub use microsandbox_utils::format::{format_bytes, format_duration};
 
 /// Format a chrono DateTime for display.
 pub fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
