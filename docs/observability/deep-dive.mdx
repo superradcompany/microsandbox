@@ -54,15 +54,10 @@ throughput. The reason: each shm snapshot already carries an absolute
 value, and counter `add()` semantics would require us to track
 per-sandbox deltas across runs.
 
-### Stopped sandboxes
+The collector also emits its own operational series; see
+[Collector self-observability](#collector-self-observability) below.
 
-A sandbox that stops releases its shm slot. `msb-metrics` reads the
-active snapshot only, so a stopped sandbox simply stops appearing in
-the export stream. Downstream the series goes stale (no fresh
-datapoints), which is the standard "host gone" signal in Prometheus and
-most TSDBs. There is no explicit "stopped" event.
-
-### Collector self-observability
+## Collector self-observability
 
 `msb-metrics otel` ships its own operational metrics through the same
 OTLP pipeline as the per-sandbox series, so a user can confirm the
@@ -114,34 +109,6 @@ A few queries you'll want to wire up:
     ```
   </Accordion>
 </AccordionGroup>
-
-### Failed exports back off exponentially
-
-When an export call fails (timeout, transport error, backend returning
-a non-2xx) the per-exporter worker doubles the delay before the next
-scheduled flush attempt: `flush_interval`, then `2× flush_interval`,
-`4×`, up to a `32× flush_interval` cap. At the default 10s flush
-interval that's a worst case of ~5 minutes between retries during a
-sustained outage, instead of hammering the backend every 10s.
-
-Explicit `RunningCollector::flush()` calls (and an embedding
-application's equivalent) bypass the backoff gate, so a caller that
-knows the upstream has recovered can force-retry immediately. On the
-first successful export the worker logs `metrics exporter recovered`
-at INFO and the multiplier resets to 1×.
-
-Data still accumulates in the buffer (subject to `--max-buffered`) while
-backoff is in effect, so a backend that returns within the buffer
-window loses no datapoints.
-
-### Cumulative counters reset across sandbox restarts
-
-Disk and network byte fields are cumulative from the sandbox process's
-point of view. When a sandbox restarts, the runtime gets a fresh slot
-and the counters start from zero again. `rate()` is robust to this (it
-detects counter resets), but in the brief window spanning the restart
-a query may return a small negative interval before the next sample
-lands. This is normal counter-reset behavior, not a bug.
 
 ## Attributes
 
@@ -267,8 +234,36 @@ If an exporter's final export hangs, it's bounded by
 Failed exports are retried on the next flush; the failed batch is
 restored to the front of the buffer. If failures keep arriving, oldest
 collections drop first and the next successful export's
-`droppedCollectionCount` reports how many were lost. The collector
-itself does not crash.
+`droppedCollectionCount` reports how many were lost (and increments the
+[`microsandbox.collector.collections.dropped`](#collector-self-observability)
+counter). The collector itself does not crash.
+
+The worker uses capped exponential backoff between scheduled retries:
+`flush_interval`, then `2× flush_interval`, `4×`, up to a `32×` cap. At
+the default 10s flush interval that's a worst case of ~5 minutes
+between retries during a sustained outage, instead of hammering the
+backend every 10s. Explicit `RunningCollector::flush()` calls bypass
+the backoff gate, so a caller that knows the upstream has recovered
+can force-retry immediately. On the first successful export the worker
+logs `metrics exporter recovered` at INFO and the multiplier resets
+to 1×.
+
+## Stopped sandboxes
+
+A sandbox that stops releases its shm slot. `msb-metrics` reads the
+active snapshot only, so a stopped sandbox simply stops appearing in
+the export stream. Downstream the series goes stale (no fresh
+datapoints), which is the standard "host gone" signal in Prometheus and
+most TSDBs. There is no explicit "stopped" event.
+
+## Counter resets across sandbox restarts
+
+Disk and network byte fields are cumulative from the sandbox process's
+point of view. When a sandbox restarts, the runtime gets a fresh slot
+and the counters start from zero again. `rate()` is robust to this (it
+detects counter resets), but in the brief window spanning the restart
+a query may return a small negative interval before the next sample
+lands. This is normal counter-reset behavior, not a bug.
 
 ## Troubleshooting
 
