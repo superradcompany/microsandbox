@@ -39,7 +39,7 @@ fully-qualified name is `microsandbox.<suffix>`.
 
 | Suffix | Type | Unit | Notes |
 |---|---|---|---|
-| `cpu.utilization` | gauge | `1` (0.0–1.0) | Source is 0–100 percent; divided by 100 on emit. |
+| `cpu.utilization` | gauge | `1` (ratio) | Process CPU usage as vCPU-seconds per wall-second. A 2-vCPU sandbox at full load reports `2.0`. Divide by allocated vCPUs for a 0..1 fraction. |
 | `memory.usage` | gauge | `By` | Resident memory in bytes. |
 | `memory.limit` | gauge | `By` | Configured guest memory limit. |
 | `disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
@@ -53,6 +53,23 @@ cumulative value. Use `rate()` (PromQL, OTel-flavored Prom) for
 throughput. The reason: each shm snapshot already carries an absolute
 value, and counter `add()` semantics would require us to track
 per-sandbox deltas across runs.
+
+### Stopped sandboxes
+
+A sandbox that stops releases its shm slot. `msb-metrics` reads the
+active snapshot only, so a stopped sandbox simply stops appearing in
+the export stream. Downstream the series goes stale (no fresh
+datapoints), which is the standard "host gone" signal in Prometheus and
+most TSDBs. There is no explicit "stopped" event.
+
+### Cumulative counters reset across sandbox restarts
+
+Disk and network byte fields are cumulative from the sandbox process's
+point of view. When a sandbox restarts, the runtime gets a fresh slot
+and the counters start from zero again. `rate()` is robust to this (it
+detects counter resets), but in the brief window spanning the restart
+a query may return a small negative interval before the next sample
+lands. This is normal counter-reset behavior, not a bug.
 
 ## Attributes
 

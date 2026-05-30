@@ -3,7 +3,7 @@
 //!
 //! # Metric names
 //!
-//! - `microsandbox.cpu.utilization`     — gauge (0.0–1.0)
+//! - `microsandbox.cpu.utilization`     — gauge (vCPU-seconds per wall-second; can exceed 1.0)
 //! - `microsandbox.memory.usage`        — gauge (bytes)
 //! - `microsandbox.memory.limit`        — gauge (bytes)
 //! - `microsandbox.disk.bytes_read`     — gauge (cumulative bytes)
@@ -416,7 +416,11 @@ fn build_instruments(meter: &Meter) -> Instruments {
     Instruments {
         cpu_utilization: meter
             .f64_gauge("microsandbox.cpu.utilization")
-            .with_description("CPU utilization, 0.0–1.0 across all host CPUs")
+            .with_description(
+                "Process CPU usage as a ratio of vCPU-seconds per wall-second. \
+                 A 2-vCPU sandbox at full load reports 2.0; divide by allocated \
+                 vCPUs for a 0..1 fraction.",
+            )
             .with_unit("1")
             .build(),
         memory_usage: meter
