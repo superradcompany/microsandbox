@@ -40,7 +40,7 @@
 use std::sync::{Arc, Weak};
 
 use futures::future::BoxFuture;
-use opentelemetry::metrics::{Gauge, Meter, MeterProvider};
+use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
     Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
@@ -141,6 +141,18 @@ struct Instruments {
     uptime: Gauge<f64>,
 }
 
+/// Instruments describing the collector's own operation, shipped through
+/// the same OTLP pipeline so a user can query
+/// `rate(microsandbox_collector_exports_success_total[1m])` to confirm
+/// the sidecar is actually flowing.
+#[derive(Clone)]
+struct SelfInstruments {
+    exports_success: Counter<u64>,
+    exports_failure: Counter<u64>,
+    collections_dropped: Counter<u64>,
+    last_success_timestamp: Gauge<f64>,
+}
+
 /// OTLP exporter. Ships each export batch's snapshots to the configured
 /// endpoint via the OTel SDK + OTLP transport.
 ///
@@ -155,6 +167,7 @@ pub struct OtelExporter {
     reader: SharedManualReader,
     otlp: Arc<OtlpMetricExporter>,
     instruments: Instruments,
+    self_instruments: SelfInstruments,
     identity: IdentityAttributes,
 }
 
@@ -320,12 +333,14 @@ impl OtelExporterBuilder {
             .build();
         let meter = provider.meter_with_scope(scope);
         let instruments = build_instruments(&meter);
+        let self_instruments = build_self_instruments(&meter);
 
         Ok(OtelExporter {
             provider: Arc::new(provider),
             reader,
             otlp: Arc::new(otlp_exporter),
             instruments,
+            self_instruments,
             identity: self.identity,
         })
     }
@@ -341,11 +356,21 @@ impl MetricsExporter for OtelExporter {
         batch: Arc<MetricsExportBatch>,
     ) -> BoxFuture<'static, MetricsCollectorResult<()>> {
         let instruments = self.instruments.clone();
+        let self_instruments = self.self_instruments.clone();
         let reader = self.reader.clone();
         let otlp = self.otlp.clone();
         let identity = self.identity;
 
         Box::pin(async move {
+            // Self-observability: count drops surfaced from the worker
+            // buffer first, so even a fully-empty batch (no sandbox
+            // snapshots) still ships the drop counter.
+            if batch.dropped_collection_count > 0 {
+                self_instruments
+                    .collections_dropped
+                    .add(batch.dropped_collection_count, &[]);
+            }
+
             for collection in &batch.collections {
                 for snapshot in &collection.sandboxes {
                     let attrs = build_attributes(snapshot, &identity);
@@ -361,14 +386,34 @@ impl MetricsExporter for OtelExporter {
                 resource: Resource::empty(),
                 scope_metrics: Vec::new(),
             };
-            reader.collect(&mut rm).map_err(|e| {
+            let collect_result = reader.collect(&mut rm).map_err(|e| {
                 MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}"))
-            })?;
-            otlp.export(&mut rm).await.map_err(|e| {
-                MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
-            })?;
+            });
+            let result = match collect_result {
+                Ok(()) => otlp.export(&mut rm).await.map_err(|e| {
+                    MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
+                }),
+                Err(e) => Err(e),
+            };
 
-            Ok(())
+            // Record outcome after the transport call; the values ship on
+            // the next successful export. Cumulative counters preserve
+            // the total even if the current export failed.
+            match &result {
+                Ok(()) => {
+                    self_instruments.exports_success.add(1, &[]);
+                    if let Ok(now) = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                    {
+                        self_instruments
+                            .last_success_timestamp
+                            .record(now.as_secs_f64(), &[]);
+                    }
+                }
+                Err(_) => self_instruments.exports_failure.add(1, &[]),
+            }
+
+            result
         })
     }
 
@@ -484,6 +529,37 @@ fn hostname() -> Option<String> {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .ok()
+}
+
+/// Build the self-observability instruments shipped alongside the
+/// per-sandbox series. These describe what the collector itself is doing
+/// so a user can confirm the sidecar is actually flowing.
+fn build_self_instruments(meter: &Meter) -> SelfInstruments {
+    SelfInstruments {
+        exports_success: meter
+            .u64_counter("microsandbox.collector.exports.success")
+            .with_description("Successful OTLP exports since process start")
+            .with_unit("1")
+            .build(),
+        exports_failure: meter
+            .u64_counter("microsandbox.collector.exports.failure")
+            .with_description("Failed OTLP exports since process start")
+            .with_unit("1")
+            .build(),
+        collections_dropped: meter
+            .u64_counter("microsandbox.collector.collections.dropped")
+            .with_description(
+                "Collections dropped from the per-exporter buffer due to overflow \
+                 (drop-oldest, see --max-buffered)",
+            )
+            .with_unit("1")
+            .build(),
+        last_success_timestamp: meter
+            .f64_gauge("microsandbox.collector.last_success_timestamp")
+            .with_description("Unix epoch seconds at the last successful OTLP export")
+            .with_unit("s")
+            .build(),
+    }
 }
 
 /// Build the bundle of instruments from the meter.

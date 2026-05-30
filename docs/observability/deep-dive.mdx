@@ -62,6 +62,40 @@ the export stream. Downstream the series goes stale (no fresh
 datapoints), which is the standard "host gone" signal in Prometheus and
 most TSDBs. There is no explicit "stopped" event.
 
+### Collector self-observability
+
+`msb-metrics otel` ships its own operational metrics through the same
+OTLP pipeline as the per-sandbox series, so a user can confirm the
+sidecar is actually flowing using the same Prometheus / Grafana / Datadog
+queries the rest of their telemetry runs through:
+
+| Suffix | Type | Notes |
+|---|---|---|
+| `collector.exports.success` | counter | Cumulative successful OTLP exports since process start. |
+| `collector.exports.failure` | counter | Cumulative failed OTLP exports (timeouts, transport errors, non-2xx). |
+| `collector.collections.dropped` | counter | Collections evicted from the per-exporter buffer because the cap was hit (drop-oldest, see `--max-buffered`). |
+| `collector.last_success_timestamp` | gauge | Unix epoch seconds at the last successful export. `time() - microsandbox_collector_last_success_timestamp_seconds` is a sensible staleness alert source. |
+
+Useful PromQL:
+
+```promql
+# Are exports flowing? Non-zero means yes.
+rate(microsandbox_collector_exports_success_total[1m])
+
+# Failure ratio over the last 5 minutes.
+rate(microsandbox_collector_exports_failure_total[5m])
+  /
+clamp_min(rate(microsandbox_collector_exports_success_total[5m]) +
+          rate(microsandbox_collector_exports_failure_total[5m]), 1)
+
+# Staleness alert: no successful export in 5 minutes.
+time() - microsandbox_collector_last_success_timestamp_seconds > 300
+```
+
+The fully-qualified series are emitted by the same scope as the
+sandbox metrics (`otel_scope_name="microsandbox-metrics-collector"`,
+`otel_scope_version=<crate version>`).
+
 ### Failed exports back off exponentially
 
 When an export call fails (timeout, transport error, backend returning
