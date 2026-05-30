@@ -19,15 +19,19 @@ use microsandbox_filesystem::{
     StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
+use microsandbox_protocol::{
+    codec,
+    message::{Message, MessageType},
+};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::Serialize;
 
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
-use crate::heartbeat::HeartbeatReader;
+use crate::heartbeat::{self, HeartbeatReader};
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
-use crate::relay::AgentRelay;
+use crate::relay::{self, AgentRelay};
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -348,6 +352,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    // Heartbeats are per boot, while the runtime directory persists across starts.
+    heartbeat::clear_stale(&config.runtime_dir)?;
 
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
@@ -604,16 +610,31 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
         let idle_exit_handle = exit_handle.clone();
         let idle_reason = Arc::clone(&exit_reason);
+        let idle_shared = Arc::clone(&shared);
         tokio_rt.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 if heartbeat_reader.is_idle(idle_secs) {
-                    tracing::info!("sandbox idle for {idle_secs}s, triggering exit");
+                    tracing::info!("sandbox idle for {idle_secs}s, requesting guest shutdown");
                     idle_reason.store(
                         EXIT_REASON_IDLE_TIMEOUT,
                         std::sync::atomic::Ordering::SeqCst,
                     );
+                    match request_guest_shutdown(&idle_shared) {
+                        Ok(()) => {
+                            tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                            tracing::info!(
+                                "idle shutdown flush window elapsed, triggering host exit"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "idle shutdown request failed, triggering host exit"
+                            );
+                        }
+                    }
                     idle_exit_handle.trigger();
                     break;
                 }
@@ -1081,6 +1102,16 @@ async fn mark_run_failed(db: &DbWriteConnection, run_id: i32) -> RuntimeResult<(
     Ok(())
 }
 
+/// Request guest poweroff through agentd without requiring a client connection.
+fn request_guest_shutdown(shared: &ConsoleSharedState) -> RuntimeResult<()> {
+    let msg = Message::with_payload(MessageType::Shutdown, 0, &())
+        .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown: {e}")))?;
+    let mut frame = Vec::new();
+    codec::encode_to_buf(&msg, &mut frame)
+        .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown frame: {e}")))?;
+    relay::push_guest_frame_blocking(shared, frame)
+}
+
 /// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.
 fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
@@ -1324,10 +1355,12 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindIdentityMapRegistration, HostPermissions, StatVirtualization, append_block_root_env,
-        bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path, validate_disk_format,
+        BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, StatVirtualization,
+        append_block_root_env, bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
+        request_guest_shutdown, validate_disk_format,
     };
 
+    use microsandbox_protocol::{codec, message::MessageType};
     use std::sync::Arc;
 
     #[test]
@@ -1434,6 +1467,18 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(off.is_none());
         assert_eq!(registration.mount_count, 2);
+    }
+
+    #[test]
+    fn test_request_guest_shutdown_enqueues_shutdown_frame() {
+        let shared = ConsoleSharedState::new();
+
+        request_guest_shutdown(&shared).unwrap();
+
+        let mut frame = shared.rx_ring.pop().unwrap();
+        let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
+        assert_eq!(msg.t, MessageType::Shutdown);
+        assert_eq!(msg.id, 0);
     }
 
     #[test]
