@@ -46,11 +46,12 @@ use opentelemetry_otlp::{
     Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::reader::MetricReader;
 use opentelemetry_sdk::metrics::{
-    InstrumentKind, ManualReader, MetricResult, Pipeline, SdkMeterProvider, Temporality,
+    InstrumentKind, ManualReader, Pipeline, SdkMeterProvider, Temporality,
 };
 use tonic::transport::{Certificate, ClientTlsConfig};
 
@@ -184,14 +185,14 @@ impl MetricReader for SharedManualReader {
     fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
         self.0.register_pipeline(pipeline);
     }
-    fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+    fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
         self.0.collect(rm)
     }
-    fn force_flush(&self) -> MetricResult<()> {
+    fn force_flush(&self) -> OTelSdkResult {
         self.0.force_flush()
     }
-    fn shutdown(&self) -> MetricResult<()> {
-        self.0.shutdown()
+    fn shutdown_with_timeout(&self, timeout: std::time::Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
     }
     fn temporality(&self, kind: InstrumentKind) -> Temporality {
         self.0.temporality(kind)
@@ -384,15 +385,12 @@ impl MetricsExporter for OtelExporter {
             // `ManualReader::collect` populates resource + scope_metrics
             // synchronously (cheap memory copy); `PushMetricExporter::export`
             // is genuinely async on the OTLP transport.
-            let mut rm = ResourceMetrics {
-                resource: Resource::empty(),
-                scope_metrics: Vec::new(),
-            };
+            let mut rm = ResourceMetrics::default();
             let collect_result = reader.collect(&mut rm).map_err(|e| {
                 MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}"))
             });
             let result = match collect_result {
-                Ok(()) => otlp.export(&mut rm).await.map_err(|e| {
+                Ok(()) => otlp.export(&rm).await.map_err(|e| {
                     MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
                 }),
                 Err(e) => Err(e),
@@ -512,7 +510,10 @@ fn apply_headers_env(headers: &[(String, String)]) {
 fn build_resource(overrides: Vec<KeyValue>) -> Resource {
     let mut attrs = default_resource_attributes();
     attrs.extend(overrides);
-    Resource::new(attrs)
+    // 0.32 closed `Resource::new`; build via `builder_empty` so we don't
+    // merge in the SDK's own default detectors (we set service.name and
+    // service.instance.id ourselves).
+    Resource::builder_empty().with_attributes(attrs).build()
 }
 
 /// Default resource attributes — `service.name` and best-effort
