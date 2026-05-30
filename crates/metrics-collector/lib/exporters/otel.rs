@@ -469,7 +469,7 @@ fn build_otlp_exporter(
             if let Some(pem) = ca_cert_pem {
                 let tls = ClientTlsConfig::new()
                     .with_webpki_roots()
-                    .ca_certificate(Certificate::from_pem(pem.to_vec()));
+                    .ca_certificate(Certificate::from_pem(pem));
                 builder = builder.with_tls_config(tls);
             }
             builder.build()
