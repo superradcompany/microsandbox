@@ -119,19 +119,15 @@ Or just run `msb-metrics otel --help` for the full prose.
 
 ## Tuning at scale
 
-At ~1000 sandboxes per host:
+With ~1000 sandboxes per host:
 
-**Heap.** Dominated by the per-exporter buffer. Plan for
-`--max-buffered × active sandboxes × ~350B`:
-
-| `--max-buffered` | Worst-case heap (1000 sandboxes) |
-|---|---|
-| `60` (default) | ~21 MB per exporter |
-| `20` | ~7 MB per exporter |
-
-**Shm registry.** Fixed at ~512 KiB regardless of sandbox count.
-
-**Hot path.** `msb-metrics` is pure-shm; no sqlite read on the hot path.
+- Heap is dominated by the per-exporter buffer. At 1000 sandboxes with
+  the default `--max-buffered=60`, worst-case heap when the backend is
+  slow is roughly `60 × 1000 × ~350B ≈ 21 MB` per exporter. Drop
+  `--max-buffered` to `~20` if you want a tighter cap.
+- The shm registry itself is fixed at ~512 KiB regardless of active
+  count.
+- No sqlite read is on the hot path; `msb-metrics` is pure-shm.
 
 ## Shutdown behavior
 
