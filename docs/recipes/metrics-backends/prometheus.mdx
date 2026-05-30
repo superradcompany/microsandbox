@@ -1,0 +1,88 @@
+---
+title: Prometheus
+description: Ship msb-metrics output directly to Prometheus's OTLP ingestion endpoint
+icon: "fire"
+---
+
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
+
+Prometheus has a native OTLP receiver since v2.47 (stable since v2.51),
+so `msb-metrics` can ship to it without an intermediate collector. Point
+the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
+`microsandbox.*` series land directly in the local TSDB.
+
+<Steps>
+  <Step title="Enable the OTLP receiver on Prometheus">
+    Start Prometheus with the OTLP receiver feature flag (Prometheus
+    treats it as a release-gated feature in some versions; recent
+    releases have it on by default):
+
+    ```sh
+    prometheus \
+      --config.file=prometheus.yml \
+      --web.enable-otlp-receiver
+    ```
+
+    The receiver listens at `/api/v1/otlp/v1/metrics` on the same port
+    as the rest of the HTTP API (default `:9090`).
+  </Step>
+
+  <Step title="Point msb-metrics at Prometheus">
+    `msb-metrics`'s OTLP HTTP transport speaks the protobuf wire format
+    Prometheus expects:
+
+    ```sh
+    msb-metrics otel \
+      --endpoint=http://localhost:9090/api/v1/otlp \
+      --protocol=http
+    ```
+
+    The `/v1/metrics` path is appended automatically by the OTLP HTTP
+    client.
+  </Step>
+
+  <Step title="Verify">
+    Boot a sandbox and query Prometheus directly:
+
+    ```sh
+    curl -s 'http://localhost:9090/api/v1/query?query=microsandbox_memory_usage_bytes' | jq
+    ```
+
+    Open the Prometheus UI at `http://localhost:9090/graph` and run
+    queries like `microsandbox_cpu_utilization_ratio` or
+    `rate(microsandbox_disk_bytes_written[1m])`.
+  </Step>
+</Steps>
+
+## Naming conventions
+
+Prometheus's OTLP receiver translates OTel metric names per the
+[OpenTelemetry semantic conventions for Prometheus compatibility](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/):
+
+- dots become underscores: `microsandbox.cpu.utilization` →
+  `microsandbox_cpu_utilization_ratio` (suffix derives from the unit
+  `1`/ratio)
+- byte units add a `_bytes` suffix: `microsandbox.memory.usage` →
+  `microsandbox_memory_usage_bytes`
+- the collector self-observability counters get the `_total` suffix
+  expected by Prometheus: `microsandbox.collector.exports.success` →
+  `microsandbox_collector_exports_success_total`
+
+## Long-running deployments
+
+For production, put a stable layer between `msb-metrics` and Prometheus:
+either a local [otel-collector](/recipes/metrics-backends/otel-collector)
+that handles batching and retries, or
+[Grafana Alloy](/recipes/metrics-backends/grafana-alloy). Direct
+shipping is fine for single-host setups and development; the buffer in
+`msb-metrics` is bounded by `--max-buffered` and is not a substitute
+for a real metrics relay.
+
+## Reference
+
+- [Prometheus OTLP receiver docs](https://prometheus.io/docs/prometheus/latest/feature_flags/#otlp-receiver)
+- [OpenTelemetry Prometheus compatibility spec](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/)

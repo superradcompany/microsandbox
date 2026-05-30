@@ -211,6 +211,7 @@
               "recipes/metrics-backends/grafana-cloud",
               "recipes/metrics-backends/grafana-alloy",
               "recipes/metrics-backends/otel-collector",
+              "recipes/metrics-backends/prometheus",
               "recipes/metrics-backends/datadog"
             ]
           }
