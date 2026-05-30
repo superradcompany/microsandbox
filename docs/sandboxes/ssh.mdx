@@ -1,6 +1,7 @@
 ---
 title: SSH
 description: Connect to sandboxes through SSH protocol sessions
+icon: "lock"
 ---
 
 SSH gives a sandbox a familiar interface without putting an SSH daemon inside the guest. microsandbox speaks SSH on the host side, then forwards shells, remote commands, and SFTP file operations through the sandbox's command and filesystem channels.
@@ -203,20 +204,28 @@ msb ssh serve devbox --host 127.0.0.1 --port 2223
 
 ### ProxyCommand
 
-`--stdio` serves one SSH transport over stdin/stdout. Use it when the SSH client should spawn `msb` as its transport bridge instead of connecting to a TCP listener.
+`msb ssh serve --stdio` carries a single SSH connection over stdin/stdout instead of a TCP listener. Point OpenSSH at it with `ProxyCommand` so any standard SSH tool can reach the sandbox by host alias, with no port to manage.
 
-```sshconfig
+Add an entry to your `~/.ssh/config`:
+
+```sshconfig ~/.ssh/config
 Host devbox.msb
   User root
   ProxyCommand msb ssh serve devbox --stdio
 ```
 
-Then use regular OpenSSH commands:
+The `Host` value is the alias you connect to, and `devbox` is the sandbox name passed to `msb ssh serve`. No `HostName` or `Port` is needed, because OpenSSH runs the `ProxyCommand` to open the transport instead of dialing a socket.
+
+Once it is in place, the alias works with any OpenSSH-based tool:
 
 ```bash
 ssh devbox.msb
 sftp devbox.msb
+scp ./build.tar devbox.msb:/tmp/
+rsync -av ./src/ devbox.msb:/app/
 ```
+
+Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
 
 ### SDK server endpoints
 
