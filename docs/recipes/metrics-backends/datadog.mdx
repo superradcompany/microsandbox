@@ -59,7 +59,7 @@ OTel default for the SDK we use). Sending our output directly will
 produce errors at the intake.
 
 If you need direct intake, put an
-[otel-collector](/recipes/metrics-shipping/otel-collector)
+[otel-collector](/recipes/metrics-backends/otel-collector)
 with the `cumulativetodelta` processor between `msb-metrics` and
 Datadog. Or stick with the agent path above, which converts temporality
 for you.

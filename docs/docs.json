@@ -205,14 +205,13 @@
             ]
           },
           {
-            "group": "Metrics shipping",
+            "group": "Metrics backends",
             "icon": "paper-plane",
             "pages": [
-              "recipes/metrics-shipping/grafana-cloud",
-              "recipes/metrics-shipping/grafana-alloy",
-              "recipes/metrics-shipping/otel-collector",
-              "recipes/metrics-shipping/datadog",
-              "recipes/metrics-shipping/run-under-systemd"
+              "recipes/metrics-backends/grafana-cloud",
+              "recipes/metrics-backends/grafana-alloy",
+              "recipes/metrics-backends/otel-collector",
+              "recipes/metrics-backends/datadog"
             ]
           }
         ]
