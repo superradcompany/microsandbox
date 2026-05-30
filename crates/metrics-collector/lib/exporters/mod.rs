@@ -6,4 +6,4 @@
 
 pub mod otel;
 
-pub use otel::{OtelExporter, OtelExporterBuilder, OtlpProtocol};
+pub use otel::{OtelExporter, OtelExporterBuilder, OtlpCompression, OtlpProtocol};

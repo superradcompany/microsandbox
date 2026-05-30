@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use microsandbox_metrics_collector::MetricsCollector;
-use microsandbox_metrics_collector::exporters::{OtelExporter, OtlpProtocol};
+use microsandbox_metrics_collector::exporters::{OtelExporter, OtlpCompression, OtlpProtocol};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -57,6 +57,11 @@ struct OtelArgs {
     /// OTLP transport protocol.
     #[arg(long, value_enum, default_value_t = OtlpProtocolArg::Grpc)]
     protocol: OtlpProtocolArg,
+
+    /// OTLP payload compression. Currently gRPC-only; `--compression=gzip`
+    /// combined with `--protocol=http` is rejected at startup.
+    #[arg(long, value_enum, default_value_t = OtlpCompressionArg::None)]
+    compression: OtlpCompressionArg,
 
     /// OTLP request header. Repeat to add several. Format: `KEY=VALUE`.
     /// Use for authentication (e.g. `--header Authorization=Basic ...`,
@@ -149,6 +154,23 @@ impl From<OtlpProtocolArg> for OtlpProtocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OtlpCompressionArg {
+    /// No compression. Default; preserves prior behavior.
+    None,
+    /// gzip. gRPC-only.
+    Gzip,
+}
+
+impl From<OtlpCompressionArg> for OtlpCompression {
+    fn from(value: OtlpCompressionArg) -> Self {
+        match value {
+            OtlpCompressionArg::None => Self::None,
+            OtlpCompressionArg::Gzip => Self::Gzip,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Entry point
 //--------------------------------------------------------------------------------------------------
@@ -174,6 +196,7 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     let mut exporter_builder = OtelExporter::builder()
         .endpoint(&args.endpoint)
         .protocol(args.protocol.into())
+        .compression(args.compression.into())
         .emit_run_id(args.emit_run_id)
         .emit_pid(args.emit_pid);
     for (k, v) in &args.headers {

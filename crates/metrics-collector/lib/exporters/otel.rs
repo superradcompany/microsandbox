@@ -42,7 +42,9 @@ use std::sync::{Arc, Weak};
 use futures::future::BoxFuture;
 use opentelemetry::metrics::{Gauge, Meter, MeterProvider};
 use opentelemetry::{InstrumentationScope, KeyValue};
-use opentelemetry_otlp::{MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig};
+use opentelemetry_otlp::{
+    Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
+};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
@@ -83,6 +85,21 @@ pub enum OtlpProtocol {
     Grpc,
     /// HTTP/1.1 + Protobuf body (default OTLP port `4318`).
     HttpProtobuf,
+}
+
+/// Optional payload compression for OTLP exports.
+///
+/// Compression is only wired through on the gRPC transport in
+/// `opentelemetry-otlp` 0.27; HTTP/Protobuf currently has no
+/// `with_compression` hook. Selecting [`OtlpCompression::Gzip`] together
+/// with [`OtlpProtocol::HttpProtobuf`] returns a build-time error.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OtlpCompression {
+    /// No compression. Default; preserves prior behavior.
+    #[default]
+    None,
+    /// gzip. gRPC only.
+    Gzip,
 }
 
 /// Which sandbox identity attributes to emit on each datapoint.
@@ -171,6 +188,7 @@ impl MetricReader for SharedManualReader {
 pub struct OtelExporterBuilder {
     endpoint: Option<String>,
     protocol: OtlpProtocol,
+    compression: OtlpCompression,
     headers: Vec<(String, String)>,
     resource_attrs: Vec<KeyValue>,
     identity: IdentityAttributes,
@@ -199,6 +217,15 @@ impl OtelExporterBuilder {
     /// OTLP transport protocol. Defaults to [`OtlpProtocol::Grpc`].
     pub fn protocol(mut self, protocol: OtlpProtocol) -> Self {
         self.protocol = protocol;
+        self
+    }
+
+    /// OTLP payload compression. Defaults to [`OtlpCompression::None`].
+    /// gzip is meaningful bandwidth saving for direct provider gateways
+    /// (Grafana Cloud, Datadog) over the public internet; for a local
+    /// collector on the same host the CPU cost outweighs the gain.
+    pub fn compression(mut self, compression: OtlpCompression) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -254,7 +281,7 @@ impl OtelExporterBuilder {
         })?;
 
         apply_headers_env(&self.headers);
-        let otlp_exporter = build_otlp_exporter(&endpoint, self.protocol)?;
+        let otlp_exporter = build_otlp_exporter(&endpoint, self.protocol, self.compression)?;
 
         let reader = SharedManualReader(Arc::new(
             ManualReader::builder()
@@ -347,19 +374,33 @@ impl MetricsExporter for OtelExporter {
 fn build_otlp_exporter(
     endpoint: &str,
     protocol: OtlpProtocol,
+    compression: OtlpCompression,
 ) -> MetricsCollectorResult<OtlpMetricExporter> {
-    let result = match protocol {
-        OtlpProtocol::Grpc => OtlpMetricExporter::builder()
+    let result = match (protocol, compression) {
+        (OtlpProtocol::Grpc, OtlpCompression::None) => OtlpMetricExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
             .with_temporality(Temporality::Cumulative)
             .build(),
-        OtlpProtocol::HttpProtobuf => OtlpMetricExporter::builder()
+        (OtlpProtocol::Grpc, OtlpCompression::Gzip) => OtlpMetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .with_compression(Compression::Gzip)
+            .with_temporality(Temporality::Cumulative)
+            .build(),
+        (OtlpProtocol::HttpProtobuf, OtlpCompression::None) => OtlpMetricExporter::builder()
             .with_http()
             .with_endpoint(endpoint)
             .with_protocol(Protocol::HttpBinary)
             .with_temporality(Temporality::Cumulative)
             .build(),
+        (OtlpProtocol::HttpProtobuf, OtlpCompression::Gzip) => {
+            return Err(MetricsCollectorError::InvalidConfig(
+                "gzip compression is currently supported only with --protocol=grpc; \
+                 opentelemetry-otlp 0.27 has no with_compression hook on the HTTP transport"
+                    .into(),
+            ));
+        }
     };
     result.map_err(|e| MetricsCollectorError::Custom(format!("otel exporter build failed: {e}")))
 }
