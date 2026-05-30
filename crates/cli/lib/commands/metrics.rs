@@ -2,6 +2,7 @@
 
 use clap::Args;
 use microsandbox::sandbox::{Sandbox, SandboxMetrics, all_sandbox_metrics};
+use microsandbox_utils::format::{format_bytes, format_duration};
 
 use crate::ui;
 
@@ -88,14 +89,14 @@ fn print_table(metrics: &[(String, SandboxMetrics)]) {
             format!("{:.1}%", metric.cpu_percent),
             format!(
                 "{} / {}",
-                ui::format_bytes(metric.memory_bytes),
-                ui::format_bytes(metric.memory_limit_bytes)
+                format_bytes(metric.memory_bytes),
+                format_bytes(metric.memory_limit_bytes)
             ),
-            ui::format_bytes(metric.disk_read_bytes),
-            ui::format_bytes(metric.disk_write_bytes),
-            ui::format_bytes(metric.net_rx_bytes),
-            ui::format_bytes(metric.net_tx_bytes),
-            ui::format_duration(metric.uptime),
+            format_bytes(metric.disk_read_bytes),
+            format_bytes(metric.disk_write_bytes),
+            format_bytes(metric.net_rx_bytes),
+            format_bytes(metric.net_tx_bytes),
+            format_duration(metric.uptime),
             metric.timestamp.to_rfc3339(),
         ]);
     }

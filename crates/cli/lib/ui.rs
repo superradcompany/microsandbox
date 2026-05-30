@@ -101,7 +101,10 @@ impl Spinner {
         if !self.quiet {
             let elapsed = self.start.elapsed();
             let duration = if elapsed.as_millis() > 500 {
-                format!(" ({})", format_duration(elapsed))
+                format!(
+                    " ({})",
+                    microsandbox_utils::format::format_duration(elapsed)
+                )
             } else {
                 String::new()
             };
@@ -391,11 +394,6 @@ pub fn generate_name() -> String {
     let id: u32 = rand::rng().random();
     format!("msb-{id:08x}")
 }
-
-// Re-exports of the canonical formatters from `microsandbox-utils::format`
-// so existing `ui::format_bytes(...)` / `ui::format_duration(...)` call
-// sites keep working. New callers should prefer the utils path directly.
-pub use microsandbox_utils::format::{format_bytes, format_duration};
 
 /// Format a chrono DateTime for display.
 pub fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
