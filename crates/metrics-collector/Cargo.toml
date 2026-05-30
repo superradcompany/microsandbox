@@ -17,7 +17,7 @@ path = "bin/main.rs"
 
 [dependencies]
 # Shared-memory primitives — the read source for every tick.
-microsandbox-metrics = { version = "0.5.2", path = "../metrics" }
+microsandbox-metrics = { path = "../metrics" }
 # ENOENT detection on shm_open failures.
 libc.workspace = true
 # Async runtime + primitives (broadcast, mpsc, JoinSet, time).
@@ -44,16 +44,16 @@ dirs.workspace = true
 
 # OTel exporter (backs the `msb-metrics otel` subcommand).
 opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["metrics"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = [
-    "metrics",
     "grpc-tonic",
-    "http-proto",
-    "reqwest-blocking-client",
     "gzip-tonic",
+    "http-proto",
+    "metrics",
+    "reqwest-blocking-client",
     "tls",
     "tls-webpki-roots",
 ] }
+opentelemetry_sdk = { version = "0.27", features = ["metrics"] }
 tonic = { version = "0.12", default-features = false, features = [
     "tls",
     "tls-webpki-roots",
@@ -61,4 +61,8 @@ tonic = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "test-util",
+] }

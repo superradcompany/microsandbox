@@ -65,7 +65,9 @@ use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 const SCOPE_NAME: &str = "microsandbox-metrics-collector";
 
 /// Version reported as `otel.scope.version` for instruments built by this
-/// exporter. Tracks the crate version so a Prometheus consumer can tell
+/// exporter. Tracks the msb version (same as the crate version, since the
+/// metrics-collector ships in lockstep with the rest of the workspace) so
+/// a Prometheus consumer can tell
 /// which `msb-metrics` build emitted a series.
 ///
 /// `otel.scope.schema_url` is intentionally left unset — our metric names
