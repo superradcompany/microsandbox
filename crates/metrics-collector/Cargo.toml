@@ -33,7 +33,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 # Structured logging.
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
 microsandbox-utils = { version = "0.5.2", path = "../utils" }

@@ -36,6 +36,13 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = LogLevel::Info, global = true)]
     log_level: LogLevel,
 
+    /// Log output format. `text` is the default human-readable
+    /// `tracing` formatter; `json` emits one JSON object per line, for
+    /// shipping `msb-metrics`'s own logs into the same pipeline as
+    /// everything else.
+    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -178,7 +185,7 @@ impl From<OtlpCompressionArg> for OtlpCompression {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.log_level);
+    init_tracing(cli.log_level, cli.log_format);
 
     match cli.command {
         Command::Otel(args) => run_otel(args).await,
@@ -236,17 +243,28 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
 
 /// Initialize the tracing subscriber. `RUST_LOG` wins if set, else uses the
 /// CLI flag as a default for both `msb_metrics` and the collector crate.
-fn init_tracing(level: LogLevel) {
+fn init_tracing(level: LogLevel, format: LogFormat) {
     let default_directive = format!(
         "msb_metrics={lvl},microsandbox_metrics_collector={lvl}",
         lvl = level.as_str()
     );
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directive));
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
-        .init();
+        .with_target(false);
+    match format {
+        LogFormat::Text => builder.init(),
+        LogFormat::Json => builder.json().init(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LogFormat {
+    /// Human-readable tracing output. Default.
+    Text,
+    /// Newline-delimited JSON.
+    Json,
 }
 
 /// Derive the shm registry name from `--msb-home` (or env/default).

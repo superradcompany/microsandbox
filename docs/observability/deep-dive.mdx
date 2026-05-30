@@ -131,7 +131,9 @@ msb-metrics otel --endpoint=<URL>
 <Accordion title="Global flags">
 | Flag | Default | Notes |
 |---|---|---|
-| `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG` env var wins if set. |
+| `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace`. Overridden by `RUST_LOG` if set. |
+| `--log-format` | `text` | `text` for the human-readable tracing formatter, `json` for newline-delimited JSON one object per line. Use `json` when shipping the collector's own logs into the same aggregator as your application logs. |
+
 </Accordion>
 
 Or just run `msb-metrics otel --help` for the full prose.
