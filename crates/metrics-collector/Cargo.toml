@@ -34,6 +34,10 @@ thiserror.workspace = true
 # Structured logging.
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+# Tiny health/readiness HTTP server for sidecar supervisors (systemd,
+# k8s, etc.). axum is already pulled in transitively via tonic, so this
+# adds no compile overhead.
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
 microsandbox-utils = { version = "0.5.2", path = "../utils" }
