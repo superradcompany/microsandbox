@@ -44,7 +44,7 @@ dirs.workspace = true
 
 # OTel exporter (backs the `msb-metrics otel` subcommand).
 opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["metrics"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = [
     "metrics",
     "grpc-tonic",

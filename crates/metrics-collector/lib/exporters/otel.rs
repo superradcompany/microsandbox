@@ -37,16 +37,19 @@
 //! - `sandbox.run_id`  — opt-in (high cardinality across sandbox restarts)
 //! - `sandbox.pid`     — opt-in (high cardinality across sandbox restarts)
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Weak};
 
 use futures::future::BoxFuture;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Gauge, Meter, MeterProvider};
 use opentelemetry_otlp::{MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
-use opentelemetry_sdk::runtime;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+use opentelemetry_sdk::metrics::reader::MetricReader;
+use opentelemetry_sdk::metrics::{
+    InstrumentKind, ManualReader, MetricResult, Pipeline, SdkMeterProvider, Temporality,
+};
 
 use crate::core::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
@@ -57,10 +60,6 @@ use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 
 /// Name reported as `otel.scope.name` for instruments built by this exporter.
 const SCOPE_NAME: &str = "microsandbox-metrics-collector";
-
-/// PeriodicReader interval. Effectively infinity — we drive flushes ourselves
-/// via `force_flush()` at the end of each `export()`.
-const READER_INTERVAL: Duration = Duration::from_secs(3600);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -116,10 +115,44 @@ struct Instruments {
 
 /// OTLP exporter. Ships each export batch's snapshots to the configured
 /// endpoint via the OTel SDK + OTLP transport.
+///
+/// Uses a `ManualReader` rather than a `PeriodicReader`: we already drive
+/// cadence from `worker.rs`'s flush ticker, and `PeriodicReader::force_flush`
+/// is a sync call that blocks on a oneshot recv and deadlocks the Tokio
+/// runtime when invoked from inside an async task. With `ManualReader` we
+/// call `reader.collect(&mut rm)` directly and then `otlp.export(&mut rm).await`
+/// — both genuinely async-compatible.
 pub struct OtelExporter {
     provider: Arc<SdkMeterProvider>,
+    reader: SharedManualReader,
+    otlp: Arc<OtlpMetricExporter>,
     instruments: Instruments,
     identity: IdentityAttributes,
+}
+
+/// `Arc`-wrapped [`ManualReader`] with a forwarded [`MetricReader`] impl, so
+/// the SDK [`SdkMeterProvider`] and the [`OtelExporter`] can both hold the
+/// same reader (`with_reader` consumes by value and `ManualReader` is not
+/// `Clone`).
+#[derive(Debug, Clone)]
+struct SharedManualReader(Arc<ManualReader>);
+
+impl MetricReader for SharedManualReader {
+    fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+        self.0.register_pipeline(pipeline);
+    }
+    fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+        self.0.collect(rm)
+    }
+    fn force_flush(&self) -> MetricResult<()> {
+        self.0.force_flush()
+    }
+    fn shutdown(&self) -> MetricResult<()> {
+        self.0.shutdown()
+    }
+    fn temporality(&self, kind: InstrumentKind) -> Temporality {
+        self.0.temporality(kind)
+    }
 }
 
 /// Builder for [`OtelExporter`]. Endpoint is required; other knobs default
@@ -213,14 +246,16 @@ impl OtelExporterBuilder {
         apply_headers_env(&self.headers);
         let otlp_exporter = build_otlp_exporter(&endpoint, self.protocol)?;
 
-        let reader = PeriodicReader::builder(otlp_exporter, runtime::Tokio)
-            .with_interval(READER_INTERVAL)
-            .build();
+        let reader = SharedManualReader(Arc::new(
+            ManualReader::builder()
+                .with_temporality(Temporality::Cumulative)
+                .build(),
+        ));
 
         let resource = build_resource(self.resource_attrs);
 
         let provider = SdkMeterProvider::builder()
-            .with_reader(reader)
+            .with_reader(reader.clone())
             .with_resource(resource)
             .build();
 
@@ -229,6 +264,8 @@ impl OtelExporterBuilder {
 
         Ok(OtelExporter {
             provider: Arc::new(provider),
+            reader,
+            otlp: Arc::new(otlp_exporter),
             instruments,
             identity: self.identity,
         })
@@ -245,7 +282,8 @@ impl MetricsExporter for OtelExporter {
         batch: Arc<MetricsExportBatch>,
     ) -> BoxFuture<'static, MetricsCollectorResult<()>> {
         let instruments = self.instruments.clone();
-        let provider = self.provider.clone();
+        let reader = self.reader.clone();
+        let otlp = self.otlp.clone();
         let identity = self.identity;
 
         Box::pin(async move {
@@ -256,19 +294,20 @@ impl MetricsExporter for OtelExporter {
                 }
             }
 
-            // Drive the export now rather than waiting for the periodic
-            // reader's next tick. `force_flush()` is synchronous and
-            // blocks the calling thread on a oneshot recv; running it via
-            // `spawn_blocking` keeps the Tokio worker that hosts the
-            // PeriodicReader's task free, avoiding a deadlock.
-            tokio::task::spawn_blocking(move || provider.force_flush())
-                .await
-                .map_err(|e| {
-                    MetricsCollectorError::Custom(format!("otel flush task panicked: {e}"))
-                })?
-                .map_err(|e| {
-                    MetricsCollectorError::Custom(format!("otel force_flush failed: {e}"))
-                })?;
+            // Pull what we just recorded out of the SDK pipeline and ship it.
+            // `ManualReader::collect` populates resource + scope_metrics
+            // synchronously (cheap memory copy); `PushMetricExporter::export`
+            // is genuinely async on the OTLP transport.
+            let mut rm = ResourceMetrics {
+                resource: Resource::empty(),
+                scope_metrics: Vec::new(),
+            };
+            reader.collect(&mut rm).map_err(|e| {
+                MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}"))
+            })?;
+            otlp.export(&mut rm).await.map_err(|e| {
+                MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
+            })?;
 
             Ok(())
         })
@@ -277,6 +316,8 @@ impl MetricsExporter for OtelExporter {
     fn shutdown(&self) -> BoxFuture<'static, MetricsCollectorResult<()>> {
         let provider = self.provider.clone();
         Box::pin(async move {
+            // ManualReader's shutdown is a non-blocking bool flip, so
+            // provider.shutdown() does not have the PeriodicReader deadlock.
             provider
                 .shutdown()
                 .map_err(|e| MetricsCollectorError::Custom(format!("otel shutdown failed: {e}")))?;
