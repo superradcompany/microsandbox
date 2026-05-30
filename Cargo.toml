@@ -130,5 +130,5 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.16.3"
 parking_lot = "0.12"
 rpassword = "7"
-russh = "0.61.0"
+russh = "0.61.1"
 russh-sftp = "2.2.2"
