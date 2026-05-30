@@ -97,7 +97,7 @@ impl Sandbox {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Get the latest metrics snapshot for every active live metrics slot.
+/// Get the latest metrics for every running sandbox at once.
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
     let Some(registry) = open_registry()? else {
         return Ok(HashMap::new());

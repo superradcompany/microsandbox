@@ -16,7 +16,9 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use microsandbox_metrics_collector::MetricsCollector;
-use microsandbox_metrics_collector::exporters::{OtelExporter, OtlpCompression, OtlpProtocol};
+use microsandbox_metrics_collector::exporters::{
+    OtelExporter, OtlpCompression, OtlpProtocol, StdoutExporter,
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +54,11 @@ enum Command {
     /// Ship metrics over OTLP to an OpenTelemetry-compatible endpoint
     /// (Grafana Cloud, Grafana Alloy, otel-collector, …).
     Otel(OtelArgs),
+    /// Print each metrics batch to stdout. For local inspection of what
+    /// `msb-metrics` is reading from shm without standing up an OTLP
+    /// receiver. Output format is human-readable and not a stable
+    /// contract.
+    Stdout(StdoutArgs),
 }
 
 #[derive(Debug, Args)]
@@ -99,6 +106,12 @@ struct OtelArgs {
     #[arg(long)]
     emit_pid: bool,
 
+    #[command(flatten)]
+    collector: CollectorOpts,
+}
+
+#[derive(Debug, Args)]
+struct StdoutArgs {
     #[command(flatten)]
     collector: CollectorOpts,
 }
@@ -196,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Otel(args) => run_otel(args).await,
+        Command::Stdout(args) => run_stdout(args).await,
     }
 }
 
@@ -226,6 +240,34 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     }
     let exporter = exporter_builder.build().context("build OTel exporter")?;
 
+    let collector = MetricsCollector::builder(registry_name)
+        .collect_interval(args.collector.collect_interval)
+        .flush_interval(args.collector.flush_interval)
+        .max_buffered_collections(args.collector.max_buffered)
+        .export_timeout(args.collector.export_timeout)
+        .register(exporter)
+        .build()
+        .context("build metrics collector")?;
+
+    let handle = collector.start().await.context("start metrics collector")?;
+    info!("msb-metrics started; press Ctrl+C to shut down");
+
+    wait_for_shutdown_signal().await;
+    info!("shutdown signal received; draining buffers");
+
+    handle
+        .shutdown()
+        .await
+        .context("shutdown metrics collector")?;
+    info!("msb-metrics stopped cleanly");
+    Ok(())
+}
+
+async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
+    let registry_name = resolve_registry_name(args.collector.msb_home.as_deref())?;
+    info!(registry = %registry_name, "starting msb-metrics stdout");
+
+    let exporter = StdoutExporter::new();
     let collector = MetricsCollector::builder(registry_name)
         .collect_interval(args.collector.collect_interval)
         .flush_interval(args.collector.flush_interval)

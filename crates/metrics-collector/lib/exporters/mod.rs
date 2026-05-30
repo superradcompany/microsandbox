@@ -5,5 +5,7 @@
 //! module's `pub use` block plus the binary's clap subcommands.
 
 pub mod otel;
+pub mod stdout;
 
 pub use otel::{OtelExporter, OtelExporterBuilder, OtlpCompression, OtlpProtocol};
+pub use stdout::StdoutExporter;

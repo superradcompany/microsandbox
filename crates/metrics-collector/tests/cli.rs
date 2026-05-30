@@ -21,9 +21,41 @@ fn help_lists_subcommands_and_global_flags() {
         .expect("spawn msb-metrics --help");
     assert!(out.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("otel"), "help should list the otel subcommand");
+    for sub in ["otel", "stdout"] {
+        assert!(stdout.contains(sub), "help should list the `{sub}` subcommand");
+    }
     for flag in ["--log-level", "--log-format"] {
         assert!(stdout.contains(flag), "expected `{flag}` in --help output");
+    }
+}
+
+#[test]
+fn stdout_help_lists_collector_flags_only() {
+    let out = Command::new(bin())
+        .args(["stdout", "--help"])
+        .output()
+        .expect("spawn msb-metrics stdout --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Shared CollectorOpts surface.
+    for flag in [
+        "--collect-interval",
+        "--flush-interval",
+        "--max-buffered",
+        "--export-timeout",
+        "--msb-home",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "expected `{flag}` in `stdout --help` output"
+        );
+    }
+    // OTLP-specific flags shouldn't leak into stdout's surface.
+    for absent in ["--endpoint", "--protocol", "--compression", "--ca-cert"] {
+        assert!(
+            !stdout.contains(absent),
+            "stdout subcommand should not expose `{absent}`, but it did: {stdout}"
+        );
     }
 }
 

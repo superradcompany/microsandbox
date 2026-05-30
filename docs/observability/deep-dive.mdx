@@ -97,6 +97,29 @@ cardinality-billed backends.
 
 ## All flags
 
+<Accordion title="msb-metrics stdout">
+For local inspection of what `msb-metrics` is reading from shm
+without standing up an OTLP receiver. One human-readable line per
+snapshot.
+
+```text
+msb-metrics stdout [--collect-interval=<dur>]
+                   [--flush-interval=<dur>]
+                   [--max-buffered=<n>]
+                   [--export-timeout=<dur>]
+                   [--msb-home=<path>]
+```
+
+The output format is not a stable contract; don't pipe it into
+production parsers. Sample line:
+
+```text
+2026-05-30T02:44:31Z sandbox=devbox id=33 cpu=0.000107 \
+    mem=13.56MiB/512.00MiB disk_r=89.33MiB disk_w=644.69MiB \
+    net_rx=48.05MiB net_tx=268.54KiB uptime=148515.9s
+```
+</Accordion>
+
 <Accordion title="msb-metrics otel">
 ```text
 msb-metrics otel --endpoint=<URL>
