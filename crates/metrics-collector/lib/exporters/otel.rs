@@ -257,11 +257,18 @@ impl MetricsExporter for OtelExporter {
             }
 
             // Drive the export now rather than waiting for the periodic
-            // reader's next tick. The reader exists only as the SDK
-            // plumbing OTLP requires.
-            provider.force_flush().map_err(|e| {
-                MetricsCollectorError::Custom(format!("otel force_flush failed: {e}"))
-            })?;
+            // reader's next tick. `force_flush()` is synchronous and
+            // blocks the calling thread on a oneshot recv; running it via
+            // `spawn_blocking` keeps the Tokio worker that hosts the
+            // PeriodicReader's task free, avoiding a deadlock.
+            tokio::task::spawn_blocking(move || provider.force_flush())
+                .await
+                .map_err(|e| {
+                    MetricsCollectorError::Custom(format!("otel flush task panicked: {e}"))
+                })?
+                .map_err(|e| {
+                    MetricsCollectorError::Custom(format!("otel force_flush failed: {e}"))
+                })?;
 
             Ok(())
         })
