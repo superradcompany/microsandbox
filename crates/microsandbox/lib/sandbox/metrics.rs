@@ -6,14 +6,10 @@ use std::time::Duration;
 use futures::stream;
 use microsandbox_db::DbReadConnection;
 use microsandbox_metrics::{LiveMetric, MetricsRegistry};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
-use crate::{
-    MicrosandboxError, MicrosandboxResult,
-    db::entity::{run as run_entity, sandbox as sandbox_entity},
-};
+use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxConfig, SandboxStatus};
+use super::{Sandbox, SandboxConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -101,77 +97,20 @@ impl Sandbox {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Get the latest metrics snapshot for every running sandbox.
+/// Get the latest metrics for every running sandbox at once.
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let pools = crate::db::init_global().await?;
-    let db = pools.read();
-    let sandboxes = sandbox_entity::Entity::find()
-        .filter(
-            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
-        )
-        .order_by_asc(sandbox_entity::Column::Name)
-        .all(db)
-        .await?;
-
-    let mut reconciled = Vec::with_capacity(sandboxes.len());
-    for sandbox in sandboxes {
-        let model = super::reconcile_sandbox_runtime_state(pools, sandbox).await?;
-        if !matches!(
-            model.status,
-            SandboxStatus::Running | SandboxStatus::Draining
-        ) {
-            continue;
-        }
-        reconciled.push(model);
-    }
-
-    if reconciled.is_empty() {
+    let Some(registry) = open_registry()? else {
         return Ok(HashMap::new());
-    }
+    };
 
-    // Bulk-load active runs so we can match registry slots by run_id when
-    // present (cheaper and more precise than re-querying per sandbox).
-    let sandbox_ids: Vec<i32> = reconciled.iter().map(|m| m.id).collect();
-    let active_runs = run_entity::Entity::find()
-        .filter(run_entity::Column::SandboxId.is_in(sandbox_ids.iter().copied()))
-        .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
-        .order_by_desc(run_entity::Column::StartedAt)
-        .all(db)
-        .await?;
-    let mut run_by_sandbox: HashMap<i32, run_entity::Model> = HashMap::new();
-    for run in active_runs {
-        run_by_sandbox.entry(run.sandbox_id).or_insert(run);
-    }
-
-    let snapshot = open_registry_snapshot()?;
-
-    let mut metrics = HashMap::with_capacity(reconciled.len());
-    for sandbox in reconciled {
-        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
-        if config.effective_metrics_interval().is_none() {
-            continue;
-        }
-
-        // Without an active `run` row the sandbox is mid-startup or in a
-        // transient state; either way there is no current run to match in
-        // the registry. Skip rather than fall back to sandbox_id matching,
-        // which would surface a Stale slot from a prior run as if it were
-        // the current sandbox's metrics.
-        let Some(run_id) = run_by_sandbox.get(&sandbox.id).map(|r| r.id) else {
-            continue;
-        };
-        let live = snapshot.as_ref().and_then(|s| find_live(s, run_id));
-
-        let Some(live) = live else {
-            // Running but no slot yet — sampler might not be up. Skip rather
-            // than fabricate zero data.
-            continue;
-        };
-
-        metrics.insert(sandbox.name, to_sandbox_metrics(&live, &config));
-    }
-
-    Ok(metrics)
+    let snapshot = registry.active_snapshot().map_err(metrics_error)?;
+    Ok(snapshot
+        .into_iter()
+        .map(|live| {
+            let metrics = to_sandbox_metrics(&live, None);
+            (live.name, metrics)
+        })
+        .collect())
 }
 
 pub(super) async fn metrics_for_sandbox(
@@ -202,7 +141,7 @@ pub(super) async fn metrics_for_sandbox(
         )));
     };
 
-    Ok(to_sandbox_metrics(&live, config))
+    Ok(to_sandbox_metrics(&live, Some(config)))
 }
 
 fn open_registry() -> MicrosandboxResult<Option<MetricsRegistry>> {
@@ -218,28 +157,13 @@ fn open_registry() -> MicrosandboxResult<Option<MetricsRegistry>> {
     }
 }
 
-fn open_registry_snapshot() -> MicrosandboxResult<Option<Vec<LiveMetric>>> {
-    match open_registry()? {
-        Some(reg) => Ok(Some(reg.snapshot().map_err(metrics_error)?)),
-        None => Ok(None),
-    }
-}
-
-fn find_live(snapshot: &[LiveMetric], run_id: i32) -> Option<LiveMetric> {
-    // Strict run_id match only. A Stale slot from a prior run shares the
-    // sandbox_id and would otherwise bleed into the current sandbox's
-    // reading; callers without a run_id should skip the sandbox.
-    snapshot.iter().find(|m| m.run_id == run_id).cloned()
-}
-
-fn to_sandbox_metrics(live: &LiveMetric, config: &SandboxConfig) -> SandboxMetrics {
+fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: live.cpu_percent,
         memory_bytes: live.memory_bytes,
-        memory_limit_bytes: if live.memory_limit_bytes > 0 {
-            live.memory_limit_bytes
-        } else {
-            memory_limit_bytes(config)
+        memory_limit_bytes: match (live.memory_limit_bytes, config) {
+            (0, Some(config)) => memory_limit_bytes(config),
+            (bytes, _) => bytes,
         },
         disk_read_bytes: live.disk_read_bytes,
         disk_write_bytes: live.disk_write_bytes,

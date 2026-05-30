@@ -101,7 +101,10 @@ impl Spinner {
         if !self.quiet {
             let elapsed = self.start.elapsed();
             let duration = if elapsed.as_millis() > 500 {
-                format!(" ({})", format_duration(elapsed))
+                format!(
+                    " ({})",
+                    microsandbox_utils::format::format_duration(elapsed)
+                )
             } else {
                 String::new()
             };
@@ -390,36 +393,6 @@ pub fn generate_name() -> String {
     use rand::RngExt;
     let id: u32 = rand::rng().random();
     format!("msb-{id:08x}")
-}
-
-/// Format a duration for display.
-pub fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else {
-        let mins = secs as u64 / 60;
-        let remaining = secs as u64 % 60;
-        format!("{mins}m{remaining}s")
-    }
-}
-
-/// Format a byte count with binary units.
-pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 /// Format a chrono DateTime for display.

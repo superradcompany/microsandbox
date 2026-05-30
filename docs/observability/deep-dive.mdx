@@ -1,0 +1,301 @@
+---
+title: Deep dive
+sidebarTitle: Deep dive
+description: Flags, emitted metrics, attributes, and operational notes for msb-metrics
+icon: "magnifying-glass"
+---
+
+Everything beyond the Quick start for the
+[`msb-metrics`](/observability/msb-metrics) sidecar: the complete flag
+set, what it emits, the attributes attached to each datapoint, and the
+operational notes you'll want once it's running in earnest.
+
+## Deployment constraints
+
+`msb-metrics` reads the shm registry directly. Two constraints follow.
+
+### Same Unix user as `msb`
+
+The shm object is mode `0600` (owner read/write only). Running
+`msb-metrics` as a different user produces `EACCES` on attach.
+
+### Same `$MSB_HOME`
+
+The shm name is derived from `stable_hash($MSB_HOME)`, so both
+processes must agree on it. Pass `--msb-home` explicitly if your
+environment doesn't set `$MSB_HOME`; the default is `~/.microsandbox`.
+
+### Per-host
+
+The registry is per-host. One `msb-metrics` process per host covers
+every running sandbox there.
+
+## Metrics emitted
+
+All metrics are emitted under the `microsandbox.*` namespace so they
+don't collide with OTel semantic-convention `system.*` host metrics in
+the same backend tenant. The table below shows the suffix only; the
+fully-qualified name is `microsandbox.<suffix>`.
+
+| Suffix | Type | Unit | Notes |
+|---|---|---|---|
+| `cpu.utilization` | gauge | `1` (ratio) | Process CPU usage as vCPU-seconds per wall-second. A 2-vCPU sandbox at full load reports `2.0`. Divide by allocated vCPUs for a 0..1 fraction. |
+| `memory.usage` | gauge | `By` | Resident memory in bytes. |
+| `memory.limit` | gauge | `By` | Configured guest memory limit. |
+| `disk.bytes_read` | gauge | `By` | Cumulative bytes read by the sandbox process. |
+| `disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
+| `network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
+| `network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
+| `uptime` | gauge | `s` | Sandbox uptime at sample time. |
+
+Cumulative byte fields are emitted as gauges carrying the absolute
+cumulative value. Use `rate()` (PromQL, OTel-flavored Prom) for
+throughput. The reason: each shm snapshot already carries an absolute
+value, and counter `add()` semantics would require us to track
+per-sandbox deltas across runs.
+
+The collector also emits its own operational series; see
+[Collector self-observability](#collector-self-observability) below.
+
+## Collector self-observability
+
+`msb-metrics otel` ships its own operational metrics through the same
+OTLP pipeline as the per-sandbox series, so a user can confirm the
+sidecar is actually flowing using the same Prometheus / Grafana / Datadog
+queries the rest of their telemetry runs through:
+
+| Suffix | Type | Notes |
+|---|---|---|
+| `collector.exports.success` | counter | Cumulative successful OTLP exports since process start. |
+| `collector.exports.failure` | counter | Cumulative failed OTLP exports (timeouts, transport errors, non-2xx). |
+| `collector.collections.dropped` | counter | Collections evicted from the per-exporter buffer because the cap was hit (drop-oldest, see `--max-buffered`). |
+| `collector.last_success_timestamp` | gauge | Unix epoch seconds at the last successful export. `time() - microsandbox_collector_last_success_timestamp_seconds` is a sensible staleness alert source. |
+
+**Scope:** these series share the same OTel scope as the sandbox
+metrics, so they show up under
+`otel_scope_name="microsandbox-metrics-collector"` with
+`otel_scope_version=<msb version>`.
+
+A few queries you'll want to wire up:
+
+<AccordionGroup>
+  <Accordion title="Are exports flowing?">
+    Non-zero rate means yes.
+
+    ```bash
+    rate(microsandbox_collector_exports_success_total[1m])
+    ```
+  </Accordion>
+  <Accordion title="Failure ratio over the last 5 minutes">
+    `clamp_min` keeps the denominator at 1 so an idle window doesn't
+    divide by zero.
+
+    ```bash
+    rate(microsandbox_collector_exports_failure_total[5m])
+      /
+    clamp_min(
+      rate(microsandbox_collector_exports_success_total[5m]) +
+      rate(microsandbox_collector_exports_failure_total[5m]),
+      1
+    )
+    ```
+  </Accordion>
+  <Accordion title="Staleness alert: no successful export in 5 minutes">
+    Wire this to your alerting backend; the `> 300` threshold is in
+    seconds.
+
+    ```bash
+    time() - microsandbox_collector_last_success_timestamp_seconds > 300
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Attributes
+
+Every datapoint carries a configurable set of attributes.
+
+**Resource attributes** describe the source. Defaults are set
+automatically; `--resource KEY=VALUE` overrides or adds.
+
+| Key | Default |
+|---|---|
+| `service.name` | `microsandbox` |
+| `service.instance.id` | hostname, best-effort from `HOSTNAME` / `COMPUTERNAME` |
+
+**Identity attributes** describe which sandbox a datapoint belongs to.
+`run_id` and `pid` are opt-in because they create a fresh time series
+per sandbox restart, which inflates active-series counts on
+cardinality-billed backends.
+
+| Attribute | Default | Notes |
+|---|---|---|
+| `sandbox.name` | on | Low cardinality. |
+| `sandbox.id` | on | Catalog id; low cardinality. |
+| `sandbox.run_id` | off | Opt-in via `--emit-run-id`. Fresh series per restart. |
+| `sandbox.pid` | off | Opt-in via `--emit-pid`. Fresh series per restart. |
+
+## All flags
+
+<Accordion title="msb-metrics stdout">
+For local inspection of what `msb-metrics` is reading from shm
+without standing up an OTLP receiver. One human-readable line per
+snapshot.
+
+```text
+msb-metrics stdout [--collect-interval=<dur>]
+                   [--flush-interval=<dur>]
+                   [--max-buffered=<n>]
+                   [--export-timeout=<dur>]
+                   [--msb-home=<path>]
+```
+
+The output format is not a stable contract; don't pipe it into
+production parsers. Sample line:
+
+```text
+2026-05-30T02:44:31Z sandbox=devbox id=33 cpu=0.000107 \
+    mem=13.6 MiB / 512.0 MiB disk_r=89.3 MiB disk_w=644.7 MiB \
+    net_rx=48.0 MiB net_tx=268.5 KiB uptime=2475m15s
+```
+</Accordion>
+
+<Accordion title="msb-metrics otel">
+```text
+msb-metrics otel --endpoint=<URL>
+                 [--protocol=grpc|http]
+                 [--compression=none|gzip]
+                 [--ca-cert=<path>]
+                 [--header=KEY=VALUE]...
+                 [--resource=KEY=VALUE]...
+                 [--emit-run-id] [--emit-pid]
+                 [--collect-interval=<dur>]
+                 [--flush-interval=<dur>]
+                 [--max-buffered=<n>]
+                 [--export-timeout=<dur>]
+                 [--msb-home=<path>]
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--endpoint` | (required) | OTLP endpoint URL. |
+| `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). |
+| `--compression` | `none` | `gzip` or `none`. gRPC-only in `opentelemetry-otlp` 0.27; rejected at startup with `--protocol=http`. Meaningful bandwidth saving for direct provider gateways over public internet. |
+| `--ca-cert` | none | Path to a PEM-encoded CA certificate to trust when negotiating TLS. Added on top of webpki roots, so a corporate gateway signed by a private CA works without disabling system trust. gRPC only; rejected at startup with `--protocol=http`. |
+| `--header` | none | `KEY=VALUE`, repeatable. For auth (`Authorization`, `api-key`, etc.). Applied via `OTEL_EXPORTER_OTLP_HEADERS`. |
+| `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
+| `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |
+| `--emit-pid` | off | Add `sandbox.pid` to every datapoint. Opt-in: high cardinality. |
+| `--collect-interval` | `1s` | How often shm is read. `humantime` durations (`1s`, `500ms`, `2m`). |
+| `--flush-interval` | `10s` | Per-exporter scheduled flush cadence. |
+| `--max-buffered` | `60` | Per-exporter buffer cap. Oldest collection drops on overflow; drop count surfaces on the next batch. |
+| `--export-timeout` | `30s` | Per-call timeout for a single OTLP export. |
+| `--msb-home` | `$MSB_HOME` ∨ `~/.microsandbox` | Used to derive the shm registry name. |
+</Accordion>
+
+<Accordion title="Global flags">
+| Flag | Default | Notes |
+|---|---|---|
+| `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace`. Overridden by `RUST_LOG` if set. |
+| `--log-format` | `text` | `text` for the human-readable tracing formatter, `json` for newline-delimited JSON one object per line. Use `json` when shipping the collector's own logs into the same aggregator as your application logs. |
+
+</Accordion>
+
+Or just run `msb-metrics otel --help` for the full prose.
+
+## Tuning at scale
+
+At ~1000 sandboxes per host the per-exporter buffer dominates heap
+usage. The shm registry stays a fixed ~512 KiB regardless of count, and
+the hot path is pure shm (no sqlite read).
+
+| `--max-buffered` | Worst-case heap, per exporter |
+|---|---|
+| `60` (default) | ~21 MB |
+| `20` | ~7 MB |
+
+Worst-case heap is `--max-buffered × active sandboxes × ~350B`,
+reached only when the backend is slow enough to fill the buffer.
+
+## Shutdown behavior
+
+SIGINT or SIGTERM triggers a clean drain:
+
+1. Stop the collect ticker.
+2. Push any buffered collections through one final export.
+3. Call each exporter's `shutdown()` (OTel: flushes and closes the
+   OTLP transport).
+4. Exit.
+
+If an exporter's final export hangs, it's bounded by
+`--export-timeout`.
+
+## Backend unreachable
+
+Failed exports are retried on the next flush; the failed batch is
+restored to the front of the buffer. If failures keep arriving, oldest
+collections drop first and the next successful export's
+`droppedCollectionCount` reports how many were lost (and increments the
+[`microsandbox.collector.collections.dropped`](#collector-self-observability)
+counter). The collector itself does not crash.
+
+The worker uses capped exponential backoff between scheduled retries:
+`flush_interval`, then `2× flush_interval`, `4×`, up to a `32×` cap. At
+the default 10s flush interval that's a worst case of ~5 minutes
+between retries during a sustained outage, instead of hammering the
+backend every 10s. Explicit `RunningCollector::flush()` calls bypass
+the backoff gate, so a caller that knows the upstream has recovered
+can force-retry immediately. On the first successful export the worker
+logs `metrics exporter recovered` at INFO and the multiplier resets
+to 1×.
+
+## Stopped sandboxes
+
+A sandbox that stops releases its shm slot. `msb-metrics` reads the
+active snapshot only, so a stopped sandbox simply stops appearing in
+the export stream. Downstream the series goes stale (no fresh
+datapoints), which is the standard "host gone" signal in Prometheus and
+most TSDBs. There is no explicit "stopped" event.
+
+## Counter resets across sandbox restarts
+
+Disk and network byte fields are cumulative from the sandbox process's
+point of view. When a sandbox restarts, the runtime gets a fresh slot
+and the counters start from zero again. `rate()` is robust to this (it
+detects counter resets), but in the brief window spanning the restart
+a query may return a small negative interval before the next sample
+lands. This is normal counter-reset behavior, not a bug.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="EACCES opening the shm region">
+    You're running `msb-metrics` as a different Unix user from the one
+    that owns the registry. Switch users or use `sudo -u <msb-user>`.
+  </Accordion>
+
+  <Accordion title="Empty metrics, no sandboxes show up">
+    Either no sandboxes are running, or `msb-metrics` is reading a
+    different registry than `msb` writes. Check `--msb-home` matches
+    the runtime's `$MSB_HOME`. Use `--log-level=debug` to see the
+    registry name and collect cadence.
+  </Accordion>
+
+  <Accordion title="OTLP backend rejects the request (HTTP 401/403/422)">
+    Auth or schema mismatch. Verify the `--header` value (especially
+    `Authorization` base64 encoding) and that the endpoint URL matches
+    the protocol. gRPC endpoints typically end at `4317`, HTTP/Protobuf
+    at `4318` with an explicit `/v1/metrics` path on some backends.
+  </Accordion>
+
+  <Accordion title="Sandbox restarts produce fresh time series">
+    Expected if `--emit-run-id` or `--emit-pid` is on. Drop them if you
+    want a single series per sandbox name across restarts.
+  </Accordion>
+</AccordionGroup>
+
+## See also
+
+- [Metrics collector](/observability/msb-metrics): overview and quick
+  start for `msb-metrics`.
+- [Metrics backends](/recipes/metrics-backends/grafana-cloud):
+  end-to-end recipes per provider.

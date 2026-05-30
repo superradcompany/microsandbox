@@ -250,7 +250,10 @@ async fn run_pull_inner(
         } else {
             let elapsed = start.elapsed();
             if elapsed.as_millis() > 500 {
-                format!(" ({})", ui::format_duration(elapsed))
+                format!(
+                    " ({})",
+                    microsandbox_utils::format::format_duration(elapsed)
+                )
             } else {
                 String::new()
             }
@@ -530,7 +533,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
 
 /// Format bytes as a human-readable string.
 fn format_bytes(bytes: i64) -> String {
-    super::ui::format_bytes(bytes.max(0) as u64)
+    microsandbox_utils::format::format_bytes(bytes.max(0) as u64)
 }
 
 /// Print the pull failure indicator line to stderr.

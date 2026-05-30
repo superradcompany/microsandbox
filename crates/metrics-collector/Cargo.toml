@@ -1,0 +1,75 @@
+[package]
+name = "microsandbox-metrics-collector"
+description = "Metrics collector orchestrator and `msb-metrics` binary. Polls the shared-memory metrics registry and ships data to backends (OTLP, …)."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "microsandbox_metrics_collector"
+path = "lib/lib.rs"
+
+[[bin]]
+name = "msb-metrics"
+path = "bin/main.rs"
+
+[dependencies]
+# Shared-memory primitives — the read source for every tick.
+microsandbox-metrics = { path = "../metrics" }
+# ENOENT detection on shm_open failures.
+libc.workspace = true
+# Async runtime + primitives (broadcast, mpsc, JoinSet, time).
+tokio = { workspace = true }
+# BoxFuture, StreamExt — used by the MetricsExporter trait + worker.
+futures.workspace = true
+# Wall-clock timestamps on each collection.
+chrono.workspace = true
+# Binary CLI.
+clap.workspace = true
+# Error plumbing.
+anyhow.workspace = true
+thiserror.workspace = true
+# Structured logging.
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+# Used by the binary to derive the shm registry name from `$MSB_HOME`.
+microsandbox-utils = { version = "0.5.2", path = "../utils" }
+# CLI duration parsing (e.g. "1s", "500ms").
+humantime = "2"
+# Resolving the default `~/.microsandbox` path when --msb-home is omitted.
+dirs.workspace = true
+
+# OTel exporter (backs the `msb-metrics otel` subcommand).
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "gzip-tonic",
+    "http-proto",
+    "metrics",
+    "reqwest-blocking-client",
+    "tls",
+    "tls-webpki-roots",
+] }
+opentelemetry_sdk = { version = "0.32", features = [
+    "metrics",
+    # ManualReader, MetricReader trait, and Pipeline moved behind this
+    # flag in 0.32. we need a manual reader because we drive cadence
+    # ourselves from worker.rs's flush ticker and PeriodicReader's sync
+    # force_flush() deadlocks an async caller.
+    "experimental_metrics_custom_reader",
+] }
+tonic = { version = "0.14", default-features = false, features = [
+    "tls-ring",
+    "tls-webpki-roots",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "test-util",
+] }

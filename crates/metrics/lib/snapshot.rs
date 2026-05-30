@@ -1,4 +1,4 @@
-//! In-memory snapshot type produced by registry reads.
+//! In-memory snapshot types produced by registry reads.
 
 use std::time::Duration;
 
@@ -7,6 +7,11 @@ use std::time::Duration;
 //--------------------------------------------------------------------------------------------------
 
 /// Coherent live sample read from a single registry slot.
+///
+/// Carries both identity (sandbox_id, run_id, pid, name) and the metric
+/// fields in one struct, matching the on-disk slot layout. Consumers that
+/// only want the metric values can convert to [`SandboxMetrics`] via
+/// [`SandboxMetricSnapshot::from`].
 #[derive(Clone, Debug)]
 pub struct LiveMetric {
     /// Catalog sandbox id.
@@ -35,4 +40,68 @@ pub struct LiveMetric {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted.
     pub net_tx_bytes: u64,
+}
+
+/// Point-in-time metrics for a running sandbox (no identity fields).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SandboxMetrics {
+    /// CPU usage as a percentage across all host CPUs.
+    pub cpu_percent: f32,
+    /// Resident memory usage in bytes.
+    pub memory_bytes: u64,
+    /// Configured guest memory limit in bytes.
+    pub memory_limit_bytes: u64,
+    /// Cumulative disk bytes read by the sandbox process.
+    pub disk_read_bytes: u64,
+    /// Cumulative disk bytes written by the sandbox process.
+    pub disk_write_bytes: u64,
+    /// Cumulative network bytes delivered from the runtime to the guest.
+    pub net_rx_bytes: u64,
+    /// Cumulative network bytes transmitted from the guest into the runtime.
+    pub net_tx_bytes: u64,
+    /// Sandbox uptime at the moment the sample was taken.
+    pub uptime: Duration,
+    /// Timestamp of the sample.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Metrics plus shared-memory identity metadata for one active sandbox slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SandboxMetricSnapshot {
+    /// Catalog sandbox id.
+    pub sandbox_id: i32,
+    /// Catalog run id.
+    pub run_id: i32,
+    /// Runtime process id that owns the metrics slot.
+    pub pid: i32,
+    /// Sandbox name.
+    pub name: String,
+    /// Resource metrics sample.
+    pub metrics: SandboxMetrics,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl From<LiveMetric> for SandboxMetricSnapshot {
+    fn from(live: LiveMetric) -> Self {
+        Self {
+            sandbox_id: live.sandbox_id,
+            run_id: live.run_id,
+            pid: live.pid,
+            name: live.name,
+            metrics: SandboxMetrics {
+                cpu_percent: live.cpu_percent,
+                memory_bytes: live.memory_bytes,
+                memory_limit_bytes: live.memory_limit_bytes,
+                disk_read_bytes: live.disk_read_bytes,
+                disk_write_bytes: live.disk_write_bytes,
+                net_rx_bytes: live.net_rx_bytes,
+                net_tx_bytes: live.net_tx_bytes,
+                uptime: live.uptime,
+                timestamp: live.timestamp,
+            },
+        }
+    }
 }

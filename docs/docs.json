@@ -62,6 +62,14 @@
             ]
           },
           {
+            "group": "Observability",
+            "icon": "gauge",
+            "pages": [
+              "observability/msb-metrics",
+              "observability/deep-dive"
+            ]
+          },
+          {
             "group": "Images",
             "icon": "layer-group",
             "pages": [
@@ -184,16 +192,27 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker",
-              "recipes/docker-in-sandbox",
-              "recipes/local-images"
+              "recipes/docker/docker",
+              "recipes/docker/docker-in-sandbox",
+              "recipes/docker/local-images"
             ]
           },
           {
             "group": "Guest",
             "icon": "server",
             "pages": [
-              "recipes/systemd-services"
+              "recipes/guest/systemd-services"
+            ]
+          },
+          {
+            "group": "Metrics backends",
+            "icon": "paper-plane",
+            "pages": [
+              "recipes/metrics-backends/grafana-cloud",
+              "recipes/metrics-backends/grafana-alloy",
+              "recipes/metrics-backends/otel-collector",
+              "recipes/metrics-backends/prometheus",
+              "recipes/metrics-backends/datadog"
             ]
           }
         ]
