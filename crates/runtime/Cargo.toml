@@ -28,7 +28,7 @@ microsandbox-metrics = { version = "0.5.3", path = "../metrics" }
 microsandbox-network = { version = "0.5.3", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.5.3", path = "../protocol" }
 microsandbox-utils = { version = "0.5.3", path = "../utils" }
-msb_krun = { git = "https://github.com/superradcompany/libkrun.git", branch = "appcypher/raise-boot-cmdline-limits", features = ["blk"] }
+msb_krun = { version = "0.1.14", features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
 rustls = { workspace = true }
 sea-orm.workspace = true
