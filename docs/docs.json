@@ -80,20 +80,14 @@
         ]
       },
       {
-        "tab": "References",
+        "tab": "CLI / SDK",
         "groups": [
-          {
-            "group": "Getting Started",
-            "icon": "flag",
-            "pages": [
-              "sdk/overview",
-              "sdk/errors"
-            ]
-          },
           {
             "group": "SDKs",
             "icon": "code",
             "pages": [
+              "sdk/overview",
+              "sdk/errors",
               {
                 "group": "Rust",
                 "icon": "rust",
