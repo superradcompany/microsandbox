@@ -1,0 +1,98 @@
+---
+title: "Week of May 29, 2026"
+description: "Native SSH and SFTP, configurable OCI upper size, msb copy and rootfs patch flags, hardened mount options, env-backed secret shorthand, and a fix for multi-second published-port stalls."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.5.0](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.0) · [v0.5.1](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.1) · [v0.5.2](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.2)
+</Tip>
+
+## New features
+
+**Native SSH and SFTP**
+
+Sandboxes gain a first-class SSH surface across the CLI and every SDK without running `sshd` inside the guest. `msb ssh <name>` opens an interactive session, `msb ssh <name> -- <cmd>` runs a one-shot command, and `msb ssh serve` exposes an external SSH transport that standard `ssh` and `sftp` clients can connect to after `msb ssh authorize` registers a key. The SDK SSH namespace in Rust, TypeScript, Python, and Go supports interactive attach, exec, and SFTP, plus an in-process server mode.
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+msb ssh serve devbox --host 127.0.0.1 --port 2222
+ssh -p 2222 root@127.0.0.1
+sftp -P 2222 root@127.0.0.1
+```
+
+See the [SSH overview](/sandboxes/ssh/overview).
+
+**Configurable OCI upper size**
+
+The writable upper layer for OCI sandboxes is now configurable, so workloads that generate large amounts of state during a session no longer have to fit inside the previous fixed default. `msb run --oci-upper-size 8G ...` sets it from the CLI, and `sandbox_defaults.oci.upper_size_mib` sets the deployment-wide default. The Rust, TypeScript, Python, and Go SDKs gained matching surfaces. Fresh OCI roots default to 4096 MiB; snapshot upper layers are copied as-is.
+
+```python
+sandbox = await Sandbox.create(
+    "worker",
+    image=Image.oci("python:3.12", upper_size_mib=8192),
+)
+```
+
+See the [sandbox commands reference](/cli/sandbox-commands).
+
+**`msb copy` and rootfs patch flags**
+
+A new `msb copy` (alias `msb cp`) moves files host-to-sandbox, sandbox-to-host, within a single sandbox, or across two sandboxes, including recursive directories and symlinks. `msb run` and `msb create` accept `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, and `--rm` so a fresh sandbox can be prepared without a separate setup step. Guest paths are validated before the sandbox is created so typos fail fast.
+
+```bash
+msb run alpine \
+  --copy ./config.toml:/etc/app/config.toml \
+  --copy-dir ./certs:/etc/app/certs \
+  --mkdir /var/cache/app \
+  --rm /etc/motd
+
+msb copy ./local.txt devbox:/tmp/local.txt
+msb copy devbox:/tmp/a otherbox:/tmp/a
+```
+
+See the [CLI overview](/cli/overview).
+
+**Docker-style mount options with enforced `ro` and `noexec`**
+
+Volume mounts now use the Docker-style `source:guest:options` shape everywhere and accept `ro`, `rw`, `nosuid`, `noexec`, and `fstype=...` (for disk-image volumes). The host-side passthroughfs enforces read-only mounts so the guest cannot remount them writable, and the runtime drops mount-admin capability before user execs so user commands cannot undo `ro` or `noexec`. Direct SDK configs are validated before create or start so unsafe guest paths and policy combinations fail early.
+
+```bash
+msb run --name tools -v ./tools:/tools:ro,noexec alpine -- ls /tools
+```
+
+See the [volumes guide](/sandboxes/volumes).
+
+**Env-backed secret shorthand**
+
+`msb --secret` accepts a new `ENV@HOST` form that reads the value from the same-named host environment variable, so common API keys no longer need to be inlined in command arguments. The existing `ENV=VALUE@HOST` form is preserved for explicit values and renames. Missing, empty, or non-UTF-8 sources produce a clear error.
+
+```bash
+msb create python --name agent \
+  --secret "OPENAI_API_KEY@api.openai.com"
+```
+
+See the [secrets guide](/sandboxes/secrets).
+
+**Other features**
+
+- **Sandbox name byte limit.** Sandbox names are now validated as 1 to 128 UTF-8 bytes everywhere (CLI, all SDKs, metrics), with a typed error rather than a silent truncation. Names longer than 128 bytes are now rejected. See [Sandbox lifecycle](/sandboxes/lifecycle).
+- **Host UDP published ports.** Published-port mappings now support UDP end to end, with bounded peer allocation and a VM round-trip test. See the [networking overview](/networking/overview).
+- **Typed Python network destinations.** The Python SDK now accepts `Ip`, `Cidr`, `Domain`, `DomainSuffix`, `Group`, and `Any` destinations on `Rule`, alongside the legacy string form. See the [Python networking reference](/sdk/python/networking).
+- **Guest clock sync.** The runtime now sends a `core.clock.sync` frame on startup, every 60 seconds, and after the host wall clock jumps by more than 6 seconds. Sandboxes that survive a host sleep or suspend resume with the correct wall time instead of drifting until restart.
+
+## Bug fixes
+
+- Published-port traffic from the host no longer stalls for several seconds before the guest receives the connection; the host listener now wakes the smoltcp poll loop immediately after accepting.
+- DNS-over-UDP responses are now delivered back to the guest as real Ethernet frames, so guest resolvers no longer occasionally time out even when the upstream query succeeded.
+- TLS-intercepted uploads no longer hang or end with EOF on large request bodies; the upstream stream is flushed after each forwarded plaintext batch.
+- TLS secret substitution is now tied to the original guest destination, DNS-cache binding, SNI, HTTP/1 `Host`, and observed HTTP/2 `:authority`, so spoofed or fronted hosts cannot trick the proxy into injecting real secret values. HTTP/2 HEADERS are decoded and re-encoded with bounded HPACK state, and HTTP/1 chunked and fixed-length bodies are rewritten safely.
+- Body-continuation chunks on long-lived TLS connections no longer corrupt binary uploads with `U+FFFD`, leak header-only secrets into request bodies, or skip substitution on pipelined follow-up requests.
+- SNI matching now enforces `deny` rules even when the guest connects to a literal IP with no DNS-cache binding, closing a path that previously let denied domains through over direct-IP HTTPS.
+- Bind mounts of host-owned directories are now mapped to the guest's resolved default user, so non-root guests can read and write project files mounted from the host. Other host owners surface as `65534:65534`.
+- Sandboxes with very long names now boot reliably; the agent relay socket is placed under a fixed-length runtime path and validated against `SUN_LEN` before spawn, with the legacy socket path retained as a fallback.
+- Network policies in the Python and Go SDKs treat bare IPv4 and IPv6 literals as host CIDR matches instead of trying to resolve them as domains.
+- `Sandbox.exec(cmd, options_dict)` and `exec_stream(cmd, options_dict)` in the Python SDK now actually apply `args` and other options, and `shell_with(..., timeout=...)` honors the same timeout path as `exec_with()`. `create_with_progress()` is callable synchronously again.
+- Sandboxes started under microsandbox 0.4 keep working for exec and shell after upgrading to 0.5; filesystem and SFTP operations against a pre-0.5 live sandbox now fail with a clear restart hint instead of a protocol-level error, and legacy OCI config rows are migrated to the new shape on first contact.
+- Split irqchip is re-enabled for x86 Linux VMs, restoring the previous interrupt routing path now that the underlying libkrun fix has shipped.
+- Released binaries now ship with the SSH feature enabled, so the new `msb ssh` commands work without rebuilding from source.
