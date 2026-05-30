@@ -516,7 +516,10 @@ fn poll_fd_readable_timeout(fd: RawFd, timeout_ms: i32) {
     }
 }
 
-fn push_guest_frame_blocking(shared: &ConsoleSharedState, mut frame: Vec<u8>) -> RuntimeResult<()> {
+pub(crate) fn push_guest_frame_blocking(
+    shared: &ConsoleSharedState,
+    mut frame: Vec<u8>,
+) -> RuntimeResult<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
     loop {
@@ -529,7 +532,7 @@ fn push_guest_frame_blocking(shared: &ConsoleSharedState, mut frame: Vec<u8>) ->
                 frame = returned;
                 if std::time::Instant::now() >= deadline {
                     return Err(RuntimeError::Custom(
-                        "timed out sending init ack to agentd".into(),
+                        "timed out sending frame to agentd".into(),
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
