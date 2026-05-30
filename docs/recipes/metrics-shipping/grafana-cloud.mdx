@@ -59,7 +59,7 @@ to it using HTTP/Protobuf and Basic auth.
 ## Production: prefer Grafana Alloy
 
 For long-running deployments, point `msb-metrics` at a local
-[Grafana Alloy](/observability/metrics-collection/grafana-alloy)
+[Grafana Alloy](/recipes/metrics-shipping/grafana-alloy)
 instance instead of the OTLP gateway directly. Alloy handles
 batching, retries, credential rotation, and buffering through Grafana
 Cloud hiccups without touching `msb-metrics`.
