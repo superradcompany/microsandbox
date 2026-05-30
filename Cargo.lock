@@ -3317,7 +3317,6 @@ name = "microsandbox-metrics-collector"
 version = "0.5.2"
 dependencies = [
  "anyhow",
- "axum",
  "chrono",
  "clap",
  "dirs",

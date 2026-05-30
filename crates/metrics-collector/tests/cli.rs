@@ -7,66 +7,10 @@
 //! to assert on stderr lines emitted by an actively-running binary makes
 //! the test racy on slower CI hosts without earning much coverage.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_msb-metrics")
-}
-
-/// Pick an unused ephemeral port for this test process. Tests run in
-/// parallel so a hardcoded port races. We assume nothing else binds in
-/// the 30000-40000 range during the test run; if that bites us we can
-/// switch to a real port-allocation library.
-fn next_test_port() -> u16 {
-    static SEQ: AtomicU16 = AtomicU16::new(30100);
-    SEQ.fetch_add(1, Ordering::SeqCst)
-}
-
-/// Send `GET <path>` on a fresh TCP connection and return the bytes of
-/// the first response line (e.g. `b"HTTP/1.1 200 OK\r\n"`).
-fn http_get_status_line(addr: &str, path: &str) -> std::io::Result<String> {
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().expect("addr parses"),
-        Duration::from_secs(2),
-    )?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf)?;
-    Ok(buf.lines().next().unwrap_or("").to_string())
-}
-
-/// Poll `addr` until a TCP connect succeeds or the deadline passes.
-/// Returns true when the listener answered.
-fn wait_for_listener(addr: &str, deadline: Duration) -> bool {
-    let stop = Instant::now() + deadline;
-    while Instant::now() < stop {
-        if TcpStream::connect_timeout(
-            &addr.parse().expect("addr parses"),
-            Duration::from_millis(200),
-        )
-        .is_ok()
-        {
-            return true;
-        }
-        sleep(Duration::from_millis(100));
-    }
-    false
-}
-
-/// RAII wrapper that kills the spawned binary on drop, so a failed assert
-/// doesn't leak a `target/debug/msb-metrics` into the next test run.
-struct Killer(Child);
-impl Drop for Killer {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 #[test]
@@ -197,63 +141,6 @@ fn missing_ca_cert_file_errors_cleanly() {
     assert!(
         stderr.contains("--ca-cert") || stderr.contains("ca.pem"),
         "error should mention --ca-cert or the bad path, got: {stderr}"
-    );
-}
-
-#[test]
-fn http_listen_serves_healthz_and_readyz() {
-    let port = next_test_port();
-    let addr = format!("127.0.0.1:{port}");
-    let child = Command::new(bin())
-        .args([
-            "--http-listen",
-            &addr,
-            "stdout",
-            "--collect-interval=1s",
-            "--flush-interval=5s",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn msb-metrics with --http-listen");
-    let _guard = Killer(child);
-
-    assert!(
-        wait_for_listener(&addr, Duration::from_secs(5)),
-        "health server should bind {addr} within 5s"
-    );
-
-    let healthz = http_get_status_line(&addr, "/healthz").expect("GET /healthz");
-    assert!(
-        healthz.starts_with("HTTP/1.1 200"),
-        "/healthz should be 200, got: {healthz}"
-    );
-
-    let readyz = http_get_status_line(&addr, "/readyz").expect("GET /readyz");
-    assert!(
-        readyz.starts_with("HTTP/1.1 200"),
-        "/readyz should be 200 once the collector started, got: {readyz}"
-    );
-
-    // Unknown path returns 404 (axum default).
-    let bogus = http_get_status_line(&addr, "/bogus").expect("GET /bogus");
-    assert!(
-        bogus.starts_with("HTTP/1.1 404"),
-        "unknown path should 404, got: {bogus}"
-    );
-}
-
-#[test]
-fn http_listen_help_lists_flag() {
-    let out = Command::new(bin())
-        .arg("--help")
-        .output()
-        .expect("spawn msb-metrics --help");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("--http-listen"),
-        "--http-listen should be in --help, got: {stdout}"
     );
 }
 

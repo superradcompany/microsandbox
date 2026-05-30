@@ -10,16 +10,10 @@
 //! Deployment constraints: must run as the same Unix user that owns
 //! the `$MSB_HOME` directory (the shm registry is mode `0600`).
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::Router;
-use axum::http::StatusCode;
-use axum::routing::get;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use microsandbox_metrics_collector::MetricsCollector;
 use microsandbox_metrics_collector::exporters::{
@@ -50,15 +44,6 @@ struct Cli {
     /// everything else.
     #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
     log_format: LogFormat,
-
-    /// Bind a health-check HTTP server to this address (e.g.
-    /// `127.0.0.1:9095`, `0.0.0.0:9095`). Exposes `/healthz` (liveness;
-    /// `200 OK` once the binary is running) and `/readyz` (readiness;
-    /// `200 OK` once the metrics collector has successfully attached to
-    /// shm and started its worker loop). Intended for systemd / Kubernetes
-    /// / Nomad probes. Omit to leave the server off entirely.
-    #[arg(long, value_name = "ADDR", global = true)]
-    http_listen: Option<SocketAddr>,
 
     #[command(subcommand)]
     command: Command,
@@ -222,29 +207,17 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.log_level, cli.log_format);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let health_task = match cli.http_listen {
-        Some(addr) => Some(spawn_health_server(addr, ready.clone()).await?),
-        None => None,
-    };
-
-    let result = match cli.command {
-        Command::Otel(args) => run_otel(args, ready.clone()).await,
-        Command::Stdout(args) => run_stdout(args, ready.clone()).await,
-    };
-
-    if let Some(handle) = health_task {
-        handle.abort();
-        let _ = handle.await;
+    match cli.command {
+        Command::Otel(args) => run_otel(args).await,
+        Command::Stdout(args) => run_stdout(args).await,
     }
-    result
 }
 
 //--------------------------------------------------------------------------------------------------
 // Subcommand handlers
 //--------------------------------------------------------------------------------------------------
 
-async fn run_otel(args: OtelArgs, ready: Arc<AtomicBool>) -> anyhow::Result<()> {
+async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     let registry_name = resolve_registry_name(args.collector.msb_home.as_deref())?;
     info!(registry = %registry_name, endpoint = %args.endpoint, "starting msb-metrics otel");
 
@@ -277,12 +250,10 @@ async fn run_otel(args: OtelArgs, ready: Arc<AtomicBool>) -> anyhow::Result<()> 
         .context("build metrics collector")?;
 
     let handle = collector.start().await.context("start metrics collector")?;
-    ready.store(true, Ordering::SeqCst);
     info!("msb-metrics started; press Ctrl+C to shut down");
 
     wait_for_shutdown_signal().await;
     info!("shutdown signal received; draining buffers");
-    ready.store(false, Ordering::SeqCst);
 
     handle
         .shutdown()
@@ -292,7 +263,7 @@ async fn run_otel(args: OtelArgs, ready: Arc<AtomicBool>) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn run_stdout(args: StdoutArgs, ready: Arc<AtomicBool>) -> anyhow::Result<()> {
+async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
     let registry_name = resolve_registry_name(args.collector.msb_home.as_deref())?;
     info!(registry = %registry_name, "starting msb-metrics stdout");
 
@@ -307,12 +278,10 @@ async fn run_stdout(args: StdoutArgs, ready: Arc<AtomicBool>) -> anyhow::Result<
         .context("build metrics collector")?;
 
     let handle = collector.start().await.context("start metrics collector")?;
-    ready.store(true, Ordering::SeqCst);
     info!("msb-metrics started; press Ctrl+C to shut down");
 
     wait_for_shutdown_signal().await;
     info!("shutdown signal received; draining buffers");
-    ready.store(false, Ordering::SeqCst);
 
     handle
         .shutdown()
@@ -320,53 +289,6 @@ async fn run_stdout(args: StdoutArgs, ready: Arc<AtomicBool>) -> anyhow::Result<
         .context("shutdown metrics collector")?;
     info!("msb-metrics stopped cleanly");
     Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-// Health server
-//--------------------------------------------------------------------------------------------------
-
-/// Bind a tiny axum server exposing `/healthz` (always 200 once the
-/// process is running) and `/readyz` (200 when the metrics collector
-/// has successfully attached to shm and started its worker loop). Both
-/// endpoints respond with `text/plain` bodies (`ok` / `not ready`),
-/// which is the convention systemd and k8s readiness probes treat
-/// as opaque payload anyway.
-async fn spawn_health_server(
-    addr: SocketAddr,
-    ready: Arc<AtomicBool>,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let liveness = || async { (StatusCode::OK, "ok") };
-    let readiness = {
-        let ready = ready.clone();
-        move || {
-            let ready = ready.clone();
-            async move {
-                if ready.load(Ordering::SeqCst) {
-                    (StatusCode::OK, "ok")
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "not ready")
-                }
-            }
-        }
-    };
-    let app = Router::new()
-        .route("/healthz", get(liveness))
-        .route("/readyz", get(readiness));
-
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind health server on {addr}"))?;
-    let bound = listener
-        .local_addr()
-        .unwrap_or_else(|_| "<unknown>".parse().unwrap());
-    info!(http_listen = %bound, "health server listening");
-
-    Ok(tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app).await {
-            tracing::warn!(%error, "health server exited");
-        }
-    }))
 }
 
 //--------------------------------------------------------------------------------------------------
