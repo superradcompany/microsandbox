@@ -40,8 +40,8 @@
 use std::sync::{Arc, Weak};
 
 use futures::future::BoxFuture;
-use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Gauge, Meter, MeterProvider};
+use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
@@ -60,6 +60,16 @@ use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 
 /// Name reported as `otel.scope.name` for instruments built by this exporter.
 const SCOPE_NAME: &str = "microsandbox-metrics-collector";
+
+/// Version reported as `otel.scope.version` for instruments built by this
+/// exporter. Tracks the crate version so a Prometheus consumer can tell
+/// which `msb-metrics` build emitted a series.
+///
+/// `otel.scope.schema_url` is intentionally left unset — our metric names
+/// (`microsandbox.cpu.utilization`, …) are project-specific and do not
+/// conform to a published OpenTelemetry semantic-conventions release, so
+/// declaring a schema URL would be misleading.
+const SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -259,7 +269,10 @@ impl OtelExporterBuilder {
             .with_resource(resource)
             .build();
 
-        let meter = provider.meter(SCOPE_NAME);
+        let scope = InstrumentationScope::builder(SCOPE_NAME)
+            .with_version(SCOPE_VERSION)
+            .build();
+        let meter = provider.meter_with_scope(scope);
         let instruments = build_instruments(&meter);
 
         Ok(OtelExporter {
