@@ -76,21 +76,39 @@ queries the rest of their telemetry runs through:
 | `collector.collections.dropped` | counter | Collections evicted from the per-exporter buffer because the cap was hit (drop-oldest, see `--max-buffered`). |
 | `collector.last_success_timestamp` | gauge | Unix epoch seconds at the last successful export. `time() - microsandbox_collector_last_success_timestamp_seconds` is a sensible staleness alert source. |
 
-Useful PromQL:
+#### Useful PromQL
 
-```promql
-# Are exports flowing? Non-zero means yes.
-rate(microsandbox_collector_exports_success_total[1m])
+<AccordionGroup>
+  <Accordion title="Are exports flowing?">
+    Non-zero rate means yes.
 
-# Failure ratio over the last 5 minutes.
-rate(microsandbox_collector_exports_failure_total[5m])
-  /
-clamp_min(rate(microsandbox_collector_exports_success_total[5m]) +
-          rate(microsandbox_collector_exports_failure_total[5m]), 1)
+    ```bash
+    rate(microsandbox_collector_exports_success_total[1m])
+    ```
+  </Accordion>
+  <Accordion title="Failure ratio over the last 5 minutes">
+    `clamp_min` keeps the denominator at 1 so an idle window doesn't
+    divide by zero.
 
-# Staleness alert: no successful export in 5 minutes.
-time() - microsandbox_collector_last_success_timestamp_seconds > 300
-```
+    ```bash
+    rate(microsandbox_collector_exports_failure_total[5m])
+      /
+    clamp_min(
+      rate(microsandbox_collector_exports_success_total[5m]) +
+      rate(microsandbox_collector_exports_failure_total[5m]),
+      1
+    )
+    ```
+  </Accordion>
+  <Accordion title="Staleness alert: no successful export in 5 minutes">
+    Wire this to your alerting backend; the `> 300` threshold is in
+    seconds.
+
+    ```bash
+    time() - microsandbox_collector_last_success_timestamp_seconds > 300
+    ```
+  </Accordion>
+</AccordionGroup>
 
 The fully-qualified series are emitted by the same scope as the
 sandbox metrics (`otel_scope_name="microsandbox-metrics-collector"`,
