@@ -47,8 +47,7 @@
               "sandboxes/customize",
               "sandboxes/snapshots",
               "sandboxes/logs",
-              "sandboxes/metrics",
-              "sandboxes/events"
+              "sandboxes/metrics"
             ]
           },
           {
@@ -107,7 +106,6 @@
                   "sdk/rust/networking",
                   "sdk/rust/secrets",
                   "sdk/rust/snapshots",
-                  "sdk/rust/events",
                   "sdk/rust/agent-client"
                 ]
               },
@@ -124,7 +122,6 @@
                   "sdk/typescript/networking",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
-                  "sdk/typescript/events",
                   "sdk/typescript/agent-client"
                 ]
               },
@@ -141,7 +138,6 @@
                   "sdk/python/networking",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
-                  "sdk/python/events",
                   "sdk/python/agent-client"
                 ]
               },
@@ -159,7 +155,6 @@
                   "sdk/go/networking",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
-                  "sdk/go/events",
                   "sdk/go/agent-client"
                 ]
               }

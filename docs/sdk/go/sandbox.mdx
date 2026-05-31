@@ -234,7 +234,7 @@ Return the sandbox's name.
 func (s *Sandbox) FS() *SandboxFs
 ```
 
-Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for the full API.
+Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for API details.
 
 ---
 
@@ -952,8 +952,8 @@ A lightweight metadata reference to a sandbox returned by [`GetSandbox`](#getsan
 | `Stop(ctx)`             | `error`                           | Graceful shutdown                                 |
 | `Kill(ctx)`             | `error`                           | Force terminate                                   |
 | `Remove(ctx)`           | `error`                           | Delete sandbox and persisted state                |
-| `Snapshot(ctx, name)`   | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox under a bare name   |
-| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox to an explicit path |
+| `Snapshot(ctx, name)`   | `(*SnapshotArtifact, error)`      | Snapshot stopped/crashed sandbox under a bare name |
+| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)`      | Snapshot stopped/crashed sandbox to an explicit path |
 
 ---
 

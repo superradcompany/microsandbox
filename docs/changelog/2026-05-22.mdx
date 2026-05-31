@@ -75,7 +75,7 @@ See the [CLI reference](/cli/sandbox-commands).
 - **Python exec keyword arguments.** `sandbox.exec("python3", ["script.py"], cwd="/app", env={...}, timeout=30.0)` now works directly, instead of requiring an `ExecOptions` dict. See the [Python SDK reference](/sdk/python/execution).
 - **Configurable guest IP pools.** Deployments can override the default IPv4 and IPv6 guest pools, and the default IPv4 pool changes from `100.96.0.0/11` to `172.16.0.0/12` to avoid colliding with Tailscale.
 - **`msb start` accepts variadic sandbox names.** Start more than one sandbox in a single command.
-- **Agent relay supports up to 128 concurrent clients.** Raised from 16. The relay also reports its correlation-ID range size to each SDK during the handshake, so a future bump will not silently misroute frames on older clients.
+- **Agent relay supports up to 128 concurrent clients.** Raised from 16. The relay also reports its correlation-ID range size to each SDK during the handshake, so later changes will not silently misroute frames on older clients.
 - **Configurable shared-memory metrics registry.** Live per-sandbox metrics now live in a POSIX shared-memory segment instead of SQLite, removing steady-state writes to the catalog database. Capacity is tunable via `metrics.capacity` in `~/.microsandbox/config.json`; the public metrics API is unchanged. See [Sandbox metrics](/sandboxes/metrics).
 
 ## Bug fixes
