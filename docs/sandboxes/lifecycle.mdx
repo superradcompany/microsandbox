@@ -251,7 +251,7 @@ msb rm worker
 <CodeGroup>
 ```rust Rust
 for handle in Sandbox::list().await? {
-    println!("{}: {:?}", handle.name(), handle.status());
+    println!("{}: {:?}", handle.name(), handle.status_snapshot());
 }
 ```
 

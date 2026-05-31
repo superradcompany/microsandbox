@@ -337,7 +337,7 @@ Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox
 #### remove_persisted()
 
 ```rust
-async fn remove_persisted(self) -> MicrosandboxResult<()>
+async fn remove_persisted(&self) -> MicrosandboxResult<()>
 ```
 
 Remove the sandbox and all its persisted state from disk.

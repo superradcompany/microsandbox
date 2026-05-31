@@ -5,8 +5,8 @@ use std::io::IsTerminal;
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
-        remove, run, self_cmd, snapshot, start, stop, uninstall, volume,
+        copy, create, exec, image, inspect, install, list, logs, metrics, profile, ps, pull,
+        registry, remove, run, self_cmd, snapshot, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -127,6 +127,9 @@ enum Commands {
     /// Manage the msb installation.
     #[command(name = "self")]
     Self_(self_cmd::SelfArgs),
+
+    /// Manage SDK backend profiles (local vs cloud).
+    Profile(profile::ProfileArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -341,6 +344,7 @@ fn run_async_command_anyhow(
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
+            Commands::Profile(args) => profile::run(args).await,
         }
     })
 }

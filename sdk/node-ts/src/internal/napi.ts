@@ -24,6 +24,13 @@ export const napi = native;
 
 export interface NativeBindings {
   readonly setRuntimeMsbPath?: (path: string) => void;
+  readonly setDefaultBackend?: (
+    kind: string,
+    url?: string,
+    apiKey?: string,
+    profile?: string,
+  ) => void;
+  readonly defaultBackendKind?: () => "local" | "cloud";
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;

@@ -48,7 +48,7 @@ impl PySandboxHandle {
             .inner
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
-        Ok(format!("{:?}", guard.status()).to_lowercase())
+        Ok(format!("{:?}", guard.status_snapshot()).to_lowercase())
     }
 
     /// Raw config JSON string.

@@ -1866,6 +1866,8 @@ pub unsafe extern "C" fn msb_sandbox_create(
 fn sandbox_status_str(s: microsandbox::sandbox::SandboxStatus) -> &'static str {
     use microsandbox::sandbox::SandboxStatus::*;
     match s {
+        Created => "created",
+        Starting => "starting",
         Running => "running",
         Draining => "draining",
         Paused => "paused",
@@ -1887,7 +1889,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             Ok(serde_json::json!({
                 "name": h.name(),
-                "status": sandbox_status_str(h.status()),
+                "status": sandbox_status_str(h.status_snapshot()),
                 "config_json": h.config_json(),
                 "created_at_unix": h.created_at().map(|t| t.timestamp()),
                 "updated_at_unix": h.updated_at().map(|t| t.timestamp()),
@@ -2225,7 +2227,7 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
     format!(
         r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated}}}"#,
         name = name_json,
-        status = sandbox_status_str(h.status()),
+        status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,
     )
 }
@@ -3382,11 +3384,13 @@ fn volume_handle_json(vh: &VolumeHandle) -> String {
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".into());
-    let path = microsandbox::config::config()
-        .volumes_dir()
-        .join(vh.name())
-        .to_string_lossy()
-        .into_owned();
+    // Best-effort: when the default backend is local we surface the host
+    // path; otherwise fall back to an empty path since cloud volumes don't
+    // expose a host-side directory.
+    let path = microsandbox::backend::default_backend()
+        .as_local()
+        .map(|local| local.volume_path(vh.name()).to_string_lossy().into_owned())
+        .unwrap_or_default();
     let name_json = serde_json::to_string(vh.name()).unwrap_or_else(|_| "\"\"".into());
     let path_json = serde_json::to_string(&path).unwrap_or_else(|_| "\"\"".into());
     format!(
@@ -4122,7 +4126,11 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let map = all_sandbox_metrics().await.map_err(FfiError::from)?;
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
+            let map = all_sandbox_metrics(local).await.map_err(FfiError::from)?;
             let mut entries = String::new();
             for (name, m) in &map {
                 if !entries.is_empty() {
@@ -4265,7 +4273,11 @@ pub unsafe extern "C" fn msb_image_get(
     run_c(cancel_id, buf, buf_len, || {
         let reference = unsafe { cstr(reference) }?;
         Ok(Box::pin(async move {
-            let h = microsandbox::image::Image::get(&reference)
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let h = microsandbox::image::Image::get(local, &reference)
                 .await
                 .map_err(FfiError::from)?;
             Ok(image_handle_json(&h).to_string())
@@ -4281,7 +4293,11 @@ pub unsafe extern "C" fn msb_image_list(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let handles = microsandbox::image::Image::list()
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let handles = microsandbox::image::Image::list(local)
                 .await
                 .map_err(FfiError::from)?;
             let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
@@ -4300,7 +4316,11 @@ pub unsafe extern "C" fn msb_image_inspect(
     run_c(cancel_id, buf, buf_len, || {
         let reference = unsafe { cstr(reference) }?;
         Ok(Box::pin(async move {
-            let detail = microsandbox::image::Image::inspect(&reference)
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let detail = microsandbox::image::Image::inspect(local, &reference)
                 .await
                 .map_err(FfiError::from)?;
             let config = detail.config.as_ref().map(|c| {
@@ -4353,7 +4373,11 @@ pub unsafe extern "C" fn msb_image_remove(
     run_c(cancel_id, buf, buf_len, || {
         let reference = unsafe { cstr(reference) }?;
         Ok(Box::pin(async move {
-            microsandbox::image::Image::remove(&reference, force)
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            microsandbox::image::Image::remove(local, &reference, force)
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
@@ -4369,7 +4393,11 @@ pub unsafe extern "C" fn msb_image_gc_layers(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc_layers()
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let removed = microsandbox::image::Image::gc_layers(local)
                 .await
                 .map_err(FfiError::from)?;
             Ok(format!(r#"{{"removed":{removed}}}"#))
@@ -4385,7 +4413,11 @@ pub unsafe extern "C" fn msb_image_gc(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc()
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let removed = microsandbox::image::Image::gc(local)
                 .await
                 .map_err(FfiError::from)?;
             Ok(format!(r#"{{"removed":{removed}}}"#))

@@ -22,7 +22,7 @@ use super::{
 const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
 const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
-const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
+pub(crate) const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
 
 /// Default timeout given to the existing sandbox during a `.replace()`
 /// create before it is force-killed.
@@ -35,28 +35,32 @@ const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
 /// [`SandboxHandle::stop`]: super::SandboxHandle::stop
 pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Compile-time defaults for `SandboxConfig` serde. Serde's `#[serde(default
+// = "fn")]` attribute can't take parameters, so these can't consult a
+// `LocalBackend`. They intentionally mirror `LocalConfig::default()` /
+// `SandboxDefaults::default()` for the same fields, so DB-row
+// deserialization (and `sandbox_config_from_cloud`) are side-effect-free.
+// A `LocalBackend` with non-default sandbox defaults applies them through
+// `SandboxBuilder` at create time, not via serde.
+
 fn default_cpus() -> u8 {
-    crate::config::config().sandbox_defaults.cpus
+    crate::config::DEFAULT_CPUS
 }
 
 fn default_memory_mib() -> u32 {
-    crate::config::config().sandbox_defaults.memory_mib
+    crate::config::DEFAULT_MEMORY_MIB
 }
 
 fn default_log_level() -> Option<LogLevel> {
-    crate::config::config().log_level
+    None
 }
 
 fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
-    crate::config::config()
-        .sandbox_defaults
-        .metrics_sample_interval_ms
+    crate::config::default_metrics_sample_interval()
 }
 
 fn default_disable_metrics_sample() -> bool {
-    crate::config::config()
-        .sandbox_defaults
-        .disable_metrics_sample
+    false
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -185,15 +189,6 @@ pub struct SandboxConfig {
     #[serde(default, skip_serializing)]
     pub registry_auth: Option<RegistryAuth>,
 
-    /// Override the libkrunfw shared library path for this sandbox.
-    ///
-    /// When `None`, resolution falls back to the global config path, a sibling
-    /// of the `msb` binary, or `~/.microsandbox/lib/` (in that order).
-    ///
-    /// Not persisted — libkrunfw is a host-side resource, not sandbox state.
-    #[serde(skip)]
-    pub libkrunfw_path: Option<PathBuf>,
-
     /// Access the registry over plain HTTP (SDK override).
     #[serde(skip)]
     pub(crate) insecure: bool,
@@ -216,7 +211,7 @@ pub struct SandboxConfig {
     ///
     /// Only consulted when `replace_existing` is true. A zero duration
     /// skips SIGTERM entirely and goes straight to SIGKILL. Default is
-    /// [`DEFAULT_REPLACE_TIMEOUT`], which gives the exit observer plenty
+    /// `DEFAULT_REPLACE_TIMEOUT`, which gives the exit observer plenty
     /// of headroom to flush logs and clean up the agent socket on a
     /// healthy sandbox before we escalate.
     ///
@@ -285,18 +280,12 @@ impl SandboxConfig {
     }
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
-    pub(crate) fn apply_rootfs_defaults(&mut self) {
+    pub(crate) fn apply_rootfs_defaults(&mut self, upper_size_mib: Option<u32>) {
         if self.snapshot_upper_source.is_none()
             && let RootfsSource::Oci(oci) = &mut self.image
             && oci.upper_size_mib.is_none()
         {
-            oci.upper_size_mib = Some(
-                crate::config::config()
-                    .sandbox_defaults
-                    .oci
-                    .upper_size_mib
-                    .unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB),
-            );
+            oci.upper_size_mib = Some(upper_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB));
         }
     }
 
@@ -412,7 +401,6 @@ impl Default for SandboxConfig {
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
-            libkrunfw_path: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -617,9 +605,21 @@ mod tests {
             ..Default::default()
         };
 
-        config.apply_rootfs_defaults();
+        config.apply_rootfs_defaults(None);
 
         assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_uses_backend_oci_upper_size() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::oci("python:3.12"),
+            ..Default::default()
+        };
+
+        config.apply_rootfs_defaults(Some(8192));
+
+        assert_eq!(config.image.oci_upper_size_mib(), Some(8192));
     }
 
     #[test]
@@ -630,7 +630,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.apply_rootfs_defaults();
+        config.apply_rootfs_defaults(Some(8192));
 
         assert_eq!(config.image.oci_upper_size_mib(), None);
     }

@@ -1,5 +1,6 @@
 import {
   CustomError,
+  CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
   HttpError,
@@ -17,10 +18,12 @@ import {
   ProtocolError,
   RuntimeError,
   SandboxFsError,
+  SandboxAlreadyExistsError,
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
   Pre05SandboxRestartRequiredError,
+  UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "../errors.js";
@@ -31,10 +34,12 @@ const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["Io", (m, c) => new IoError(m, { cause: c })],
   ["Http", (m, c) => new HttpError(m, { cause: c })],
+  ["CloudHttp", (m, c) => new CloudHttpError(m, { cause: c })],
   ["LibkrunfwNotFound", (m, c) => new LibkrunfwNotFoundError(m, { cause: c })],
   ["Database", (m, c) => new DatabaseError(m, { cause: c })],
   ["InvalidConfig", (m, c) => new InvalidConfigError(m, { cause: c })],
   ["SandboxNotFound", (m, c) => new SandboxNotFoundError(m, { cause: c })],
+  ["SandboxAlreadyExists", (m, c) => new SandboxAlreadyExistsError(m, { cause: c })],
   ["SandboxStillRunning", (m, c) => new SandboxStillRunningError(m, { cause: c })],
   ["Runtime", (m, c) => new RuntimeError(m, { cause: c })],
   ["Json", (m, c) => new JsonError(m, { cause: c })],
@@ -53,6 +58,7 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
   // compatibility for versions before 0.5 is no longer supported.
   ["Pre05SandboxRestartRequired", (m, c) => new Pre05SandboxRestartRequiredError(m, { cause: c })],
+  ["Unsupported", (m, c) => new UnsupportedError(m, { cause: c })],
   ["Custom", (m, c) => new CustomError(m, { cause: c })],
 ]);
 

@@ -16,6 +16,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
     match err {
         MicrosandboxError::Io(_) => "Io",
         MicrosandboxError::Http(_) => "Http",
+        MicrosandboxError::CloudHttp { .. } => "CloudHttp",
         MicrosandboxError::LibkrunfwNotFound(_) => "LibkrunfwNotFound",
         MicrosandboxError::Database(_) => "Database",
         MicrosandboxError::InvalidConfig(_) => "InvalidConfig",
@@ -54,6 +55,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
             "Pre05SandboxRestartRequired"
         }
         MicrosandboxError::AgentClient(_) => "AgentClient",
+        MicrosandboxError::Unsupported { .. } => "Unsupported",
         MicrosandboxError::Custom(_) => "Custom",
     }
 }

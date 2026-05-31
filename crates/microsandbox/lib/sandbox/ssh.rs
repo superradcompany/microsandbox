@@ -11,7 +11,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use microsandbox_protocol::fs::FS_CHUNK_SIZE;
+use microsandbox_protocol::{
+    fs::{
+        FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse,
+        FsResponseData, FsSetAttrs,
+    },
+    message::MessageType,
+};
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
 use russh::server::{Auth, Msg, Session};
@@ -167,10 +173,10 @@ struct PtyInfo {
 }
 
 struct SftpServerSession {
-    fs: crate::sandbox::fs::SandboxFs,
+    client: Arc<AgentClient>,
     cwd: String,
     next_handle: u64,
-    handles: HashMap<String, crate::sandbox::FsHandle>,
+    handles: HashMap<String, crate::sandbox::fs::FsHandle>,
 }
 
 /// Ordered duplex stream backed by this process's stdin and stdout.
@@ -295,14 +301,25 @@ impl SandboxSsh {
         &self,
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
+        let local_backend =
+            self.sandbox
+                .backend()
+                .as_local()
+                .ok_or_else(|| MicrosandboxError::Unsupported {
+                    feature: "Sandbox::ssh on cloud".into(),
+                    available_when: "when cloud SSH proxying lands".into(),
+                })?;
         let options = f(SshServerOptionsBuilder::default()).build();
-        let authorized_keys = build_authorized_keys(&options)?;
+        let authorized_keys = build_authorized_keys(&options, local_backend.config())?;
         let host_key = match options.host_key {
             Some(key) => key,
             None => {
                 let (host_key_path, secure_parent) = match options.host_key_path {
                     Some(path) => (path, false),
-                    None => (default_host_key_path(self.sandbox.name()), true),
+                    None => (
+                        default_host_key_path(local_backend, self.sandbox.name()),
+                        true,
+                    ),
                 };
                 load_or_create_host_key(&host_key_path, secure_parent)?
             }
@@ -786,7 +803,16 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
-        let client = Arc::new(AgentClient::connect_sandbox(self.settings.sandbox.name()).await?);
+        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
+            MicrosandboxError::Unsupported {
+                feature: "Sandbox::ssh on cloud".into(),
+                available_when: "when cloud SSH proxying lands".into(),
+            }
+        })?;
+        let client = Arc::new(
+            crate::sandbox::fs::local::connect_agent(local_backend, self.settings.sandbox.name())
+                .await?,
+        );
         self.client = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -810,7 +836,6 @@ impl SshSession {
             return Ok(());
         };
 
-        let client = self.agent_client().await?;
         let shell = self
             .settings
             .sandbox
@@ -844,11 +869,22 @@ impl SshSession {
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);
         let cols = pty.as_ref().map(|p| p.cols).unwrap_or(80);
-        let handle = self
-            .settings
-            .sandbox
-            .exec_stream_with_agent(client, cmd, opts, rows, cols)
-            .await?;
+        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
+            MicrosandboxError::Unsupported {
+                feature: "Sandbox::ssh exec on cloud".into(),
+                available_when: "when cloud SSH proxying lands".into(),
+            }
+        })?;
+        let handle = crate::sandbox::exec::local::exec_stream_with_pty_size(
+            local_backend,
+            self.settings.sandbox.name(),
+            self.settings.sandbox.config(),
+            cmd,
+            opts,
+            rows,
+            cols,
+        )
+        .await?;
         let (control, stdin, mut events) = handle.into_parts();
         let session_handle = session.handle();
         let pty_enabled = pty.is_some();
@@ -1030,7 +1066,6 @@ impl russh::server::Handler for SshSession {
             return Ok(());
         }
 
-        let fs = crate::sandbox::fs::SandboxFs::new(&client);
         let cwd = self
             .settings
             .sandbox
@@ -1042,7 +1077,7 @@ impl russh::server::Handler for SshSession {
             .clone()
             .unwrap_or_else(|| "/".to_string());
         let sftp = SftpServerSession {
-            fs,
+            client,
             cwd,
             next_handle: 0,
             handles: HashMap::new(),
@@ -1176,7 +1211,7 @@ impl SftpServerSession {
         }
     }
 
-    fn track_handle(&mut self, handle: crate::sandbox::FsHandle) -> String {
+    fn track_handle(&mut self, handle: crate::sandbox::fs::FsHandle) -> String {
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
         let token = self.next_handle.to_string();
         self.handles.insert(token.clone(), handle);
@@ -1186,7 +1221,7 @@ impl SftpServerSession {
     fn resolve_handle(
         &self,
         token: &str,
-    ) -> Result<crate::sandbox::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .get(token)
             .copied()
@@ -1196,7 +1231,7 @@ impl SftpServerSession {
     fn forget_handle(
         &mut self,
         token: &str,
-    ) -> Result<crate::sandbox::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .remove(token)
             .ok_or(russh_sftp::protocol::StatusCode::Failure)
@@ -1205,11 +1240,11 @@ impl SftpServerSession {
 
 impl Drop for SftpServerSession {
     fn drop(&mut self) {
-        let fs = self.fs.clone();
+        let client = Arc::clone(&self.client);
         let handles: Vec<_> = self.handles.drain().map(|(_, handle)| handle).collect();
         tokio::spawn(async move {
             for handle in handles {
-                let _ = fs.close_handle(handle).await;
+                let _ = sftp_close_handle(&client, handle).await;
             }
         });
     }
@@ -1239,9 +1274,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = self.normalize_path(filename);
         let options = open_flags_to_options(pflags, &attrs);
-        let handle = self
-            .fs
-            .open_file(&path, options)
+        let handle = sftp_open_file(&self.client, &path, options)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Handle {
@@ -1256,7 +1289,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.forget_handle(&handle)?;
-        self.fs.close_handle(handle).await.map_err(status_code)?;
+        sftp_close_handle(&self.client, handle)
+            .await
+            .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1269,9 +1304,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Data, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
         let len = len.min(FS_CHUNK_SIZE as u32);
-        let data = self
-            .fs
-            .read_handle(handle, offset, Some(len as u64))
+        let data = sftp_read_handle(&self.client, handle, offset, Some(len as u64))
             .await
             .map_err(status_code)?;
         if data.is_empty() {
@@ -1291,8 +1324,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         data: Vec<u8>,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        self.fs
-            .write_handle(handle, offset, data)
+        sftp_write_handle(&self.client, handle, offset, data)
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1304,9 +1336,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let path = self.normalize_path(path);
-        let attrs = self
-            .fs
-            .stat_with_follow(&path, false)
+        let attrs = sftp_stat(&self.client, &path, false)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
@@ -1321,9 +1351,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let path = self.normalize_path(path);
-        let attrs = self
-            .fs
-            .stat_with_follow(&path, true)
+        let attrs = sftp_stat(&self.client, &path, true)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
@@ -1338,7 +1366,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        let attrs = self.fs.fstat(handle).await.map_err(status_code)?;
+        let attrs = sftp_fstat(&self.client, handle)
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
             id,
             attrs: metadata_to_sftp_attrs(&attrs),
@@ -1352,8 +1382,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs
-            .set_stat(&path, true, attrs_to_set_attrs(&attrs))
+        sftp_set_stat(&self.client, &path, true, attrs_to_set_attrs(&attrs))
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1366,8 +1395,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        self.fs
-            .fset_stat(handle, attrs_to_set_attrs(&attrs))
+        sftp_fset_stat(&self.client, handle, attrs_to_set_attrs(&attrs))
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1379,7 +1407,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = self.normalize_path(path);
-        let handle = self.fs.open_dir(&path).await.map_err(status_code)?;
+        let handle = sftp_open_dir(&self.client, &path)
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Handle {
             id,
             handle: self.track_handle(handle),
@@ -1392,7 +1422,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        let entries = self.fs.read_dir(handle, None).await.map_err(status_code)?;
+        let entries = sftp_read_dir(&self.client, handle, None)
+            .await
+            .map_err(status_code)?;
         if entries.is_empty() {
             return Err(russh_sftp::protocol::StatusCode::Eof);
         }
@@ -1408,7 +1440,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         filename: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(filename);
-        self.fs.remove(&path).await.map_err(status_code)?;
+        sftp_simple_op(&self.client, FsOp::Remove { path })
+            .await
+            .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1419,10 +1453,17 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs.mkdir(&path).await.map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::Mkdir {
+                path: path.clone(),
+                mode: attrs.permissions,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         if attrs.permissions.is_some() {
-            self.fs
-                .set_stat(&path, true, attrs_to_set_attrs(&attrs))
+            sftp_set_stat(&self.client, &path, true, attrs_to_set_attrs(&attrs))
                 .await
                 .map_err(status_code)?;
         }
@@ -1435,7 +1476,15 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs.remove_empty_dir(&path).await.map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::RemoveDir {
+                path,
+                recursive: false,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1445,7 +1494,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let path = self.normalize_path(path);
-        let path = self.fs.real_path(&path).await.map_err(status_code)?;
+        let path = sftp_path_op(&self.client, FsOp::RealPath { path })
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Name {
             id,
             files: vec![russh_sftp::protocol::File::dummy(path)],
@@ -1460,10 +1511,15 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let oldpath = self.normalize_path(oldpath);
         let newpath = self.normalize_path(newpath);
-        self.fs
-            .rename(&oldpath, &newpath)
-            .await
-            .map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::Rename {
+                src: oldpath,
+                dst: newpath,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1473,7 +1529,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let path = self.normalize_path(path);
-        let target = self.fs.read_link(&path).await.map_err(status_code)?;
+        let target = sftp_path_op(&self.client, FsOp::ReadLink { path })
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Name {
             id,
             files: vec![russh_sftp::protocol::File::dummy(target)],
@@ -1488,8 +1546,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let target = linkpath;
         let link_path = self.normalize_path(targetpath);
-        self.fs
-            .symlink(&target, &link_path)
+        sftp_simple_op(&self.client, FsOp::Symlink { target, link_path })
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1551,12 +1608,15 @@ impl AsyncWrite for SshStdioStream {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<String>> {
+fn build_authorized_keys(
+    options: &SshServerOptions,
+    config: &crate::config::LocalConfig,
+) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
         keys.extend(load_authorized_keys(path)?);
     } else if options.authorized_keys.is_empty() {
-        keys.extend(load_authorized_keys(&default_authorized_keys_path())?);
+        keys.extend(load_authorized_keys(&default_authorized_keys_path(config))?);
     }
     for key in &options.authorized_keys {
         keys.push(parse_authorized_key(key)?);
@@ -1569,12 +1629,15 @@ fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<S
     Ok(keys)
 }
 
-fn default_authorized_keys_path() -> PathBuf {
-    crate::config::config().ssh_dir().join("authorized_keys")
+fn default_authorized_keys_path(config: &crate::config::LocalConfig) -> PathBuf {
+    config.ssh_dir().join("authorized_keys")
 }
 
-fn default_host_key_path(sandbox_name: &str) -> PathBuf {
-    crate::config::config()
+fn default_host_key_path(
+    local_backend: &crate::backend::LocalBackend,
+    sandbox_name: &str,
+) -> PathBuf {
+    local_backend
         .sandboxes_dir()
         .join(sandbox_name)
         .join(microsandbox_utils::SSH_SUBDIR)
@@ -1737,11 +1800,243 @@ fn signal_to_libc(signal: Sig) -> Option<i32> {
     }
 }
 
+async fn sftp_response(client: &AgentClient, op: FsOp) -> MicrosandboxResult<FsResponse> {
+    let req = FsRequest { op };
+    let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+    let resp: FsResponse = resp_msg.payload()?;
+    if resp.ok {
+        Ok(resp)
+    } else {
+        Err(MicrosandboxError::SandboxFs(
+            resp.error.unwrap_or_else(|| "unknown error".into()),
+        ))
+    }
+}
+
+async fn sftp_simple_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<()> {
+    sftp_response(client, op).await.map(|_| ())
+}
+
+async fn sftp_path_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<String> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Path(path)) => Ok(path),
+        _ => Err(MicrosandboxError::SandboxFs(
+            "unexpected response data for path operation".into(),
+        )),
+    }
+}
+
+async fn sftp_open_file(
+    client: &AgentClient,
+    path: &str,
+    options: FsOpenOptions,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    sftp_handle_op(
+        client,
+        FsOp::OpenFile {
+            path: path.to_string(),
+            options,
+        },
+    )
+    .await
+}
+
+async fn sftp_open_dir(
+    client: &AgentClient,
+    path: &str,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    sftp_handle_op(
+        client,
+        FsOp::OpenDir {
+            path: path.to_string(),
+        },
+    )
+    .await
+}
+
+async fn sftp_handle_op(
+    client: &AgentClient,
+    op: FsOp,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Handle(handle)) => Ok(handle),
+        _ => Err(MicrosandboxError::SandboxFs(
+            "unexpected response data for handle operation".into(),
+        )),
+    }
+}
+
+async fn sftp_close_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(client, FsOp::CloseHandle { handle }).await
+}
+
+async fn sftp_read_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    offset: u64,
+    len: Option<u64>,
+) -> MicrosandboxResult<Bytes> {
+    let req = FsRequest {
+        op: FsOp::Read {
+            handle,
+            offset,
+            len,
+        },
+    };
+    let (_id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
+
+    let mut data = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg.t {
+            MessageType::FsData => {
+                let chunk: FsData = msg.payload()?;
+                data.extend_from_slice(&chunk.data);
+            }
+            MessageType::FsResponse => {
+                let resp: FsResponse = msg.payload()?;
+                if resp.ok {
+                    return Ok(Bytes::from(data));
+                }
+                return Err(MicrosandboxError::SandboxFs(
+                    resp.error.unwrap_or_else(|| "unknown error".into()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Err(MicrosandboxError::SandboxFs(
+        "channel closed before read response".into(),
+    ))
+}
+
+async fn sftp_write_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    offset: u64,
+    data: Vec<u8>,
+) -> MicrosandboxResult<()> {
+    let req = FsRequest {
+        op: FsOp::Write {
+            handle,
+            offset,
+            len: Some(data.len() as u64),
+        },
+    };
+    let (id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
+
+    for chunk in data.chunks(FS_CHUNK_SIZE) {
+        client
+            .send(
+                id,
+                MessageType::FsData,
+                &FsData {
+                    data: chunk.to_vec(),
+                },
+            )
+            .await?;
+    }
+    client
+        .send(id, MessageType::FsData, &FsData { data: Vec::new() })
+        .await?;
+
+    while let Some(msg) = rx.recv().await {
+        if msg.t == MessageType::FsResponse {
+            let resp: FsResponse = msg.payload()?;
+            if resp.ok {
+                return Ok(());
+            }
+            return Err(MicrosandboxError::SandboxFs(
+                resp.error.unwrap_or_else(|| "unknown error".into()),
+            ));
+        }
+    }
+
+    Err(MicrosandboxError::SandboxFs(
+        "channel closed before write response".into(),
+    ))
+}
+
+async fn sftp_stat(
+    client: &AgentClient,
+    path: &str,
+    follow_symlink: bool,
+) -> MicrosandboxResult<FsEntryInfo> {
+    sftp_stat_op(
+        client,
+        FsOp::Stat {
+            path: path.to_string(),
+            follow_symlink,
+        },
+    )
+    .await
+}
+
+async fn sftp_fstat(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+) -> MicrosandboxResult<FsEntryInfo> {
+    sftp_stat_op(client, FsOp::FStat { handle }).await
+}
+
+async fn sftp_stat_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<FsEntryInfo> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Stat(info)) => Ok(info),
+        _ => Err(MicrosandboxError::SandboxFs(
+            "unexpected response data for stat operation".into(),
+        )),
+    }
+}
+
+async fn sftp_set_stat(
+    client: &AgentClient,
+    path: &str,
+    follow_symlink: bool,
+    attrs: FsSetAttrs,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(
+        client,
+        FsOp::SetStat {
+            path: path.to_string(),
+            follow_symlink,
+            attrs,
+        },
+    )
+    .await
+}
+
+async fn sftp_fset_stat(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    attrs: FsSetAttrs,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(client, FsOp::FSetStat { handle, attrs }).await
+}
+
+async fn sftp_read_dir(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    limit: Option<u32>,
+) -> MicrosandboxResult<Vec<FsEntryInfo>> {
+    match sftp_response(client, FsOp::ReadDir { handle, limit })
+        .await?
+        .data
+    {
+        Some(FsResponseData::List(entries)) => Ok(entries),
+        _ => Err(MicrosandboxError::SandboxFs(
+            "unexpected response data for readdir operation".into(),
+        )),
+    }
+}
+
 fn open_flags_to_options(
     flags: russh_sftp::protocol::OpenFlags,
     attrs: &russh_sftp::protocol::FileAttributes,
-) -> crate::sandbox::FsOpenOptions {
-    crate::sandbox::FsOpenOptions {
+) -> FsOpenOptions {
+    FsOpenOptions {
         read: flags.contains(russh_sftp::protocol::OpenFlags::READ),
         write: flags.contains(russh_sftp::protocol::OpenFlags::WRITE),
         append: flags.contains(russh_sftp::protocol::OpenFlags::APPEND),
@@ -1752,8 +2047,8 @@ fn open_flags_to_options(
     }
 }
 
-fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> crate::sandbox::FsSetAttrs {
-    crate::sandbox::FsSetAttrs {
+fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> FsSetAttrs {
+    FsSetAttrs {
         mode: attrs.permissions,
         uid: attrs.uid,
         gid: attrs.gid,
@@ -1763,9 +2058,7 @@ fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> crate::sa
     }
 }
 
-fn metadata_to_sftp_attrs(
-    metadata: &crate::sandbox::FsMetadata,
-) -> russh_sftp::protocol::FileAttributes {
+fn metadata_to_sftp_attrs(metadata: &FsEntryInfo) -> russh_sftp::protocol::FileAttributes {
     russh_sftp::protocol::FileAttributes {
         size: Some(metadata.size),
         uid: Some(metadata.uid),
@@ -1773,12 +2066,15 @@ fn metadata_to_sftp_attrs(
         gid: Some(metadata.gid),
         group: None,
         permissions: Some(metadata.mode),
-        atime: metadata.accessed.map(|t| t.timestamp().max(0) as u32),
-        mtime: metadata.modified.map(|t| t.timestamp().max(0) as u32),
+        atime: metadata.atime.map(|t| t.max(0) as u32),
+        mtime: metadata
+            .mtime
+            .or(metadata.modified)
+            .map(|t| t.max(0) as u32),
     }
 }
 
-fn entry_to_sftp_file(entry: crate::sandbox::FsEntry) -> russh_sftp::protocol::File {
+fn entry_to_sftp_file(entry: FsEntryInfo) -> russh_sftp::protocol::File {
     let filename = entry
         .path
         .rsplit('/')
@@ -1795,8 +2091,8 @@ fn entry_to_sftp_file(entry: crate::sandbox::FsEntry) -> russh_sftp::protocol::F
             gid: Some(entry.gid),
             group: None,
             permissions: Some(entry.mode),
-            atime: entry.accessed.map(|t| t.timestamp().max(0) as u32),
-            mtime: entry.modified.map(|t| t.timestamp().max(0) as u32),
+            atime: entry.atime.map(|t| t.max(0) as u32),
+            mtime: entry.mtime.or(entry.modified).map(|t| t.max(0) as u32),
         },
     )
 }

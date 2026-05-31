@@ -17,6 +17,11 @@ class InvalidConfigError(MicrosandboxError):
     code = "invalid-config"
 
 
+class CloudHttpError(MicrosandboxError):
+    """Cloud control-plane request failed."""
+    code = "cloud-http"
+
+
 class SandboxNotFoundError(MicrosandboxError):
     """Sandbox does not exist."""
     code = "sandbox-not-found"
@@ -102,3 +107,8 @@ class MetricsDisabledError(MicrosandboxError):
 class Pre05SandboxRestartRequiredError(MicrosandboxError):
     """Filesystem and SFTP features need this sandbox to be restarted."""
     code = "pre05-sandbox-restart-required"
+
+
+class UnsupportedError(MicrosandboxError):
+    """The selected backend does not support a requested feature yet."""
+    code = "unsupported"

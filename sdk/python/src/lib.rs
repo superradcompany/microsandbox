@@ -25,6 +25,9 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setup::install, m)?)?;
     m.add_function(wrap_pyfunction!(setup::is_installed, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
+    m.add_function(wrap_pyfunction!(set_runtime_libkrunfw_path, m)?)?;
+    m.add_function(wrap_pyfunction!(set_default_backend, m)?)?;
+    m.add_function(wrap_pyfunction!(default_backend_kind, m)?)?;
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
@@ -69,12 +72,80 @@ fn set_runtime_msb_path(path: String) {
     microsandbox::config::set_sdk_msb_path(path);
 }
 
+/// Set the `libkrunfw` shared library path resolved by the Python SDK.
+///
+/// Process-level setter — one dylib per process address space, so this is the
+/// natural granularity. User env (`MSB_LIBKRUNFW_PATH`) still wins. Mirrors
+/// `set_runtime_msb_path` for libkrunfw.
+#[pyfunction]
+fn set_runtime_libkrunfw_path(path: String) {
+    microsandbox::config::set_sdk_libkrunfw_path(path);
+}
+
+/// Set the process-wide default backend.
+///
+/// `kind="local"` selects the local libkrun backend. `kind="cloud"` requires
+/// either `url` + `api_key`, or `profile`.
+#[pyfunction]
+#[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
+fn set_default_backend(
+    kind: String,
+    url: Option<String>,
+    api_key: Option<String>,
+    profile: Option<String>,
+) -> PyResult<()> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "local" => microsandbox::set_default_backend(microsandbox::LocalBackend::lazy()),
+        "cloud" => {
+            let cloud = if let Some(profile) = profile {
+                microsandbox::CloudBackend::from_profile(&profile)
+            } else {
+                let url = url.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "cloud backend requires url + api_key or profile",
+                    )
+                })?;
+                let api_key = api_key.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "cloud backend requires url + api_key or profile",
+                    )
+                })?;
+                microsandbox::CloudBackend::new(url, api_key)
+            }
+            .map_err(error::to_py_err)?;
+            microsandbox::set_default_backend(cloud);
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "backend kind must be 'local' or 'cloud', got {other:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Return the active default backend kind (`"local"` or `"cloud"`).
+#[pyfunction]
+fn default_backend_kind() -> &'static str {
+    match microsandbox::default_backend().kind() {
+        microsandbox::BackendKind::Local => "local",
+        microsandbox::BackendKind::Cloud => "cloud",
+    }
+}
+
 /// Return the `msb` binary path the native resolver would currently use.
 ///
 /// Intended as a test/diagnostic hook for verifying the Python-to-native bridge.
 #[pyfunction]
 fn resolved_msb_path() -> PyResult<String> {
-    microsandbox::config::resolve_msb_path()
+    let backend = microsandbox::backend::default_backend();
+    let local = backend.as_local().ok_or_else(|| {
+        error::to_py_err(microsandbox::MicrosandboxError::Unsupported {
+            feature: "resolved_msb_path requires a local backend".into(),
+            available_when: "with a local backend".into(),
+        })
+    })?;
+    microsandbox::config::resolve_msb_path(local.config())
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(error::to_py_err)
 }

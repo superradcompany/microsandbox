@@ -688,7 +688,7 @@ pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetric
 fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> SandboxInfo {
     SandboxInfo {
         name: handle.name().to_string(),
-        status: format!("{:?}", handle.status()).to_lowercase(),
+        status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
         config_json: handle.config_json().to_string(),
         created_at: opt_datetime_to_ms(&handle.created_at()),
         updated_at: opt_datetime_to_ms(&handle.updated_at()),

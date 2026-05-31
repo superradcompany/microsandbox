@@ -28,9 +28,14 @@ from microsandbox._microsandbox import (
     Volume,
     VolumeHandle,
     all_sandbox_metrics,
+    default_backend_kind,
     install,
     is_installed,
+    set_default_backend,
     version,
+)
+from microsandbox._microsandbox import (
+    set_runtime_libkrunfw_path as set_libkrunfw_path,
 )
 from microsandbox._microsandbox import (
     set_runtime_msb_path as _set_runtime_msb_path,
@@ -44,6 +49,7 @@ from microsandbox.agent import (
     AgentStream,
 )
 from microsandbox.errors import (
+    CloudHttpError,
     ExecFailedError,
     ExecTimeoutError,
     FilesystemError,
@@ -62,6 +68,7 @@ from microsandbox.errors import (
     SandboxStillRunningError,
     SecretViolationError,
     TlsError,
+    UnsupportedError,
     VolumeNotFoundError,
 )
 from microsandbox.events import (
@@ -240,6 +247,7 @@ __all__ = [
     # Errors
     "MicrosandboxError",
     "InvalidConfigError",
+    "CloudHttpError",
     "SandboxNotFoundError",
     "SandboxNotRunningError",
     "SandboxAlreadyExistsError",
@@ -257,8 +265,12 @@ __all__ = [
     "IoError",
     "MetricsDisabledError",
     "Pre05SandboxRestartRequiredError",
+    "UnsupportedError",
     # Setup
     "install",
     "is_installed",
+    "set_libkrunfw_path",
+    "set_default_backend",
+    "default_backend_kind",
     "version",
 ]

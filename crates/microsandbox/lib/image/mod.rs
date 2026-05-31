@@ -16,13 +16,11 @@ use microsandbox_image::{
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    db::{
-        self,
-        entity::{
-            config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
-            manifest as manifest_entity, manifest_layer as manifest_layer_entity,
-            sandbox_rootfs as sandbox_rootfs_entity,
-        },
+    backend::LocalBackend,
+    db::entity::{
+        config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
+        manifest as manifest_entity, manifest_layer as manifest_layer_entity,
+        sandbox_rootfs as sandbox_rootfs_entity,
     },
 };
 
@@ -162,10 +160,11 @@ impl Image {
     /// This avoids ~25–30 redundant write statements per cached create
     /// and keeps SQLite's single-writer lock free for other work.
     pub async fn persist(
+        local: &LocalBackend,
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
-        let pools = db::init_global().await?;
+        let pools = local.db().await?;
         let db = pools.write();
         let reference = reference.to_string();
 
@@ -234,8 +233,8 @@ impl Image {
     }
 
     /// Get an image handle by reference.
-    pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let db = db::init_global().await?.read();
+    pub async fn get(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle> {
+        let db = local.db().await?.read();
 
         let (image_ref_model, manifest) = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -252,8 +251,8 @@ impl Image {
     }
 
     /// List all cached images, ordered by creation time (newest first).
-    pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let db = db::init_global().await?.read();
+    pub async fn list(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>> {
+        let db = local.db().await?.read();
 
         let models = image_ref_entity::Entity::find()
             .order_by_desc(image_ref_entity::Column::CreatedAt)
@@ -269,8 +268,8 @@ impl Image {
     }
 
     /// Get full detail for an image (config + layers).
-    pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let db = db::init_global().await?.read();
+    pub async fn inspect(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail> {
+        let db = local.db().await?.read();
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -363,8 +362,12 @@ impl Image {
     ///
     /// If `force` is false and the image is referenced by any sandbox, returns
     /// [`MicrosandboxError::ImageInUse`].
-    pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let pools = db::init_global().await?;
+    pub async fn remove(
+        local: &LocalBackend,
+        reference: &str,
+        force: bool,
+    ) -> MicrosandboxResult<()> {
+        let pools = local.db().await?;
         let db = pools.write();
 
         let image_ref_model = image_ref_entity::Entity::find()
@@ -455,7 +458,7 @@ impl Image {
             .await?;
 
         // Best-effort on-disk cleanup (outside transaction).
-        let cache_dir = crate::config::config().cache_dir();
+        let cache_dir = local.cache_dir();
         if let Ok(cache) = GlobalCache::new(&cache_dir) {
             for diff_id_str in &layer_diff_ids {
                 if let Ok(diff_id) = diff_id_str.parse::<Digest>() {
@@ -485,8 +488,8 @@ impl Image {
     /// referenced by any manifest.
     ///
     /// Returns the number of layers removed.
-    pub async fn gc_layers() -> MicrosandboxResult<u32> {
-        let pools = db::init_global().await?;
+    pub async fn gc_layers(local: &LocalBackend) -> MicrosandboxResult<u32> {
+        let pools = local.db().await?;
 
         // Find layers with zero manifest_layer references.
         let orphans: Vec<layer_entity::Model> = layer_entity::Entity::find()
@@ -495,7 +498,7 @@ impl Image {
             .all(pools.read())
             .await?;
 
-        let cache_dir = crate::config::config().cache_dir();
+        let cache_dir = local.cache_dir();
         let cache = GlobalCache::new(&cache_dir).ok();
         let mut removed = 0u32;
 
@@ -518,8 +521,8 @@ impl Image {
     }
 
     /// Run full garbage collection: orphaned layers.
-    pub async fn gc() -> MicrosandboxResult<u32> {
-        Self::gc_layers().await
+    pub async fn gc(local: &LocalBackend) -> MicrosandboxResult<u32> {
+        Self::gc_layers(local).await
     }
 }
 

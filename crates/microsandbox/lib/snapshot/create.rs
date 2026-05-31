@@ -10,6 +10,7 @@ use microsandbox_image::snapshot::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
+use crate::backend::LocalBackend;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -21,7 +22,10 @@ use super::{Snapshot, SnapshotConfig, SnapshotDestination};
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResult<Snapshot> {
+pub(super) async fn create_snapshot(
+    local: &LocalBackend,
+    config: SnapshotConfig,
+) -> MicrosandboxResult<Snapshot> {
     let SnapshotConfig {
         source_sandbox,
         destination,
@@ -30,7 +34,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
         record_integrity,
     } = config;
 
-    let db = crate::db::init_global().await?.read();
+    let db = local.db().await?.read();
 
     // Look up the sandbox row + parse its persisted config.
     let model = sandbox_entity::Entity::find()
@@ -60,9 +64,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
     let image_reference = oci_reference_string(&sandbox_config)?;
 
     // Resolve source upper.ext4 path from the canonical sandbox layout.
-    let sandbox_dir = crate::config::config()
-        .sandboxes_dir()
-        .join(&source_sandbox);
+    let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
     let src_upper = sandbox_dir.join("upper.ext4");
     if !src_upper.exists() {
         return Err(MicrosandboxError::Custom(format!(
@@ -72,7 +74,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
     }
 
     // Resolve and prepare the destination directory.
-    let dest_dir = resolve_destination(&destination)?;
+    let dest_dir = resolve_destination(local, &destination)?;
     if dest_dir.exists() {
         if !force {
             return Err(MicrosandboxError::SnapshotAlreadyExists(
@@ -147,7 +149,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
 
     // Best-effort index upsert. Failures are logged, not propagated —
     // the artifact on disk is the source of truth.
-    if let Err(e) = index_upsert(&dest_dir, &digest, &manifest).await {
+    if let Err(e) = index_upsert(local, &dest_dir, &digest, &manifest).await {
         tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
     }
 
@@ -168,7 +170,10 @@ fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
     }
 }
 
-fn resolve_destination(dest: &SnapshotDestination) -> MicrosandboxResult<PathBuf> {
+fn resolve_destination(
+    local: &LocalBackend,
+    dest: &SnapshotDestination,
+) -> MicrosandboxResult<PathBuf> {
     match dest {
         SnapshotDestination::Path(p) => Ok(p.clone()),
         SnapshotDestination::Name(name) => {
@@ -182,7 +187,7 @@ fn resolve_destination(dest: &SnapshotDestination) -> MicrosandboxResult<PathBuf
                     "snapshot name must be a bare identifier, not a path: '{name}'"
                 )));
             }
-            Ok(crate::config::config().snapshots_dir().join(name))
+            Ok(local.snapshots_dir().join(name))
         }
     }
 }

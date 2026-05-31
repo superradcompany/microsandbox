@@ -39,7 +39,7 @@ impl JsSandboxHandle {
     /// Status at time of query: "running", "stopped", "crashed", or "draining".
     #[napi(getter)]
     pub fn status(&self) -> String {
-        format!("{:?}", self.inner.status()).to_lowercase()
+        format!("{:?}", self.inner.status_snapshot()).to_lowercase()
     }
 
     /// Raw config JSON string from the database.

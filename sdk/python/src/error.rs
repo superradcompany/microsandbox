@@ -22,6 +22,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
 
         let (cls_name, msg) = match &err {
             InvalidConfig(_) => ("InvalidConfigError", err.to_string()),
+            CloudHttp { .. } => ("CloudHttpError", err.to_string()),
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
@@ -36,6 +37,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
                 // compatibility for versions before 0.5 is no longer supported.
                 ("Pre05SandboxRestartRequiredError", err.to_string())
             }
+            Unsupported { .. } => ("UnsupportedError", err.to_string()),
             Terminal(_) => ("MicrosandboxError", err.to_string()),
             _ => ("MicrosandboxError", err.to_string()),
         };

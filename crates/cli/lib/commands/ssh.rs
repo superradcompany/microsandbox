@@ -206,7 +206,8 @@ async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
 fn run_authorize(args: SshAuthorizeArgs) -> anyhow::Result<()> {
     let key_text = read_public_key_source(args)?;
     let (key_base64, line) = parse_public_key_line(&key_text)?;
-    let ssh_dir = microsandbox::config::config().ssh_dir();
+    let local_backend = microsandbox::LocalBackend::lazy();
+    let ssh_dir = local_backend.config().ssh_dir();
     create_secure_dir(&ssh_dir)?;
     let authorized_keys = ssh_dir.join("authorized_keys");
 

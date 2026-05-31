@@ -107,7 +107,14 @@ pub fn convert_metrics(m: &microsandbox::sandbox::SandboxMetrics) -> PySandboxMe
 #[pyfunction]
 pub fn all_sandbox_metrics<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let metrics = microsandbox::sandbox::all_sandbox_metrics()
+        let backend = microsandbox::backend::default_backend();
+        let local = backend.as_local().ok_or_else(|| {
+            to_py_err(microsandbox::MicrosandboxError::Unsupported {
+                feature: "all_sandbox_metrics requires a local backend".into(),
+                available_when: "when cloud metrics land".into(),
+            })
+        })?;
+        let metrics = microsandbox::sandbox::all_sandbox_metrics(local)
             .await
             .map_err(to_py_err)?;
         let result: std::collections::HashMap<String, PySandboxMetrics> = metrics
