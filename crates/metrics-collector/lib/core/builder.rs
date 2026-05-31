@@ -5,7 +5,8 @@ use std::{sync::Arc, time::Duration};
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 
 use super::driver::{CollectorConfig, MetricsCollector, MetricsErrorPolicy};
-use super::reader::{CollectFn, registry_collect_fn};
+use super::label_source::LabelSource;
+use super::reader::{CollectFn, enrich_with_labels, registry_collect_fn};
 use super::types::MetricsExporter;
 
 //--------------------------------------------------------------------------------------------------
@@ -129,6 +130,15 @@ impl MetricsCollectorBuilder {
     /// Set the collector-wide interval between shared-memory metrics reads.
     pub fn collect_interval(mut self, interval: Duration) -> Self {
         self.collect_interval = interval;
+        self
+    }
+
+    /// Enrich each collection with per-sandbox labels from a [`LabelSource`]
+    /// (e.g. [`CatalogLabelSource`](super::CatalogLabelSource)). Labels are
+    /// attached as attributes by label-aware exporters (e.g. OTel). Without
+    /// this, collections carry no labels.
+    pub fn enrich_labels(mut self, source: Arc<dyn LabelSource>) -> Self {
+        self.collect_fn = enrich_with_labels(self.collect_fn, source);
         self
     }
 
@@ -332,12 +342,10 @@ mod tests {
     }
 
     struct NoopCollector;
+    #[async_trait::async_trait]
     impl MetricsExporter for NoopCollector {
-        fn export(
-            &self,
-            _batch: Arc<MetricsExportBatch>,
-        ) -> futures::future::BoxFuture<'static, MetricsCollectorResult<()>> {
-            Box::pin(async { Ok(()) })
+        async fn export(&self, _batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+            Ok(())
         }
     }
 }

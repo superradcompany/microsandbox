@@ -22,8 +22,10 @@ microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
 libc.workspace = true
 # Async runtime + primitives (broadcast, mpsc, JoinSet, time).
 tokio = { workspace = true }
-# BoxFuture, StreamExt — used by the MetricsExporter trait + worker.
+# BoxFuture, StreamExt — used by the CollectFn type alias + worker.
 futures.workspace = true
+# `async fn` in the MetricsExporter / LabelSource traits (object-safe).
+async-trait = "0.1"
 # Wall-clock timestamps on each collection.
 chrono.workspace = true
 # Binary CLI.
@@ -35,6 +37,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
+# Catalog access for per-sandbox labels (read-only connection + entity).
+microsandbox-db = { version = "0.5.4", path = "../db" }
+# Query traits (EntityTrait, ColumnTrait, QueryFilter) for the label lookup.
+sea-orm = { workspace = true }
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
 microsandbox-utils = { version = "0.5.4", path = "../utils" }
 # CLI duration parsing (e.g. "1s", "500ms").
@@ -68,6 +74,8 @@ tonic = { version = "0.14", default-features = false, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# Apply the catalog schema to a temp DB in LabelCache tests.
+microsandbox-migration = { version = "0.5.4", path = "../migration" }
 tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",

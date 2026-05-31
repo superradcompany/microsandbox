@@ -7,6 +7,8 @@
 
 mod builder;
 mod driver;
+mod label_cache;
+mod label_source;
 mod reader;
 mod types;
 mod worker;
@@ -23,4 +25,7 @@ pub use builder::{
     DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollectorBuilder, MetricsExporterConfig,
 };
 pub use driver::{MetricsCollector, MetricsErrorPolicy, RunningCollector};
-pub use types::{MetricsCollection, MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
+pub use label_source::{CatalogLabelSource, LabelSource};
+pub use types::{
+    MetricsCollection, MetricsExportBatch, MetricsExporter, SandboxLabels, SandboxMetricSnapshot,
+};

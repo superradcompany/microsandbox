@@ -116,6 +116,60 @@ End-to-end setup walkthroughs live under [Recipes](/recipes):
   </Card>
 </CardGroup>
 
+## Labels and per-user views
+
+Labels you set at sandbox creation ride along to your backend as metric
+attributes, so you can build per-user, per-tenant, or per-environment
+views without naming every sandbox.
+
+```bash
+msb create alpine --name agent-1 --label user.id=alice --label tenant=acme
+```
+
+`msb-metrics` reads those labels from the catalog and attaches them to
+every datapoint emitted for that sandbox.
+
+### Label names in PromQL
+
+OpenTelemetry attribute keys allow dots; Prometheus label names do not, so
+Prometheus and Grafana Cloud normalize `.` to `_`. A label set as
+`user.id` is queried as `user_id`. (Metric names are normalized the same
+way: `microsandbox.cpu.utilization` becomes `microsandbox_cpu_utilization`.)
+
+### Per-user dashboard queries
+
+Use the labels to slice the standard sandbox metrics. CPU is the simplest
+to start with (the same labels apply to every metric — see the
+[metric table](/observability/deep-dive#metrics-emitted)):
+
+```promql
+# CPU per user (vCPU-seconds per second)
+sum by (user_id) (microsandbox_cpu_utilization)
+
+# Top 10 users by CPU right now
+topk(10, sum by (user_id) (microsandbox_cpu_utilization))
+
+# One user's sandboxes
+microsandbox_cpu_utilization{user_id="alice"}
+
+# Scope to a tenant as well
+sum by (user_id) (microsandbox_cpu_utilization{tenant="acme"})
+```
+
+To make a reusable dashboard, add a Grafana template variable so the panels
+follow a dropdown:
+
+```text
+Variable:  user
+Query:     label_values(microsandbox_cpu_utilization, user_id)
+Panels:    microsandbox_cpu_utilization{user_id="$user"}
+```
+
+Labels are on by default. Pass `--no-labels` to turn them off, e.g. when
+a high-cardinality key like `user.id` would inflate active-series
+billing. See the [Deep dive](/observability/deep-dive#attributes) for the
+cardinality trade-offs.
+
 ## Reference
 
 For flags, metric names, attribute tables, operational notes, and

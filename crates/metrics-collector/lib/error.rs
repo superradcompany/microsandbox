@@ -24,6 +24,10 @@ pub enum MetricsCollectorError {
     #[error("invalid collector configuration: {0}")]
     InvalidConfig(String),
 
+    /// A catalog (sqlite) query failed while resolving sandbox labels.
+    #[error("catalog: {0}")]
+    Catalog(#[from] sea_orm::DbErr),
+
     /// Anything else worth surfacing as a string (e.g., timeouts,
     /// worker/driver task panics, exporter-supplied errors).
     #[error("{0}")]
