@@ -133,6 +133,7 @@ pub enum HostPermissions {
 
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
     ///
@@ -1099,6 +1100,13 @@ fn validate_virtiofs_policies(
     Ok(())
 }
 
+fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountOptions {
+    options.unwrap_or(MountOptions {
+        readonly,
+        ..MountOptions::default()
+    })
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations: IntoImage
 //--------------------------------------------------------------------------------------------------
@@ -1255,7 +1263,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Bind {
                 host: PathBuf,
                 guest: String,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1264,7 +1275,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Named {
                 name: String,
                 guest: String,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1274,7 +1288,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 size_mib: Option<u32>,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
             },
             DiskImage {
                 host: PathBuf,
@@ -1282,7 +1299,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 format: DiskImageFormat,
                 #[serde(default)]
                 fstype: Option<String>,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
             },
         }
 
@@ -1292,12 +1312,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host,
                 guest,
                 options,
+                readonly,
                 stat_virtualization,
                 host_permissions,
             } => Self::Bind {
                 host,
                 guest,
-                options,
+                options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
             },
@@ -1305,12 +1326,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 name,
                 guest,
                 options,
+                readonly,
                 stat_virtualization,
                 host_permissions,
             } => Self::Named {
                 name,
                 guest,
-                options,
+                options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
             },
@@ -1318,10 +1340,11 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest,
                 size_mib,
                 options,
+                readonly,
             } => Self::Tmpfs {
                 guest,
                 size_mib,
-                options,
+                options: decode_mount_options(options, readonly),
             },
             VolumeMountHelper::DiskImage {
                 host,
@@ -1329,12 +1352,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 format,
                 fstype,
                 options,
+                readonly,
             } => Self::DiskImage {
                 host,
                 guest,
                 format,
                 fstype,
-                options,
+                options: decode_mount_options(options, readonly),
             },
         })
     }
@@ -1595,6 +1619,55 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_volume_mount_json_accepts_legacy_readonly_field() {
+        let bind: VolumeMount = serde_json::from_str(
+            r#"{"type":"Bind","host":"/host/data","guest":"/data","readonly":true}"#,
+        )
+        .unwrap();
+        match bind {
+            VolumeMount::Bind { options, .. } => {
+                assert!(options.readonly);
+                assert!(!options.noexec);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+
+        let named: VolumeMount =
+            serde_json::from_str(r#"{"type":"Named","name":"cache","guest":"/cache"}"#).unwrap();
+        match named {
+            VolumeMount::Named { options, .. } => assert_eq!(options, MountOptions::default()),
+            other => panic!("expected Named, got {other:?}"),
+        }
+
+        let tmpfs: VolumeMount =
+            serde_json::from_str(r#"{"type":"Tmpfs","guest":"/tmp","readonly":false}"#).unwrap();
+        match tmpfs {
+            VolumeMount::Tmpfs { options, .. } => assert_eq!(options, MountOptions::default()),
+            other => panic!("expected Tmpfs, got {other:?}"),
+        }
+
+        let disk: VolumeMount = serde_json::from_str(
+            r#"{"type":"DiskImage","host":"/host/data.raw","guest":"/data","format":"Raw","readonly":true}"#,
+        )
+        .unwrap();
+        match disk {
+            VolumeMount::DiskImage { options, .. } => {
+                assert!(options.readonly);
+                assert!(!options.noexec);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_options_json_defaults_missing_fields() {
+        let options: MountOptions = serde_json::from_str(r#"{"readonly":true}"#).unwrap();
+
+        assert!(options.readonly);
+        assert!(!options.noexec);
     }
 
     #[test]
