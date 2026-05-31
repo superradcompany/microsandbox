@@ -565,6 +565,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sandbox_config_deserializes_legacy_readonly_mounts() {
+        let json = r#"{"name":"legacy","mounts":[{"type":"Tmpfs","guest":"/tmp","size_mib":512,"readonly":false}]}"#;
+
+        let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(decoded.mounts.len(), 1);
+        match &decoded.mounts[0] {
+            VolumeMount::Tmpfs {
+                guest,
+                size_mib,
+                options,
+            } => {
+                assert_eq!(guest, "/tmp");
+                assert_eq!(*size_mib, Some(512));
+                assert_eq!(*options, MountOptions::default());
+            }
+            mount => panic!("expected tmpfs mount, got {mount:?}"),
+        }
+    }
+
+    #[test]
     fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
         let mut config = SandboxConfig {
             image: RootfsSource::oci("python:3.12"),
