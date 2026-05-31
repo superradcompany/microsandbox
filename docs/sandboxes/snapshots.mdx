@@ -1,13 +1,13 @@
 ---
 title: Snapshots
-description: Capture a stopped sandbox's writable layer as a portable artifact
+description: Capture a sandbox's writable layer as a portable artifact
 icon: "code-branch"
 ---
 
 A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
 
 <Note>
-Snapshots are **disk-only and stopped-only**: the sandbox can't be running when you take one.
+Snapshots are **disk-only** and require a sandbox that is not running. Stopped and crashed sandboxes can be snapshotted; running, draining, and paused sandboxes are rejected.
 </Note>
 
 ## What gets captured
@@ -39,10 +39,10 @@ msb run --name worker --snapshot after-pip-install \
 ```
 
 <Tip>
-The snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
 </Tip>
 
-## Snapshot a stopped sandbox
+## Snapshot a sandbox
 
 Snapshot under a bare name (resolved to `~/.microsandbox/snapshots/<name>/`) or to an explicit path:
 
@@ -314,7 +314,7 @@ msb snapshot inspect after-pip-install --verify
 
 </CodeGroup>
 
-`msb snapshot export` automatically populates the integrity hash before bundling, and `msb snapshot import` verifies it on the way in. The local index path stays fast; the cross-machine path stays trustworthy.
+`msb snapshot export` bundles the snapshot as it exists on disk. `msb snapshot import` verifies recorded integrity when the archive includes it, so create snapshots with `--integrity` before exporting across a trust boundary.
 
 ## Use cases
 

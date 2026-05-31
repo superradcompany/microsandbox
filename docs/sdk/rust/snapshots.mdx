@@ -3,7 +3,7 @@ title: Snapshots
 description: Rust SDK - Snapshot API reference
 ---
 
-Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Rust SDK reference.
+Disk-only snapshots of a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Rust SDK reference.
 
 ```rust
 use microsandbox::{Sandbox, Snapshot, SnapshotHandle, SnapshotFormat};
@@ -11,7 +11,7 @@ use microsandbox::snapshot::ExportOpts;
 ```
 
 <Note>
-  Snapshots are **disk-only and stopped-only**.
+  Snapshots are **disk-only** and require a sandbox that is not running.
 </Note>
 
 ## SandboxBuilder
@@ -44,7 +44,7 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()
 async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
 ```
 
-Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination see [`snapshot_to()`](#snapshot-to).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. For an explicit filesystem destination see [`snapshot_to()`](#snapshot-to).
 
 **Parameters**
 
@@ -71,7 +71,7 @@ Snapshot this (stopped) sandbox under a bare name in the default snapshots direc
 async fn snapshot_to(&self, path: impl AsRef<Path>) -> MicrosandboxResult<Snapshot>
 ```
 
-Snapshot this (stopped) sandbox to an explicit filesystem path. For the common case of writing under the default snapshots directory see [`snapshot()`](#snapshot).
+Snapshot this sandbox to an explicit filesystem path. The sandbox must be stopped or crashed. For the common case of writing under the default snapshots directory see [`snapshot()`](#snapshot).
 
 **Parameters**
 
@@ -256,13 +256,13 @@ Walk `dir`, upsert index rows for every artifact found, recompute parent-edge ch
 async fn export(name_or_path: &str, out: &Path, opts: ExportOpts) -> MicrosandboxResult<()>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
 
 **ExportOpts**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `with_parents` | `bool` | Walk the parent chain and include each ancestor (no-op today) |
+| `with_parents` | `bool` | Walk the parent chain and include each ancestor |
 | `with_image` | `bool` | Bundle the OCI image cache (`cache/{layers,fsmeta,vmdk}`) for offline transport |
 | `plain_tar` | `bool` | Skip zstd compression and write a plain `.tar` |
 
@@ -274,7 +274,7 @@ Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity h
 async fn import(archive: &Path, dest: Option<&Path>) -> MicrosandboxResult<SnapshotHandle>
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity when present. Compression is detected from magic bytes.
 
 ---
 
@@ -287,7 +287,7 @@ let h = Snapshot::get("after-pip-install").await?;
 
 h.digest();           // &str — sha256:...
 h.name();             // Option<&str>
-h.parent_digest();    // Option<&str> — None today; populated when chains land
+h.parent_digest();    // Option<&str>
 h.image_ref();        // &str
 h.format();           // SnapshotFormat::Raw | Qcow2
 h.size_bytes();       // Option<u64>

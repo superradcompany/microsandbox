@@ -3,14 +3,14 @@ title: Snapshots
 description: Go SDK - Snapshot API reference
 ---
 
-Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
+Disk-only snapshots of a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
 
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
 <Note>
-  Snapshots are **disk-only and stopped-only**.
+  Snapshots are **disk-only** and require a sandbox that is not running.
 </Note>
 
 ## Boot from snapshot
@@ -56,7 +56,7 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
 ```
 
-Snapshot this stopped sandbox under a bare name in the default snapshots directory.
+Snapshot this sandbox under a bare name in the default snapshots directory. The sandbox must be stopped or crashed.
 
 ---
 
@@ -66,7 +66,7 @@ Snapshot this stopped sandbox under a bare name in the default snapshots directo
 func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error)
 ```
 
-Snapshot this stopped sandbox to an explicit artifact directory.
+Snapshot this sandbox to an explicit artifact directory. The sandbox must be stopped or crashed.
 
 ## Snapshot
 
@@ -84,7 +84,7 @@ func (snapshotFactory) Create(
 ) (*SnapshotArtifact, error)
 ```
 
-Create a snapshot from a stopped sandbox. Set exactly one of `SnapshotCreateOptions.Name` or `SnapshotCreateOptions.Path`.
+Create a snapshot from a stopped or crashed sandbox. Set exactly one of `SnapshotCreateOptions.Name` or `SnapshotCreateOptions.Path`.
 
 ```go
 snap, err := m.Snapshot.Create(ctx, "baseline",

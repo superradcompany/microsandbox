@@ -3,7 +3,7 @@ title: Snapshots
 description: TypeScript SDK - Snapshot API reference
 ---
 
-Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the TypeScript SDK reference.
+Disk-only snapshots of a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the TypeScript SDK reference.
 
 ```ts
 import { Sandbox, Snapshot, SnapshotHandle } from "microsandbox";
@@ -11,7 +11,7 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
 ```
 
 <Note>
-  Snapshots are **disk-only and stopped-only**.
+  Snapshots are **disk-only** and require a sandbox that is not running.
 </Note>
 
 ## SandboxBuilder
@@ -44,7 +44,7 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()
 snapshot(name: string): Promise<Snapshot>
 ```
 
-Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination, see [`snapshotTo()`](#snapshotto).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. For an explicit filesystem destination, see [`snapshotTo()`](#snapshotto).
 
 **Errors**
 
@@ -59,7 +59,7 @@ Snapshot this (stopped) sandbox under a bare name in the default snapshots direc
 snapshotTo(path: string): Promise<Snapshot>
 ```
 
-Snapshot this (stopped) sandbox to an explicit filesystem path.
+Snapshot this sandbox to an explicit filesystem path. The sandbox must be stopped or crashed.
 
 ---
 
@@ -287,13 +287,13 @@ Walk `dir` (default: configured snapshots dir) and rebuild the local index. Retu
 static export(nameOrPath: string, out: string, opts?: ExportOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
 
 **ExportOpts**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `withParents` | `boolean` | Walk the parent chain (no-op today) |
+| `withParents` | `boolean` | Walk the parent chain and include each ancestor |
 | `withImage` | `boolean` | Bundle the OCI image cache for offline transport |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar` |
 
@@ -305,7 +305,7 @@ Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity h
 static import(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity when present. Compression is detected from magic bytes.
 
 ---
 
@@ -318,7 +318,7 @@ const h = await Snapshot.get("after-pip-install");
 
 h.digest;          // string ("sha256:...")
 h.name;            // string | null
-h.parentDigest;    // string | null — null today
+h.parentDigest;    // string | null
 h.imageRef;        // string
 h.format;          // "raw" | "qcow2"
 h.sizeBytes;       // bigint | null

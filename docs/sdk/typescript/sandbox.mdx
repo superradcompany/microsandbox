@@ -586,7 +586,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `disableNetwork()` | Disable networking entirely |
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
-| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
+| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<env_var>`. |
 | `build(): Promise<SandboxConfig>` | Materialize without booting. Consumes the builder |
 | `create(): Promise<Sandbox>` | Build and boot in attached mode |
 | `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
