@@ -35,6 +35,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
+# Catalog access for per-sandbox labels (read-only connection + entity).
+microsandbox-db = { version = "0.5.2", path = "../db" }
+# Query traits (EntityTrait, ColumnTrait, QueryFilter) for the label lookup.
+sea-orm = { workspace = true }
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
 microsandbox-utils = { version = "0.5.2", path = "../utils" }
 # CLI duration parsing (e.g. "1s", "500ms").
@@ -68,6 +72,8 @@ tonic = { version = "0.14", default-features = false, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# Apply the catalog schema to a temp DB in LabelCache tests.
+microsandbox-migration = { path = "../migration" }
 tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",

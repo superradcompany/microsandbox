@@ -383,7 +383,8 @@ impl MetricsExporter for OtelExporter {
             // every collected sample instead of collapsing to the final value.
             for collection in &batch.collections {
                 for snapshot in &collection.sandboxes {
-                    let attrs = build_attributes(snapshot, &identity);
+                    let labels = collection.labels.get(&snapshot.sandbox_id);
+                    let attrs = build_attributes(snapshot, &identity, labels.map(|l| l.as_slice()));
                     record_snapshot(&instruments, snapshot, &attrs);
                 }
 
@@ -629,13 +630,20 @@ fn build_instruments(meter: &Meter) -> Instruments {
     }
 }
 
-/// Build the per-snapshot attribute set according to the configured
-/// `IdentityAttributes`.
+/// Build the per-snapshot attribute set: the configured `IdentityAttributes`
+/// plus the sandbox's user labels.
+///
+/// Labels are appended as ordinary per-datapoint attributes (the same path as
+/// identity), NOT as OTel `Resource` attributes — the `Resource` is fixed per
+/// MeterProvider and shared across every sandbox, so per-sandbox labels there
+/// would leak across series.
 fn build_attributes(
     snapshot: &SandboxMetricSnapshot,
     identity: &IdentityAttributes,
+    labels: Option<&[(String, String)]>,
 ) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(4);
+    let label_count = labels.map_or(0, <[_]>::len);
+    let mut attrs = Vec::with_capacity(4 + label_count);
     if identity.emit_name {
         attrs.push(KeyValue::new("sandbox.name", snapshot.name.clone()));
     }
@@ -647,6 +655,9 @@ fn build_attributes(
     }
     if identity.emit_pid {
         attrs.push(KeyValue::new("sandbox.pid", i64::from(snapshot.pid)));
+    }
+    for (key, value) in labels.unwrap_or(&[]) {
+        attrs.push(KeyValue::new(key.clone(), value.clone()));
     }
     attrs
 }
@@ -674,4 +685,74 @@ fn record_snapshot(
         .record(m.net_rx_bytes, attrs);
     instruments.network_bytes_sent.record(m.net_tx_bytes, attrs);
     instruments.uptime.record(m.uptime.as_secs_f64(), attrs);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use microsandbox_metrics::SandboxMetrics;
+
+    use super::*;
+
+    fn snapshot() -> SandboxMetricSnapshot {
+        SandboxMetricSnapshot {
+            name: "dev".into(),
+            sandbox_id: 7,
+            run_id: 70,
+            pid: 1007,
+            metrics: SandboxMetrics {
+                cpu_percent: 1.0,
+                memory_bytes: 1,
+                memory_limit_bytes: 2,
+                disk_read_bytes: 3,
+                disk_write_bytes: 4,
+                net_rx_bytes: 5,
+                net_tx_bytes: 6,
+                uptime: Duration::from_secs(1),
+                timestamp: chrono::Utc::now(),
+            },
+        }
+    }
+
+    fn pairs(attrs: &[KeyValue]) -> Vec<(String, String)> {
+        attrs
+            .iter()
+            .map(|kv| (kv.key.as_str().to_string(), kv.value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn labels_become_datapoint_attributes() {
+        let labels = [
+            ("user.id".to_string(), "alice".to_string()),
+            ("tenant".to_string(), "acme".to_string()),
+        ];
+        let attrs = build_attributes(&snapshot(), &IdentityAttributes::default(), Some(&labels));
+        let got = pairs(&attrs);
+
+        // Identity attributes still present (default emits name + id).
+        assert!(got.iter().any(|(k, _)| k == "sandbox.name"));
+        assert!(got.iter().any(|(k, _)| k == "sandbox.id"));
+        // Labels appended verbatim as their own attributes.
+        assert!(got.contains(&("user.id".to_string(), "alice".to_string())));
+        assert!(got.contains(&("tenant".to_string(), "acme".to_string())));
+    }
+
+    #[test]
+    fn no_labels_adds_no_extra_attributes() {
+        let with_none = build_attributes(&snapshot(), &IdentityAttributes::default(), None);
+        let with_empty = build_attributes(&snapshot(), &IdentityAttributes::default(), Some(&[]));
+        assert_eq!(with_none.len(), with_empty.len());
+        // Only sandbox.* identity attributes remain.
+        assert!(
+            with_none
+                .iter()
+                .all(|kv| kv.key.as_str().starts_with("sandbox."))
+        );
+    }
 }
