@@ -13,7 +13,5 @@ RUN apt-get update \
 COPY build/${TARGETARCH}/msb /usr/local/bin/msb
 COPY build/${TARGETARCH}/libkrunfw.so.* /usr/local/lib/
 
-ENV LD_LIBRARY_PATH="/usr/local/lib"
-
 ENTRYPOINT ["msb"]
 CMD ["--help"]
