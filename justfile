@@ -84,7 +84,7 @@ build-agentd:
     docker cp "$id:/agentd" build/agentd
     touch build/agentd
 
-# Check for libkrunfw and build it only if not found in build/, ~/.microsandbox/lib/, or system paths.
+# Check for libkrunfw and build it only if not found in build/ or ~/.microsandbox/lib/.
 [linux]
 _ensure-libkrunfw:
     #!/usr/bin/env bash
@@ -99,15 +99,10 @@ _ensure-libkrunfw:
         echo "Found libkrunfw in ~/.microsandbox/lib/"
         exit 0
     fi
-    # Check system library paths via ldconfig.
-    if ldconfig -p 2>/dev/null | grep -q libkrunfw; then
-        echo "Found libkrunfw in system library paths"
-        exit 0
-    fi
     echo "libkrunfw not found — building from source..."
     just build-libkrunfw
 
-# Check for libkrunfw and build it only if not found in build/, ~/.microsandbox/lib/, or system paths.
+# Check for libkrunfw and build it only if not found in build/ or ~/.microsandbox/lib/.
 [macos]
 _ensure-libkrunfw:
     #!/usr/bin/env bash
@@ -197,7 +192,7 @@ install:
     echo "Installed libkrunfw → ~/.microsandbox/lib/"
 
     echo ""
-    echo "Remember to add ~/.microsandbox/bin to your PATH and ~/.microsandbox/lib to your LD_LIBRARY_PATH."
+    echo "Remember to add ~/.microsandbox/bin to your PATH."
 
 # Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/. Requires: just build.
 [macos]
@@ -222,7 +217,7 @@ install:
     echo "Installed libkrunfw → ~/.microsandbox/lib/"
 
     echo ""
-    echo "Remember to add ~/.microsandbox/bin to your PATH and ~/.microsandbox/lib to your DYLD_LIBRARY_PATH."
+    echo "Remember to add ~/.microsandbox/bin to your PATH."
 
 # Remove installed binaries from ~/.microsandbox/{bin,lib}/.
 uninstall:
