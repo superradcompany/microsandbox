@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -76,6 +76,16 @@ struct CachedPullInfo {
 
 struct LayerPipelineFailure {
     error: ImageError,
+}
+
+struct MaterializeLayersRequest<'a> {
+    oci_ref: &'a oci_client::Reference,
+    manifest_digest: &'a Digest,
+    layer_descriptors: &'a [LayerDescriptor],
+    diff_ids: &'a [String],
+    force: bool,
+    progress: Option<PullProgressSender>,
+    staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
 }
 
 /// Per-layer pipeline success: EROFS image written, data-stripped tree + data map retained.
@@ -164,6 +174,28 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
     ) -> ImageResult<PullResult> {
+        self.materialize_cached_layers_inner(reference, metadata, force, None)
+            .await
+    }
+
+    pub(crate) async fn materialize_cached_layers_from_paths(
+        &self,
+        reference: &oci_client::Reference,
+        metadata: &CachedImageMetadata,
+        force: bool,
+        staged_layers: Arc<HashMap<String, PathBuf>>,
+    ) -> ImageResult<PullResult> {
+        self.materialize_cached_layers_inner(reference, metadata, force, Some(staged_layers))
+            .await
+    }
+
+    async fn materialize_cached_layers_inner(
+        &self,
+        reference: &oci_client::Reference,
+        metadata: &CachedImageMetadata,
+        force: bool,
+        staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
+    ) -> ImageResult<PullResult> {
         let manifest_digest: Digest = metadata.manifest_digest.parse()?;
         let layer_descriptors = metadata
             .layers
@@ -182,14 +214,15 @@ impl Registry {
             .map(|layer| layer.diff_id.clone())
             .collect::<Vec<_>>();
 
-        self.materialize_layers_and_fsmeta(
-            reference,
-            &manifest_digest,
-            &layer_descriptors,
-            &diff_ids,
+        self.materialize_layers_and_fsmeta(MaterializeLayersRequest {
+            oci_ref: reference,
+            manifest_digest: &manifest_digest,
+            layer_descriptors: &layer_descriptors,
+            diff_ids: &diff_ids,
             force,
-            None,
-        )
+            progress: None,
+            staged_layers,
+        })
         .await?;
 
         let layer_diff_ids = diff_ids
@@ -357,7 +390,7 @@ impl Registry {
 
         // Determine media type from manifest bytes. For multi-platform images,
         // this also fetches the platform-specific config bytes.
-        let (manifest, config_bytes) = self
+        let (manifest, config_bytes, resolved_manifest_bytes) = self
             .parse_and_resolve_manifest(&manifest_bytes, config_bytes, oci_ref)
             .await?;
 
@@ -420,14 +453,15 @@ impl Registry {
         }
 
         // Materialize per-layer EROFS images, then generate fsmeta + VMDK.
-        self.materialize_layers_and_fsmeta(
+        self.materialize_layers_and_fsmeta(MaterializeLayersRequest {
             oci_ref,
-            &manifest_digest,
-            &layer_descriptors,
-            &diff_ids,
-            options.force,
-            progress.clone(),
-        )
+            manifest_digest: &manifest_digest,
+            layer_descriptors: &layer_descriptors,
+            diff_ids: &diff_ids,
+            force: options.force,
+            progress: progress.clone(),
+            staged_layers: None,
+        })
         .await?;
 
         // Clean up compressed tarballs after all layer tasks complete.
@@ -446,6 +480,8 @@ impl Registry {
         let cached_image = CachedImageMetadata {
             manifest_digest: manifest_digest.to_string(),
             config_digest: manifest.config_digest().unwrap_or_default(),
+            raw_manifest_json: json_bytes_to_string(&resolved_manifest_bytes, "resolved manifest")?,
+            raw_config_json: json_bytes_to_string(&config_bytes, "image config")?,
             config: image_config.clone(),
             layers: layer_descriptors
                 .iter()
@@ -510,7 +546,7 @@ impl Registry {
         manifest_bytes: &[u8],
         config_bytes: Vec<u8>,
         reference: &oci_client::Reference,
-    ) -> ImageResult<(OciManifest, Vec<u8>)> {
+    ) -> ImageResult<(OciManifest, Vec<u8>, Vec<u8>)> {
         // Try to detect media type from the JSON.
         let media_type = detect_manifest_media_type(manifest_bytes);
 
@@ -521,7 +557,7 @@ impl Registry {
             self.resolve_platform_manifest(manifest_bytes, reference)
                 .await
         } else {
-            Ok((manifest, config_bytes))
+            Ok((manifest, config_bytes, manifest_bytes.to_vec()))
         }
     }
 
@@ -532,7 +568,7 @@ impl Registry {
         &self,
         index_bytes: &[u8],
         reference: &oci_client::Reference,
-    ) -> ImageResult<(OciManifest, Vec<u8>)> {
+    ) -> ImageResult<(OciManifest, Vec<u8>, Vec<u8>)> {
         let index: oci_spec::image::ImageIndex = serde_json::from_slice(index_bytes)
             .map_err(|e| ImageError::ManifestParse(format!("failed to parse index: {e}")))?;
 
@@ -604,7 +640,7 @@ impl Registry {
 
         let media_type = detect_manifest_media_type(&manifest_bytes);
         let manifest = OciManifest::parse(&manifest_bytes, &media_type)?;
-        Ok((manifest, config_bytes))
+        Ok((manifest, config_bytes, manifest_bytes))
     }
 
     /// Extract layer digests and sizes from a parsed manifest.
@@ -644,13 +680,18 @@ impl Registry {
     /// Materialize per-layer EROFS images, then generate fsmeta + VMDK.
     async fn materialize_layers_and_fsmeta(
         &self,
-        oci_ref: &oci_client::Reference,
-        manifest_digest: &Digest,
-        layer_descriptors: &[LayerDescriptor],
-        diff_ids: &[String],
-        force: bool,
-        progress: Option<PullProgressSender>,
+        request: MaterializeLayersRequest<'_>,
     ) -> ImageResult<()> {
+        let MaterializeLayersRequest {
+            oci_ref,
+            manifest_digest,
+            layer_descriptors,
+            diff_ids,
+            force,
+            progress,
+            staged_layers,
+        } = request;
+
         // Validate all diff_ids parse as digests before spawning layer tasks.
         // diff_ids come from the remote config blob (untrusted input).
         let validated_diff_ids: Vec<Digest> = diff_ids
@@ -714,6 +755,9 @@ impl Registry {
                 let progress = progress.clone();
                 let media_type = layer_desc.media_type.clone();
                 let diff_id = diff_ids[i].clone();
+                let staged_tar_path = staged_layers
+                    .as_ref()
+                    .and_then(|layers| layers.get(&layer_desc.digest.to_string()).cloned());
 
                 let diff_id_digest: Digest = validated_diff_ids[i].clone();
                 let erofs_path = self.cache.layer_erofs_path(&diff_id_digest);
@@ -755,9 +799,10 @@ impl Registry {
                         });
                     }
 
-                    if let Err(error) = layer
-                        .download(&client, &oci_ref, size, force, progress.as_ref(), i)
-                        .await
+                    if staged_tar_path.is_none()
+                        && let Err(error) = layer
+                            .download(&client, &oci_ref, size, force, progress.as_ref(), i)
+                            .await
                     {
                         return Err(LayerPipelineFailure { error });
                     }
@@ -806,7 +851,9 @@ impl Registry {
                         });
                     }
 
-                    let tar_path = layer.tar_path_ref();
+                    let tar_path = staged_tar_path
+                        .clone()
+                        .unwrap_or_else(|| layer.tar_path_ref());
                     let tar_size =
                         tokio::fs::metadata(&tar_path)
                             .await
@@ -1507,6 +1554,12 @@ fn layer_pipeline_concurrency(layer_count: usize) -> usize {
     host_limit.min(layer_count.max(1))
 }
 
+fn json_bytes_to_string(bytes: &[u8], context: &str) -> ImageResult<String> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|e| ImageError::ConfigParse(format!("{context} is not UTF-8 JSON: {e}")))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1860,6 +1913,10 @@ mod tests {
                     .to_string(),
             config_digest:
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.to_string(),
+            raw_config_json:
+                r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#
                     .to_string(),
             config: ImageConfig {
                 env: vec!["PATH=/usr/bin".into()],

@@ -1,10 +1,15 @@
 //! Container image archive import/export.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, Read, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -27,6 +32,10 @@ const OCI_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 const OCI_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 const OCI_LAYER_ZSTD_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
 const OCI_REF_NAME_ANNOTATION: &str = "org.opencontainers.image.ref.name";
+const ARCHIVE_METADATA_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const ARCHIVE_LAYER_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const ARCHIVE_MAX_ENTRY_COUNT: u64 = 1_000_000;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -65,6 +74,8 @@ pub struct ImageSaveRequest {
     pub reference: String,
     /// Image config fields.
     pub config: ImageSaveConfig,
+    /// Raw image config JSON to preserve non-runtime metadata on export.
+    pub raw_config_json: String,
     /// Ordered layer list, bottom-to-top.
     pub layers: Vec<ImageSaveLayer>,
 }
@@ -104,10 +115,23 @@ struct PreparedLoadedImage {
 }
 
 #[derive(Debug)]
+struct PreparedArchiveLoad {
+    images: Vec<PreparedLoadedImage>,
+    staged_layers: HashMap<String, PathBuf>,
+}
+
+#[derive(Debug)]
+struct StagedLayerGuard {
+    paths: HashMap<String, PathBuf>,
+    cleanup_on_drop: bool,
+}
+
+#[derive(Debug)]
 struct LayerBlobInfo {
     digest: String,
     media_type: String,
     size_bytes: u64,
+    path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +190,34 @@ impl<W> DigestingWriter<W> {
     }
 }
 
+impl StagedLayerGuard {
+    fn new() -> Self {
+        Self {
+            paths: HashMap::new(),
+            cleanup_on_drop: true,
+        }
+    }
+
+    fn track(&mut self, digest: String, path: PathBuf) -> PathBuf {
+        if let Some(existing_path) = self.paths.get(&digest) {
+            let _ = std::fs::remove_file(&path);
+            return existing_path.clone();
+        }
+
+        self.paths.insert(digest, path.clone());
+        path
+    }
+
+    fn into_inner(mut self) -> HashMap<String, PathBuf> {
+        self.cleanup_on_drop = false;
+        std::mem::take(&mut self.paths)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
 impl<W: Write> Write for DigestingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buf)?;
@@ -176,6 +228,18 @@ impl<W: Write> Write for DigestingWriter<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl Drop for StagedLayerGuard {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop {
+            return;
+        }
+
+        for path in self.paths.values() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -199,47 +263,50 @@ pub async fn load_archive(
 
     let cache = GlobalCache::new_async(cache_dir).await?;
     let registry = Registry::new(Platform::host_linux(), cache)?;
-    let staged_layer_digests = prepared
-        .iter()
-        .flat_map(|image| {
-            image
-                .metadata
-                .layers
-                .iter()
-                .map(|layer| layer.digest.clone())
-        })
-        .collect::<HashSet<_>>();
-    let mut loaded = Vec::with_capacity(prepared.len());
-
-    for image in prepared {
-        let reference: Reference = image
-            .reference
-            .parse()
-            .map_err(|e| ImageError::ManifestParse(format!("invalid image reference: {e}")))?;
-
-        registry
-            .materialize_cached_layers(&reference, &image.metadata, false)
-            .await?;
-
-        let cache = GlobalCache::new_async(cache_dir).await?;
-        cache
-            .write_image_metadata_async(&reference, &image.metadata)
-            .await?;
-
-        loaded.push(LoadedImage {
-            reference: image.reference,
-            metadata: image.metadata,
-        });
-    }
-
+    let PreparedArchiveLoad {
+        images,
+        staged_layers,
+    } = prepared;
+    let cleanup_paths = staged_layers.values().cloned().collect::<Vec<_>>();
+    let staged_layers = Arc::new(staged_layers);
     let cache = GlobalCache::new_async(cache_dir).await?;
-    for digest in staged_layer_digests {
-        if let Ok(digest) = digest.parse::<Digest>() {
-            let _ = tokio::fs::remove_file(cache.tar_path(&digest)).await;
+    let mut loaded = Vec::with_capacity(images.len());
+
+    let result = async {
+        for image in images {
+            let reference: Reference = image
+                .reference
+                .parse()
+                .map_err(|e| ImageError::ManifestParse(format!("invalid image reference: {e}")))?;
+
+            registry
+                .materialize_cached_layers_from_paths(
+                    &reference,
+                    &image.metadata,
+                    false,
+                    Arc::clone(&staged_layers),
+                )
+                .await?;
+
+            cache
+                .write_image_metadata_async(&reference, &image.metadata)
+                .await?;
+
+            loaded.push(LoadedImage {
+                reference: image.reference,
+                metadata: image.metadata,
+            });
         }
+
+        Ok(loaded)
+    }
+    .await;
+
+    for path in cleanup_paths {
+        let _ = tokio::fs::remove_file(path).await;
     }
 
-    Ok(loaded)
+    result
 }
 
 /// Save images as a Docker-compatible image archive.
@@ -279,10 +346,11 @@ fn save_docker_archive_inner(
         path: output.to_path_buf(),
         source: e,
     })?;
-    let mut archive = tar::Builder::new(output_file);
+    let mut archive = tar::Builder::new(BufWriter::new(output_file));
     let mut generated_layers: HashMap<String, GeneratedLayer> = HashMap::new();
     let mut appended_layers: HashSet<String> = HashSet::new();
     let mut manifest_entries = Vec::with_capacity(images.len());
+    let mut config_entries = Vec::with_capacity(images.len());
 
     for image in images {
         let mut layer_paths = Vec::with_capacity(image.layers.len());
@@ -302,20 +370,12 @@ fn save_docker_archive_inner(
             layer_paths.push(format!("{}/layer.tar", generated.hex));
         }
 
-        let config_bytes = docker_config_json(&image.config, &regenerated_diff_ids)?;
+        let config_bytes =
+            docker_config_json(&image.config, &image.raw_config_json, &regenerated_diff_ids)?;
         let config_hex = sha256_hex(&config_bytes);
         let config_name = format!("{config_hex}.json");
 
-        append_bytes(&mut archive, &config_name, &config_bytes)?;
-
-        for layer in &image.layers {
-            let generated = generated_layers.get(&layer.diff_id).ok_or_else(|| {
-                ImageError::ManifestParse(format!("missing generated layer {}", layer.diff_id))
-            })?;
-            if appended_layers.insert(generated.hex.clone()) {
-                append_layer_entries(&mut archive, generated)?;
-            }
-        }
+        config_entries.push((config_name.clone(), config_bytes));
 
         manifest_entries.push(DockerManifestOut {
             config: config_name,
@@ -327,6 +387,22 @@ fn save_docker_archive_inner(
     let manifest_bytes = serde_json::to_vec_pretty(&manifest_entries)
         .map_err(|e| ImageError::ConfigParse(format!("serialize docker manifest: {e}")))?;
     append_bytes(&mut archive, "manifest.json", &manifest_bytes)?;
+
+    for (config_name, config_bytes) in config_entries {
+        append_bytes(&mut archive, &config_name, &config_bytes)?;
+    }
+
+    for image in images {
+        for layer in &image.layers {
+            let generated = generated_layers.get(&layer.diff_id).ok_or_else(|| {
+                ImageError::ManifestParse(format!("missing generated layer {}", layer.diff_id))
+            })?;
+            if appended_layers.insert(generated.hex.clone()) {
+                append_layer_entries(&mut archive, generated)?;
+            }
+        }
+    }
+
     archive.finish().map_err(ImageError::Io)?;
 
     for layer in generated_layers.values() {
@@ -351,18 +427,13 @@ fn save_oci_archive_inner(
         path: output.to_path_buf(),
         source: e,
     })?;
-    let mut archive = tar::Builder::new(output_file);
+    let mut archive = tar::Builder::new(BufWriter::new(output_file));
     let mut generated_layers: HashMap<String, GeneratedLayer> = HashMap::new();
-    let mut appended_blobs: HashSet<String> = HashSet::new();
+    let mut appended_metadata_blobs: HashSet<String> = HashSet::new();
+    let mut appended_layer_blobs: HashSet<String> = HashSet::new();
+    let mut layer_blob_order = Vec::new();
+    let mut metadata_blobs = Vec::new();
     let mut index_manifests = Vec::with_capacity(images.len());
-
-    append_bytes(
-        &mut archive,
-        "oci-layout",
-        br#"{"imageLayoutVersion":"1.0.0"}"#,
-    )?;
-    append_directory(&mut archive, "blobs")?;
-    append_directory(&mut archive, "blobs/sha256")?;
 
     for image in images {
         let mut layer_descriptors = Vec::with_capacity(image.layers.len());
@@ -379,13 +450,8 @@ fn save_oci_archive_inner(
             };
 
             regenerated_diff_ids.push(generated.diff_id.clone());
-            if appended_blobs.insert(generated.hex.clone()) {
-                append_blob_file(
-                    &mut archive,
-                    &generated.hex,
-                    &generated.path,
-                    generated.size,
-                )?;
+            if appended_layer_blobs.insert(generated.hex.clone()) {
+                layer_blob_order.push(layer.diff_id.clone());
             }
             layer_descriptors.push(serde_json::json!({
                 "mediaType": OCI_LAYER_MEDIA_TYPE,
@@ -394,10 +460,11 @@ fn save_oci_archive_inner(
             }));
         }
 
-        let config_bytes = docker_config_json(&image.config, &regenerated_diff_ids)?;
+        let config_bytes =
+            docker_config_json(&image.config, &image.raw_config_json, &regenerated_diff_ids)?;
         let config_hex = sha256_hex(&config_bytes);
-        if appended_blobs.insert(config_hex.clone()) {
-            append_blob_bytes(&mut archive, &config_hex, &config_bytes)?;
+        if appended_metadata_blobs.insert(config_hex.clone()) {
+            metadata_blobs.push((config_hex.clone(), config_bytes.clone()));
         }
 
         let manifest_bytes = serde_json::to_vec(&serde_json::json!({
@@ -412,8 +479,8 @@ fn save_oci_archive_inner(
         }))
         .map_err(|e| ImageError::ManifestParse(format!("serialize OCI manifest: {e}")))?;
         let manifest_hex = sha256_hex(&manifest_bytes);
-        if appended_blobs.insert(manifest_hex.clone()) {
-            append_blob_bytes(&mut archive, &manifest_hex, &manifest_bytes)?;
+        if appended_metadata_blobs.insert(manifest_hex.clone()) {
+            metadata_blobs.push((manifest_hex.clone(), manifest_bytes.clone()));
         }
 
         index_manifests.push(serde_json::json!({
@@ -436,7 +503,32 @@ fn save_oci_archive_inner(
         "manifests": index_manifests,
     }))
     .map_err(|e| ImageError::ManifestParse(format!("serialize OCI index: {e}")))?;
+
+    append_bytes(
+        &mut archive,
+        "oci-layout",
+        br#"{"imageLayoutVersion":"1.0.0"}"#,
+    )?;
     append_bytes(&mut archive, "index.json", &index_bytes)?;
+    append_directory(&mut archive, "blobs")?;
+    append_directory(&mut archive, "blobs/sha256")?;
+
+    for (hex, bytes) in metadata_blobs {
+        append_blob_bytes(&mut archive, &hex, &bytes)?;
+    }
+
+    for diff_id in layer_blob_order {
+        let generated = generated_layers.get(&diff_id).ok_or_else(|| {
+            ImageError::ManifestParse(format!("missing generated layer {diff_id}"))
+        })?;
+        append_blob_file(
+            &mut archive,
+            &generated.hex,
+            &generated.path,
+            generated.size,
+        )?;
+    }
+
     archive.finish().map_err(ImageError::Io)?;
 
     for layer in generated_layers.values() {
@@ -450,7 +542,7 @@ fn load_archive_blocking(
     cache_dir: &Path,
     input: &Path,
     options: ImageLoadOptions,
-) -> ImageResult<Vec<PreparedLoadedImage>> {
+) -> ImageResult<PreparedArchiveLoad> {
     if let Some(manifest_json) = read_archive_entry(input, "manifest.json")? {
         let manifest: Vec<DockerManifestEntry> = serde_json::from_slice(&manifest_json)
             .map_err(|e| ImageError::ManifestParse(format!("docker manifest.json: {e}")))?;
@@ -471,7 +563,7 @@ fn load_docker_archive_blocking(
     input: &Path,
     options: ImageLoadOptions,
     manifest: Vec<DockerManifestEntry>,
-) -> ImageResult<Vec<PreparedLoadedImage>> {
+) -> ImageResult<PreparedArchiveLoad> {
     let cache = GlobalCache::new(cache_dir)?;
     if manifest.is_empty() {
         return Err(ImageError::ManifestParse(
@@ -494,22 +586,27 @@ fn load_docker_archive_blocking(
     let mut archive = tar::Archive::new(file);
     let mut configs: HashMap<String, Vec<u8>> = HashMap::new();
     let mut layers: HashMap<String, LayerBlobInfo> = HashMap::new();
+    let mut staged_layers = StagedLayerGuard::new();
     let mut temp_counter = 0u64;
+    let mut entry_count = 0u64;
 
     for entry in archive.entries().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
+        entry_count += 1;
+        enforce_archive_entry_count(entry_count)?;
         let path = normalized_archive_path(&entry)?;
 
         if required_configs.contains(&path) {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).map_err(ImageError::Io)?;
+            let data = read_entry_to_vec(&mut entry, &path, ARCHIVE_METADATA_MAX_BYTES)?;
             configs.insert(path, data);
             continue;
         }
 
         if required_layers.contains(&path) {
-            let info = extract_layer_blob(&cache, &path, &mut entry, temp_counter)?;
+            let mut info = extract_layer_blob(&cache, &path, &mut entry, temp_counter)?;
             temp_counter += 1;
+            info.path = staged_layers.track(info.digest.clone(), info.path);
+            verify_docker_layer_path_digest(&path, &info.digest)?;
             layers.insert(path, info);
             continue;
         }
@@ -568,6 +665,8 @@ fn load_docker_archive_blocking(
         let metadata = CachedImageMetadata {
             manifest_digest,
             config_digest,
+            raw_manifest_json: json_bytes_to_string(&manifest_bytes, "docker manifest")?,
+            raw_config_json: json_bytes_to_string(config_bytes, "docker config")?,
             config,
             layers: layer_metadata,
         };
@@ -603,14 +702,17 @@ fn load_docker_archive_blocking(
         }
     }
 
-    Ok(loaded)
+    Ok(PreparedArchiveLoad {
+        images: loaded,
+        staged_layers: staged_layers.into_inner(),
+    })
 }
 
 fn load_oci_archive_blocking(
     cache_dir: &Path,
     input: &Path,
     options: ImageLoadOptions,
-) -> ImageResult<Vec<PreparedLoadedImage>> {
+) -> ImageResult<PreparedArchiveLoad> {
     let cache = GlobalCache::new(cache_dir)?;
     let layout_json = read_archive_entry(input, "oci-layout")?
         .ok_or_else(|| ImageError::ManifestParse("OCI layout missing oci-layout".into()))?;
@@ -660,22 +762,26 @@ fn load_oci_archive_blocking(
     let mut archive = tar::Archive::new(file);
     let mut configs: HashMap<String, Vec<u8>> = HashMap::new();
     let mut layers: HashMap<String, LayerBlobInfo> = HashMap::new();
+    let mut staged_layers = StagedLayerGuard::new();
     let mut temp_counter = 0u64;
+    let mut entry_count = 0u64;
 
     for entry in archive.entries().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
+        entry_count += 1;
+        enforce_archive_entry_count(entry_count)?;
         let path = normalized_archive_path(&entry)?;
 
         if required_configs.contains(&path) {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).map_err(ImageError::Io)?;
+            let data = read_entry_to_vec(&mut entry, &path, ARCHIVE_METADATA_MAX_BYTES)?;
             configs.insert(path, data);
             continue;
         }
 
         if required_layers.contains(&path) {
-            let info = extract_layer_blob(&cache, &path, &mut entry, temp_counter)?;
+            let mut info = extract_layer_blob(&cache, &path, &mut entry, temp_counter)?;
             temp_counter += 1;
+            info.path = staged_layers.track(info.digest.clone(), info.path);
             layers.insert(path, info);
             continue;
         }
@@ -716,6 +822,8 @@ fn load_oci_archive_blocking(
         let metadata = CachedImageMetadata {
             manifest_digest: format!("sha256:{}", sha256_hex(&manifest_bytes)),
             config_digest: manifest.config().digest().to_string(),
+            raw_manifest_json: json_bytes_to_string(&manifest_bytes, "OCI manifest")?,
+            raw_config_json: json_bytes_to_string(config_bytes, "OCI config")?,
             config,
             layers: layer_metadata,
         };
@@ -752,7 +860,10 @@ fn load_oci_archive_blocking(
         }
     }
 
-    Ok(loaded)
+    Ok(PreparedArchiveLoad {
+        images: loaded,
+        staged_layers: staged_layers.into_inner(),
+    })
 }
 
 fn read_archive_entry(input: &Path, wanted_path: &str) -> ImageResult<Option<Vec<u8>>> {
@@ -761,16 +872,18 @@ fn read_archive_entry(input: &Path, wanted_path: &str) -> ImageResult<Option<Vec
         source: e,
     })?;
     let mut archive = tar::Archive::new(file);
+    let mut entry_count = 0u64;
 
     for entry in archive.entries().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
+        entry_count += 1;
+        enforce_archive_entry_count(entry_count)?;
         let path = normalized_archive_path(&entry)?;
         if path != wanted_path {
             continue;
         }
 
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data).map_err(ImageError::Io)?;
+        let data = read_entry_to_vec(&mut entry, &path, ARCHIVE_METADATA_MAX_BYTES)?;
         return Ok(Some(data));
     }
 
@@ -787,17 +900,22 @@ fn read_archive_entries(
     })?;
     let mut archive = tar::Archive::new(file);
     let mut entries = HashMap::new();
+    let mut entry_count = 0u64;
 
     for entry in archive.entries().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
+        entry_count += 1;
+        enforce_archive_entry_count(entry_count)?;
         let path = normalized_archive_path(&entry)?;
         if !wanted_paths.contains(&path) {
             continue;
         }
 
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data).map_err(ImageError::Io)?;
+        let data = read_entry_to_vec(&mut entry, &path, ARCHIVE_METADATA_MAX_BYTES)?;
         entries.insert(path, data);
+        if entries.len() == wanted_paths.len() {
+            break;
+        }
     }
 
     Ok(entries)
@@ -906,71 +1024,119 @@ fn verify_digest_bytes(digest: &str, bytes: &[u8]) -> ImageResult<()> {
     Ok(())
 }
 
+fn verify_docker_layer_path_digest(path: &str, digest: &str) -> ImageResult<()> {
+    let Some(hex) = path.strip_prefix("blobs/sha256/") else {
+        return Ok(());
+    };
+    if hex.contains('/') {
+        return Ok(());
+    }
+
+    let expected = format!("sha256:{hex}");
+    if expected != digest {
+        return Err(ImageError::ManifestParse(format!(
+            "docker archive layer path {path} digest mismatch: expected {expected}, got {digest}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn create_unique_temp_file(dir: &Path, prefix: &str, suffix: &str) -> ImageResult<(File, PathBuf)> {
+    for _ in 0..128 {
+        let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("{prefix}-{}-{id}{suffix}", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(ImageError::Cache { path, source: e });
+            }
+        }
+    }
+
+    Err(ImageError::Cache {
+        path: dir.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique temporary image archive file",
+        ),
+    })
+}
+
 fn extract_layer_blob(
     cache: &GlobalCache,
     path: &str,
     entry: &mut tar::Entry<'_, File>,
     counter: u64,
 ) -> ImageResult<LayerBlobInfo> {
-    let temp_path = cache
-        .tmp_dir()
-        .join(format!("load-{}-{counter}.blob", std::process::id()));
-    let mut temp = File::create(&temp_path).map_err(|e| ImageError::Cache {
-        path: temp_path.clone(),
-        source: e,
-    })?;
-    let mut hasher = Sha256::new();
-    let mut size = 0u64;
-    let mut magic = Vec::with_capacity(4);
-    let mut buf = [0u8; 64 * 1024];
-
-    loop {
-        let read = entry.read(&mut buf).map_err(ImageError::Io)?;
-        if read == 0 {
-            break;
-        }
-        if magic.len() < 4 {
-            let take = (4 - magic.len()).min(read);
-            magic.extend_from_slice(&buf[..take]);
-        }
-        hasher.update(&buf[..read]);
-        temp.write_all(&buf[..read])
-            .map_err(|e| ImageError::Cache {
-                path: temp_path.clone(),
-                source: e,
-            })?;
-        size += read as u64;
+    let declared_size = entry.header().size().map_err(ImageError::Io)?;
+    if declared_size > ARCHIVE_LAYER_MAX_BYTES {
+        return Err(ImageError::ManifestParse(format!(
+            "archive layer {path} is {declared_size} bytes; max is {ARCHIVE_LAYER_MAX_BYTES}"
+        )));
     }
-    temp.flush().map_err(|e| ImageError::Cache {
-        path: temp_path.clone(),
-        source: e,
-    })?;
-    drop(temp);
 
-    let digest = Digest::new("sha256", hex::encode(hasher.finalize()));
-    let final_path = cache.tar_path(&digest);
-    if final_path.exists() {
-        let _ = std::fs::remove_file(&temp_path);
-    } else {
-        std::fs::rename(&temp_path, &final_path).map_err(|e| ImageError::Cache {
-            path: final_path,
+    let (mut temp, temp_path) =
+        create_unique_temp_file(cache.tmp_dir(), &format!("load-{counter}"), ".blob")?;
+    let result = (|| {
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut magic = Vec::with_capacity(4);
+        let mut buf = [0u8; 64 * 1024];
+
+        loop {
+            let read = entry.read(&mut buf).map_err(ImageError::Io)?;
+            if read == 0 {
+                break;
+            }
+            if magic.len() < 4 {
+                let take = (4 - magic.len()).min(read);
+                magic.extend_from_slice(&buf[..take]);
+            }
+            hasher.update(&buf[..read]);
+            temp.write_all(&buf[..read])
+                .map_err(|e| ImageError::Cache {
+                    path: temp_path.clone(),
+                    source: e,
+                })?;
+            size += read as u64;
+            if size > ARCHIVE_LAYER_MAX_BYTES {
+                return Err(ImageError::ManifestParse(format!(
+                    "archive layer {path} exceeds {ARCHIVE_LAYER_MAX_BYTES} bytes"
+                )));
+            }
+        }
+        temp.flush().map_err(|e| ImageError::Cache {
+            path: temp_path.clone(),
             source: e,
         })?;
+        drop(temp);
+
+        let digest = Digest::new("sha256", hex::encode(hasher.finalize()));
+        let staged_path = temp_path.clone();
+
+        let media_type = match Compression::detect(&magic) {
+            Compression::None => OCI_LAYER_MEDIA_TYPE,
+            Compression::Gzip => OCI_LAYER_GZIP_MEDIA_TYPE,
+            Compression::Zstd => OCI_LAYER_ZSTD_MEDIA_TYPE,
+        };
+
+        tracing::debug!(path, digest = %digest, size, "loaded layer blob from docker archive");
+
+        Ok(LayerBlobInfo {
+            digest: digest.to_string(),
+            media_type: media_type.to_string(),
+            size_bytes: size,
+            path: staged_path,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
 
-    let media_type = match Compression::detect(&magic) {
-        Compression::None => OCI_LAYER_MEDIA_TYPE,
-        Compression::Gzip => OCI_LAYER_GZIP_MEDIA_TYPE,
-        Compression::Zstd => OCI_LAYER_ZSTD_MEDIA_TYPE,
-    };
-
-    tracing::debug!(path, digest = %digest, size, "loaded layer blob from docker archive");
-
-    Ok(LayerBlobInfo {
-        digest: digest.to_string(),
-        media_type: media_type.to_string(),
-        size_bytes: size,
-    })
+    result
 }
 
 fn generate_layer_tar(cache: &GlobalCache, layer: &ImageSaveLayer) -> ImageResult<GeneratedLayer> {
@@ -981,54 +1147,54 @@ fn generate_layer_tar(cache: &GlobalCache, layer: &ImageSaveLayer) -> ImageResul
         source: e,
     })?;
     let mut reader = ErofsReader::new(file).map_err(ImageError::Io)?;
-    let temp_path = cache.tmp_dir().join(format!(
-        "save-{}-{}.layer.tar",
-        std::process::id(),
-        diff_id.to_path_safe()
-    ));
-    let temp_file = File::create(&temp_path).map_err(|e| ImageError::Cache {
-        path: temp_path.clone(),
-        source: e,
-    })?;
-    let digesting = DigestingWriter::new(temp_file);
-    let mut builder = tar::Builder::new(digesting);
-    let entries = reader.walk().map_err(ImageError::Io)?;
-    let mut hardlinks: HashMap<u32, PathBuf> = HashMap::new();
+    let (temp_file, temp_path) = create_unique_temp_file(cache.tmp_dir(), "save", ".layer.tar")?;
+    let result = (|| {
+        let digesting = DigestingWriter::new(BufWriter::new(temp_file));
+        let mut builder = tar::Builder::new(digesting);
+        let mut hardlinks: HashMap<u32, PathBuf> = HashMap::new();
 
-    for entry in entries {
-        if entry.path.as_os_str().is_empty() {
-            continue;
-        }
+        reader.walk_entries::<ImageError, _>(|reader, entry| {
+            if entry.path.as_os_str().is_empty() {
+                return Ok(());
+            }
 
-        if entry.kind == ErofsEntryKind::CharDevice && entry.rdev == Some((0, 0)) {
-            append_whiteout(&mut builder, &entry)?;
-            continue;
-        }
+            if entry.kind == ErofsEntryKind::CharDevice && entry.rdev == Some((0, 0)) {
+                append_whiteout(&mut builder, &entry)?;
+                return Ok(());
+            }
 
-        append_erofs_entry(&mut builder, &mut reader, &entry, &mut hardlinks)?;
+            append_erofs_entry(&mut builder, reader, &entry, &mut hardlinks)?;
 
-        if entry.kind == ErofsEntryKind::Directory && entry.is_opaque() {
-            append_opaque_marker(&mut builder, &entry)?;
-        }
+            if entry.kind == ErofsEntryKind::Directory && entry.is_opaque() {
+                append_opaque_marker(&mut builder, &entry)?;
+            }
+            Ok(())
+        })?;
+
+        let digesting = builder.into_inner().map_err(ImageError::Io)?;
+        let (mut file, hex, size) = digesting.finish();
+        file.flush().map_err(|e| ImageError::Cache {
+            path: temp_path.clone(),
+            source: e,
+        })?;
+
+        Ok(GeneratedLayer {
+            diff_id: format!("sha256:{hex}"),
+            hex,
+            path: temp_path.clone(),
+            size,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
 
-    let digesting = builder.into_inner().map_err(ImageError::Io)?;
-    let (mut file, hex, size) = digesting.finish();
-    file.flush().map_err(|e| ImageError::Cache {
-        path: temp_path.clone(),
-        source: e,
-    })?;
-
-    Ok(GeneratedLayer {
-        diff_id: format!("sha256:{hex}"),
-        hex,
-        path: temp_path,
-        size,
-    })
+    result
 }
 
-fn append_erofs_entry(
-    builder: &mut tar::Builder<DigestingWriter<File>>,
+fn append_erofs_entry<W: Write>(
+    builder: &mut tar::Builder<DigestingWriter<W>>,
     reader: &mut ErofsReader,
     entry: &crate::erofs::ErofsTreeEntry,
     hardlinks: &mut HashMap<u32, PathBuf>,
@@ -1115,28 +1281,30 @@ fn append_erofs_entry(
     Ok(())
 }
 
-fn append_whiteout(
-    builder: &mut tar::Builder<DigestingWriter<File>>,
+fn append_whiteout<W: Write>(
+    builder: &mut tar::Builder<DigestingWriter<W>>,
     entry: &crate::erofs::ErofsTreeEntry,
 ) -> ImageResult<()> {
     let Some(file_name) = entry.path.file_name() else {
         return Ok(());
     };
     let mut path = entry.path.clone();
-    path.set_file_name(format!(".wh.{}", file_name.to_string_lossy()));
+    let mut whiteout_name = b".wh.".to_vec();
+    whiteout_name.extend_from_slice(file_name.as_bytes());
+    path.set_file_name(OsString::from_vec(whiteout_name));
     append_empty_file(builder, &path, entry)
 }
 
-fn append_opaque_marker(
-    builder: &mut tar::Builder<DigestingWriter<File>>,
+fn append_opaque_marker<W: Write>(
+    builder: &mut tar::Builder<DigestingWriter<W>>,
     entry: &crate::erofs::ErofsTreeEntry,
 ) -> ImageResult<()> {
     let path = entry.path.join(".wh..wh..opq");
     append_empty_file(builder, &path, entry)
 }
 
-fn append_empty_file(
-    builder: &mut tar::Builder<DigestingWriter<File>>,
+fn append_empty_file<W: Write>(
+    builder: &mut tar::Builder<DigestingWriter<W>>,
     path: &Path,
     entry: &crate::erofs::ErofsTreeEntry,
 ) -> ImageResult<()> {
@@ -1151,8 +1319,8 @@ fn append_empty_file(
         .map_err(ImageError::Io)
 }
 
-fn append_layer_entries(
-    archive: &mut tar::Builder<File>,
+fn append_layer_entries<W: Write>(
+    archive: &mut tar::Builder<W>,
     layer: &GeneratedLayer,
 ) -> ImageResult<()> {
     append_bytes(archive, &format!("{}/VERSION", layer.hex), b"1.0\n")?;
@@ -1175,8 +1343,8 @@ fn append_layer_entries(
         .map_err(ImageError::Io)
 }
 
-fn append_blob_file(
-    archive: &mut tar::Builder<File>,
+fn append_blob_file<W: Write>(
+    archive: &mut tar::Builder<W>,
     hex: &str,
     path: &Path,
     size: u64,
@@ -1198,11 +1366,15 @@ fn append_blob_file(
         .map_err(ImageError::Io)
 }
 
-fn append_blob_bytes(archive: &mut tar::Builder<File>, hex: &str, bytes: &[u8]) -> ImageResult<()> {
+fn append_blob_bytes<W: Write>(
+    archive: &mut tar::Builder<W>,
+    hex: &str,
+    bytes: &[u8],
+) -> ImageResult<()> {
     append_bytes(archive, &format!("blobs/sha256/{hex}"), bytes)
 }
 
-fn append_directory(archive: &mut tar::Builder<File>, path: &str) -> ImageResult<()> {
+fn append_directory<W: Write>(archive: &mut tar::Builder<W>, path: &str) -> ImageResult<()> {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_mode(0o755);
@@ -1216,7 +1388,11 @@ fn append_directory(archive: &mut tar::Builder<File>, path: &str) -> ImageResult
         .map_err(ImageError::Io)
 }
 
-fn append_bytes(archive: &mut tar::Builder<File>, path: &str, bytes: &[u8]) -> ImageResult<()> {
+fn append_bytes<W: Write>(
+    archive: &mut tar::Builder<W>,
+    path: &str,
+    bytes: &[u8],
+) -> ImageResult<()> {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Regular);
     header.set_mode(0o644);
@@ -1230,7 +1406,69 @@ fn append_bytes(archive: &mut tar::Builder<File>, path: &str, bytes: &[u8]) -> I
         .map_err(ImageError::Io)
 }
 
-fn docker_config_json(config: &ImageSaveConfig, diff_ids: &[String]) -> ImageResult<Vec<u8>> {
+fn enforce_archive_entry_count(count: u64) -> ImageResult<()> {
+    if count > ARCHIVE_MAX_ENTRY_COUNT {
+        return Err(ImageError::ManifestParse(format!(
+            "archive has more than {ARCHIVE_MAX_ENTRY_COUNT} entries"
+        )));
+    }
+
+    Ok(())
+}
+
+fn read_entry_to_vec(
+    entry: &mut tar::Entry<'_, File>,
+    path: &str,
+    max_bytes: u64,
+) -> ImageResult<Vec<u8>> {
+    let declared_size = entry.header().size().map_err(ImageError::Io)?;
+    if declared_size > max_bytes {
+        return Err(ImageError::ManifestParse(format!(
+            "archive metadata entry {path} is {declared_size} bytes; max is {max_bytes}"
+        )));
+    }
+
+    let mut data = Vec::with_capacity(declared_size as usize);
+    entry.read_to_end(&mut data).map_err(ImageError::Io)?;
+    Ok(data)
+}
+
+fn json_bytes_to_string(bytes: &[u8], context: &str) -> ImageResult<String> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|e| ImageError::ConfigParse(format!("{context} is not UTF-8 JSON: {e}")))
+}
+
+fn docker_config_json(
+    config: &ImageSaveConfig,
+    raw_config_json: &str,
+    diff_ids: &[String],
+) -> ImageResult<Vec<u8>> {
+    if !raw_config_json.is_empty() {
+        let mut config_json: serde_json::Value = serde_json::from_str(raw_config_json)
+            .map_err(|e| ImageError::ConfigParse(format!("parse raw image config: {e}")))?;
+        let Some(object) = config_json.as_object_mut() else {
+            return Err(ImageError::ConfigParse(
+                "raw image config JSON is not an object".into(),
+            ));
+        };
+        object.insert(
+            "rootfs".into(),
+            serde_json::json!({
+                "type": "layers",
+                "diff_ids": diff_ids,
+            }),
+        );
+        object.entry("architecture").or_insert_with(|| {
+            serde_json::json!(config.architecture.as_deref().unwrap_or("amd64"))
+        });
+        object
+            .entry("os")
+            .or_insert_with(|| serde_json::json!(config.os.as_deref().unwrap_or("linux")));
+        return serde_json::to_vec(&config_json)
+            .map_err(|e| ImageError::ConfigParse(format!("serialize image config: {e}")));
+    }
+
     let config_json = serde_json::json!({
         "architecture": config.architecture.as_deref().unwrap_or("amd64"),
         "os": config.os.as_deref().unwrap_or("linux"),
@@ -1368,6 +1606,40 @@ mod tests {
     }
 
     #[test]
+    fn docker_archive_rejects_mismatched_blob_layer_path() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("bad-blob-path.tar");
+        let layer_bytes = simple_layer_tar();
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let config_bytes = test_config_bytes(&diff_id);
+        let config_name = format!("blobs/sha256/{}", sha256_hex(&config_bytes));
+        let layer_name = format!("blobs/sha256/{:064x}", 1u8);
+
+        write_test_docker_archive_entries(
+            &input,
+            "bad-blob-path:latest",
+            config_name,
+            layer_name,
+            config_bytes,
+            layer_bytes,
+        );
+
+        let err = runtime
+            .block_on(load_archive(
+                &temp.path().join("cache"),
+                &input,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("digest mismatch"));
+    }
+
+    #[test]
     fn oci_layout_archive_load_save_load_roundtrip() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1500,6 +1772,71 @@ mod tests {
 
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].reference, "complex:latest");
+    }
+
+    #[test]
+    fn docker_archive_save_preserves_raw_config_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("config-fidelity.tar");
+        let layer_bytes = simple_layer_tar();
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let config_bytes = serde_json::to_vec(&serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "author": "microsandbox-test",
+            "config": {
+                "Env": ["PATH=/usr/bin"],
+                "Cmd": ["cat", "/hello.txt"],
+            },
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": [diff_id],
+            },
+            "history": [{
+                "created_by": "fixture",
+                "comment": "keep me",
+            }],
+        }))
+        .unwrap();
+        let config_name = format!("{}.json", sha256_hex(&config_bytes));
+
+        write_test_docker_archive_entries(
+            &input,
+            "config-fidelity:latest",
+            config_name,
+            "layer/layer.tar".into(),
+            config_bytes,
+            layer_bytes,
+        );
+
+        let first_cache = temp.path().join("cache-1");
+        let loaded = runtime
+            .block_on(load_archive(
+                &first_cache,
+                &input,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap();
+        let saved = temp.path().join("saved-config-fidelity.tar");
+        let request = save_request_from_loaded(&loaded[0]);
+        let cache = GlobalCache::new(&first_cache).unwrap();
+        save_docker_archive(&cache, &saved, &[request]).unwrap();
+
+        let manifest_bytes = read_archive_entry(&saved, "manifest.json")
+            .unwrap()
+            .unwrap();
+        let manifest: Vec<DockerManifestEntry> = serde_json::from_slice(&manifest_bytes).unwrap();
+        let saved_config = read_archive_entry(&saved, &manifest[0].config)
+            .unwrap()
+            .unwrap();
+        let saved_config: serde_json::Value = serde_json::from_slice(&saved_config).unwrap();
+
+        assert_eq!(saved_config["author"], "microsandbox-test");
+        assert_eq!(saved_config["history"][0]["comment"], "keep me");
     }
 
     fn write_test_docker_archive(path: &Path, reference: &str) {
@@ -1855,6 +2192,7 @@ mod tests {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
             },
+            raw_config_json: image.metadata.raw_config_json.clone(),
             layers: image
                 .metadata
                 .layers

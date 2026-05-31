@@ -36,17 +36,21 @@ trap cleanup EXIT
 
 export LD_LIBRARY_PATH="$ROOT_DIR/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-docker pull "$IMAGE" >/dev/null
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" >/dev/null
 docker save "$IMAGE" -o "$smoke_root/docker-input.tar"
 
-"$MSB_BIN" image load --input "$smoke_root/docker-input.tar" --tag "$TAG" --quiet
-"$MSB_BIN" image save --output "$smoke_root/docker-output.tar" --quiet "$TAG"
-"$MSB_BIN" image save --format oci --output "$smoke_root/oci-output.tar" --quiet "$TAG"
+"$MSB_BIN" load -i "$smoke_root/docker-input.tar" --tag "$TAG" --quiet
+"$MSB_BIN" save -o "$smoke_root/docker-output.tar" --quiet "$TAG"
+"$MSB_BIN" save --format oci -o "$smoke_root/oci-output.tar" --quiet "$TAG"
+
+tar -tf "$smoke_root/docker-output.tar" > "$smoke_root/docker-entries.txt"
+grep -qx 'manifest.json' "$smoke_root/docker-entries.txt"
+grep -q '/layer.tar$' "$smoke_root/docker-entries.txt"
 
 tar -tf "$smoke_root/oci-output.tar" > "$smoke_root/oci-entries.txt"
 grep -qx 'oci-layout' "$smoke_root/oci-entries.txt"
 grep -qx 'index.json' "$smoke_root/oci-entries.txt"
 grep -q '^blobs/sha256/' "$smoke_root/oci-entries.txt"
 
-MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" image load --input "$smoke_root/oci-output.tar" --quiet
-MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" image ls -q | grep -qx "$TAG"
+MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" load -i "$smoke_root/oci-output.tar" --quiet
+MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" images -q | grep -qx "$TAG"
