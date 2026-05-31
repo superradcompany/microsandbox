@@ -52,6 +52,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		User:            o.User,
 		Replace:         o.Replace,
 		Env:             o.Env,
+		Labels:          o.Labels,
 		Detached:        o.Detached,
 		Entrypoint:      o.Entrypoint,
 		LogLevel:        string(o.LogLevel),

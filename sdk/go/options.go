@@ -27,6 +27,7 @@ type SandboxConfig struct {
 	// SIGKILLs immediately. Use WithReplaceWithTimeout.
 	ReplaceWithTimeout *time.Duration
 	Env                map[string]string
+	Labels             map[string]string
 	Detached           bool
 	Entrypoint         []string
 	Init               *InitConfig
@@ -110,6 +111,30 @@ func WithEnv(env map[string]string) SandboxOption {
 		for k, v := range env {
 			o.Env[k] = v
 		}
+	}
+}
+
+// WithLabels attaches labels to the sandbox for metrics attribution. Called
+// repeatedly, the maps merge; later keys overwrite earlier ones. Keys must not
+// use the reserved prefixes "sandbox.", "microsandbox.", or "service.".
+func WithLabels(labels map[string]string) SandboxOption {
+	return func(o *SandboxConfig) {
+		if o.Labels == nil {
+			o.Labels = make(map[string]string, len(labels))
+		}
+		for k, v := range labels {
+			o.Labels[k] = v
+		}
+	}
+}
+
+// WithLabel attaches a single label to the sandbox. See WithLabels.
+func WithLabel(key, value string) SandboxOption {
+	return func(o *SandboxConfig) {
+		if o.Labels == nil {
+			o.Labels = make(map[string]string, 1)
+		}
+		o.Labels[key] = value
 	}
 }
 

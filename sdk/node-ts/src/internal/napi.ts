@@ -152,6 +152,8 @@ export interface NapiSandboxBuilderSetters {
   secretEnv(envVar: string, value: string, allowedHost: string): this;
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
+  label(key: string, value: string): this;
+  labels(labels: Record<string, string>): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
   script(name: string, content: string): this;

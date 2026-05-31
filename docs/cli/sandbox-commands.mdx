@@ -22,6 +22,7 @@ msb run --name api \
   -v pydata:/data \
   -p 8000:8000 \
   -e DEBUG=true \
+  --label user.id=alice \
   -w /app \
   python
 
@@ -42,6 +43,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app/src:ro,noexec`) |
 | `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST`, `BIND_ADDR:HOST:GUEST`, and `/udp` variants) |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
+| `--label` | Attach a label for metric attribution (`KEY=VALUE`). Repeatable. Keys cannot start with `sandbox.`, `microsandbox.`, or `service.` |
 | `-w`, `--workdir` | Working directory inside the sandbox |
 | `--shell` | Default shell for interactive sessions |
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |

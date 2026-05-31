@@ -1363,6 +1363,7 @@ type CreateOptions struct {
 	Replace              bool                 `json:"replace,omitempty"`
 	ReplaceWithTimeoutMs *uint64              `json:"replace_with_timeout_ms,omitempty"`
 	Env                  map[string]string    `json:"env,omitempty"`
+	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
 	Entrypoint           []string             `json:"entrypoint,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`

@@ -954,6 +954,10 @@ export declare class SandboxBuilder {
   env(key: string, value: string): this
   /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
+  /** Attach a single label for metrics attribution. */
+  label(key: string, value: string): this
+  /** Attach labels from an object for metrics attribution. */
+  labels(labels: Record<string, string>): this
   /** Set a hard rlimit (soft = hard). */
   rlimit(resource: string, limit: number): this
   /** Set a separate soft and hard rlimit. */

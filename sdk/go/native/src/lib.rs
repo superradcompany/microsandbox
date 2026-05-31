@@ -915,6 +915,8 @@ struct SandboxCreateOpts {
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
     #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
     detached: bool,
     hostname: Option<String>,
     user: Option<String>,
@@ -1816,6 +1818,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
+            }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
             }
             // Top-level ports.
             for (host, guest) in &opts.ports {

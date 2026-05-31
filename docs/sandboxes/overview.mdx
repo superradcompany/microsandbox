@@ -52,6 +52,7 @@ let sb = Sandbox::builder("worker")
     .cpus(2)
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
+    .label("user.id", "alice")
     .volume("/app/src", |v| v.bind("./src").readonly())
     .volume("/data", |v| v.named("my-data"))
     .volume("/tmp/scratch", |v| v.tmpfs().size(100))
@@ -68,6 +69,7 @@ await using sb = await Sandbox.builder("worker")
     .cpus(2)
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
+    .label("user.id", "alice")
     .volume("/app/src",     (m) => m.bind("./src").readonly())
     .volume("/data",        (m) => m.named("my-data"))
     .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
@@ -84,6 +86,7 @@ sb = await Sandbox.create(
     cpus=2,
 
     env={"DEBUG": "true", "API_PORT": "8000"},
+    labels={"user.id": "alice"},
     volumes={
         "/app/src": Volume.bind("./src", readonly=True),
         "/data": Volume.named("my-data"),
@@ -101,6 +104,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
         "DEBUG": "true",
         "API_PORT": "8000",
     }),
+    m.WithLabels(map[string]string{"user.id": "alice"}),
     m.WithMounts(map[string]m.MountConfig{
         "/app/src":     m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
         "/data":        m.Mount.Named("my-data", m.MountOptions{}),
@@ -115,6 +119,7 @@ msb create python --name worker \
   -m 1G \
   -e DEBUG=true \
   -e API_PORT=8000 \
+  --label user.id=alice \
   -v ./src:/app/src:ro \
   -v my-data:/data \
   --tmpfs /tmp/scratch:100
@@ -130,9 +135,20 @@ msb create python --name worker \
 | `workdir` | — | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | `{}` | Environment variables |
+| `labels` | `{}` | Key/value metadata for metric attribution |
 | `volumes` | `[]` | Volume mounts (bind, named, or tmpfs) |
 | `network` | `public` | Network policy and port mappings |
 | `scripts` | `{}` | Named scripts stored at `/.msb/scripts/` |
+
+Labels are arbitrary `key=value` metadata attached to a sandbox, set at creation
+and fixed for the sandbox's life. They are meant for attribution — tagging a
+sandbox with the user, tenant, or environment it belongs to so the metrics
+pipeline can build per-user views. Keys cannot start with the reserved prefixes
+`sandbox.`, `microsandbox.`, or `service.`.
+
+Set one at a time with `.label(key, value)` or many at once with
+`.labels({...})` (`WithLabel` / `WithLabels` in Go, the `labels={...}` argument
+in Python). On the CLI, repeat `--label` once per entry.
 
 <Tip>
   `cpus` and `memory` are **limits, not reservations**. Setting `memory: 512` doesn't allocate 512 MiB upfront. Physical pages are only allocated as the guest actually touches them, so you can comfortably run many sandboxes on a single host without worrying about overcommitting.
