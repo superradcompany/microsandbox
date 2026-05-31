@@ -8,7 +8,7 @@ pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 
 use std::path::PathBuf;
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult, db::entity::volume as volume_entity, size::Mebibytes,
@@ -169,34 +169,12 @@ impl Volume {
             return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
         }
 
-        // Serialize labels.
-        let labels_json = if config.labels.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&config.labels)?)
-        };
-
         // Insert DB record first — orphaned directories are easier to clean
         // up than orphaned DB records.
-        let now = chrono::Utc::now().naive_utc();
-        let model = volume_entity::ActiveModel {
-            name: Set(config.name.clone()),
-            quota_mib: Set(config.quota_mib.map(|v| v as i32)),
-            size_bytes: Set(None),
-            labels: Set(labels_json),
-            created_at: Set(Some(now)),
-            updated_at: Set(Some(now)),
-            ..Default::default()
-        };
-
-        volume_entity::Entity::insert(model)
-            .exec(pools.write())
-            .await?;
+        insert_volume_record(pools.write(), &config).await?;
 
         // Create the volume directory. If this fails, clean up the DB record.
-        let volumes_dir = crate::config::config().volumes_dir();
-        let path = volumes_dir.join(&config.name);
-
+        let path = volume_path(&config.name);
         if let Err(e) = tokio::fs::create_dir_all(&path).await {
             let _ = volume_entity::Entity::delete_many()
                 .filter(volume_entity::Column::Name.eq(&config.name))
@@ -209,6 +187,39 @@ impl Volume {
             name: config.name,
             path,
         })
+    }
+
+    /// Insert the volume DB record inside the caller's transaction.
+    ///
+    /// Lets `SandboxBuilder::auto_volume` create the volume and the
+    /// sandbox in one atomic write so a concurrent `Volume::list`
+    /// cannot observe the volume before the owning sandbox exists.
+    /// Returns [`MicrosandboxError::VolumeAlreadyExists`] if the name
+    /// is already in the table.
+    ///
+    /// The caller is responsible for creating the on-disk directory
+    /// after the transaction commits (or rolling back via
+    /// `Volume::remove` if the directory step fails).
+    pub(crate) async fn create_in_transaction<C: ConnectionTrait>(
+        txn: &C,
+        config: &VolumeConfig,
+    ) -> MicrosandboxResult<()> {
+        validate_volume_name(&config.name)?;
+
+        let existing = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&config.name))
+            .one(txn)
+            .await?;
+        if existing.is_some() {
+            return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+        }
+
+        insert_volume_record(txn, config).await
+    }
+
+    /// Resolve the on-disk path for a named volume.
+    pub(crate) fn path_for(name: &str) -> PathBuf {
+        volume_path(name)
     }
 
     /// Get a volume handle by name from the database.
@@ -330,6 +341,35 @@ impl From<VolumeConfig> for VolumeBuilder {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn volume_path(name: &str) -> PathBuf {
+    crate::config::config().volumes_dir().join(name)
+}
+
+async fn insert_volume_record<C: ConnectionTrait>(
+    db: &C,
+    config: &VolumeConfig,
+) -> MicrosandboxResult<()> {
+    let labels_json = if config.labels.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&config.labels)?)
+    };
+
+    let now = chrono::Utc::now().naive_utc();
+    let model = volume_entity::ActiveModel {
+        name: Set(config.name.clone()),
+        quota_mib: Set(config.quota_mib.map(|v| v as i32)),
+        size_bytes: Set(None),
+        labels: Set(labels_json),
+        created_at: Set(Some(now)),
+        updated_at: Set(Some(now)),
+        ..Default::default()
+    };
+
+    volume_entity::Entity::insert(model).exec(db).await?;
+    Ok(())
+}
 
 /// Validate that a volume name is safe for use as a directory name.
 ///
