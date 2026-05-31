@@ -8,7 +8,7 @@ microsandbox cannot read Docker's private local image store directly. If you bui
 
 ```bash
 docker build -t my-image:latest .
-docker save my-image:latest | msb image load
+docker save my-image:latest | msb load
 msb run my-image:latest
 ```
 
@@ -16,19 +16,19 @@ You can also save to a file first:
 
 ```bash
 docker save -o my-image.tar my-image:latest
-msb image load --input my-image.tar
+msb load --input my-image.tar
 ```
 
 If the archive has no useful tag, or you want a different local alias, pass one:
 
 ```bash
-docker save my-image:latest | msb image load --tag app:local
+docker save my-image:latest | msb load --tag app:local
 msb run app:local
 ```
 
-`msb load` is a top-level alias for `msb image load`.
+`msb load` is the short top-level form of `msb image load`.
 
-`msb image load` can also import OCI Image Layout archives produced by tools such as BuildKit, Skopeo, or ORAS. If the OCI layout does not include an `org.opencontainers.image.ref.name` annotation, pass `--tag` to name the imported image locally.
+`msb load` can also import OCI Image Layout archives produced by tools such as BuildKit, Skopeo, or ORAS. If the OCI layout does not include an `org.opencontainers.image.ref.name` annotation, pass `--tag` to name the imported image locally.
 
 ## Local registry alternative
 

@@ -15,6 +15,8 @@ msb pull alpine
 msb pull ghcr.io/my-org/my-image:v1
 ```
 
+Expanded form: `msb image pull`.
+
 | Flag | Description |
 |------|-------------|
 | `-f`, `--force` | Force re-download even if cached |
@@ -26,16 +28,17 @@ msb pull ghcr.io/my-org/my-image:v1
   Pre-pulling is useful when you want sandbox creation to be instant. Without a pre-pull, the first `Sandbox.create` with a new image will block on the download.
 </Tip>
 
-## msb image load
+## msb load
 
 Load a Docker image archive or OCI Image Layout archive into the local microsandbox cache.
 
 ```bash
-docker save my-image:latest | msb image load
-msb image load --input my-image.tar
-msb image load --input oci-layout.tar --tag my-image:latest
+docker save my-image:latest | msb load
 msb load --input my-image.tar
+msb load --input oci-layout.tar --tag my-image:latest
 ```
+
+Expanded form: `msb image load`.
 
 | Flag | Description |
 |------|-------------|
@@ -43,16 +46,17 @@ msb load --input my-image.tar
 | `-t`, `--tag <REF>` | Add a local image reference to the first imported image |
 | `-q`, `--quiet` | Suppress output |
 
-## msb image save
+## msb save
 
 Save one or more cached images as a Docker-compatible archive or OCI Image Layout archive.
 
 ```bash
-msb image save --output my-image.tar my-image:latest
-msb image save --format oci --output my-image.oci.tar my-image:latest
 msb save --output my-image.tar my-image:latest
-msb image save my-image:latest > my-image.tar
+msb save --format oci --output my-image.oci.tar my-image:latest
+msb save my-image:latest > my-image.tar
 ```
+
+Expanded form: `msb image save`.
 
 | Flag | Description |
 |------|-------------|
@@ -60,26 +64,24 @@ msb image save my-image:latest > my-image.tar
 | `-o`, `--output <PATH>` | Write archive to a tar file instead of stdout |
 | `-q`, `--quiet` | Suppress output |
 
-`msb image save` re-exports images from microsandbox's EROFS cache. The saved archive is semantically equivalent, but it is not a byte-for-byte copy of the originally pulled image. Manifest digest and layer digests can change because layer tar streams are regenerated.
+`msb save` re-exports images from microsandbox's EROFS cache. The saved archive is semantically equivalent, but it is not a byte-for-byte copy of the originally pulled image. Manifest digest and layer digests can change because layer tar streams are regenerated.
 
-## msb image ls
+## msb images
 
 List images in the local cache.
 
 ```bash
-msb image ls
-msb image ls --format json
-msb image ls -q               # References only
+msb images
+msb images --format json
+msb images -q               # References only
 ```
+
+Expanded form: `msb image ls`.
 
 | Flag | Description |
 |------|-------------|
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only image references |
-
-<Tip>
-  `msb images` is a shorthand alias for `msb image ls`.
-</Tip>
 
 ## msb image inspect
 
@@ -94,23 +96,21 @@ msb image inspect python --format json
 |------|-------------|
 | `--format` | Output format (`json`) |
 
-## msb image rm
+## msb rmi
 
 Remove one or more cached images and their layers (layers shared with other images are kept).
 
 ```bash
-msb image rm python
-msb image rm alpine ubuntu   # Remove multiple
+msb rmi python
+msb rmi alpine ubuntu   # Remove multiple
 ```
+
+Expanded form: `msb image rm`.
 
 | Flag | Description |
 |------|-------------|
 | `-f`, `--force` | Remove even if the image is used by existing sandboxes |
 | `-q`, `--quiet` | Suppress output |
-
-<Tip>
-  `msb rmi` is a shorthand alias for `msb image rm`.
-</Tip>
 
 ## msb registry
 
