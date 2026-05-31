@@ -99,42 +99,20 @@ icon: "bolt"
     ```
 
     ```go Go
-    package main
-
-    import (
-        "context"
-        "fmt"
-        "log"
-        "strings"
-
-        m "github.com/superradcompany/microsandbox/sdk/go"
+    sb, err := m.CreateSandbox(ctx, "hello",
+        m.WithImage("python"),
+        m.WithMemory(512),
     )
-
-    func main() {
-        ctx := context.Background()
-        // Optional: download msb + libkrunfw to ~/.microsandbox/ if not
-        // already there. The first SDK call does this for you, but
-        // calling it explicitly surfaces install errors up front.
-        if err := m.EnsureInstalled(ctx); err != nil {
-            log.Fatal(err)
-        }
-
-        sb, err := m.CreateSandbox(ctx, "hello",
-            m.WithImage("python"),
-            m.WithMemory(512),
-        )
-        if err != nil {
-            log.Fatal(err)
-        }
-        defer sb.Close()
-        defer sb.Stop(ctx)
-
-        output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
-        if err != nil {
-            log.Fatal(err)
-        }
-        fmt.Println(strings.TrimSpace(output.Stdout())) // Hello from a microVM!
+    if err != nil {
+        return err
     }
+    defer sb.Stop(ctx)
+
+    output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
+    if err != nil {
+        return err
+    }
+    fmt.Println(output.Stdout()) // Hello from a microVM!
     ```
 
     ```bash CLI
@@ -147,14 +125,14 @@ icon: "bolt"
 
 ## What just happened?
 
-Here's what actually happened behind that `Sandbox.builder(...).create()` call:
+Here's what happened behind that `Sandbox.builder(...).create()` call:
 
-1. **Pulled the image** from Docker Hub (or skipped this if it was already cached, since shared layers are deduplicated).
-2. **Assembled the filesystem** by stacking the image layers into a copy-on-write filesystem, so nothing you do inside the sandbox modifies the base image.
-3. **Booted a microVM** as a child process. The 512 MiB you specified is a limit, not a reservation, so the VM only uses what it actually needs.
-4. **Started the guest agent** inside the VM, which set up the environment and opened a communication channel back to the host.
+1. **Pulled the image** from Docker Hub, unless it was already cached.
+2. **Assembled a copy-on-write filesystem** so changes inside the sandbox do not modify the base image.
+3. **Booted a microVM** as a child process with the resource limits you configured.
+4. **Started the guest agent** so the SDK can run commands and move data in and out.
 
-The `exec` call sent a message to that guest agent, which spawned `python` inside the VM, streamed stdout back, and returned the exit code. No SSH involved, no network overhead. The command channel is completely separate from the sandbox's network stack.
+The `exec` call uses the host-guest command channel, not SSH and not the sandbox network.
 
 <Tip>
   Because exec doesn't go through the network, it works even when a sandbox has networking disabled via `.disable_network()` and no network interfaces at all.
@@ -162,7 +140,7 @@ The `exec` call sent a message to that guest agent, which spawned `python` insid
 
 ## Next steps
 
-- [Understand sandbox configuration](/sandboxes/overview): how the VM, filesystem, and networking fit together
+- [Understand sandbox configuration](/sandboxes/overview): resources, images, volumes, and lifecycle
 - [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
 - [Control network access](/networking/overview): policies, DNS interception, and secret protection
 - [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

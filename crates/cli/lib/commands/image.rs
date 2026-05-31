@@ -329,7 +329,7 @@ pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
                     "architecture": img.architecture(),
                     "os": img.os(),
                     "layer_count": img.layer_count(),
-                    "created_at": img.created_at().map(|dt| ui::format_datetime(&dt)),
+                    "created_at": img.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 })
             })
             .collect();
@@ -413,7 +413,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
             "architecture": detail.handle.architecture(),
             "os": detail.handle.os(),
             "layer_count": detail.handle.layer_count(),
-            "created_at": detail.handle.created_at().map(|dt| ui::format_datetime(&dt)),
+            "created_at": detail.handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "config": config_json,
             "layers": layers_json,
         });

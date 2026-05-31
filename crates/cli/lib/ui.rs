@@ -405,9 +405,61 @@ pub fn generate_name() -> String {
     format!("msb-{id:08x}")
 }
 
-/// Format a chrono DateTime for display.
+/// Format a UTC timestamp for human display in the system's local timezone.
 pub fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    dt.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// Format a UTC timestamp for machine-readable JSON output.
+pub fn format_json_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339()
+}
+
+/// Format an RFC 3339 timestamp for human display in the system's local timezone.
+pub fn format_rfc3339_datetime(s: &str) -> Result<String, chrono::ParseError> {
+    chrono::DateTime::parse_from_rfc3339(s).map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn json_datetime_uses_rfc3339_utc() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-05-31T09:09:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            super::format_json_datetime(&dt),
+            "2026-05-31T09:09:00+00:00"
+        );
+    }
+
+    #[test]
+    fn display_datetime_uses_local_timezone() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-05-31T09:09:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let expected = dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert_eq!(super::format_datetime(&dt), expected);
+        assert_eq!(
+            super::format_rfc3339_datetime("2026-05-31T09:09:00Z").unwrap(),
+            expected
+        );
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

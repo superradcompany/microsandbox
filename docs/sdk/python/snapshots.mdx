@@ -3,14 +3,14 @@ title: Snapshots
 description: Python SDK - Snapshot API reference
 ---
 
-Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Python SDK reference.
+Disk-only snapshots of a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Python SDK reference.
 
 ```python
 from microsandbox import Sandbox, Snapshot, SnapshotHandle
 ```
 
 <Note>
-  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+  Snapshots are **disk-only** and require a sandbox that is not running.
 </Note>
 
 ## Sandbox.create() — `snapshot=` kwarg
@@ -46,7 +46,7 @@ sb = await Sandbox.create("worker", image="python:3.12")
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination, see [`snapshot_to()`](#snapshot-to).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. For an explicit filesystem destination, see [`snapshot_to()`](#snapshot-to).
 
 **Errors**
 
@@ -61,7 +61,7 @@ Snapshot this (stopped) sandbox under a bare name in the default snapshots direc
 async def snapshot_to(self, path: str | os.PathLike) -> Snapshot
 ```
 
-Snapshot this (stopped) sandbox to an explicit filesystem path.
+Snapshot this sandbox to an explicit filesystem path. The sandbox must be stopped or crashed.
 
 ---
 
@@ -133,7 +133,7 @@ async def create(
 ) -> Snapshot
 ```
 
-Create a snapshot from a stopped sandbox. Exactly one of `name=` (resolved under the default snapshots directory) or `path=` (explicit filesystem destination) is required.
+Create a snapshot from a stopped or crashed sandbox. Exactly one of `name=` (resolved under the default snapshots directory) or `path=` (explicit filesystem destination) is required.
 
 ```python
 snap = await Snapshot.create(
@@ -226,7 +226,7 @@ async def export(
 ) -> None
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
 
 ---
 
@@ -241,7 +241,7 @@ async def import_(
 ) -> SnapshotHandle
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity when present. Compression is detected from magic bytes.
 
 The trailing underscore is intentional — `import` is a reserved Python keyword.
 
@@ -255,7 +255,7 @@ Lightweight handle backed by an index row. Returned by [`Snapshot.list()`](#snap
 |----------|------|-------------|
 | `digest` | `str` | Manifest digest — canonical identity |
 | `name` | `str \| None` | Convenience alias |
-| `parent_digest` | `str \| None` | Parent snapshot digest (`None` today; populated when chains land) |
+| `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
 | `image_ref` | `str` | Image the snapshot was taken from |
 | `format` | `str` | `"raw"` or `"qcow2"` |
 | `size_bytes` | `int \| None` | Apparent upper size at index time |

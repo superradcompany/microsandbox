@@ -4,7 +4,7 @@ description: Install the SDK and create your first sandbox
 icon: "play"
 ---
 
-The SDK embeds the microsandbox runtime directly into whatever application uses it. `Sandbox.builder(name).create()` spawns the VM as a child process. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. No daemon to install, no server to connect to.
+The SDK embeds the microsandbox runtime directly into your application. Creating a sandbox spawns a local VM as a child process; there is no daemon to install and no server to connect to.
 
 ## Installation
 
@@ -26,23 +26,18 @@ go get github.com/superradcompany/microsandbox/sdk/go
 ```
 </CodeGroup>
 
-## Quick start
+## Small example
 
 Create a sandbox from a container image, run a command, print the output, and stop it.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, NetworkPolicy};
+use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sb = Sandbox::builder("my-sandbox")
+    let sb = Sandbox::builder("hello")
         .image("python")
-        .memory(512)
-        .cpus(2)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .volume("/app/src", |v| v.bind("./src").readonly())
-        .network(|n| n.policy(NetworkPolicy::public_only()))
         .create()
         .await?;
 
@@ -55,15 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ```typescript TypeScript
-import { NetworkPolicy, Sandbox } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("my-sandbox")
+await using sb = await Sandbox.builder("hello")
     .image("python")
-    .memory(512)
-    .cpus(2)
-    .env("PYTHONDONTWRITEBYTECODE", "1")
-    .volume("/app/src", (m) => m.bind("./src").readonly())
-    .network((n) => n.policy(NetworkPolicy.publicOnly()))
     .create();
 
 const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
@@ -72,19 +62,12 @@ console.log("Output:", output.stdout());
 
 ```python Python
 import asyncio
-from microsandbox import Network, Sandbox, Volume
+from microsandbox import Sandbox
 
 async def main():
     sb = await Sandbox.create(
-        "my-sandbox",
+        "hello",
         image="python",
-        memory=512,
-        cpus=2,
-        env={"PYTHONDONTWRITEBYTECODE": "1"},
-        volumes={
-            "/app/src": Volume.bind("./src", readonly=True),
-        },
-        network=Network.public_only(),
     )
 
     output = await sb.exec("python", ["-c", "print('Hello, World!')"])
@@ -108,20 +91,7 @@ import (
 
 func main() {
     ctx := context.Background()
-    if err := m.EnsureInstalled(ctx); err != nil {
-        log.Fatal(err)
-    }
-
-    sb, err := m.CreateSandbox(ctx, "my-sandbox",
-        m.WithImage("python"),
-        m.WithMemory(512),
-        m.WithCPUs(2),
-        m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
-        m.WithMounts(map[string]m.MountConfig{
-            "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
-        }),
-        m.WithNetwork(m.NetworkPolicy.PublicOnly()),
-    )
+    sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
     if err != nil {
         log.Fatal(err)
     }
@@ -140,4 +110,13 @@ func main() {
 
 </CodeGroup>
 
-The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox), [TypeScript SDK](/sdk/typescript/sandbox), [Python SDK](/sdk/python/sandbox), or [Go SDK](/sdk/go/sandbox) for the full API. For low-level protocol integrations, see the Agent Client references for [Rust](/sdk/rust/agent-client), [TypeScript](/sdk/typescript/agent-client), [Python](/sdk/python/agent-client), and [Go](/sdk/go/agent-client). See also [error handling](/sdk/errors).
+## Reference
+
+Choose the SDK for your language:
+
+- [Rust SDK](/sdk/rust/sandbox)
+- [TypeScript SDK](/sdk/typescript/sandbox)
+- [Python SDK](/sdk/python/sandbox)
+- [Go SDK](/sdk/go/sandbox)
+
+For low-level protocol integrations, see the Agent Client references for [Rust](/sdk/rust/agent-client), [TypeScript](/sdk/typescript/agent-client), [Python](/sdk/python/agent-client), and [Go](/sdk/go/agent-client). See also [error handling](/sdk/errors).
