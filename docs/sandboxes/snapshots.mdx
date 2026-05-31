@@ -12,14 +12,13 @@ Snapshots are **disk-only and stopped-only**: the sandbox can't be running when 
 
 ## What gets captured
 
-| Captured                                     | Not captured                      |
-| -------------------------------------------- | --------------------------------- |
-| `upper.ext4`, the sandbox's writable overlay | Memory contents                   |
-| Pinned image reference + manifest digest     | CPU registers / running processes |
-| `fstype`, `format`, optional labels          | Network state                     |
-| Optional content-integrity hash              | Open file handles                 |
+| Captured | Not captured |
+| -------- | ------------ |
+| Writable filesystem changes | Memory contents |
+| Pinned image identity | Running processes |
+| Optional labels and integrity hash | Network state |
 
-Booting from a snapshot is a cold boot of a fresh VM that reuses the captured upper layer as its starting filesystem. The image (lower layer) is re-resolved by digest from the local OCI cache, or re-pulled from the registry if missing.
+Booting from a snapshot is a cold boot of a fresh VM that starts from the captured filesystem changes.
 
 ## Quick start
 
@@ -156,7 +155,7 @@ msb run --name worker --snapshot after-pip-install -- python -V
 
 </CodeGroup>
 
-Booting validates the snapshot's manifest, re-resolves the pinned image from the local OCI cache (re-pulling and verifying the digest if it's missing), and reflinks the captured `upper.ext4` into the new sandbox's directory. Reflinks use `clonefile` on macOS APFS, `FICLONE` on btrfs/XFS, with a sparse-aware fallback on ext4, so each new sandbox gets an independent COW copy without paying the bytes again.
+Booting validates the snapshot, resolves the pinned image, and gives the new sandbox its own writable copy.
 
 ## List, inspect, and remove
 
@@ -221,13 +220,11 @@ msb snapshot reindex
 
 </CodeGroup>
 
-Opening a snapshot is cheap: it validates the manifest and checks the upper file's size, but does **not** read the file's contents. The same path powers `inspect` and the boot flow; the load-bearing local operation has to stay fast.
-
-`list` and `get` are backed by a small local index DB. The index is just a cache for fast lookups, not a source of truth; if it ever gets out of sync (or you delete it), `reindex` rebuilds it from the artifacts on disk.
+`list` and `get` use a local index for fast lookup. If the index gets out of sync, `reindex` rebuilds it from the snapshot artifacts on disk.
 
 ## Move snapshots between machines
 
-The artifact is a directory containing `manifest.json` (canonical JSON; identity is the SHA-256 of these bytes) plus the captured `upper.ext4`. The directory **is** the snapshot; there's no hidden daemon state, so any of these three transports work:
+The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or export it as an archive:
 
 ```bash
 # Copy the directory directly with scp (image must be cached or pullable on the target)
@@ -244,72 +241,11 @@ msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
 ssh other-host msb snapshot import /tmp/snap.tar.zst
 ```
 
-Archives default to `.tar.zst` since zstd collapses sparse zero runs cheaply. Pass `--plain-tar` for a plain `.tar`; both are accepted on import via magic-byte detection.
-
-Or drive `export` and `import` from code:
-
-<CodeGroup>
-```rust Rust
-use std::path::Path;
-use microsandbox::Snapshot;
-use microsandbox::snapshot::ExportOpts;
-
-Snapshot::export(
-    "after-pip-install",
-    Path::new("/tmp/snap.tar.zst"),
-    ExportOpts { with_image: true, ..Default::default() },
-).await?;
-
-let snap = Snapshot::import(
-    Path::new("/tmp/snap.tar.zst"),
-    None,
-).await?;
-```
-
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-await Snapshot.export("after-pip-install", "/tmp/snap.tar.zst", {
-  withImage: true,
-});
-
-const snap = await Snapshot.import("/tmp/snap.tar.zst");
-```
-
-```python Python
-from microsandbox import Snapshot
-
-await Snapshot.export(
-    "after-pip-install",
-    "/tmp/snap.tar.zst",
-    with_image=True,
-)
-
-snap = await Snapshot.import_("/tmp/snap.tar.zst")  # Trailing _ avoids the keyword
-```
-
-```go Go
-err := m.Snapshot.Export(ctx,
-    "after-pip-install",
-    "/tmp/snap.tar.zst",
-    m.SnapshotExportOptions{WithImage: true},
-)
-
-snap, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
-```
-
-```bash CLI
-msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
-msb snapshot import /tmp/snap.tar.zst
-```
-
-</CodeGroup>
+Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same export and import operations as the CLI.
 
 ## Integrity verification
 
-By default, snapshot creation does **not** hash the upper file. The artifact carries the upper's size and the pinned image's manifest digest, which together catch any corruption that would stop it from booting. Skipping the hash keeps `inspect` fast on multi-GB sparse upper layers, where the cost would otherwise dominate.
-
-Opt in to a content-integrity hash when crossing a trust boundary:
+By default, snapshot creation records enough metadata to validate the artifact without hashing the full writable layer. Opt in to a content-integrity hash when crossing a trust boundary:
 
 <CodeGroup>
 ```rust Rust

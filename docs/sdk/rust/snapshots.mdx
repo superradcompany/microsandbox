@@ -318,11 +318,11 @@ Used by [`SnapshotBuilder::destination()`](#snapshotbuilder). The handle methods
 ```rust
 pub enum SnapshotFormat {
     Raw,
-    Qcow2,    // future
+    Qcow2,
 }
 ```
 
-Always emits `Raw` today. The `Qcow2` variant is reserved for backing-chain checkpoints.
+Snapshots currently emit `Raw`.
 
 #### SnapshotVerifyReport
 

@@ -4,7 +4,7 @@ description: Connect to sandboxes through SSH protocol sessions
 icon: "computer"
 ---
 
-SSH gives a sandbox a familiar interface without putting an SSH daemon inside the guest. microsandbox speaks SSH on the host side, then forwards shells, remote commands, and SFTP file operations through the sandbox's command and filesystem channels.
+SSH gives a sandbox a familiar interface without putting an SSH daemon inside the guest. microsandbox speaks SSH on the host side, then forwards shells, remote commands, and SFTP file operations into the sandbox.
 
 Use it when you want existing SSH tools to work with a sandbox, or when you want SDK code to use SSH semantics while still going through microsandbox.
 
@@ -15,7 +15,7 @@ There are two ways to connect:
 
 ## Native sessions
 
-Native sessions keep the SSH protocol boundary but do not expose a listener. microsandbox creates an in-process SSH client/server pair over an in-memory stream, then forwards SSH channels to the sandbox.
+Native sessions keep the SSH protocol boundary but do not expose a listener.
 
 ### CLI
 
@@ -31,7 +31,7 @@ msb ssh devbox -- uname -a
 msb ssh devbox -- sh -lc "cd /app && npm test"
 ```
 
-If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`. Sandbox names are limited to 128 UTF-8 bytes:
+If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`:
 
 ```bash
 msb ssh --name serve
@@ -177,7 +177,7 @@ msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
 cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 ```
 
-Keys are appended to `<MSB_HOME>/ssh/authorized_keys`. Existing keys are deduplicated by public-key material.
+Keys are appended to `<MSB_HOME>/ssh/authorized_keys`.
 
 ### TCP listener
 
@@ -204,7 +204,7 @@ msb ssh serve devbox --host 127.0.0.1 --port 2223
 
 ### ProxyCommand
 
-`msb ssh serve --stdio` carries a single SSH connection over stdin/stdout instead of a TCP listener. Point OpenSSH at it with `ProxyCommand` so any standard SSH tool can reach the sandbox by host alias, with no port to manage.
+`msb ssh serve --stdio` carries a single SSH connection over stdin/stdout instead of a TCP listener. Point OpenSSH at it with `ProxyCommand` so standard SSH tools can reach the sandbox by host alias.
 
 Add an entry to your `~/.ssh/config`:
 
@@ -214,7 +214,7 @@ Host devbox.msb
   ProxyCommand msb ssh serve devbox --stdio
 ```
 
-The `Host` value is the alias you connect to, and `devbox` is the sandbox name passed to `msb ssh serve`. No `HostName` or `Port` is needed, because OpenSSH runs the `ProxyCommand` to open the transport instead of dialing a socket.
+The `Host` value is the alias you connect to, and `devbox` is the sandbox name passed to `msb ssh serve`.
 
 Once it is in place, the alias works with any OpenSSH-based tool:
 
@@ -226,20 +226,5 @@ rsync -av ./src/ devbox.msb:/app/
 ```
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
-
-### SDK server endpoints
-
-The Rust SDK exposes the general form: prepare an SSH server endpoint, then pass each ordered duplex stream to `serve(stream)`.
-
-```rust
-let server = sandbox
-    .ssh()
-    .server_with(|ssh| ssh.sftp(true))
-    .await?;
-
-server.serve(stream).await?;
-```
-
-The TypeScript, Python, and Go SDKs expose stdio server helpers for process-bridge use cases. See the SDK reference pages for the exact language-specific surface.
 
 For exact SDK signatures, see the SSH reference for [Rust](/sdk/rust/ssh), [TypeScript](/sdk/typescript/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh).

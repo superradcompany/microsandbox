@@ -161,7 +161,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 The patch builder appends operations in the order you call them; calls are chainable. Available operations across SDKs: `text`, `file`, `mkdir`, `append`, `copyFile` / `copy_file`, `copyDir` / `copy_dir`, `symlink`, `remove`.
 
-Full per-language signatures, parameters, and option shapes are documented in the SDK references:
+For per-language signatures and option shapes, see the SDK references:
 
 - Rust: [`PatchBuilder`](/sdk/rust/sandbox#patchbuilder)
 - TypeScript: [`PatchBuilder`](/sdk/typescript/sandbox#patchbuilder)
@@ -172,22 +172,9 @@ Full per-language signatures, parameters, and option shapes are documented in th
 
 By default the microsandbox agent runs as PID 1 inside the guest: small, fast, minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit, etc.), `--init` hands PID 1 over to the init binary of your choice.
 
-The handoff sequence:
-
-- Agent does the boot-time setup: mount filesystems, configure network, prepare runtime dirs.
-- Agent forks.
-- Parent execs your init and becomes PID 1.
-- Child agent continues serving host requests over the same channel.
-
 Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
 
-The simplest entry point is `auto`, which probes a small list of well-known paths inside the guest rootfs and picks the first one that exists:
-
-- `/sbin/init`
-- `/lib/systemd/systemd`
-- `/usr/lib/systemd/systemd`
-
-Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
+Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI.
 
 <CodeGroup>
 ```rust Rust
@@ -242,14 +229,14 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 ```
 </CodeGroup>
 
-To verify the handoff worked, check `/proc/1/comm` inside the sandbox. It should print the init's name (`systemd`, `init`, etc.):
+To verify the handoff worked, check `/proc/1/comm` inside the sandbox:
 
 ```bash
 $ msb run ghcr.io/superradcompany/debian-systemd:12 --init auto -- cat /proc/1/comm
 systemd
 ```
 
-If `--init=auto` can't find anything in its candidate list, agentd fails boot with a clear error in `kernel.log` listing every path it checked. Switch to an explicit path (`--init=/lib/systemd/systemd`) when you know exactly where the init lives, or follow the image-picking guidance below to choose an image that actually ships one.
+If `--init=auto` cannot find an init binary, boot fails with a clear error in `kernel.log`. Use an explicit path when you know where the init lives.
 
 ### Argv and env
 
@@ -259,7 +246,7 @@ Pass extra argv and env to the init:
 - **Python**: pass an `InitConfig` to `init=`.
 - **CLI**: repeat `--init-arg` once per entry, and `--init-env KEY=VAL` once per env var.
 
-Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inherited environment.
+Argv defaults to the init command when none is given; env is merged on top of the inherited environment.
 
 <CodeGroup>
 ```rust Rust
@@ -318,73 +305,6 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 
 ### Picking an image
 
-Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries; they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log (no kernel panic).
+Most slim Docker base images do not include systemd or another full init. Use an image that ships the init you want, or build a small custom image that installs it.
 
-Three ways to get an image with an init:
-
-<AccordionGroup>
-  <Accordion title="Use one of our published guest images">
-    We maintain a small collection at [`superradcompany/guest-images`](https://github.com/superradcompany/guest-images) for the cases where you specifically need a real init. Current set:
-
-    | Image | Pull |
-    |-------|------|
-    | Debian + systemd | `ghcr.io/superradcompany/debian-systemd:12` |
-    | Ubuntu + systemd | `ghcr.io/superradcompany/ubuntu-systemd:24.04` |
-    | Fedora + systemd | `ghcr.io/superradcompany/fedora-systemd:40` |
-    | Alpine + OpenRC | `ghcr.io/superradcompany/alpine-openrc:3.20` |
-
-    Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly so they pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
-  </Accordion>
-  <Accordion title="Build a small custom image">
-    ```dockerfile
-    # Dockerfile.systemd
-    FROM debian:bookworm
-    RUN apt-get update \
-        && apt-get install -y --no-install-recommends systemd \
-        && rm -rf /var/lib/apt/lists/*
-    ```
-
-    ```bash
-    docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
-    msb run local-systemd:debian --init /lib/systemd/systemd -- bash
-    ```
-  </Accordion>
-  <Accordion title="Use a community-built systemd image">
-    Examples: `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`. These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
-  </Accordion>
-</AccordionGroup>
-
-For a sanity check that doesn't need systemd, `alpine:3.20` ships BusyBox at `/sbin/init`, which is enough to exercise the handoff mechanics:
-
-```bash
-msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
-# busybox
-```
-
-### Shutdown semantics
-
-Without `--init`, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)`. Typically &lt;100 ms.
-
-With `--init`, the agent isn't PID 1 anymore, so it asks your init to shut down:
-
-- `SIGRTMIN+4` first (systemd's poweroff signal).
-- `SIGTERM` fallback for inits that don't speak it.
-
-Your init then runs its own teardown (stop services, unmount, halt), which is slower:
-
-| Init | Typical shutdown |
-|------|------------------|
-| BusyBox / s6 / runit | &lt;100 ms |
-| OpenRC | 50-500 ms |
-| systemd | 1-5 s |
-
-This is the price of a real init. If your test harness measures end-to-end sandbox lifecycle and you're comparing to a no-handoff baseline, account for this.
-
-### Init and entrypoint
-
-`--init` and `--entrypoint` are orthogonal:
-
-- `--init` controls **PID 1**: what runs the system.
-- `--entrypoint` (and the trailing `-- cmd`) controls **what your workload runs**.
-
-They can be combined. Boot systemd as PID 1 and have microsandbox `exec` calls land your shell, scripts, or app inside the systemd-managed environment.
+`--init` controls PID 1. `--entrypoint` and the trailing command control the workload you run after boot, so the two can be combined.
