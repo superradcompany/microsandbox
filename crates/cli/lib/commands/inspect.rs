@@ -120,6 +120,15 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         }
 
+        if !config.labels.is_empty() {
+            ui::detail_header("Labels");
+            let mut labels: Vec<_> = config.labels.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in labels {
+                println!("  {k}={v}");
+            }
+        }
+
         if !config.mounts.is_empty() {
             ui::detail_header("Mounts");
             for mount in &config.mounts {

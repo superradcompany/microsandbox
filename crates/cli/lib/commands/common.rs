@@ -42,6 +42,11 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub env: Vec<String>,
 
+    /// Attach a label to the sandbox for metrics attribution (KEY=VALUE).
+    /// Repeatable. Surfaced as attributes on the sandbox's metrics.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub label: Vec<String>,
+
     /// Replace an existing sandbox with the same name.
     #[arg(long)]
     pub replace: bool,
@@ -433,6 +438,12 @@ pub fn apply_sandbox_opts(
     for env_str in &opts.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
         builder = builder.env(k, v);
+    }
+
+    // --- Labels ---
+    for label_str in &opts.label {
+        let (k, v) = ui::parse_label(label_str).map_err(anyhow::Error::msg)?;
+        builder = builder.label(k, v);
     }
 
     // --- Volumes ---

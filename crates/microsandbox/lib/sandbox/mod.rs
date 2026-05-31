@@ -45,7 +45,8 @@ use crate::{
     db::{
         self,
         entity::{
-            run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
+            run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
+            sandbox_rootfs as sandbox_rootfs_entity,
         },
     },
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
@@ -231,6 +232,7 @@ impl Sandbox {
         validate_sandbox_name_for_runtime(&config.name)?;
         validate_rootfs_source(&config.image)?;
         types::validate_volume_mounts(&config.mounts)?;
+        validate_labels(&config.labels)?;
 
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
@@ -451,6 +453,7 @@ impl Sandbox {
         validate_sandbox_name_for_runtime(&config.name)?;
         validate_rootfs_source(&config.image)?;
         types::validate_volume_mounts(&config.mounts)?;
+        validate_labels(&config.labels)?;
         validate_start_state(&config, &crate::config::config().sandboxes_dir().join(name))?;
         update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 
@@ -1878,7 +1881,38 @@ async fn pull_oci_image(
     }
 }
 
-/// Validate rootfs configuration that depends on host filesystem state.
+/// Validate user-defined sandbox labels: keys and values must be non-empty, and
+/// keys must not use a reserved prefix.
+fn validate_labels(labels: &HashMap<String, String>) -> MicrosandboxResult<()> {
+    /// Validate rootfs configuration that depends on host filesystem state.
+    /// Prefixes reserved for the built-in identity/resource attributes the metrics
+    /// exporter emits. User labels must not use them or they would shadow the
+    /// `sandbox.*` / `microsandbox.*` / `service.*` attributes downstream.
+    const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
+
+    for (key, value) in labels {
+        if key.is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "label key must not be empty".into(),
+            ));
+        }
+        if value.is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "label '{key}' must have a non-empty value"
+            )));
+        }
+        if let Some(prefix) = RESERVED_LABEL_PREFIXES
+            .iter()
+            .find(|p| key.starts_with(**p))
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "label key '{key}' uses reserved prefix '{prefix}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
     match rootfs {
         RootfsSource::Bind(path) => {
@@ -2160,7 +2194,26 @@ async fn insert_sandbox_record(
                 ..Default::default()
             };
             let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
-            Ok((txn, result.last_insert_id))
+            let sandbox_id = result.last_insert_id;
+
+            // Persist labels in the same transaction so the catalog record is
+            // all-or-nothing — a failed label write rolls back the sandbox row.
+            let label_rows: Vec<sandbox_label_entity::ActiveModel> = config
+                .labels
+                .iter()
+                .map(|(key, value)| sandbox_label_entity::ActiveModel {
+                    sandbox_id: Set(sandbox_id),
+                    key: Set(key.clone()),
+                    value: Set(value.clone()),
+                })
+                .collect();
+            if !label_rows.is_empty() {
+                sandbox_label_entity::Entity::insert_many(label_rows)
+                    .exec(&txn)
+                    .await?;
+            }
+
+            Ok((txn, sandbox_id))
         }
     })
     .await
@@ -2269,6 +2322,7 @@ fn build_overlay_upper_tree(tree: Option<tree::FileTree>) -> tree::FileTree {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         fs,
         os::fd::{AsRawFd, FromRawFd, OwnedFd},
         path::PathBuf,
@@ -2286,7 +2340,7 @@ mod tests {
         MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxStatus,
         digest_pinned_reference, insert_sandbox_record, persist_oci_manifest_pin,
         prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
-        validate_rootfs_source, validate_sandbox_name_for_runtime,
+        validate_labels, validate_rootfs_source, validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2607,6 +2661,77 @@ mod tests {
         let decoded: SandboxConfig = serde_json::from_str(&row.config).unwrap();
 
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[test]
+    fn test_validate_labels_accepts_plain_labels() {
+        let labels = HashMap::from([
+            ("user.id".to_string(), "alice".to_string()),
+            ("tenant".to_string(), "acme".to_string()),
+        ]);
+        assert!(validate_labels(&labels).is_ok());
+        assert!(validate_labels(&HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_labels_rejects_empty_and_reserved() {
+        let empty_key = HashMap::from([(String::new(), "v".to_string())]);
+        assert!(validate_labels(&empty_key).is_err());
+
+        let empty_value = HashMap::from([("k".to_string(), String::new())]);
+        assert!(validate_labels(&empty_value).is_err());
+
+        for reserved in ["sandbox.id", "microsandbox.cpu", "service.name"] {
+            let labels = HashMap::from([(reserved.to_string(), "v".to_string())]);
+            assert!(
+                validate_labels(&labels).is_err(),
+                "reserved key {reserved} should be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_persists_labels() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let config = SandboxConfig {
+            name: "labelled".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            labels: HashMap::from([
+                ("user.id".to_string(), "alice".to_string()),
+                ("tenant".to_string(), "acme".to_string()),
+            ]),
+            ..Default::default()
+        };
+
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        let mut rows = super::sandbox_label_entity::Entity::find()
+            .filter(super::sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.write())
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "tenant");
+        assert_eq!(rows[0].value, "acme");
+        assert_eq!(rows[1].key, "user.id");
+        assert_eq!(rows[1].value, "alice");
+
+        // Deleting the sandbox cascades to its labels.
+        super::sandbox_entity::Entity::delete_by_id(sandbox_id)
+            .exec(pools.write())
+            .await
+            .unwrap();
+        let remaining = super::sandbox_label_entity::Entity::find()
+            .filter(super::sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.write())
+            .await
+            .unwrap();
+        assert!(remaining.is_empty(), "labels should cascade-delete");
     }
 
     #[tokio::test]
