@@ -148,7 +148,44 @@ pipeline can build per-user views. Keys cannot start with the reserved prefixes
 
 Set one at a time with `.label(key, value)` or many at once with
 `.labels({...})` (`WithLabel` / `WithLabels` in Go, the `labels={...}` argument
-in Python). On the CLI, repeat `--label` once per entry.
+in Python). On the CLI, repeat `--label` once per entry. Values may be empty: a
+valueless label such as `--label gpu` is a plain marker (it stores `gpu=""`),
+matching Docker's label semantics.
+
+### Selecting sandboxes by label
+
+Labels double as selectors. `list_with` returns sandboxes carrying **all** of
+the given labels (AND-matched) — useful when your application owns a subset of
+sandboxes on a shared host. The CLI extends this to bulk operations: `msb stop`,
+`msb start`, and `msb rm` all accept `--label` to act on every match.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::{Sandbox, SandboxFilter};
+
+let mine = Sandbox::list_with(SandboxFilter::new().label("app", "engine")).await?;
+```
+
+```typescript TypeScript
+const mine = await Sandbox.listWith({ labels: { app: "engine" } });
+```
+
+```python Python
+mine = await Sandbox.list_with(labels={"app": "engine"})
+```
+
+```go Go
+mine, err := microsandbox.ListSandboxesWith(ctx,
+    microsandbox.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}))
+```
+
+```bash CLI
+msb ls --label app=engine      # list matches
+msb stop --label app=engine    # stop every match
+msb rm --force --label app=engine
+```
+
+</CodeGroup>
 
 <Tip>
   `cpus` and `memory` are **limits, not reservations**. Setting `memory: 512` doesn't allocate 512 MiB upfront. Physical pages are only allocated as the guest actually touches them, so you can comfortably run many sandboxes on a single host without worrying about overcommitting.

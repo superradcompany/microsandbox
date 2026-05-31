@@ -5,6 +5,8 @@ use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus
 
 use crate::ui;
 
+use super::common;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -19,6 +21,11 @@ pub struct ListArgs {
     /// Show only stopped sandboxes.
     #[arg(long)]
     pub stopped: bool,
+
+    /// Show only sandboxes carrying this label (`KEY=VALUE`). Repeatable;
+    /// AND-matched.
+    #[arg(long)]
+    pub label: Vec<String>,
 
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
@@ -35,7 +42,7 @@ pub struct ListArgs {
 
 /// Execute the `msb list` command.
 pub async fn run(args: ListArgs) -> anyhow::Result<()> {
-    let sandboxes = Sandbox::list().await?;
+    let sandboxes = Sandbox::list_with(common::label_filter(&args.label)).await?;
 
     let filtered: Vec<_> = sandboxes
         .into_iter()

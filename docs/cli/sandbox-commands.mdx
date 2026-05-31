@@ -43,7 +43,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app/src:ro,noexec`) |
 | `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST`, `BIND_ADDR:HOST:GUEST`, and `/udp` variants) |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
-| `--label` | Attach a label for metric attribution (`KEY=VALUE`). Repeatable. Keys cannot start with `sandbox.`, `microsandbox.`, or `service.` |
+| `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY` for a valueless marker). Repeatable. Keys cannot start with `sandbox.`, `microsandbox.`, or `service.` |
 | `-w`, `--workdir` | Working directory inside the sandbox |
 | `--shell` | Default shell for interactive sessions |
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
@@ -178,14 +178,16 @@ msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediatel
 
 ## msb start
 
-Resume a stopped sandbox.
+Resume a stopped sandbox. Name one or more sandboxes, or select them by label.
 
 ```bash
 msb start devbox
+msb start --label app=engine          # start every sandbox labelled app=engine
 ```
 
 | Flag | Description |
 |------|-------------|
+| `--label` | Start every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb stop
@@ -194,6 +196,7 @@ msb start devbox
 msb stop devbox                # Graceful shutdown (10s grace)
 msb stop --force devbox        # Force kill immediately
 msb stop -t 30 devbox          # 30s grace before force kill
+msb stop --label app=engine    # stop every sandbox labelled app=engine
 ```
 
 Graceful shutdown gives the sandbox a chance to finish writing any
@@ -209,6 +212,7 @@ themselves.
 
 | Flag | Description |
 |------|-------------|
+| `--label` | Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
 | `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
@@ -319,6 +323,7 @@ List all stored sandboxes.
 msb ls                    # All sandboxes (running and stopped)
 msb ls --running          # Running sandboxes only
 msb ls --stopped          # Stopped sandboxes only
+msb ls --label app=engine # Only sandboxes labelled app=engine
 msb ls --format json      # JSON output
 msb ls -q                 # Names only
 ```
@@ -327,6 +332,7 @@ msb ls -q                 # Names only
 |------|-------------|
 | `--running` | Show only running sandboxes |
 | `--stopped` | Show only stopped sandboxes |
+| `--label` | Show only sandboxes carrying this label (`KEY=VALUE`). Repeatable; AND-matched |
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
@@ -344,6 +350,7 @@ msb ps --format json      # JSON output
 | Flag | Description |
 |------|-------------|
 | `-a`, `--all` | Show all sandboxes, not just running ones |
+| `--label` | Show only sandboxes carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Not combinable with a sandbox name |
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
@@ -380,12 +387,14 @@ Remove one or more sandboxes and their associated state.
 
 ```bash
 msb rm devbox
-msb rm --force devbox     # Stop and remove in one step
-msb rm worker-1 worker-2  # Remove multiple
+msb rm --force devbox            # Stop and remove in one step
+msb rm worker-1 worker-2         # Remove multiple
+msb rm --force --label app=engine  # Remove every sandbox labelled app=engine
 ```
 
 | Flag | Description |
 |------|-------------|
+| `--label` | Remove every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Stop the sandbox if running, then remove it |
 | `-q`, `--quiet` | Suppress progress output |
 

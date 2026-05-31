@@ -5,6 +5,8 @@ use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
+use super::common;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -13,8 +15,12 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
     /// Sandbox(es) to remove.
-    #[arg(required = true)]
     pub names: Vec<String>,
+
+    /// Remove every sandbox carrying this label (`KEY=VALUE`). Repeatable;
+    /// AND-matched. Unioned with any explicitly named sandboxes.
+    #[arg(long)]
+    pub label: Vec<String>,
 
     /// Stop the sandbox if running, then remove it.
     #[arg(short, long)]
@@ -31,9 +37,10 @@ pub struct RemoveArgs {
 
 /// Execute the `msb remove` command.
 pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
+    let names = common::resolve_bulk_targets(&args.names, &args.label, args.quiet).await?;
     let mut failed = false;
 
-    for name in &args.names {
+    for name in &names {
         if args.force {
             // Kill the sandbox first if it's running.
             if let Ok(mut handle) = Sandbox::get(name).await {

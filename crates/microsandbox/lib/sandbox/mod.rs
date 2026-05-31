@@ -18,7 +18,12 @@ mod patch;
 pub mod ssh;
 mod types;
 
-use std::{collections::HashMap, path::Path, process::ExitStatus, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::ExitStatus,
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use microsandbox_db::pool::DbPools;
@@ -29,7 +34,8 @@ use microsandbox_protocol::{
     message::{Message, MessageType},
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, sea_query::Expr,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    sea_query::Expr,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -110,6 +116,45 @@ pub(crate) struct RegistryOverrides {
     pub auth: Option<microsandbox_image::RegistryAuth>,
     pub insecure: bool,
     pub ca_certs: Vec<Vec<u8>>,
+}
+
+/// Filter for [`Sandbox::list_with`].
+///
+/// Built fluently and passed to `list_with` to narrow which sandboxes are
+/// returned. Today it selects by labels; it is designed to grow further
+/// criteria (e.g. status) without changing the call site.
+#[derive(Debug, Default, Clone)]
+pub struct SandboxFilter {
+    labels: Vec<(String, String)>,
+}
+
+impl SandboxFilter {
+    /// An empty filter — matches every sandbox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Require sandboxes to carry this `key=value` label. Repeatable; multiple
+    /// labels are AND-matched.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.push((key.into(), value.into()));
+        self
+    }
+
+    /// Require sandboxes to carry all of these `key=value` labels (AND-matched).
+    pub fn labels(
+        mut self,
+        labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.labels
+            .extend(labels.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    /// Whether the filter has no criteria (matches everything).
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
 }
 
 /// A running sandbox.
@@ -520,23 +565,32 @@ impl Sandbox {
             .all(pools.read())
             .await?;
 
-        let mut reconciled = Vec::with_capacity(sandboxes.len());
-        for sandbox in sandboxes {
-            let model = reconcile_sandbox_runtime_state(pools, sandbox).await?;
-            reconciled.push(model);
+        build_sandbox_handles(pools, sandboxes).await
+    }
+
+    /// List sandboxes matching a [`SandboxFilter`].
+    ///
+    /// An empty filter behaves like [`list`](Self::list). Label selectors on the
+    /// filter are AND-matched: a sandbox is returned only if it carries all of
+    /// them.
+    pub async fn list_with(filter: SandboxFilter) -> MicrosandboxResult<Vec<SandboxHandle>> {
+        if filter.is_empty() {
+            return Self::list().await;
         }
 
-        let sandbox_ids: Vec<i32> = reconciled.iter().map(|sandbox| sandbox.id).collect();
-        let active_pids = load_active_pids(pools.read(), &sandbox_ids).await?;
-        let mut handles = Vec::with_capacity(reconciled.len());
-        for sandbox in reconciled {
-            handles.push(build_handle_with_pid(
-                sandbox.clone(),
-                active_pids.get(&sandbox.id).copied(),
-            ));
+        let pools = db::init_global().await?;
+        let ids = filter_sandbox_ids(pools.read(), &filter).await?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(handles)
+        let sandboxes = sandbox_entity::Entity::find()
+            .filter(sandbox_entity::Column::Id.is_in(ids))
+            .order_by_desc(sandbox_entity::Column::CreatedAt)
+            .all(pools.read())
+            .await?;
+
+        build_sandbox_handles(pools, sandboxes).await
     }
 
     /// Remove a stopped sandbox from the database.
@@ -1650,6 +1704,78 @@ fn build_handle_with_pid(model: sandbox_entity::Model, pid: Option<i32>) -> Sand
     SandboxHandle::new(model, pid)
 }
 
+/// Reconcile runtime state for each sandbox row and build a handle (with live
+/// pid) for each. Shared by [`Sandbox::list`] and [`Sandbox::list_by_labels`].
+async fn build_sandbox_handles(
+    pools: &DbPools,
+    sandboxes: Vec<sandbox_entity::Model>,
+) -> MicrosandboxResult<Vec<SandboxHandle>> {
+    let mut reconciled = Vec::with_capacity(sandboxes.len());
+    for sandbox in sandboxes {
+        let model = reconcile_sandbox_runtime_state(pools, sandbox).await?;
+        reconciled.push(model);
+    }
+
+    let sandbox_ids: Vec<i32> = reconciled.iter().map(|sandbox| sandbox.id).collect();
+    let active_pids = load_active_pids(pools.read(), &sandbox_ids).await?;
+    let mut handles = Vec::with_capacity(reconciled.len());
+    for sandbox in reconciled {
+        handles.push(build_handle_with_pid(
+            sandbox.clone(),
+            active_pids.get(&sandbox.id).copied(),
+        ));
+    }
+
+    Ok(handles)
+}
+
+/// Return the ids of sandboxes matching every criterion of `filter`.
+///
+/// Only call this for a non-empty filter (callers short-circuit the empty case
+/// to a full listing). Today the only criterion is labels — AND-matched, with
+/// duplicate selectors de-duplicated. As `SandboxFilter` grows new fields, each
+/// becomes an additional narrowing step here.
+async fn filter_sandbox_ids(
+    db: &DbReadConnection,
+    filter: &SandboxFilter,
+) -> MicrosandboxResult<Vec<i32>> {
+    let wanted: HashSet<(String, String)> = filter.labels.iter().cloned().collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cond = Condition::any();
+    for (key, value) in &wanted {
+        cond = cond.add(
+            sandbox_label_entity::Column::Key
+                .eq(key.clone())
+                .and(sandbox_label_entity::Column::Value.eq(value.clone())),
+        );
+    }
+
+    let rows = sandbox_label_entity::Entity::find()
+        .filter(cond)
+        .all(db)
+        .await?;
+
+    // Group matched (key, value) pairs per sandbox; a sandbox qualifies only
+    // when its set covers all wanted selectors. The set dedups so duplicate
+    // rows cannot inflate the count.
+    let mut matched: HashMap<i32, HashSet<(String, String)>> = HashMap::new();
+    for row in rows {
+        matched
+            .entry(row.sandbox_id)
+            .or_default()
+            .insert((row.key, row.value));
+    }
+
+    Ok(matched
+        .into_iter()
+        .filter(|(_, set)| set.len() == wanted.len())
+        .map(|(id, _)| id)
+        .collect())
+}
+
 fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
     run.and_then(|model| model.pid)
         .filter(|pid| pid_is_alive(*pid))
@@ -1881,25 +2007,21 @@ async fn pull_oci_image(
     }
 }
 
-/// Validate user-defined sandbox labels: keys and values must be non-empty, and
-/// keys must not use a reserved prefix.
+/// Validate user-defined sandbox labels. Keys must be non-empty and must not
+/// use a reserved prefix. Values may be empty: a valueless label is a plain
+/// marker (e.g. `gpu`), matching Docker's label semantics.
 fn validate_labels(labels: &HashMap<String, String>) -> MicrosandboxResult<()> {
-    /// Validate rootfs configuration that depends on host filesystem state.
-    /// Prefixes reserved for the built-in identity/resource attributes the metrics
-    /// exporter emits. User labels must not use them or they would shadow the
-    /// `sandbox.*` / `microsandbox.*` / `service.*` attributes downstream.
+    /// Prefixes reserved for the built-in identity/resource attributes the
+    /// metrics exporter emits. User labels must not use them or they would
+    /// shadow the `sandbox.*` / `microsandbox.*` / `service.*` attributes
+    /// downstream.
     const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
 
-    for (key, value) in labels {
+    for key in labels.keys() {
         if key.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "label key must not be empty".into(),
             ));
-        }
-        if value.is_empty() {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "label '{key}' must have a non-empty value"
-            )));
         }
         if let Some(prefix) = RESERVED_LABEL_PREFIXES
             .iter()
@@ -2337,10 +2459,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxStatus,
-        digest_pinned_reference, insert_sandbox_record, persist_oci_manifest_pin,
-        prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
-        validate_labels, validate_rootfs_source, validate_sandbox_name_for_runtime,
+        MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter, SandboxStatus,
+        digest_pinned_reference, filter_sandbox_ids, insert_sandbox_record,
+        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
+        remove_dir_if_exists, validate_labels, validate_rootfs_source,
+        validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2664,22 +2787,23 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_labels_accepts_plain_labels() {
+    fn test_validate_labels_accepts_plain_and_valueless() {
         let labels = HashMap::from([
             ("user.id".to_string(), "alice".to_string()),
             ("tenant".to_string(), "acme".to_string()),
         ]);
         assert!(validate_labels(&labels).is_ok());
         assert!(validate_labels(&HashMap::new()).is_ok());
+
+        // A valueless label (empty value) is a valid marker.
+        let marker = HashMap::from([("gpu".to_string(), String::new())]);
+        assert!(validate_labels(&marker).is_ok());
     }
 
     #[test]
-    fn test_validate_labels_rejects_empty_and_reserved() {
+    fn test_validate_labels_rejects_empty_key_and_reserved() {
         let empty_key = HashMap::from([(String::new(), "v".to_string())]);
         assert!(validate_labels(&empty_key).is_err());
-
-        let empty_value = HashMap::from([("k".to_string(), String::new())]);
-        assert!(validate_labels(&empty_value).is_err());
 
         for reserved in ["sandbox.id", "microsandbox.cpu", "service.name"] {
             let labels = HashMap::from([(reserved.to_string(), "v".to_string())]);
@@ -2732,6 +2856,81 @@ mod tests {
             .await
             .unwrap();
         assert!(remaining.is_empty(), "labels should cascade-delete");
+    }
+
+    #[tokio::test]
+    async fn test_filter_sandbox_ids_and_semantics() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        // alice owns two sandboxes; bob owns one. One of alice's is also prod.
+        let alice_web = SandboxConfig {
+            name: "alice-web".into(),
+            image: RootfsSource::oci("alpine"),
+            labels: HashMap::from([
+                ("user.id".to_string(), "alice".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]),
+            ..Default::default()
+        };
+        let alice_job = SandboxConfig {
+            name: "alice-job".into(),
+            image: RootfsSource::oci("alpine"),
+            labels: HashMap::from([("user.id".to_string(), "alice".to_string())]),
+            ..Default::default()
+        };
+        let bob_web = SandboxConfig {
+            name: "bob-web".into(),
+            image: RootfsSource::oci("alpine"),
+            labels: HashMap::from([("user.id".to_string(), "bob".to_string())]),
+            ..Default::default()
+        };
+
+        let alice_web_id = insert_sandbox_record(pools.write(), &alice_web)
+            .await
+            .unwrap();
+        let alice_job_id = insert_sandbox_record(pools.write(), &alice_job)
+            .await
+            .unwrap();
+        let bob_web_id = insert_sandbox_record(pools.write(), &bob_web)
+            .await
+            .unwrap();
+
+        async fn by(pools: &DbPools, sel: &[(&str, &str)]) -> Vec<i32> {
+            let filter = SandboxFilter::new().labels(
+                sel.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<Vec<_>>(),
+            );
+            let mut ids = filter_sandbox_ids(pools.read(), &filter).await.unwrap();
+            ids.sort();
+            ids
+        }
+
+        // Single selector → both of alice's sandboxes.
+        let mut alice = vec![alice_web_id, alice_job_id];
+        alice.sort();
+        assert_eq!(by(&pools, &[("user.id", "alice")]).await, alice);
+
+        // AND of two selectors → only the sandbox with both.
+        assert_eq!(
+            by(&pools, &[("user.id", "alice"), ("env", "prod")]).await,
+            vec![alice_web_id]
+        );
+
+        // bob's selector → only bob's sandbox.
+        assert_eq!(by(&pools, &[("user.id", "bob")]).await, vec![bob_web_id]);
+
+        // Non-matching value → empty.
+        assert!(by(&pools, &[("user.id", "carol")]).await.is_empty());
+
+        // Conflicting AND (no sandbox has both) → empty.
+        assert!(
+            by(&pools, &[("user.id", "alice"), ("user.id", "bob")])
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

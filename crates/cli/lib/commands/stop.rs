@@ -5,6 +5,8 @@ use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
+use super::common;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -13,8 +15,12 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct StopArgs {
     /// Sandbox(es) to stop.
-    #[arg(required = true)]
     pub names: Vec<String>,
+
+    /// Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable;
+    /// AND-matched. Unioned with any explicitly named sandboxes.
+    #[arg(long)]
+    pub label: Vec<String>,
 
     /// Immediately kill the sandbox without graceful shutdown.
     /// Pending writes that the workload hasn't `fsync`'d may be lost.
@@ -36,9 +42,10 @@ pub struct StopArgs {
 
 /// Execute the `msb stop` command.
 pub async fn run(args: StopArgs) -> anyhow::Result<()> {
+    let names = common::resolve_bulk_targets(&args.names, &args.label, args.quiet).await?;
     let mut failed = false;
 
-    for name in &args.names {
+    for name in &names {
         let spinner = if args.quiet {
             ui::Spinner::quiet()
         } else {
