@@ -400,6 +400,7 @@ jobs:
       - name: Run CLI smoke tests
         run: |
           chmod +x build/msb
+          scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
 
   # ---------------------------------------------------------------------------
