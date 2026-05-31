@@ -34,8 +34,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export LD_LIBRARY_PATH="$ROOT_DIR/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" >/dev/null
 docker save "$IMAGE" -o "$smoke_root/docker-input.tar"
 
