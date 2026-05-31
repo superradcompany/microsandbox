@@ -1,12 +1,18 @@
 //! `msb image` command — manage OCI images.
 
+use std::collections::BTreeMap;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use console::style;
-use microsandbox::image::Image;
-use microsandbox_image::Registry;
+use microsandbox::image::{Image, ImageConfigDetail};
+use microsandbox_image::{
+    ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
+    Registry,
+};
 
 use crate::ui;
 
@@ -37,6 +43,12 @@ pub enum ImageCommands {
     /// Show detailed image information.
     Inspect(ImageInspectArgs),
 
+    /// Load an image archive from tar.
+    Load(ImageLoadArgs),
+
+    /// Save one or more cached images to a tar archive.
+    Save(ImageSaveArgs),
+
     /// Delete one or more cached images.
     #[command(visible_alias = "rm")]
     Remove(ImageRemoveArgs),
@@ -63,6 +75,51 @@ pub struct ImageInspectArgs {
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
+}
+
+/// Arguments for `msb image load`.
+#[derive(Debug, Args)]
+pub struct ImageLoadArgs {
+    /// Read archive from a tar file instead of stdin.
+    #[arg(short, long, value_name = "PATH")]
+    pub input: Option<PathBuf>,
+
+    /// Add a local image reference to the first imported image.
+    #[arg(short, long, value_name = "REF")]
+    pub tag: Vec<String>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Arguments for `msb image save`.
+#[derive(Debug, Args)]
+pub struct ImageSaveArgs {
+    /// Image reference(s) to save.
+    #[arg(required = true)]
+    pub references: Vec<String>,
+
+    /// Archive format to write.
+    #[arg(long, value_enum, default_value = "docker")]
+    pub format: ImageSaveFormat,
+
+    /// Write archive to a tar file instead of stdout.
+    #[arg(short, long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Archive format for `msb image save`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ImageSaveFormat {
+    /// Docker `docker save` compatible archive.
+    Docker,
+    /// OCI Image Layout archive.
+    Oci,
 }
 
 /// Arguments for `msb image remove`.
@@ -101,6 +158,8 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
         }
         ImageCommands::List(args) => run_list(args).await,
         ImageCommands::Inspect(args) => run_inspect(args).await,
+        ImageCommands::Load(args) => run_load(args).await,
+        ImageCommands::Save(args) => run_save(args).await,
         ImageCommands::Remove(args) => run_remove(args).await,
     }
 }
@@ -495,6 +554,114 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Execute `msb image load` / `msb load`.
+pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
+    let global = microsandbox::config::config();
+    let cache_dir = global.cache_dir();
+    let temp_input;
+    let input_path = if let Some(path) = args.input.as_ref() {
+        path
+    } else {
+        temp_input = tempfile::NamedTempFile::new()?;
+        let mut input = io::stdin().lock();
+        let mut output = temp_input.reopen()?;
+        io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        temp_input.path()
+    };
+
+    let loaded = microsandbox_image::load_archive(
+        &cache_dir,
+        input_path,
+        ImageLoadOptions {
+            tags: args.tag.clone(),
+        },
+    )
+    .await?;
+
+    for image in &loaded {
+        Image::persist(&image.reference, image.metadata.clone()).await?;
+    }
+
+    if !args.quiet {
+        for image in &loaded {
+            eprintln!(
+                "   {} {:<12} {}",
+                style("✓").green(),
+                "Loaded",
+                image.reference
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute `msb image save` / `msb save`.
+pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
+    let global = microsandbox::config::config();
+    let cache_dir = global.cache_dir();
+    let mut requests = Vec::with_capacity(args.references.len());
+
+    for reference in &args.references {
+        let detail = Image::inspect(reference).await?;
+        let config = save_config_from_detail(
+            detail.handle.architecture().map(ToOwned::to_owned),
+            detail.handle.os().map(ToOwned::to_owned),
+            detail.config.as_ref(),
+        );
+        let layers = detail
+            .layers
+            .iter()
+            .map(|layer| ImageSaveLayer {
+                diff_id: layer.diff_id.clone(),
+            })
+            .collect();
+
+        requests.push(ImageSaveRequest {
+            reference: reference.clone(),
+            config,
+            layers,
+        });
+    }
+
+    let temp_output;
+    let output_path = if let Some(path) = args.output.as_ref() {
+        path
+    } else {
+        temp_output = tempfile::NamedTempFile::new()?;
+        temp_output.path()
+    };
+    let output_path_for_task = output_path.to_path_buf();
+    let format = match args.format {
+        ImageSaveFormat::Docker => ImageArchiveFormat::Docker,
+        ImageSaveFormat::Oci => ImageArchiveFormat::Oci,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
+        microsandbox_image::save_archive(&cache, &output_path_for_task, &requests, format)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("save task panicked: {e}"))??;
+
+    if args.output.is_none() {
+        let mut file = std::fs::File::open(output_path)?;
+        let mut stdout = io::stdout().lock();
+        io::copy(&mut file, &mut stdout)?;
+        stdout.flush()?;
+    } else if !args.quiet {
+        eprintln!(
+            "   {} {:<12} {}",
+            style("✓").green(),
+            "Saved",
+            output_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Execute `msb image rm` / `msb rmi`.
 pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
     let mut failed = false;
@@ -550,4 +717,46 @@ fn truncate_digest(digest: &str) -> String {
     } else {
         digest.chars().take(19).collect()
     }
+}
+
+fn save_config_from_detail(
+    architecture: Option<String>,
+    os: Option<String>,
+    config: Option<&ImageConfigDetail>,
+) -> ImageSaveConfig {
+    let Some(config) = config else {
+        return ImageSaveConfig {
+            architecture,
+            os,
+            ..Default::default()
+        };
+    };
+
+    ImageSaveConfig {
+        architecture,
+        os,
+        env: config.env.clone(),
+        entrypoint: config.entrypoint.clone(),
+        cmd: config.cmd.clone(),
+        working_dir: config.working_dir.clone(),
+        user: config.user.clone(),
+        labels: labels_to_string_map(config.labels.as_ref()),
+    }
+}
+
+fn labels_to_string_map(labels: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    let Some(serde_json::Value::Object(labels)) = labels else {
+        return BTreeMap::new();
+    };
+
+    labels
+        .iter()
+        .map(|(key, value)| {
+            let value = value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            (key.clone(), value)
+        })
+        .collect()
 }

@@ -153,6 +153,58 @@ impl Registry {
         self.pull_inner(reference, options, None).await
     }
 
+    /// Materialize layers that have already been staged into the cache.
+    ///
+    /// This is used by archive import: layer blobs are written to the cache at
+    /// their descriptor digest first, then the normal EROFS/fsmeta/VMDK
+    /// materialization path can run without contacting a registry.
+    pub async fn materialize_cached_layers(
+        &self,
+        reference: &oci_client::Reference,
+        metadata: &CachedImageMetadata,
+        force: bool,
+    ) -> ImageResult<PullResult> {
+        let manifest_digest: Digest = metadata.manifest_digest.parse()?;
+        let layer_descriptors = metadata
+            .layers
+            .iter()
+            .map(|layer| {
+                Ok(LayerDescriptor {
+                    digest: layer.digest.parse()?,
+                    media_type: layer.media_type.clone(),
+                    size: layer.size_bytes,
+                })
+            })
+            .collect::<ImageResult<Vec<_>>>()?;
+        let diff_ids = metadata
+            .layers
+            .iter()
+            .map(|layer| layer.diff_id.clone())
+            .collect::<Vec<_>>();
+
+        self.materialize_layers_and_fsmeta(
+            reference,
+            &manifest_digest,
+            &layer_descriptors,
+            &diff_ids,
+            force,
+            None,
+        )
+        .await?;
+
+        let layer_diff_ids = diff_ids
+            .iter()
+            .map(|diff_id| diff_id.parse())
+            .collect::<ImageResult<Vec<Digest>>>()?;
+
+        Ok(PullResult {
+            layer_diff_ids,
+            config: metadata.config.clone(),
+            manifest_digest,
+            cached: false,
+        })
+    }
+
     /// Pull with progress reporting.
     ///
     /// Creates a progress channel internally and returns both the receiver

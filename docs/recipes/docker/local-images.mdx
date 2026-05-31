@@ -1,10 +1,38 @@
 ---
 title: Using local Docker images
-description: Use locally built Docker images with microsandbox via a local registry
+description: Use locally built Docker images with microsandbox
 icon: "boxes-stacked"
 ---
 
-microsandbox pulls images from OCI-compatible registries. If you build an image locally with `docker build`, microsandbox can't access it directly from Docker's local store. The workaround is to run a local registry and push your image there.
+microsandbox cannot read Docker's private local image store directly. If you build an image locally with `docker build`, export it with `docker save` and load it into microsandbox:
+
+```bash
+docker build -t my-image:latest .
+docker save my-image:latest | msb image load
+msb run my-image:latest
+```
+
+You can also save to a file first:
+
+```bash
+docker save -o my-image.tar my-image:latest
+msb image load --input my-image.tar
+```
+
+If the archive has no useful tag, or you want a different local alias, pass one:
+
+```bash
+docker save my-image:latest | msb image load --tag app:local
+msb run app:local
+```
+
+`msb load` is a top-level alias for `msb image load`.
+
+`msb image load` can also import OCI Image Layout archives produced by tools such as BuildKit, Skopeo, or ORAS. If the OCI layout does not include an `org.opencontainers.image.ref.name` annotation, pass `--tag` to name the imported image locally.
+
+## Local registry alternative
+
+Use a local registry when you want registry-like push/pull behavior, or when multiple machines should pull the same locally built image.
 
 ## Step 1: Start a local registry
 

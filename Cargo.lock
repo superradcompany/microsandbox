@@ -3210,6 +3210,7 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "tempfile",
  "test-utils",
  "thiserror 2.0.18",
  "tokio",

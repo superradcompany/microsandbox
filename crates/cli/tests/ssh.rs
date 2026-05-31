@@ -154,7 +154,7 @@ async fn run_tmux_cli_session(
             "-t",
             session,
             "-o",
-            &format!("cat > {}", shell_quote(&log_path.to_string_lossy())),
+            &format!("cat > {}", shell_quote(log_path.to_string_lossy())),
         ]),
         "pipe tmux pane",
     )?;
