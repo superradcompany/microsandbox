@@ -111,7 +111,7 @@ fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
             serde_json::json!({
                 "name": s.name(),
                 "status": format!("{:?}", s.status()),
-                "created_at": s.created_at().map(|dt| ui::format_datetime(&dt)),
+                "created_at": s.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 "image": extract_image(s.config_json()),
             })
         })

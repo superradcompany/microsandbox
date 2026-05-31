@@ -233,7 +233,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "parent_digest": s.parent_digest(),
                     "format": format_str(s.format()),
                     "size_bytes": s.size_bytes(),
-                    "created_at": ui::format_datetime(&s.created_at().and_utc()),
+                    "created_at": ui::format_json_datetime(&s.created_at().and_utc()),
                     "artifact_path": s.path().display().to_string(),
                 })
             })
@@ -280,7 +280,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Format", format_str(snap.manifest().format));
     ui::detail_kv("Filesystem", &m.fstype);
     ui::detail_kv("Parent", m.parent.as_deref().unwrap_or("-"));
-    ui::detail_kv("Created", &m.created_at);
+    ui::detail_kv("Created", &ui::format_rfc3339_datetime(&m.created_at)?);
     ui::detail_kv("Upper File", &m.upper.file);
     ui::detail_kv("Upper Size", &format_size(m.upper.size_bytes));
     ui::detail_kv("Integrity", &format_integrity(m.upper.integrity.as_ref()));
