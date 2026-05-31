@@ -17,7 +17,7 @@ path = "bin/main.rs"
 
 [dependencies]
 # Shared-memory primitives — the read source for every tick.
-microsandbox-metrics = { path = "../metrics" }
+microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
 # ENOENT detection on shm_open failures.
 libc.workspace = true
 # Async runtime + primitives (broadcast, mpsc, JoinSet, time).
@@ -36,7 +36,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
-microsandbox-utils = { version = "0.5.2", path = "../utils" }
+microsandbox-utils = { version = "0.5.4", path = "../utils" }
 # CLI duration parsing (e.g. "1s", "500ms").
 humantime = "2"
 # Resolving the default `~/.microsandbox` path when --msb-home is omitted.
