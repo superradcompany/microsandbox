@@ -7,7 +7,7 @@ icon: "code-branch"
 A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
 
 <Note>
-Snapshots are **disk-only and stopped-only**: the sandbox can't be running when you take one. Memory and CPU state, plus qcow2 backing chains, are future work.
+Snapshots are **disk-only and stopped-only**: the sandbox can't be running when you take one.
 </Note>
 
 ## What gets captured
@@ -386,10 +386,3 @@ msb snapshot inspect after-pip-install --verify
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
 - **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --snapshot` from the pre-migration artifact.
-
-## What's not yet supported
-
-- **Live (running) snapshots.** The sandbox must be stopped first. Live capture requires an in-guest filesystem freeze and memory checkpointing that's tracked as future work.
-- **qcow2 backing chains.** Snapshots always copy the upper layer today. The manifest's `format` and `parent` fields are reserved so qcow2 chains can land additively without a schema break.
-- **Push/pull from a registry.** The artifact format is registry-shaped on purpose, but transport tooling beyond `scp` and `tar.zst` is a separate piece of work.
-- **Snapshotting `DiskImage` volumes.** The same mechanism would apply (reflink the disk file), but is currently out of scope.

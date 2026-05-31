@@ -4,13 +4,13 @@ description: What sandboxes are and how to configure them
 icon: "circle-info"
 ---
 
-A sandbox is a microVM: a real virtual machine with its own Linux kernel, filesystem, and network stack, running as a child process of whatever application creates it.
+A sandbox is a local microVM with its own Linux kernel, filesystem, and network stack. Your application or the `msb` CLI starts it as a child process, then talks to the guest agent to run commands, move files, and control lifecycle.
 
-The security boundary here is hardware virtualization, not Linux namespaces. Container escapes are a well-documented class of vulnerability; breaking out of a microVM requires exploiting the hypervisor itself, which is a fundamentally harder problem.
+The security boundary is hardware virtualization, not Linux namespaces. That makes sandboxes a good fit for running agent-generated code, untrusted tools, dependency installs, and other workloads that should not inherit the host process's full privileges.
 
-## Creating a sandbox
+## Create a sandbox
 
-At minimum, a sandbox needs a name and an image. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. Everything else has sensible defaults: 1 vCPU, 512 MiB memory, public-only networking, `/bin/sh` as the shell.
+At minimum, a sandbox needs a name and an image. Everything else has defaults: 1 vCPU, 512 MiB memory, public-only networking, and `/bin/sh` as the default shell.
 
 <CodeGroup>
 ```rust Rust
@@ -31,18 +31,17 @@ sb = await Sandbox.create("worker", image="python")
 ```
 
 ```go Go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python"),
-)
+sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 ```
 
 ```bash CLI
 msb create python --name worker
 ```
-
 </CodeGroup>
 
-## Configuration options
+Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
+
+## Common configuration
 
 <CodeGroup>
 ```rust Rust
@@ -51,44 +50,29 @@ let sb = Sandbox::builder("worker")
     .memory(1024)
     .cpus(2)
     .env("DEBUG", "true")
-    .env("API_PORT", "8000")
     .volume("/app/src", |v| v.bind("./src").readonly())
-    .volume("/data", |v| v.named("my-data"))
-    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
     .create()
     .await?;
 ```
 
 ```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
 await using sb = await Sandbox.builder("worker")
     .image("python")
     .memory(1024)
     .cpus(2)
     .env("DEBUG", "true")
-    .env("API_PORT", "8000")
-    .volume("/app/src",     (m) => m.bind("./src").readonly())
-    .volume("/data",        (m) => m.named("my-data"))
-    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .volume("/app/src", (m) => m.bind("./src").readonly())
     .create();
 ```
 
 ```python Python
-from microsandbox import Sandbox, Volume
-
 sb = await Sandbox.create(
     "worker",
     image="python",
     memory=1024,
     cpus=2,
-
-    env={"DEBUG": "true", "API_PORT": "8000"},
-    volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
-        "/data": Volume.named("my-data"),
-        "/tmp/scratch": Volume.tmpfs(size_mib=100),
-    },
+    env={"DEBUG": "true"},
+    volumes={"/app/src": Volume.bind("./src", readonly=True)},
 )
 ```
 
@@ -97,14 +81,9 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
     m.WithMemory(1024),
     m.WithCPUs(2),
-    m.WithEnv(map[string]string{
-        "DEBUG": "true",
-        "API_PORT": "8000",
-    }),
+    m.WithEnv(map[string]string{"DEBUG": "true"}),
     m.WithMounts(map[string]m.MountConfig{
-        "/app/src":     m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
-        "/data":        m.Mount.Named("my-data", m.MountOptions{}),
-        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
+        "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
     }),
 )
 ```
@@ -114,157 +93,53 @@ msb create python --name worker \
   -c 2 \
   -m 1G \
   -e DEBUG=true \
-  -e API_PORT=8000 \
-  -v ./src:/app/src:ro \
-  -v my-data:/data \
-  --tmpfs /tmp/scratch:100
+  -v ./src:/app/src:ro
 ```
-
 </CodeGroup>
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `image` | — | OCI image, local path, or disk image |
-| `cpus` | `1` | Number of virtual CPUs |
-| `memory` | `512` | Guest memory in MiB |
-| `workdir` | — | Default working directory for commands |
+| `image` | required | OCI image, local rootfs path, or disk image |
+| `cpus` | `1` | Virtual CPU limit |
+| `memory` | `512` | Guest memory limit in MiB |
+| `workdir` | image default | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
-| `env` | `{}` | Environment variables |
-| `volumes` | `[]` | Volume mounts (bind, named, or tmpfs) |
-| `network` | `public` | Network policy and port mappings |
-| `scripts` | `{}` | Named scripts stored at `/.msb/scripts/` |
+| `env` | empty | Environment variables |
+| `volumes` | empty | Bind, named, tmpfs, or disk-image mounts |
+| `network` | public-only | Network policy and published ports |
+| `scripts` | empty | Named scripts mounted at `/.msb/scripts/` |
 
 <Tip>
-  `cpus` and `memory` are **limits, not reservations**. Setting `memory: 512` doesn't allocate 512 MiB upfront. Physical pages are only allocated as the guest actually touches them, so you can comfortably run many sandboxes on a single host without worrying about overcommitting.
+  `cpus` and `memory` are limits, not reservations. Guest memory is allocated as the VM touches pages.
 </Tip>
 
-## Rootfs sources
+## Image sources
 
-microsandbox supports three ways to provide a root filesystem. The choice affects how the filesystem is assembled and what features are available.
+Most sandboxes start from an OCI image:
 
-### OCI images
-
-The most common option. microsandbox pulls the image and stacks its layers as a copy-on-write filesystem. Changes inside the sandbox don't modify the base image. If two sandboxes use the same image, they share the same cached layers on disk.
-
-<CodeGroup>
-```rust Rust
-Sandbox::builder("worker").image("python").create().await?;
-```
-
-```typescript TypeScript
-await Sandbox.builder("worker").image("python").create();
-```
-
-```python Python
-await Sandbox.create("worker", image="python")
-```
-
-```go Go
-_, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python"),
-)
-```
-
-```bash CLI
+```bash
 msb create python --name worker
 ```
 
-</CodeGroup>
+You can also use a host directory as the root filesystem:
 
-### Bind mounts
-
-Use a local directory on the host as the root filesystem directly. The guest sees the directory contents as its `/`. This is useful for development when you have a pre-built rootfs, or for minimal environments where you've assembled the filesystem yourself.
-
-<CodeGroup>
-```rust Rust
-Sandbox::builder("worker").image("./my-rootfs").create().await?;
-```
-
-```typescript TypeScript
-await Sandbox.builder("worker").image("./my-rootfs").create();
-```
-
-```python Python
-await Sandbox.create("worker", image="./my-rootfs")
-```
-
-```go Go
-_, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("./my-rootfs"),
-)
-```
-
-```bash CLI
+```bash
 msb create ./my-rootfs --name worker
 ```
 
-</CodeGroup>
+Or boot from a disk image:
 
-<Note>
-  The guest agent is automatically included in the rootfs during sandbox creation, regardless of rootfs source. You don't need to add anything to your image or directory.
-</Note>
-
-### Disk images
-
-Boot from a QCOW2, Raw, or VMDK disk image. Unlike OCI images (which use a copy-on-write overlay), disk images give the guest raw block device access. See [Disk Images](/images/disk-images) for details.
-
-<CodeGroup>
-```rust Rust
-// Auto-detect filesystem
-Sandbox::builder("worker")
-    .image("./ubuntu-22.04.qcow2")
-    .create()
-    .await?;
-
-// Explicit filesystem type
-Sandbox::builder("worker")
-    .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-// Auto-detect the disk image format from the file extension.
-await Sandbox.builder("worker")
-    .image("./alpine.qcow2")
-    .create();
-```
-
-```python Python
-from microsandbox import Image, Sandbox
-
-# Auto-detect filesystem
-await Sandbox.create("worker", image="./ubuntu-22.04.qcow2")
-
-# Explicit filesystem type
-await Sandbox.create("worker", image=Image.disk("./alpine.raw", fstype="ext4"))
-```
-
-```go Go
-// Auto-detect the disk image format from the file extension.
-_, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("./alpine.qcow2"),
-)
-
-// Explicit filesystem type.
-_, err = m.CreateSandbox(ctx, "worker-ext4",
-    m.WithImageDisk("./alpine.raw", "ext4"),
-)
-```
-
-```bash CLI
+```bash
 msb create ./alpine.qcow2 --name worker
 ```
 
-</CodeGroup>
+OCI images use a copy-on-write overlay so sandboxes can share cached base layers. Disk images are attached as block devices, so each sandbox should use its own disk image copy unless the image format handles its own snapshotting.
 
-<Note>
-  With OCI images, microsandbox stacks layers and adds a copy-on-write overlay so sandboxes share the base. With disk images, the guest gets the block device directly, so there's no copy-on-write isolation between sandboxes using the same disk image. Each sandbox needs its own copy (or use QCOW2's built-in snapshot/backing file support).
-</Note>
+See [Images](/images/overview) and [Disk Images](/images/disk-images) for the full image model.
 
-## Replace existing
+## Naming conflicts
 
-Replace a stopped or running sandbox with the same name instead of failing on conflict. This stops the old sandbox (if still running), removes it, and creates a fresh one.
+Creating a sandbox fails if another sandbox already has the same name. Use replace when you want a fresh sandbox with that name:
 
 <CodeGroup>
 ```rust Rust
@@ -296,191 +171,15 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```bash CLI
 msb create --replace python --name worker
 ```
-
 </CodeGroup>
 
-### Grace period
+When replacing a running sandbox, microsandbox attempts graceful shutdown before force-killing it. Use `replace_with_timeout` or `--replace-with-timeout` when the workload needs a longer grace period.
 
-If the existing sandbox is still running, microsandbox sends it `SIGTERM` and waits for it to exit before falling back to `SIGKILL`. The default wait is 10 seconds. Pass a longer grace if the workload needs more time to shut down cleanly, or `0` to skip `SIGTERM` and kill immediately.
+## Where to go next
 
-<CodeGroup>
-```rust Rust
-use std::time::Duration;
-
-let sb = Sandbox::builder("worker")
-    .image("python")
-    .replace_with_timeout(Duration::from_secs(30))
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .replaceWithTimeout(30_000)  // milliseconds
-    .create();
-```
-
-```python Python
-sb = await Sandbox.create("worker", image="python", replace_with_timeout=30)  # seconds
-```
-
-```go Go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python"),
-    m.WithReplaceWithTimeout(30*time.Second),
-)
-```
-
-```bash CLI
-msb create --replace-with-timeout 30s python --name worker
-msb create --replace-with-timeout 0 python --name worker  # SIGKILL immediately
-```
-
-</CodeGroup>
-
-`replace_with_timeout` / `--replace-with-timeout` implies `replace` / `--replace`, so you don't need to pass both.
-
-## Private registry
-
-Authenticate to private container registries and control when images are pulled.
-
-<CodeGroup>
-```rust Rust
-use microsandbox::{Sandbox, RegistryAuth, PullPolicy};
-
-let sb = Sandbox::builder("worker")
-    .image("registry.corp.io/team/app:latest")
-    .registry_auth(RegistryAuth::Basic {
-        username: "deploy".into(),
-        password: std::env::var("REGISTRY_PASSWORD")?,
-    })
-    .pull_policy(PullPolicy::Always)
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-    .image("private.registry.io/org/app:v1")
-    .registry((r) => r.auth({
-        kind: "basic",
-        username: "deploy",
-        password: process.env.REGISTRY_TOKEN!,
-    }))
-    .pullPolicy("always")
-    .create();
-```
-
-```python Python
-import os
-from microsandbox import PullPolicy, RegistryAuth, Sandbox
-
-sb = await Sandbox.create(
-    "worker",
-    image="private.registry.io/org/app:v1",
-    registry_auth=RegistryAuth.basic("deploy", os.environ["REGISTRY_PASSWORD"]),
-    pull_policy=PullPolicy.ALWAYS,
-)
-```
-
-```go Go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("private.registry.io/org/app:v1"),
-    m.WithRegistryAuth(m.RegistryAuth{
-        Username: "deploy",
-        Password: os.Getenv("REGISTRY_PASSWORD"),
-    }),
-    m.WithPullPolicy(m.PullPolicyAlways),
-)
-```
-
-```bash CLI
-msb registry login private.registry.io -u deploy
-msb create private.registry.io/org/app:v1 \
-  --name worker --pull always
-```
-
-</CodeGroup>
-
-| Policy | Behavior |
-|--------|----------|
-| `"always"` | Pull the image every time, even if cached locally |
-| `"if-missing"` | Pull only if the image is not already cached (default) |
-| `"never"` | Never pull; fail if the image is not cached |
-
-<Tip>
-  Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
-</Tip>
-
-## Config inspection
-
-Build or inspect a sandbox configuration. Rust and TypeScript can build a config before boot; Python and Go expose the persisted config after creation.
-
-<CodeGroup>
-```rust Rust
-let config = Sandbox::builder("preview")
-    .image("python")
-    .memory(1024)
-    .build()
-    .await?;
-
-println!("{}", serde_json::to_string_pretty(&config)?);
-let sb = Sandbox::create(config).await?;
-```
-
-```typescript TypeScript
-const config = await Sandbox.builder("preview")
-    .image("python")
-    .memory(1024)
-    .build();
-
-console.log(JSON.stringify(config, null, 2));
-const sb = await Sandbox.builder("preview")
-    .image("python")
-    .memory(1024)
-    .create();
-```
-
-```python Python
-import json
-from microsandbox import Sandbox
-
-sb = await Sandbox.create(
-    "preview",
-    image="python",
-    memory=1024,
-)
-handle = await Sandbox.get("preview")
-config = json.loads(handle.config_json)
-
-print(json.dumps(config, indent=2))
-```
-
-```go Go
-sb, err := m.CreateSandbox(ctx, "preview",
-    m.WithImage("python"),
-    m.WithMemory(1024),
-)
-if err != nil {
-    return err
-}
-
-handle, err := m.GetSandbox(ctx, "preview")
-if err != nil {
-    return err
-}
-
-fmt.Println(handle.ConfigJSON())
-```
-
-</CodeGroup>
-
-## Customizing the guest environment
-
-If you need to run setup logic, install packages, or inject files before a sandbox starts doing real work, there are two ways to do it without building a custom image:
-
-- **[Scripts](/sandboxes/customize#scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
-- **[Patches](/sandboxes/customize#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.
+- [Lifecycle](/sandboxes/lifecycle): start, stop, detach, wait, and remove sandboxes
+- [Commands](/sandboxes/commands): run commands and stream output
+- [Volumes](/sandboxes/volumes): persist or share data
+- [Networking](/networking/overview): control egress, ingress, DNS, and ports
+- [Customize](/sandboxes/customize): add scripts, patches, or a custom init
+- [SDK reference](/sdk/overview): per-language API details
