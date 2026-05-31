@@ -206,6 +206,13 @@ jobs:
           mkdir -p build
           cp target/release/msb build/msb
 
+      # -- msb-metrics --
+      - name: Build msb-metrics
+        run: |
+          cargo build --release -p microsandbox-metrics-collector
+          mkdir -p build
+          cp target/release/msb-metrics build/msb-metrics
+
       # -- Go FFI cdylib --
       - name: Build microsandbox-go
         run: |
@@ -288,6 +295,9 @@ jobs:
 
           # Standalone msb
           cp build/msb artifacts/msb-${{ matrix.target }}
+
+          # Standalone msb-metrics
+          cp build/msb-metrics artifacts/msb-metrics-${{ matrix.target }}
 
           # Standalone libkrunfw
           cp build/${{ matrix.libkrunfw_file }} artifacts/${{ matrix.libkrunfw_asset }}
@@ -579,6 +589,7 @@ jobs:
             microsandbox-filesystem \
             microsandbox-network \
             microsandbox-metrics \
+            microsandbox-metrics-collector \
             microsandbox-runtime \
             microsandbox \
             microsandbox-cli; do

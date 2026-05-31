@@ -94,9 +94,8 @@ pub enum OtlpProtocol {
 /// Optional payload compression for OTLP exports.
 ///
 /// Compression is only wired through on the gRPC transport in
-/// `opentelemetry-otlp` 0.27; HTTP/Protobuf currently has no
-/// `with_compression` hook. Selecting [`OtlpCompression::Gzip`] together
-/// with [`OtlpProtocol::HttpProtobuf`] returns a build-time error.
+/// the current HTTP/Protobuf build. Selecting [`OtlpCompression::Gzip`]
+/// together with [`OtlpProtocol::HttpProtobuf`] returns a build-time error.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OtlpCompression {
     /// No compression. Default; preserves prior behavior.
@@ -251,9 +250,8 @@ impl OtelExporterBuilder {
     /// OTLP endpoint. Added on top of webpki roots, so a corporate gateway
     /// signed by a private CA works without disabling system trust.
     ///
-    /// gRPC only — the `opentelemetry-otlp` 0.27 HTTP transport does not
-    /// expose a TLS configuration hook. Passing this with `--protocol=http`
-    /// is rejected at build time.
+    /// gRPC only — the HTTP transport does not expose a TLS configuration
+    /// hook. Passing this with `--protocol=http` is rejected at build time.
     pub fn ca_cert_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
         self.ca_cert_pem = Some(pem.into());
         self
@@ -374,46 +372,27 @@ impl MetricsExporter for OtelExporter {
                     .add(batch.dropped_collection_count, &[]);
             }
 
+            if batch.collections.is_empty() {
+                let result = export_recorded_metrics(&reader, &otlp).await;
+                record_export_outcome(&self_instruments, &result);
+                return result;
+            }
+
+            // Synchronous OTel gauges use LastValue aggregation. Record and
+            // export one collection at a time so a buffered flush preserves
+            // every collected sample instead of collapsing to the final value.
             for collection in &batch.collections {
                 for snapshot in &collection.sandboxes {
                     let attrs = build_attributes(snapshot, &identity);
                     record_snapshot(&instruments, snapshot, &attrs);
                 }
+
+                let result = export_recorded_metrics(&reader, &otlp).await;
+                record_export_outcome(&self_instruments, &result);
+                result?;
             }
 
-            // Pull what we just recorded out of the SDK pipeline and ship it.
-            // `ManualReader::collect` populates resource + scope_metrics
-            // synchronously (cheap memory copy); `PushMetricExporter::export`
-            // is genuinely async on the OTLP transport.
-            let mut rm = ResourceMetrics::default();
-            let collect_result = reader.collect(&mut rm).map_err(|e| {
-                MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}"))
-            });
-            let result = match collect_result {
-                Ok(()) => otlp.export(&rm).await.map_err(|e| {
-                    MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
-                }),
-                Err(e) => Err(e),
-            };
-
-            // Record outcome after the transport call; the values ship on
-            // the next successful export. Cumulative counters preserve
-            // the total even if the current export failed.
-            match &result {
-                Ok(()) => {
-                    self_instruments.exports_success.add(1, &[]);
-                    if let Ok(now) =
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    {
-                        self_instruments
-                            .last_success_timestamp
-                            .record(now.as_secs_f64(), &[]);
-                    }
-                }
-                Err(_) => self_instruments.exports_failure.add(1, &[]),
-            }
-
-            result
+            Ok(())
         })
     }
 
@@ -444,7 +423,7 @@ fn build_otlp_exporter(
     if matches!(protocol, OtlpProtocol::HttpProtobuf) && ca_cert_pem.is_some() {
         return Err(MetricsCollectorError::InvalidConfig(
             "custom CA certificate is currently supported only with --protocol=grpc; \
-             opentelemetry-otlp 0.27 has no TLS configuration hook on the HTTP transport"
+             opentelemetry-otlp has no TLS configuration hook on the HTTP transport"
                 .into(),
         ));
     }
@@ -453,7 +432,7 @@ fn build_otlp_exporter(
     {
         return Err(MetricsCollectorError::InvalidConfig(
             "gzip compression is currently supported only with --protocol=grpc; \
-             opentelemetry-otlp 0.27 has no with_compression hook on the HTTP transport"
+             the HTTP transport was not built with gzip support"
                 .into(),
         ));
     }
@@ -482,6 +461,39 @@ fn build_otlp_exporter(
             .build(),
     };
     result.map_err(|e| MetricsCollectorError::Custom(format!("otel exporter build failed: {e}")))
+}
+
+/// Pull recorded points out of the SDK pipeline and ship them. `collect`
+/// populates resource + scope metrics synchronously; the OTLP transport export
+/// is async.
+async fn export_recorded_metrics(
+    reader: &SharedManualReader,
+    otlp: &OtlpMetricExporter,
+) -> MetricsCollectorResult<()> {
+    let mut rm = ResourceMetrics::default();
+    reader
+        .collect(&mut rm)
+        .map_err(|e| MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}")))?;
+    otlp.export(&rm)
+        .await
+        .map_err(|e| MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}")))?;
+    Ok(())
+}
+
+/// Record exporter self-observability after the transport returns. These
+/// cumulative points ship on the next successful OTLP request.
+fn record_export_outcome(instruments: &SelfInstruments, result: &MetricsCollectorResult<()>) {
+    match result {
+        Ok(()) => {
+            instruments.exports_success.add(1, &[]);
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                instruments
+                    .last_success_timestamp
+                    .record(now.as_secs_f64(), &[]);
+            }
+        }
+        Err(_) => instruments.exports_failure.add(1, &[]),
+    }
 }
 
 /// Apply caller-supplied `--header k=v` pairs by writing them into the
