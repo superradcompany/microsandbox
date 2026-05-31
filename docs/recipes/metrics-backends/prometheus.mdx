@@ -37,12 +37,12 @@ the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
 
     ```sh
     msb-metrics otel \
-      --endpoint=http://localhost:9090/api/v1/otlp \
+      --endpoint=http://localhost:9090/api/v1/otlp/v1/metrics \
       --protocol=http
     ```
 
-    The `/v1/metrics` path is appended automatically by the OTLP HTTP
-    client.
+    Pass the full receiver path. `msb-metrics` uses HTTP endpoints
+    exactly as provided.
   </Step>
 
   <Step title="Verify">

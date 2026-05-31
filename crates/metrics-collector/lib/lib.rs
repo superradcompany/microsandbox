@@ -2,8 +2,8 @@
 //! metrics registry, buffers per-exporter, and fans batches out to
 //! registered exporters.
 //!
-//! See `docs/msb-metrics-binary-plan.md` for the architecture and the
-//! `msb-metrics` binary that ships in this crate's `bin/main.rs`.
+//! See `docs/observability/msb-metrics.mdx` for the user-facing overview and
+//! the `msb-metrics` binary that ships in this crate's `bin/main.rs`.
 //!
 //! # Lifecycle
 //!

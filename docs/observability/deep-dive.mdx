@@ -177,9 +177,9 @@ msb-metrics otel --endpoint=<URL>
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--endpoint` | (required) | OTLP endpoint URL. |
-| `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). |
-| `--compression` | `none` | `gzip` or `none`. gRPC-only in `opentelemetry-otlp` 0.27; rejected at startup with `--protocol=http`. Meaningful bandwidth saving for direct provider gateways over public internet. |
+| `--endpoint` | (required) | OTLP endpoint URL. With `--protocol=http`, pass the complete metrics signal URL (usually ending in `/v1/metrics`). |
+| `--protocol` | `grpc` | `grpc` (port `4317`) or `http` (Protobuf body, port `4318`). HTTP endpoints are used exactly as provided. |
+| `--compression` | `none` | `gzip` or `none`. gRPC-only in the current build; rejected at startup with `--protocol=http`. Meaningful bandwidth saving for direct provider gateways over public internet. |
 | `--ca-cert` | none | Path to a PEM-encoded CA certificate to trust when negotiating TLS. Added on top of webpki roots, so a corporate gateway signed by a private CA works without disabling system trust. gRPC only; rejected at startup with `--protocol=http`. |
 | `--header` | none | `KEY=VALUE`, repeatable. For auth (`Authorization`, `api-key`, etc.). Applied via `OTEL_EXPORTER_OTLP_HEADERS`. |
 | `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
@@ -283,8 +283,9 @@ lands. This is normal counter-reset behavior, not a bug.
   <Accordion title="OTLP backend rejects the request (HTTP 401/403/422)">
     Auth or schema mismatch. Verify the `--header` value (especially
     `Authorization` base64 encoding) and that the endpoint URL matches
-    the protocol. gRPC endpoints typically end at `4317`, HTTP/Protobuf
-    at `4318` with an explicit `/v1/metrics` path on some backends.
+    the protocol. gRPC endpoints typically end at `4317`; HTTP/Protobuf
+    endpoints should be the full metrics URL expected by that backend
+    (often `/v1/metrics`, but deployments can route it differently).
   </Accordion>
 
   <Accordion title="Sandbox restarts produce fresh time series">

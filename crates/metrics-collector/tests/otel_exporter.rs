@@ -40,7 +40,7 @@ async fn grpc_gzip_builds() {
             .compression(OtlpCompression::Gzip)
             .build()
             .is_ok(),
-        "gRPC + gzip is supported in opentelemetry-otlp 0.27"
+        "gRPC + gzip is supported by the configured opentelemetry-otlp build"
     );
 }
 
