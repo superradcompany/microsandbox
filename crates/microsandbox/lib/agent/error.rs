@@ -51,6 +51,24 @@ pub enum AgentClientError {
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
 
+    /// The message type requires a newer protocol generation than the
+    /// connected sandbox speaks.
+    ///
+    /// Raised on send, before any bytes go out, so a feature the runtime is too
+    /// old to handle fails on its own without disturbing the rest of the
+    /// session. See `VERSIONING.md` in `microsandbox-protocol`.
+    #[error(
+        "message type '{msg_type}' needs protocol generation {needs} but this sandbox speaks generation {peer}; recreate the sandbox with a newer runtime to use it"
+    )]
+    Unsupported {
+        /// Wire name of the message type that was gated.
+        msg_type: &'static str,
+        /// Generation the message type was introduced in.
+        needs: u8,
+        /// Generation negotiated with the connected sandbox.
+        peer: u8,
+    },
+
     /// The reader task closed (socket EOF or client closed) before the
     /// in-flight request received its response.
     #[error("reader closed before response for id={0}")]

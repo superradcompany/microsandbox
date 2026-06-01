@@ -81,6 +81,11 @@ pub struct AgentClient {
     id_max: u32,
     /// Agent protocol generation for this connection.
     protocol: AgentProtocol,
+    /// Negotiated protocol generation: `min(our PROTOCOL_VERSION, the
+    /// generation the sandbox echoed in its `core.ready` frame)`. Drives the
+    /// capability gate on the typed send path. Distinct from [`Self::protocol`],
+    /// which selects the wire codec; see `VERSIONING.md`.
+    negotiated_version: u8,
     /// Pending response channels keyed by correlation ID.
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
     /// Background reader task handle.
@@ -211,6 +216,13 @@ impl AgentClient {
             .payload()
             .map_err(|e| AgentClientError::Handshake(format!("decode ready payload: {e}")))?;
 
+        // The negotiated capability generation is the lower of what we speak and
+        // what the sandbox echoed in its ready frame (`ready_msg.v`). For the
+        // load-bearing case — a newer host meeting an older runtime — this is the
+        // runtime's generation, so the send gate withholds features it can't
+        // handle. The codec generation (`protocol`) is negotiated separately.
+        let negotiated_version = protocol.version().min(ready_msg.v);
+
         tracing::info!(
             id_min,
             id_max,
@@ -239,6 +251,7 @@ impl AgentClient {
             id_min,
             id_max,
             protocol,
+            negotiated_version,
             pending,
             reader_handle,
             ready_body: ready_frame.body,
@@ -366,6 +379,18 @@ impl AgentClient {
     pub fn is_legacy_protocol(&self) -> bool {
         self.protocol == AgentProtocol::LegacyV1
     }
+
+    /// The negotiated protocol generation for this connection: the lower of what
+    /// this client speaks and what the sandbox advertised at handshake.
+    pub fn negotiated_version(&self) -> u8 {
+        self.negotiated_version
+    }
+
+    /// Reject a message type the connected sandbox is too old to handle, before
+    /// any bytes are sent. Only that one operation fails; the session continues.
+    fn ensure_supported(&self, t: MessageType) -> AgentClientResult<()> {
+        gate_message_type(t, self.negotiated_version)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -379,6 +404,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<Message> {
+        self.ensure_supported(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         let frame = self.request_raw(flags, body).await?;
@@ -392,6 +418,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<Message>)> {
+        self.ensure_supported(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         let (id, raw_rx) = self.stream_raw(flags, body).await?;
@@ -408,6 +435,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<()> {
+        self.ensure_supported(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         self.write_frame(id, flags, &body).await
@@ -565,6 +593,22 @@ async fn decode_stream_task(
     }
 }
 
+/// Gate a typed send: reject a message type whose introducing generation is
+/// newer than the generation negotiated with the connected sandbox.
+///
+/// A free function so the gate is unit-testable without a live connection.
+fn gate_message_type(t: MessageType, negotiated: u8) -> AgentClientResult<()> {
+    let needs = t.min_protocol_version();
+    if needs > negotiated {
+        return Err(AgentClientError::Unsupported {
+            msg_type: t.as_str(),
+            needs,
+            peer: negotiated,
+        });
+    }
+    Ok(())
+}
+
 /// Encode a typed payload to a CBOR `Message` body.
 fn encode_message_body<T: Serialize>(
     version: u8,
@@ -620,6 +664,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(client.protocol(), AgentProtocol::Current);
+        // Both peers speak the current generation, so that is what is negotiated.
+        assert_eq!(client.negotiated_version(), PROTOCOL_VERSION);
         let decoded = client.ready().unwrap();
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
@@ -627,6 +673,63 @@ mod tests {
 
         let raw_msg: Message = ciborium::from_reader(client.ready_bytes()).unwrap();
         assert_eq!(raw_msg.t, MessageType::Ready);
+    }
+
+    #[tokio::test]
+    async fn connect_negotiates_down_to_older_guest_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 1,
+            init_time_ns: 2,
+            ready_time_ns: 3,
+        };
+        // A current-codec guest that advertises an older capability generation in
+        // its ready frame (a runtime one generation behind this host).
+        let mut ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+        ready_msg.v = 1;
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket
+                .write_all(&microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP.to_be_bytes())
+                .await
+                .unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+        });
+
+        let client =
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+
+        // Current codec, but the capability gate is pinned to the guest's older
+        // generation: min(host PROTOCOL_VERSION, guest's advertised 1) == 1.
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        assert_eq!(client.negotiated_version(), 1);
+    }
+
+    #[test]
+    fn gate_allows_baseline_types_for_any_live_generation() {
+        assert!(gate_message_type(MessageType::ExecRequest, 1).is_ok());
+        assert!(gate_message_type(MessageType::FsRequest, PROTOCOL_VERSION).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_type_newer_than_negotiated() {
+        // No baseline type exceeds generation 1, so simulate a peer older than the
+        // v1 floor to exercise the rejection path and the typed error shape.
+        let err = gate_message_type(MessageType::ExecRequest, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            AgentClientError::Unsupported {
+                needs: 1,
+                peer: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

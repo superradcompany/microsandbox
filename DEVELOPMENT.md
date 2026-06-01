@@ -94,7 +94,7 @@ The project is a Cargo workspace with these crates (in dependency order):
 | Crate | Path | Description |
 | --- | --- | --- |
 | `microsandbox-utils` | `crates/utils` | Shared utilities |
-| `microsandbox-protocol` | `crates/protocol` | Wire protocol definitions |
+| `microsandbox-protocol` | `crates/protocol` | Wire protocol definitions ([versioning](./crates/protocol/VERSIONING.md)) |
 | `microsandbox-db` | `crates/db` | Database layer |
 | `microsandbox-migration` | `crates/migration` | Database migrations |
 | `microsandbox-image` | `crates/image` | OCI image handling |

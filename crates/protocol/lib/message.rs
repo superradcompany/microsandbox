@@ -45,7 +45,13 @@ pub const FRAME_HEADER_SIZE: usize = 5;
 /// so that relay intermediaries can route frames without CBOR parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// Protocol version.
+    /// Protocol generation, echoed into the frame.
+    ///
+    /// This is the single protocol version axis (see `VERSIONING.md`), the same
+    /// number negotiated once at the handshake — not a second, message-local
+    /// version. It is carried here so a frame is self-describing for debugging
+    /// and telemetry; behavior is gated on the negotiated generation, not on
+    /// reading this field per message.
     pub v: u8,
 
     /// Message type.
@@ -70,7 +76,7 @@ pub struct Message {
 }
 
 /// Identifies the type of a protocol message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageType {
     /// Guest agent is ready.
     Ready,
@@ -184,6 +190,43 @@ impl MessageType {
             Self::ExecRequest | Self::FsRequest => FLAG_SESSION_START,
             Self::Shutdown => FLAG_SHUTDOWN,
             _ => 0,
+        }
+    }
+
+    /// The protocol generation that introduced this message type.
+    ///
+    /// A per-type label on the single protocol generation axis (see
+    /// `VERSIONING.md`), not a separate version counter. The send path gates on
+    /// it: a type whose generation exceeds the peer's negotiated generation is
+    /// rejected locally with a typed error instead of being sent to a peer that
+    /// cannot handle it, so only that one feature fails rather than the session.
+    ///
+    /// Every current type belongs to the v1 baseline. There is deliberately no
+    /// wildcard arm: adding a new `MessageType` must force a conscious choice of
+    /// the generation that introduced it (and a matching `PROTOCOL_VERSION`
+    /// bump). Message types are append-only — never lower or re-purpose an
+    /// existing value.
+    pub fn min_protocol_version(&self) -> u8 {
+        match self {
+            Self::Ready
+            | Self::InitResolved
+            | Self::InitAck
+            | Self::Shutdown
+            | Self::RelayClientDisconnected
+            | Self::ClockSync
+            | Self::ExecRequest
+            | Self::ExecStarted
+            | Self::ExecStdin
+            | Self::ExecStdinError
+            | Self::ExecStdout
+            | Self::ExecStderr
+            | Self::ExecExited
+            | Self::ExecFailed
+            | Self::ExecResize
+            | Self::ExecSignal
+            | Self::FsRequest
+            | Self::FsResponse
+            | Self::FsData => 1,
         }
     }
 
@@ -375,6 +418,41 @@ mod tests {
         assert_eq!(MessageType::ExecResize.flags(), 0);
         assert_eq!(MessageType::ExecSignal.flags(), 0);
         assert_eq!(MessageType::FsData.flags(), 0);
+    }
+
+    #[test]
+    fn test_min_protocol_version_baseline_is_v1() {
+        // Every current message type belongs to the v1 baseline. When a type is
+        // introduced at a later generation this assertion is expected to change
+        // for that type only — and `PROTOCOL_VERSION` should bump alongside it.
+        let baseline = [
+            MessageType::Ready,
+            MessageType::InitResolved,
+            MessageType::InitAck,
+            MessageType::Shutdown,
+            MessageType::RelayClientDisconnected,
+            MessageType::ClockSync,
+            MessageType::ExecRequest,
+            MessageType::ExecStarted,
+            MessageType::ExecStdin,
+            MessageType::ExecStdinError,
+            MessageType::ExecStdout,
+            MessageType::ExecStderr,
+            MessageType::ExecExited,
+            MessageType::ExecFailed,
+            MessageType::ExecResize,
+            MessageType::ExecSignal,
+            MessageType::FsRequest,
+            MessageType::FsResponse,
+            MessageType::FsData,
+        ];
+
+        for mt in &baseline {
+            assert_eq!(mt.min_protocol_version(), 1, "{mt:?} should be v1 baseline");
+        }
+
+        // A baseline type must always be sendable to the oldest supported peer.
+        assert!(MessageType::ExecRequest.min_protocol_version() <= PROTOCOL_VERSION);
     }
 
     #[test]
