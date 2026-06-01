@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use microsandbox_protocol::fs::FS_CHUNK_SIZE;
+use microsandbox_protocol::{fs::FS_CHUNK_SIZE, message::MessageType};
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
 use russh::server::{Auth, Msg, Session};
@@ -100,9 +100,11 @@ pub struct SshClient {
     handle: russh::client::Handle<SshClientHandler>,
     term: String,
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
+    // Whether the sandbox is new enough for SFTP, which rides on the filesystem
+    // protocol. Captured at connect; decided by MessageType::min_protocol_version.
     // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
     // compatibility for versions before 0.5 is no longer supported.
-    legacy_agent: bool,
+    sftp_supported: bool,
 }
 
 /// High-level SFTP client session.
@@ -281,7 +283,7 @@ impl SandboxSsh {
             handle: client,
             term,
             server_task: Some(server_task),
-            legacy_agent: self.sandbox.client().is_legacy_protocol(),
+            sftp_supported: self.sandbox.client().supports(MessageType::FsRequest),
         })
     }
 
@@ -639,7 +641,7 @@ impl SshClient {
 
     /// Open an SFTP client session over this SSH connection.
     pub async fn sftp(&self) -> MicrosandboxResult<SftpClient> {
-        if self.legacy_agent {
+        if !self.sftp_supported {
             // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
             // compatibility for versions before 0.5 is no longer supported.
             return Err(MicrosandboxError::AgentClient(
@@ -1023,9 +1025,10 @@ impl russh::server::Handler for SshSession {
         };
 
         let client = self.agent_client().await?;
-        if client.is_legacy_protocol() {
-            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-            // compatibility for versions before 0.5 is no longer supported.
+        if !client.supports(MessageType::FsRequest) {
+            // SFTP rides on the filesystem protocol; reject the subsystem on a
+            // sandbox too old for it. TODO(upgrade-0.6): Remove in 0.6.x or later
+            // once live-sandbox compatibility for versions before 0.5 is dropped.
             session.channel_failure(channel)?;
             return Ok(());
         }

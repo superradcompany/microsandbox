@@ -194,14 +194,19 @@ CBOR { v, t, p }                   <- the envelope: version, message type, paylo
   not a per-message version. Don't gate behavior by reading it per message.
 - **`MessageType::min_protocol_version()`** (`lib/message.rs`) is the per-type label: the
   generation that introduced the type. It has no wildcard arm, so adding a `MessageType` won't
-  compile until you assign its generation (and bump `PROTOCOL_VERSION` to match). Current types are
-  all generation 1.
+  compile until you assign its generation (and bump `PROTOCOL_VERSION` to match). Core and exec
+  types are generation 1 (the pre-0.5 legacy runtime handles them); the `Fs*` types are generation
+  2, because filesystem streaming did not exist in the legacy protocol.
 - **The send gate** lives on the host client (`crates/microsandbox/lib/agent/client.rs`). At
   handshake the client computes `negotiated_version = min(our PROTOCOL_VERSION, the generation the
 sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_version()` against it
-  and returns `AgentClientError::Unsupported` if the sandbox is too old. The check is on both
-  directions in principle; the guest→host gate is future work (the runtime doesn't yet track the
-  host's generation, and no guest→host message type is above generation 1).
+  and rejects too-old sandboxes with `AgentClientError::Unsupported` — except a legacy-generation
+  sandbox, which gets the tailored `Pre05SandboxRestartRequired` ("restart") error, since restarting
+  a pre-0.5 sandbox re-runs agentd at the current version. Callers that can't gate by sending (the
+  SSH/SFTP layer, the filesystem fail-fast) consult `AgentClient::supports(MessageType)`, the single
+  predicate over the same mechanism, instead of inspecting the protocol generation directly. The
+  guest→host gate is future work (the runtime doesn't yet track the host's generation, and no
+  guest→host message type is above generation 1).
 - **Codec vs. gate.** `AgentProtocol` (Current / LegacyV1) selects the wire _codec_ (the container
   format). `negotiated_version` drives the _capability gate_. These are the two consumers of the
   one generation number.

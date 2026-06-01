@@ -201,11 +201,15 @@ impl MessageType {
     /// rejected locally with a typed error instead of being sent to a peer that
     /// cannot handle it, so only that one feature fails rather than the session.
     ///
-    /// Every current type belongs to the v1 baseline. There is deliberately no
-    /// wildcard arm: adding a new `MessageType` must force a conscious choice of
-    /// the generation that introduced it (and a matching `PROTOCOL_VERSION`
-    /// bump). Message types are append-only — never lower or re-purpose an
-    /// existing value.
+    /// Core and exec types belong to the generation-1 baseline; they work on
+    /// every runtime we still talk to, including the pre-0.5 legacy one.
+    /// Filesystem streaming did not exist in the pre-0.5 legacy protocol
+    /// (generation 1), so the `Fs*` types require generation 2 or newer.
+    ///
+    /// There is deliberately no wildcard arm: adding a new `MessageType` must
+    /// force a conscious choice of the generation that introduced it (and a
+    /// matching `PROTOCOL_VERSION` bump). Message types are append-only — never
+    /// lower or re-purpose an existing value.
     pub fn min_protocol_version(&self) -> u8 {
         match self {
             Self::Ready
@@ -223,10 +227,8 @@ impl MessageType {
             | Self::ExecExited
             | Self::ExecFailed
             | Self::ExecResize
-            | Self::ExecSignal
-            | Self::FsRequest
-            | Self::FsResponse
-            | Self::FsData => 1,
+            | Self::ExecSignal => 1,
+            Self::FsRequest | Self::FsResponse | Self::FsData => 2,
         }
     }
 
@@ -456,10 +458,9 @@ mod tests {
     }
 
     #[test]
-    fn test_min_protocol_version_baseline_is_v1() {
-        // Every current message type belongs to the v1 baseline. When a type is
-        // introduced at a later generation this assertion is expected to change
-        // for that type only — and `PROTOCOL_VERSION` should bump alongside it.
+    fn test_min_protocol_version_per_type() {
+        // Core and exec types are the generation-1 baseline: usable on every
+        // runtime we still talk to, including the pre-0.5 legacy one.
         let baseline = [
             MessageType::Ready,
             MessageType::InitResolved,
@@ -477,17 +478,23 @@ mod tests {
             MessageType::ExecFailed,
             MessageType::ExecResize,
             MessageType::ExecSignal,
-            MessageType::FsRequest,
-            MessageType::FsResponse,
-            MessageType::FsData,
         ];
-
         for mt in &baseline {
             assert_eq!(mt.min_protocol_version(), 1, "{mt:?} should be v1 baseline");
         }
 
-        // A baseline type must always be sendable to the oldest supported peer.
-        assert!(MessageType::ExecRequest.min_protocol_version() <= PROTOCOL_VERSION);
+        // Filesystem streaming did not exist in the pre-0.5 legacy protocol, so
+        // these require a post-legacy generation.
+        for mt in [
+            MessageType::FsRequest,
+            MessageType::FsResponse,
+            MessageType::FsData,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 2, "{mt:?} should require gen 2");
+        }
+
+        // Every current type must be sendable to a current peer.
+        assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);
     }
 
     #[test]

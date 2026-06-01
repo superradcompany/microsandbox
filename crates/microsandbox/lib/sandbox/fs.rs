@@ -137,9 +137,11 @@ impl SandboxFs {
     }
 
     fn ensure_current_protocol(&self) -> MicrosandboxResult<()> {
-        if self.client.is_legacy_protocol() {
-            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-            // compatibility for versions before 0.5 is no longer supported.
+        // Fail fast with the tailored restart error when the sandbox is too old
+        // for filesystem streaming. The send path enforces the same gate; this
+        // is the early, friendlier surface. Feature support is decided in one
+        // place: MessageType::min_protocol_version.
+        if !self.client.supports(MessageType::FsRequest) {
             return Err(MicrosandboxError::AgentClient(
                 AgentClientError::Pre05SandboxRestartRequired,
             ));

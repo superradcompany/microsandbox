@@ -386,6 +386,14 @@ impl AgentClient {
         self.negotiated_version
     }
 
+    /// Whether the connected sandbox is new enough to handle the given message
+    /// type. The single source of truth for feature gating: callers that can't
+    /// gate by sending (e.g. the SSH/SFTP layer) consult this instead of
+    /// inspecting the protocol generation directly.
+    pub fn supports(&self, t: MessageType) -> bool {
+        t.min_protocol_version() <= self.negotiated_version
+    }
+
     /// Reject a message type the connected sandbox is too old to handle, before
     /// any bytes are sent. Only that one operation fails; the session continues.
     fn ensure_supported(&self, t: MessageType) -> AgentClientResult<()> {
@@ -596,17 +604,27 @@ async fn decode_stream_task(
 /// Gate a typed send: reject a message type whose introducing generation is
 /// newer than the generation negotiated with the connected sandbox.
 ///
-/// A free function so the gate is unit-testable without a live connection.
+/// A pre-0.5 legacy sandbox is a special case: restarting it re-runs agentd at
+/// the current version, so the rejection carries the tailored "restart" error
+/// instead of the generic "recreate" one. A free function so the gate is
+/// unit-testable without a live connection.
 fn gate_message_type(t: MessageType, negotiated: u8) -> AgentClientResult<()> {
     let needs = t.min_protocol_version();
-    if needs > negotiated {
-        return Err(AgentClientError::Unsupported {
-            msg_type: t.as_str(),
-            needs,
-            peer: negotiated,
-        });
+    if needs <= negotiated {
+        return Ok(());
     }
-    Ok(())
+
+    // TODO(upgrade-0.6): Remove the legacy branch in 0.6.x or later once
+    // pre-0.5 live-sandbox compatibility is dropped.
+    if negotiated <= LEGACY_PROTOCOL_VERSION {
+        return Err(AgentClientError::Pre05SandboxRestartRequired);
+    }
+
+    Err(AgentClientError::Unsupported {
+        msg_type: t.as_str(),
+        needs,
+        peer: negotiated,
+    })
 }
 
 /// Encode a typed payload to a CBOR `Message` body.
@@ -666,6 +684,7 @@ mod tests {
         assert_eq!(client.protocol(), AgentProtocol::Current);
         // Both peers speak the current generation, so that is what is negotiated.
         assert_eq!(client.negotiated_version(), PROTOCOL_VERSION);
+        assert!(client.supports(MessageType::FsRequest));
         let decoded = client.ready().unwrap();
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
@@ -709,27 +728,26 @@ mod tests {
         // generation: min(host PROTOCOL_VERSION, guest's advertised 1) == 1.
         assert_eq!(client.protocol(), AgentProtocol::Current);
         assert_eq!(client.negotiated_version(), 1);
+        // Exec is in the baseline; filesystem is not, at generation 1.
+        assert!(client.supports(MessageType::ExecRequest));
+        assert!(!client.supports(MessageType::FsRequest));
     }
 
     #[test]
-    fn gate_allows_baseline_types_for_any_live_generation() {
-        assert!(gate_message_type(MessageType::ExecRequest, 1).is_ok());
+    fn gate_allows_supported_types() {
+        // Baseline exec works everywhere, including the legacy generation.
+        assert!(gate_message_type(MessageType::ExecRequest, LEGACY_PROTOCOL_VERSION).is_ok());
+        // Filesystem works on a current sandbox.
         assert!(gate_message_type(MessageType::FsRequest, PROTOCOL_VERSION).is_ok());
     }
 
     #[test]
-    fn gate_rejects_type_newer_than_negotiated() {
-        // No baseline type exceeds generation 1, so simulate a peer older than the
-        // v1 floor to exercise the rejection path and the typed error shape.
-        let err = gate_message_type(MessageType::ExecRequest, 0).unwrap_err();
-        assert!(matches!(
-            err,
-            AgentClientError::Unsupported {
-                needs: 1,
-                peer: 0,
-                ..
-            }
-        ));
+    fn gate_rejects_filesystem_on_legacy_with_restart_error() {
+        // The legacy (generation 1) runtime lacks filesystem streaming. It is
+        // rejected with the tailored restart error, not the generic one, because
+        // restarting a pre-0.5 sandbox re-runs agentd at the current version.
+        let err = gate_message_type(MessageType::FsRequest, LEGACY_PROTOCOL_VERSION).unwrap_err();
+        assert!(matches!(err, AgentClientError::Pre05SandboxRestartRequired));
     }
 
     #[tokio::test]
