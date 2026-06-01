@@ -194,6 +194,7 @@ mod tests {
             "manifest_layer",
             "run",
             "sandbox",
+            "sandbox_labels",
             "sandbox_rootfs",
             "snapshot_index",
             "volume",
@@ -428,6 +429,6 @@ mod tests {
             .try_get_by_index::<i64>(0)
             .unwrap();
 
-        assert_eq!(migration_count, 8);
+        assert_eq!(migration_count, 10);
     }
 }
