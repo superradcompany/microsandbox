@@ -7,6 +7,7 @@
 
 mod builder;
 mod driver;
+mod label_cache;
 mod reader;
 mod types;
 mod worker;

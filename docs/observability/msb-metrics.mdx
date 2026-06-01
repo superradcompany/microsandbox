@@ -116,6 +116,29 @@ End-to-end setup walkthroughs live under [Recipes](/recipes):
   </Card>
 </CardGroup>
 
+## Labels and per-user views
+
+Labels you set at sandbox creation ride along to your backend as metric
+attributes, so you can build per-user, per-tenant, or per-environment
+views without naming every sandbox.
+
+```bash
+msb create agent-1 --image alpine --label user.id=alice --label tenant=acme
+```
+
+`msb-metrics` reads those labels from the catalog and attaches them to
+every datapoint. In Grafana Cloud or Prometheus you then filter by them
+(dots become underscores in PromQL):
+
+```promql
+microsandbox_cpu_utilization{user_id="alice"}
+```
+
+Labels are on by default. Pass `--no-labels` to turn them off, e.g. when
+a high-cardinality key like `user.id` would inflate active-series
+billing. See the [Deep dive](/observability/deep-dive#attributes) for the
+cardinality trade-offs.
+
 ## Reference
 
 For flags, metric names, attribute tables, operational notes, and

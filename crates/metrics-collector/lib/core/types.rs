@@ -1,5 +1,6 @@
 //! Public types: batches, collections, exporter trait.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -20,6 +21,11 @@ pub struct MetricsCollection {
 
     /// Active sandbox metrics snapshots.
     pub sandboxes: Vec<SandboxMetricSnapshot>,
+
+    /// Per-sandbox labels (`sandbox_id` → ordered `(key, value)` pairs), resolved
+    /// from the catalog. Empty when label enrichment is disabled or a sandbox has
+    /// no labels; exporters look up entries by `SandboxMetricSnapshot::sandbox_id`.
+    pub labels: HashMap<i32, Arc<Vec<(String, String)>>>,
 }
 
 /// A buffered metrics export batch delivered to a registered exporter.

@@ -134,6 +134,23 @@ cardinality-billed backends.
 | `sandbox.run_id` | off | Opt-in via `--emit-run-id`. Fresh series per restart. |
 | `sandbox.pid` | off | Opt-in via `--emit-pid`. Fresh series per restart. |
 
+**Label attributes** are the user-defined labels set at sandbox
+creation (`msb create --label user.id=alice`). They are read from the
+catalog on first sight of each sandbox, cached, and attached to every
+datapoint as a plain attribute with the same key and value, so backends
+can group and filter by them. On by default; disable with `--no-labels`.
+
+<Warning>
+  Labels are emitted unconditionally and are not pre-declared, so a
+  high-cardinality key like `user.id` multiplies active series far more
+  than the opt-in `run_id` / `pid` do. Backends such as Grafana Cloud and
+  Prometheus bill on active series. Keep label keys low-cardinality, or
+  pass `--no-labels` where attribution is not needed.
+</Warning>
+
+If the catalog DB cannot be opened, `msb-metrics` logs a warning and
+keeps shipping metrics without labels.
+
 ## All flags
 
 <Accordion title="msb-metrics stdout">
@@ -147,6 +164,7 @@ msb-metrics stdout [--collect-interval=<dur>]
                    [--max-buffered=<n>]
                    [--export-timeout=<dur>]
                    [--msb-home=<path>]
+                   [--no-labels]
 ```
 
 The output format is not a stable contract; don't pipe it into
@@ -173,6 +191,7 @@ msb-metrics otel --endpoint=<URL>
                  [--max-buffered=<n>]
                  [--export-timeout=<dur>]
                  [--msb-home=<path>]
+                 [--no-labels]
 ```
 
 | Flag | Default | Notes |
@@ -185,6 +204,7 @@ msb-metrics otel --endpoint=<URL>
 | `--resource` | none | `KEY=VALUE`, repeatable. Overrides or adds OTel resource attributes. |
 | `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |
 | `--emit-pid` | off | Add `sandbox.pid` to every datapoint. Opt-in: high cardinality. |
+| `--no-labels` | off | Stop attaching per-sandbox labels (skips the catalog lookup). Use to cap series cardinality from high-cardinality label keys. |
 | `--collect-interval` | `1s` | How often shm is read. `humantime` durations (`1s`, `500ms`, `2m`). |
 | `--flush-interval` | `10s` | Per-exporter scheduled flush cadence. |
 | `--max-buffered` | `60` | Per-exporter buffer cap. Oldest collection drops on overflow; drop count surfaces on the next batch. |

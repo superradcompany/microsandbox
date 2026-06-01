@@ -103,5 +103,6 @@ pub(crate) fn collection(seq: i32) -> MetricsCollection {
                 timestamp: chrono::Utc::now(),
             },
         }],
+        labels: std::collections::HashMap::new(),
     }
 }

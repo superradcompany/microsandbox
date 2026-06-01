@@ -4,8 +4,10 @@ use std::{sync::Arc, time::Duration};
 
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 
+use microsandbox_db::DbReadConnection;
+
 use super::driver::{CollectorConfig, MetricsCollector, MetricsErrorPolicy};
-use super::reader::{CollectFn, registry_collect_fn};
+use super::reader::{CollectFn, enrich_with_labels, registry_collect_fn};
 use super::types::MetricsExporter;
 
 //--------------------------------------------------------------------------------------------------
@@ -129,6 +131,14 @@ impl MetricsCollectorBuilder {
     /// Set the collector-wide interval between shared-memory metrics reads.
     pub fn collect_interval(mut self, interval: Duration) -> Self {
         self.collect_interval = interval;
+        self
+    }
+
+    /// Enrich each collection with per-sandbox labels read from the catalog
+    /// `db`. Labels are attached as attributes by label-aware exporters (e.g.
+    /// OTel). Without this, collections carry no labels.
+    pub fn enrich_labels(mut self, db: Arc<DbReadConnection>) -> Self {
+        self.collect_fn = enrich_with_labels(self.collect_fn, db);
         self
     }
 
