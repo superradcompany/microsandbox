@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, SandboxFilter, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -903,6 +903,12 @@ struct RegistryAuthOpts {
     password: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct SandboxListFilter {
+    #[serde(default)]
+    labels: HashMap<String, String>,
+}
+
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
@@ -914,6 +920,8 @@ struct SandboxCreateOpts {
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
     #[serde(default)]
     detached: bool,
     hostname: Option<String>,
@@ -1817,6 +1825,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
             }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
+            }
             // Top-level ports.
             for (host, guest) in &opts.ports {
                 builder = builder.port(*host, *guest);
@@ -2190,12 +2201,17 @@ pub unsafe extern "C" fn msb_sandbox_owns_lifecycle(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_list(
     cancel_id: u64,
+    filter_json: *const c_char,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
+        let filter_raw = unsafe { cstr(filter_json) }?;
+        let filter: SandboxListFilter = serde_json::from_str(&filter_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid filter JSON: {e}")))?;
+        let filter = SandboxFilter::new().labels(filter.labels);
         Ok(Box::pin(async move {
-            let handles = Sandbox::list().await.map_err(FfiError::from)?;
+            let handles = Sandbox::list_with(filter).await.map_err(FfiError::from)?;
             let mut out = String::from("[");
             for (i, h) in handles.iter().enumerate() {
                 if i > 0 {

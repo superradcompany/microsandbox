@@ -179,6 +179,28 @@ impl PySandbox {
         })
     }
 
+    /// List sandboxes filtered to those carrying all of the given `labels`
+    /// (AND-matched).
+    #[staticmethod]
+    #[pyo3(signature = (*, labels = None))]
+    fn list_with<'py>(
+        py: Python<'py>,
+        labels: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let filter =
+                microsandbox::sandbox::SandboxFilter::new().labels(labels.unwrap_or_default());
+            let handles = microsandbox::sandbox::Sandbox::list_with(filter)
+                .await
+                .map_err(to_py_err)?;
+            let py_handles: Vec<PySandboxHandle> = handles
+                .into_iter()
+                .map(PySandboxHandle::from_rust)
+                .collect();
+            Ok(py_handles)
+        })
+    }
+
     /// Remove a stopped sandbox.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.

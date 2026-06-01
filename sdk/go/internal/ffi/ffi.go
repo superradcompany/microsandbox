@@ -78,7 +78,7 @@ typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_and_wait_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_kill_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
@@ -519,8 +519,8 @@ char *call_msb_sandbox_stop_and_wait(uint64_t cancel_id, uint64_t handle, uint8_
 char *call_msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_kill ? ptr_msb_sandbox_kill(cancel_id, handle, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_list ? ptr_msb_sandbox_list(cancel_id, buf, buf_len) : NULL;
+char *call_msb_sandbox_list(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_list ? ptr_msb_sandbox_list(cancel_id, filter_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_remove ? ptr_msb_sandbox_remove(cancel_id, name, buf, buf_len) : NULL;
@@ -1346,6 +1346,11 @@ func (c *AgentClient) CloseCtx(ctx context.Context) error {
 // Sandbox lifecycle
 // =============================================================================
 
+// SandboxListFilter matches the JSON filter shape expected by msb_sandbox_list.
+type SandboxListFilter struct {
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
 // The Rust side applies defaults when optional fields are absent.
@@ -1363,6 +1368,7 @@ type CreateOptions struct {
 	Replace              bool                 `json:"replace,omitempty"`
 	ReplaceWithTimeoutMs *uint64              `json:"replace_with_timeout_ms,omitempty"`
 	Env                  map[string]string    `json:"env,omitempty"`
+	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
 	Entrypoint           []string             `json:"entrypoint,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`
@@ -1901,13 +1907,21 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	return err
 }
 
-// ListSandboxes returns metadata for all known sandboxes (running or stopped).
-func ListSandboxes(ctx context.Context) ([]*SandboxHandleInfo, error) {
+// ListSandboxes returns metadata for all known sandboxes (running or stopped),
+// optionally filtered by the given labels (AND-matched).
+func ListSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	filterJSON, err := json.Marshal(SandboxListFilter{Labels: labels})
+	if err != nil {
+		return nil, fmt.Errorf("marshal list filter: %w", err)
+	}
+	cFilter := C.CString(string(filterJSON))
+	defer C.free(unsafe.Pointer(cFilter))
+
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_list(cancelID, buf, bufLen)
+		return C.call_msb_sandbox_list(cancelID, cFilter, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err

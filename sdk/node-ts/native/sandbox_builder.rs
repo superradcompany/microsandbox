@@ -430,6 +430,22 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Attach a single label for metrics attribution.
+    #[napi]
+    pub fn label(&mut self, key: String, value: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.label(key, value));
+        self
+    }
+
+    /// Attach labels from an object for metrics attribution.
+    #[napi]
+    pub fn labels(&mut self, labels: std::collections::HashMap<String, String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.labels(labels));
+        self
+    }
+
     /// Set a hard rlimit (soft = hard).
     #[napi]
     pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {

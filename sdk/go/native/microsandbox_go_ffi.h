@@ -120,7 +120,10 @@ char *msb_sandbox_wait(uint64_t cancel_id, Handle handle, unsigned char *buf, ui
  */
 char *msb_sandbox_owns_lifecycle(Handle handle, unsigned char *buf, uintptr_t buf_len);
 
-char *msb_sandbox_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+char *msb_sandbox_list(uint64_t cancel_id,
+                       const char *filter_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
 
 char *msb_sandbox_logs(uint64_t cancel_id,
                        Handle handle,

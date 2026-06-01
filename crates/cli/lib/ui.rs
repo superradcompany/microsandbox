@@ -388,6 +388,16 @@ pub fn parse_env(s: &str) -> Result<(String, String), String> {
     }
 }
 
+/// Parse a `KEY=VALUE` label argument. Unlike [`parse_env`], a missing `=` does
+/// not trigger a host-environment lookup — a bare `KEY` is a valueless marker
+/// label (empty value), matching Docker's label semantics.
+pub fn parse_label(s: &str) -> (String, String) {
+    match s.find('=') {
+        Some(eq_pos) => (s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()),
+        None => (s.to_string(), String::new()),
+    }
+}
+
 /// Generate a random sandbox name.
 pub fn generate_name() -> String {
     use rand::RngExt;

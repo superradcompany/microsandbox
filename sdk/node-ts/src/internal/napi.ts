@@ -94,11 +94,16 @@ export interface NapiAgentClient {
 export type NapiBuilderCtor<T> = new () => T;
 export type NapiSandboxConfig = Record<string, unknown>;
 
+export interface NapiSandboxListFilter {
+  labels?: Record<string, string>;
+}
+
 export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
   list(): Promise<NapiSandboxInfo[]>;
+  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxInfo[]>;
   remove(name: string): Promise<void>;
 }
 
@@ -152,6 +157,8 @@ export interface NapiSandboxBuilderSetters {
   secretEnv(envVar: string, value: string, allowedHost: string): this;
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
+  label(key: string, value: string): this;
+  labels(labels: Record<string, string>): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
   script(name: string, content: string): this;

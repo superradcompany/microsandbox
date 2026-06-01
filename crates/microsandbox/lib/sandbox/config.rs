@@ -117,6 +117,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub env: Vec<(String, String)>,
 
+    /// User-defined labels (`key`/`value`) attached to the sandbox for
+    /// attribution. Surfaced as attributes on the sandbox's emitted metrics so
+    /// backends can build per-user/per-tenant views. Immutable once the sandbox
+    /// is created.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
     /// Sandbox-wide resource limits inherited by guest processes.
     ///
     /// Unlike per-exec rlimits, these are applied by agentd during PID 1
@@ -399,6 +406,7 @@ impl Default for SandboxConfig {
             shell: None,
             scripts: HashMap::new(),
             env: Vec::new(),
+            labels: HashMap::new(),
             rlimits: Vec::new(),
             mounts: Vec::new(),
             patches: Vec::new(),

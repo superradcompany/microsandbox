@@ -189,6 +189,17 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /**
+   * List sandboxes filtered to those carrying all of the given labels
+   * (AND-matched).
+   */
+  static async listWith(filter: {
+    labels?: Record<string, string>;
+  }): Promise<SandboxHandle[]> {
+    const infos = await withMappedErrors(() => napi.Sandbox.listWith(filter));
+    return infos.map(sandboxInfoToHandle);
+  }
+
+  /**
    * Remove a stopped sandbox from the database.
    * Names are limited to 128 UTF-8 bytes.
    */

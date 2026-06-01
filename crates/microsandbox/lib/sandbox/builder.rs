@@ -564,6 +564,26 @@ impl SandboxBuilder {
         self
     }
 
+    /// Attach a label (`key`/`value`) to the sandbox for attribution. Labels
+    /// are surfaced as attributes on the sandbox's metrics, letting backends
+    /// build per-user or per-tenant views. Can be called multiple times; the
+    /// last value for a given key wins.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.labels.insert(key.into(), value.into());
+        self
+    }
+
+    /// Attach multiple labels at once. See [`label`](Self::label).
+    pub fn labels(
+        mut self,
+        labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        for (k, v) in labels {
+            self.config.labels.insert(k.into(), v.into());
+        }
+        self
+    }
+
     /// Set a sandbox-wide resource limit inherited by all guest processes.
     ///
     /// This is applied during agentd PID 1 startup, so bootstrap scripts and

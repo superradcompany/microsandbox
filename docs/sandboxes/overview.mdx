@@ -50,6 +50,7 @@ let sb = Sandbox::builder("worker")
     .memory(1024)
     .cpus(2)
     .env("DEBUG", "true")
+    .label("user.id", "alice")
     .volume("/app/src", |v| v.bind("./src").readonly())
     .create()
     .await?;
@@ -61,6 +62,7 @@ await using sb = await Sandbox.builder("worker")
     .memory(1024)
     .cpus(2)
     .env("DEBUG", "true")
+    .label("user.id", "alice")
     .volume("/app/src", (m) => m.bind("./src").readonly())
     .create();
 ```
@@ -72,6 +74,7 @@ sb = await Sandbox.create(
     memory=1024,
     cpus=2,
     env={"DEBUG": "true"},
+    labels={"user.id": "alice"},
     volumes={"/app/src": Volume.bind("./src", readonly=True)},
 )
 ```
@@ -82,6 +85,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithMemory(1024),
     m.WithCPUs(2),
     m.WithEnv(map[string]string{"DEBUG": "true"}),
+    m.WithLabels(map[string]string{"user.id": "alice"}),
     m.WithMounts(map[string]m.MountConfig{
         "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
     }),
@@ -93,6 +97,7 @@ msb create python --name worker \
   -c 2 \
   -m 1G \
   -e DEBUG=true \
+  --label user.id=alice \
   -v ./src:/app/src:ro
 ```
 </CodeGroup>
@@ -105,9 +110,57 @@ msb create python --name worker \
 | `workdir` | image default | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | empty | Environment variables |
+| `labels` | empty | Key/value metadata for metric attribution |
 | `volumes` | empty | Bind, named, tmpfs, or disk-image mounts |
 | `network` | public-only | Network policy and published ports |
 | `scripts` | empty | Named scripts mounted at `/.msb/scripts/` |
+
+Labels are arbitrary `key=value` metadata attached to a sandbox, set at creation
+and fixed for the sandbox's life. They are meant for attribution — tagging a
+sandbox with the user, tenant, or environment it belongs to so the metrics
+pipeline can build per-user views. Keys cannot start with the reserved prefixes
+`sandbox.`, `microsandbox.`, or `service.`.
+
+Set one at a time with `.label(key, value)` or many at once with
+`.labels({...})` (`WithLabel` / `WithLabels` in Go, the `labels={...}` argument
+in Python). On the CLI, repeat `--label` once per entry. Values may be empty: a
+valueless label such as `--label gpu` is a plain marker (it stores `gpu=""`),
+matching Docker's label semantics.
+
+### Selecting sandboxes by label
+
+Labels double as selectors. `list_with` returns sandboxes carrying **all** of
+the given labels (AND-matched) — useful when your application owns a subset of
+sandboxes on a shared host. The CLI extends this to bulk operations: `msb stop`,
+`msb start`, and `msb rm` all accept `--label` to act on every match.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::{Sandbox, SandboxFilter};
+
+let mine = Sandbox::list_with(SandboxFilter::new().label("app", "engine")).await?;
+```
+
+```typescript TypeScript
+const mine = await Sandbox.listWith({ labels: { app: "engine" } });
+```
+
+```python Python
+mine = await Sandbox.list_with(labels={"app": "engine"})
+```
+
+```go Go
+mine, err := microsandbox.ListSandboxesWith(ctx,
+    microsandbox.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}))
+```
+
+```bash CLI
+msb ls --label app=engine      # list matches
+msb stop --label app=engine    # stop every match
+msb rm --force --label app=engine
+```
+
+</CodeGroup>
 
 <Tip>
   `cpus` and `memory` are limits, not reservations. Guest memory is allocated as the VM touches pages.
