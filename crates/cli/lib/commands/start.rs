@@ -14,7 +14,8 @@ use super::common;
 /// Start a stopped sandbox.
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Sandbox(es) to start.
+    /// Sandbox(es) to start. Required unless `--label` is given.
+    #[arg(required_unless_present = "label")]
     pub names: Vec<String>,
 
     /// Start every sandbox carrying this label (`KEY=VALUE`). Repeatable;

@@ -14,7 +14,8 @@ use super::common;
 /// Stop one or more running sandboxes.
 #[derive(Debug, Args)]
 pub struct StopArgs {
-    /// Sandbox(es) to stop.
+    /// Sandbox(es) to stop. Required unless `--label` is given.
+    #[arg(required_unless_present = "label")]
     pub names: Vec<String>,
 
     /// Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable;

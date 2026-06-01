@@ -14,7 +14,8 @@ use super::common;
 /// Remove one or more sandboxes.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// Sandbox(es) to remove.
+    /// Sandbox(es) to remove. Required unless `--label` is given.
+    #[arg(required_unless_present = "label")]
     pub names: Vec<String>,
 
     /// Remove every sandbox carrying this label (`KEY=VALUE`). Repeatable;
