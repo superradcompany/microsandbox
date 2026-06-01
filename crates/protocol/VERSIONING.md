@@ -224,11 +224,18 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
 
 ### Tests that keep this honest
 
-- **Schema snapshot test** (`insta`): regenerate the current version's schema from the live types
-  and diff it against the checked-in `schema/gen-<N>.json`; fail on mismatch. Prior versions are
-  frozen.
-- **Golden-bytes interop test:** keep real encoded messages from each past generation and assert
-  current code still decodes them.
-- **Append-only gate:** assert `gen-N.json` only _adds_ fields versus `gen-(N-1).json`.
-- **Unit tests:** an unknown extra field decodes via defaults; a too-new message type is rejected
-  on send with the typed error; the negotiated generation is the lower of the two sides.
+- **Schema snapshot test** (`crates/protocol/tests/schema_snapshot.rs`): generate the current
+  protocol surface (the `PROTOCOL_VERSION`, the frame constants and flag bits, and every
+  `MessageType` with its introducing generation, iterated via `MessageType::ALL`) as deterministic
+  JSON and diff it against the checked-in `crates/protocol/schema/gen-<PROTOCOL_VERSION>.json`. Fail
+  on mismatch. Re-bless an intended change with
+  `UPDATE_PROTOCOL_SCHEMA=1 cargo test -p microsandbox-protocol --test schema_snapshot`; the
+  generator only ever writes the current generation's file, so prior-generation files stay frozen,
+  and a generation bump shows up as a reviewable diff.
+- **Unit tests** (`message.rs`, `client.rs`): an unknown extra field decodes via `serde(default)` in
+  both directions; a too-new message type is rejected on send with the typed `UnsupportedOperation`
+  error; the negotiated generation is the lower of the two sides; every type is sendable to a current
+  peer; wire strings are unique and round-trip.
+- **Future:** a golden-bytes interop corpus (canonical encoded samples of each payload, asserted to
+  decode under current code) and an append-only gate (a new `gen-N.json` may only add message types
+  versus `gen-(N-1).json`) once a second generation exists to compare against.

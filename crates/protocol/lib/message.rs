@@ -183,6 +183,31 @@ impl Message {
 }
 
 impl MessageType {
+    /// Every message type, in a stable order. The single source for exhaustive
+    /// iteration (the schema snapshot, tests). When adding a variant, append it
+    /// here too; the schema snapshot then surfaces it as a reviewable diff.
+    pub const ALL: &'static [MessageType] = &[
+        Self::Ready,
+        Self::InitResolved,
+        Self::InitAck,
+        Self::Shutdown,
+        Self::RelayClientDisconnected,
+        Self::ClockSync,
+        Self::ExecRequest,
+        Self::ExecStarted,
+        Self::ExecStdin,
+        Self::ExecStdinError,
+        Self::ExecStdout,
+        Self::ExecStderr,
+        Self::ExecExited,
+        Self::ExecFailed,
+        Self::ExecResize,
+        Self::ExecSignal,
+        Self::FsRequest,
+        Self::FsResponse,
+        Self::FsData,
+    ];
+
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
