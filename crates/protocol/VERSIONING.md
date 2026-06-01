@@ -205,7 +205,7 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
   host build artifact, not baked into the sandbox image). The name is direction-neutral so the same
   error can later cover the reverse skew (a newer runtime feature an older SDK can't use). Callers
   that can't gate by sending (the SSH/SFTP layer, the filesystem fail-fast) consult
-  `AgentClient::supports(MessageType)` or `AgentClient::require(MessageType)`, the single predicate
+  `AgentClient::supports(MessageType)` or `AgentClient::ensure_version_compat(MessageType)`, the single predicate
   over the same mechanism, instead of inspecting the protocol generation directly. The
   guest→host gate is future work (the runtime doesn't yet track the host's generation, and no
   guest→host message type is above generation 1).

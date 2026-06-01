@@ -99,7 +99,7 @@ pub struct SshClient {
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
     /// Protocol generation negotiated with the sandbox, captured at connect.
     /// SFTP rides on the filesystem protocol, so it is gated against this through
-    /// `AgentClient::gate`.
+    /// `AgentClient::ensure_version_compat_for`.
     negotiated_version: u8,
 }
 
@@ -638,7 +638,7 @@ impl SshClient {
     /// Reject SFTP on a sandbox too old for the filesystem protocol it rides on,
     /// with the same consolidated error as a direct filesystem call.
     fn ensure_sftp_supported(&self) -> MicrosandboxResult<()> {
-        AgentClient::gate(MessageType::FsRequest, self.negotiated_version)?;
+        AgentClient::ensure_version_compat_for(MessageType::FsRequest, self.negotiated_version)?;
         Ok(())
     }
 

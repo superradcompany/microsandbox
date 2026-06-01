@@ -397,15 +397,15 @@ impl AgentClient {
     /// Reject a message type the connected sandbox is too old to handle, against
     /// this connection's negotiated generation. Fails before any bytes are sent,
     /// so only that one operation fails and the session continues.
-    pub fn require(&self, t: MessageType) -> AgentClientResult<()> {
-        Self::gate(t, self.negotiated_version)
+    pub fn ensure_version_compat(&self, t: MessageType) -> AgentClientResult<()> {
+        Self::ensure_version_compat_for(t, self.negotiated_version)
     }
 
-    /// Gate a message type against an explicit negotiated generation.
+    /// Check a message type against an explicit negotiated generation.
     ///
     /// The single place the rule lives. Exposed for callers that hold the
     /// negotiated generation but not the live client (e.g. the SSH/SFTP layer).
-    pub fn gate(t: MessageType, negotiated: u8) -> AgentClientResult<()> {
+    pub fn ensure_version_compat_for(t: MessageType, negotiated: u8) -> AgentClientResult<()> {
         let needs = t.min_protocol_version();
         if needs <= negotiated {
             return Ok(());
@@ -429,7 +429,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<Message> {
-        self.require(t)?;
+        self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         let frame = self.request_raw(flags, body).await?;
@@ -443,7 +443,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<Message>)> {
-        self.require(t)?;
+        self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         let (id, raw_rx) = self.stream_raw(flags, body).await?;
@@ -460,7 +460,7 @@ impl AgentClient {
         t: MessageType,
         payload: &T,
     ) -> AgentClientResult<()> {
-        self.require(t)?;
+        self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         self.write_frame(id, flags, &body).await
@@ -725,19 +725,35 @@ mod tests {
     }
 
     #[test]
-    fn gate_allows_supported_types() {
-        // Baseline exec works everywhere, including the legacy generation.
-        assert!(AgentClient::gate(MessageType::ExecRequest, LEGACY_PROTOCOL_VERSION).is_ok());
-        // Filesystem works on a current sandbox.
-        assert!(AgentClient::gate(MessageType::FsRequest, PROTOCOL_VERSION).is_ok());
+    fn version_compat_across_generations() {
+        use MessageType::{ExecRequest, FsRequest};
+        // (message type, peer generation, expected allowed). Generation 1 is the
+        // pre-0.5 legacy runtime (no filesystem); generation 2 introduced the
+        // Fs* types; generation 3 is current.
+        let cases = [
+            (ExecRequest, 1, true),
+            (ExecRequest, 2, true),
+            (ExecRequest, 3, true),
+            (FsRequest, 1, false),
+            (FsRequest, 2, true),
+            (FsRequest, 3, true),
+        ];
+        for (t, generation, allowed) in cases {
+            assert_eq!(
+                AgentClient::ensure_version_compat_for(t, generation).is_ok(),
+                allowed,
+                "{t:?} at generation {generation}"
+            );
+        }
     }
 
     #[test]
-    fn gate_rejects_filesystem_on_legacy() {
-        // The legacy (generation 1) runtime lacks filesystem streaming. It is
-        // rejected before any send, with the structured Unsupported error whose
-        // message tells the user to restart the sandbox.
-        let err = AgentClient::gate(MessageType::FsRequest, LEGACY_PROTOCOL_VERSION).unwrap_err();
+    fn version_compat_rejection_is_typed() {
+        // Filesystem on the legacy (generation 1) runtime is rejected before any
+        // send, with the structured error whose message tells the user to restart.
+        let err =
+            AgentClient::ensure_version_compat_for(MessageType::FsRequest, LEGACY_PROTOCOL_VERSION)
+                .unwrap_err();
         assert!(matches!(
             err,
             AgentClientError::UnsupportedOperation {

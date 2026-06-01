@@ -138,7 +138,7 @@ impl SandboxFs {
         // send path enforces the same gate; this is the early, friendlier
         // surface. Feature support is decided in one place:
         // MessageType::min_protocol_version, via AgentClient::require.
-        self.client.require(MessageType::FsRequest)?;
+        self.client.ensure_version_compat(MessageType::FsRequest)?;
         Ok(())
     }
 
