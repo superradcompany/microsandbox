@@ -421,6 +421,41 @@ mod tests {
     }
 
     #[test]
+    fn test_additive_fields_keep_old_and_new_compatible() {
+        // The core backward-compatibility guarantee from VERSIONING.md: a new,
+        // always-optional field is safe in both directions across a version skew.
+        use serde::{Deserialize, Serialize};
+
+        // A payload as it existed at an older generation.
+        #[derive(Serialize, Deserialize)]
+        struct Old {
+            a: u32,
+            b: u32,
+        }
+
+        // The same payload after a later generation added `c` (optional).
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct New {
+            a: u32,
+            b: u32,
+            #[serde(default)]
+            c: u32,
+        }
+
+        // New sender -> old receiver: the unknown `c` is ignored, not an error.
+        let mut new_bytes = Vec::new();
+        ciborium::into_writer(&New { a: 1, b: 2, c: 3 }, &mut new_bytes).unwrap();
+        let as_old: Old = ciborium::from_reader(&new_bytes[..]).unwrap();
+        assert_eq!((as_old.a, as_old.b), (1, 2));
+
+        // Old sender -> new receiver: the missing `c` falls back to its default.
+        let mut old_bytes = Vec::new();
+        ciborium::into_writer(&Old { a: 1, b: 2 }, &mut old_bytes).unwrap();
+        let as_new: New = ciborium::from_reader(&old_bytes[..]).unwrap();
+        assert_eq!(as_new, New { a: 1, b: 2, c: 0 });
+    }
+
+    #[test]
     fn test_min_protocol_version_baseline_is_v1() {
         // Every current message type belongs to the v1 baseline. When a type is
         // introduced at a later generation this assertion is expected to change
