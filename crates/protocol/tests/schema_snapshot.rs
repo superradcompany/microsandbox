@@ -25,11 +25,11 @@ use microsandbox_protocol::{
     },
 };
 use serde_json::json;
+use strum::IntoEnumIterator;
 
 /// Render the current protocol surface as deterministic, pretty JSON.
 fn render_surface() -> String {
-    let message_types: Vec<_> = MessageType::ALL
-        .iter()
+    let message_types: Vec<_> = MessageType::iter()
         .map(|t| {
             json!({
                 "wire": t.as_str(),
@@ -93,7 +93,7 @@ fn protocol_surface_matches_snapshot() {
 
 #[test]
 fn every_message_type_is_sendable_to_a_current_peer() {
-    for t in MessageType::ALL {
+    for t in MessageType::iter() {
         assert!(
             t.min_protocol_version() <= PROTOCOL_VERSION,
             "{t:?} requires a generation newer than PROTOCOL_VERSION ({PROTOCOL_VERSION})"
@@ -104,7 +104,7 @@ fn every_message_type_is_sendable_to_a_current_peer() {
 #[test]
 fn message_type_wire_strings_are_unique_and_roundtrip() {
     let mut seen = HashSet::new();
-    for t in MessageType::ALL {
+    for t in MessageType::iter() {
         assert!(
             seen.insert(t.as_str()),
             "duplicate wire string {}",
@@ -112,7 +112,7 @@ fn message_type_wire_strings_are_unique_and_roundtrip() {
         );
         assert_eq!(
             MessageType::from_wire_str(t.as_str()),
-            Some(*t),
+            Some(t),
             "wire string for {t:?} does not round-trip"
         );
     }

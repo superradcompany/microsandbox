@@ -76,68 +76,103 @@ pub struct Message {
 }
 
 /// Identifies the type of a protocol message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The `#[strum(serialize = ...)]` attribute on each variant is the single
+/// source for its wire string: [`as_str`](Self::as_str) and
+/// [`from_wire_str`](Self::from_wire_str) are derived from it, and
+/// [`strum::IntoEnumIterator`] yields every variant for exhaustive iteration
+/// (the schema snapshot) without a hand-maintained list.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
 pub enum MessageType {
     /// Guest agent is ready.
+    #[strum(serialize = "core.ready")]
     Ready,
 
     /// Guest reports init context before user mounts.
+    #[strum(serialize = "core.init.resolved")]
     InitResolved,
 
     /// Host acknowledges init-context setup.
+    #[strum(serialize = "core.init.ack")]
     InitAck,
 
     /// Host requests shutdown.
+    #[strum(serialize = "core.shutdown")]
     Shutdown,
 
     /// Host relay reports that one SDK client disconnected.
+    #[strum(serialize = "core.relay.client.disconnected")]
     RelayClientDisconnected,
 
     /// Host asks the guest to synchronize `CLOCK_REALTIME`.
+    #[strum(serialize = "core.clock.sync")]
     ClockSync,
 
     /// Host requests command execution.
+    #[strum(serialize = "core.exec.request")]
     ExecRequest,
 
     /// Guest confirms command started.
+    #[strum(serialize = "core.exec.started")]
     ExecStarted,
 
     /// Host sends stdin data.
+    #[strum(serialize = "core.exec.stdin")]
     ExecStdin,
 
     /// Guest reports that a prior `ExecStdin` write to the child's
     /// stdin failed (e.g. the child closed its read end). Non-terminal:
     /// the session continues and may still produce stdout/stderr and
     /// an exit code.
+    #[strum(serialize = "core.exec.stdin.error")]
     ExecStdinError,
 
     /// Guest sends stdout data.
+    #[strum(serialize = "core.exec.stdout")]
     ExecStdout,
 
     /// Guest sends stderr data.
+    #[strum(serialize = "core.exec.stderr")]
     ExecStderr,
 
     /// Guest reports command exit.
+    #[strum(serialize = "core.exec.exited")]
     ExecExited,
 
     /// Guest reports command failed to spawn (binary not found,
     /// permission denied, etc.). Distinct from `ExecExited` —
     /// `ExecFailed` means the user code never ran. Terminal.
+    #[strum(serialize = "core.exec.failed")]
     ExecFailed,
 
     /// Host requests PTY resize.
+    #[strum(serialize = "core.exec.resize")]
     ExecResize,
 
     /// Host sends signal to process.
+    #[strum(serialize = "core.exec.signal")]
     ExecSignal,
 
     /// Host requests a filesystem operation.
+    #[strum(serialize = "core.fs.request")]
     FsRequest,
 
     /// Guest sends a terminal filesystem response.
+    #[strum(serialize = "core.fs.response")]
     FsResponse,
 
     /// Streaming file data chunk (bidirectional).
+    #[strum(serialize = "core.fs.data")]
     FsData,
 }
 
@@ -183,31 +218,6 @@ impl Message {
 }
 
 impl MessageType {
-    /// Every message type, in a stable order. The single source for exhaustive
-    /// iteration (the schema snapshot, tests). When adding a variant, append it
-    /// here too; the schema snapshot then surfaces it as a reviewable diff.
-    pub const ALL: &'static [MessageType] = &[
-        Self::Ready,
-        Self::InitResolved,
-        Self::InitAck,
-        Self::Shutdown,
-        Self::RelayClientDisconnected,
-        Self::ClockSync,
-        Self::ExecRequest,
-        Self::ExecStarted,
-        Self::ExecStdin,
-        Self::ExecStdinError,
-        Self::ExecStdout,
-        Self::ExecStderr,
-        Self::ExecExited,
-        Self::ExecFailed,
-        Self::ExecResize,
-        Self::ExecSignal,
-        Self::FsRequest,
-        Self::FsResponse,
-        Self::FsData,
-    ];
-
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
@@ -258,54 +268,17 @@ impl MessageType {
     }
 
     /// Returns the wire string representation.
+    ///
+    /// Backed by the per-variant `#[strum(serialize = ...)]` attribute, the
+    /// single source of truth for wire strings.
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Ready => "core.ready",
-            Self::InitResolved => "core.init.resolved",
-            Self::InitAck => "core.init.ack",
-            Self::Shutdown => "core.shutdown",
-            Self::RelayClientDisconnected => "core.relay.client.disconnected",
-            Self::ClockSync => "core.clock.sync",
-            Self::ExecRequest => "core.exec.request",
-            Self::ExecStarted => "core.exec.started",
-            Self::ExecStdin => "core.exec.stdin",
-            Self::ExecStdinError => "core.exec.stdin.error",
-            Self::ExecStdout => "core.exec.stdout",
-            Self::ExecStderr => "core.exec.stderr",
-            Self::ExecExited => "core.exec.exited",
-            Self::ExecFailed => "core.exec.failed",
-            Self::ExecResize => "core.exec.resize",
-            Self::ExecSignal => "core.exec.signal",
-            Self::FsRequest => "core.fs.request",
-            Self::FsResponse => "core.fs.response",
-            Self::FsData => "core.fs.data",
-        }
+        (*self).into()
     }
 
-    /// Parses a wire string into a message type.
+    /// Parses a wire string into a message type, the inverse of
+    /// [`as_str`](Self::as_str). Returns `None` for an unknown string.
     pub fn from_wire_str(s: &str) -> Option<Self> {
-        match s {
-            "core.ready" => Some(Self::Ready),
-            "core.init.resolved" => Some(Self::InitResolved),
-            "core.init.ack" => Some(Self::InitAck),
-            "core.shutdown" => Some(Self::Shutdown),
-            "core.relay.client.disconnected" => Some(Self::RelayClientDisconnected),
-            "core.clock.sync" => Some(Self::ClockSync),
-            "core.exec.request" => Some(Self::ExecRequest),
-            "core.exec.started" => Some(Self::ExecStarted),
-            "core.exec.stdin" => Some(Self::ExecStdin),
-            "core.exec.stdin.error" => Some(Self::ExecStdinError),
-            "core.exec.stdout" => Some(Self::ExecStdout),
-            "core.exec.stderr" => Some(Self::ExecStderr),
-            "core.exec.exited" => Some(Self::ExecExited),
-            "core.exec.failed" => Some(Self::ExecFailed),
-            "core.exec.resize" => Some(Self::ExecResize),
-            "core.exec.signal" => Some(Self::ExecSignal),
-            "core.fs.request" => Some(Self::FsRequest),
-            "core.fs.response" => Some(Self::FsResponse),
-            "core.fs.data" => Some(Self::FsData),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 

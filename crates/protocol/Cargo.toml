@@ -15,6 +15,7 @@ chrono.workspace = true
 ciborium.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+strum.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.42", default-features = false, features = ["io-util"] }
 
