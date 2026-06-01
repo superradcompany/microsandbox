@@ -29,7 +29,7 @@ DoT (TCP/853) is a separate port; `allow_dns()` does not include it. Pair an `An
 
 Domain blocking lives in the network policy as `deny Domain(...)` / `deny DomainSuffix(...)` rules. The interceptor enforces them at three layers:
 
-1. **DNS resolution** — denied names get a local `REFUSED` response; the upstream resolver never sees them.
+1. **DNS resolution** — denied names get a local `NXDOMAIN` response (a definitive negative, so stub resolvers fail fast instead of hanging); the upstream resolver never sees them.
 2. **TLS first-flight** — when a guest hardcodes an IP and opens a TLS connection, the SNI is checked against the same rules.
 3. **TCP egress (cache fallback)** — for non-TLS traffic, the resolved-hostname cache disambiguates by IP.
 

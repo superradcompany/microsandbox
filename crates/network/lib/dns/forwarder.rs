@@ -14,7 +14,7 @@
 //!   the operator-configured upstream.
 //! - Otherwise the guest explicitly chose a resolver via `@target`.
 //!   Consult the network egress policy: if the resolver IP is allowed,
-//!   forward there directly; if denied, return REFUSED.
+//!   forward there directly; if denied, synthesize NXDOMAIN.
 //!
 //! Block list and rebind protection apply to every query/response
 //! regardless of which path was taken — the host always sees the
@@ -113,7 +113,7 @@ pub(crate) struct DnsForwarder {
 }
 
 /// Outcome of upstream selection. The query may be forwarded through a
-/// [`Client`], synthesized as REFUSED (policy denied the resolver IP),
+/// [`Client`], synthesized as NXDOMAIN (policy denied the resolver IP),
 /// or synthesized as SERVFAIL (couldn't reach upstream).
 enum UpstreamChoice {
     Client(Client),
@@ -131,7 +131,7 @@ enum UpstreamDecision {
     /// Forward directly to this resolver IP over the matching transport.
     Direct(SocketAddr),
     /// Network policy denied egress to the chosen resolver — synthesize
-    /// REFUSED.
+    /// an NXDOMAIN denial.
     Refused,
 }
 
@@ -166,7 +166,12 @@ impl DnsForwarder {
         // the DNS protocol/port.
         if decide_dns_action(&self.network_policy, &domain, transport).is_deny() {
             tracing::debug!(domain = %domain, "DNS query refused by network policy");
-            return build_status_response(&query_msg, ResponseCode::Refused);
+            // NXDOMAIN, not REFUSED: stub resolvers (e.g. glibc) don't
+            // fail-fast on REFUSED, so a denied lookup hangs the guest in a
+            // deny-by-default sandbox. NXDOMAIN is a definitive negative and
+            // fails the lookup immediately — the convention DNS blockers
+            // (Pi-hole et al.) use for filtered names.
+            return build_status_response(&query_msg, ResponseCode::NXDomain);
         }
 
         // Locally synthesize answers for the host alias; MX / TXT / etc.
@@ -188,7 +193,7 @@ impl DnsForwarder {
                     ?original_dst,
                     "DNS resolver denied by network policy"
                 );
-                return build_status_response(&query_msg, ResponseCode::Refused);
+                return build_status_response(&query_msg, ResponseCode::NXDomain);
             }
             UpstreamChoice::ServFail => {
                 return build_status_response(&query_msg, ResponseCode::ServFail);
@@ -225,7 +230,7 @@ impl DnsForwarder {
                         domain = %domain,
                         "DNS rebind protection: response contains private IP"
                     );
-                    return build_status_response(&query_msg, ResponseCode::Refused);
+                    return build_status_response(&query_msg, ResponseCode::NXDomain);
                 }
             }
         }
@@ -482,9 +487,9 @@ fn decide_dns_action(policy: &NetworkPolicy, domain: &str, transport: Transport)
 }
 
 /// Build a status-only response (no answers, no authority) with the given
-/// RCODE. Used for locally-synthesized REFUSED (block list / policy) and
-/// SERVFAIL (upstream unreachable). The guest's transaction id, OPCODE
-/// and RD bit are echoed.
+/// RCODE. Used for locally-synthesized NXDOMAIN (block list / policy deny /
+/// rebind rejection) and SERVFAIL (upstream unreachable). The guest's
+/// transaction id, OPCODE and RD bit are echoed.
 fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> {
     let mut response = Message::response(query.id(), query.op_code());
     response.set_recursion_desired(query.recursion_desired());
@@ -628,6 +633,19 @@ mod tests {
         assert_eq!(msg.answers().len(), 0);
     }
 
+    /// Policy denials synthesize NXDOMAIN (not REFUSED) so stub resolvers
+    /// fail closed immediately instead of falling back to an unreachable
+    /// next nameserver under deny-by-default egress.
+    #[test]
+    fn build_status_response_nxdomain_variant() {
+        let query = make_query("example.com.", RecordType::A);
+        let bytes = build_status_response(&query, ResponseCode::NXDomain).expect("built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.response_code(), ResponseCode::NXDomain);
+        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.queries().len(), 1);
+    }
+
     #[test]
     fn build_truncated_response_sets_tc_and_keeps_question() {
         let query = make_query("example.com.", RecordType::TXT);
@@ -733,8 +751,9 @@ mod tests {
     #[test]
     fn decide_upstream_refused_when_policy_denies_resolver() {
         // public_only policy denies private addresses — guest aiming at
-        // a private resolver should get REFUSED rather than silently
-        // hitting the configured upstream instead.
+        // a private resolver should be routed to the denial path (a
+        // synthesized NXDOMAIN) rather than silently hitting the configured
+        // upstream instead.
         let gw = gateway_set();
         let shared = SharedState::new(4);
         let policy = NetworkPolicy::public_only();
@@ -748,8 +767,8 @@ mod tests {
     #[test]
     fn decide_upstream_refused_when_policy_denies_all() {
         // none() denies everything; only queries to the gateway can
-        // still reach the configured upstream. Direct queries get
-        // REFUSED.
+        // still reach the configured upstream. Direct queries are routed
+        // to the denial path (synthesized NXDOMAIN).
         let gw = gateway_set();
         let shared = SharedState::new(4);
         let policy = NetworkPolicy::none();
