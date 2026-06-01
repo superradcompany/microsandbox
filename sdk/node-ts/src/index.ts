@@ -374,7 +374,7 @@ export {
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
-  Pre05SandboxRestartRequiredError,
+  UnsupportedOperationError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";

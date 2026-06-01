@@ -136,12 +136,9 @@ const (
 	// loaded. Call EnsureInstalled() before using any SDK functions.
 	ErrLibraryNotLoaded
 
-	// ErrPre05SandboxRestartRequired indicates filesystem or SFTP was requested
-	// for a sandbox that must be stopped and started first.
-	//
-	// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-	// compatibility for versions before 0.5 is no longer supported.
-	ErrPre05SandboxRestartRequired
+	// ErrUnsupportedOperation indicates the sandbox runtime is too old for the
+	// requested feature; restart the sandbox to update it.
+	ErrUnsupportedOperation
 
 	// ErrInternal is every other error from the runtime.
 	ErrInternal
@@ -207,8 +204,8 @@ func (k ErrorKind) String() string {
 		return "Cancelled"
 	case ErrLibraryNotLoaded:
 		return "LibraryNotLoaded"
-	case ErrPre05SandboxRestartRequired:
-		return "Pre05SandboxRestartRequired"
+	case ErrUnsupportedOperation:
+		return "UnsupportedOperation"
 	case ErrInternal:
 		return "Internal"
 	default:
@@ -322,10 +319,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrCancelled
 	case ffi.KindLibraryNotLoaded:
 		return ErrLibraryNotLoaded
-	case ffi.KindPre05SandboxRestartRequired:
-		// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-		// compatibility for versions before 0.5 is no longer supported.
-		return ErrPre05SandboxRestartRequired
+	case ffi.KindUnsupportedOperation:
+		return ErrUnsupportedOperation
 	default:
 		return ErrInternal
 	}

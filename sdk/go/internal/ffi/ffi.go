@@ -969,10 +969,8 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindPatchFailed            = "patch_failed"
-	// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-	// compatibility for versions before 0.5 is no longer supported.
-	KindPre05SandboxRestartRequired = "pre05_sandbox_restart_required"
-	KindIO                          = "io"
+	KindUnsupportedOperation = "unsupported_operation"
+	KindIO            = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.

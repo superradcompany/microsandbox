@@ -20,10 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
-use crate::{
-    MicrosandboxError, MicrosandboxResult, Sandbox,
-    agent::{AgentClient, AgentClientError},
-};
+use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -100,11 +97,10 @@ pub struct SshClient {
     handle: russh::client::Handle<SshClientHandler>,
     term: String,
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
-    // Whether the sandbox is new enough for SFTP, which rides on the filesystem
-    // protocol. Captured at connect; decided by MessageType::min_protocol_version.
-    // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-    // compatibility for versions before 0.5 is no longer supported.
-    sftp_supported: bool,
+    /// Protocol generation negotiated with the sandbox, captured at connect.
+    /// SFTP rides on the filesystem protocol, so it is gated against this through
+    /// `AgentClient::gate`.
+    negotiated_version: u8,
 }
 
 /// High-level SFTP client session.
@@ -283,7 +279,7 @@ impl SandboxSsh {
             handle: client,
             term,
             server_task: Some(server_task),
-            sftp_supported: self.sandbox.client().supports(MessageType::FsRequest),
+            negotiated_version: self.sandbox.client().negotiated_version(),
         })
     }
 
@@ -639,15 +635,16 @@ impl SshClient {
         Ok(exit_code)
     }
 
+    /// Reject SFTP on a sandbox too old for the filesystem protocol it rides on,
+    /// with the same consolidated error as a direct filesystem call.
+    fn ensure_sftp_supported(&self) -> MicrosandboxResult<()> {
+        AgentClient::gate(MessageType::FsRequest, self.negotiated_version)?;
+        Ok(())
+    }
+
     /// Open an SFTP client session over this SSH connection.
     pub async fn sftp(&self) -> MicrosandboxResult<SftpClient> {
-        if !self.sftp_supported {
-            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-            // compatibility for versions before 0.5 is no longer supported.
-            return Err(MicrosandboxError::AgentClient(
-                AgentClientError::Pre05SandboxRestartRequired,
-            ));
-        }
+        self.ensure_sftp_supported()?;
 
         let mut channel = self
             .handle

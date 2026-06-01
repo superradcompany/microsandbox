@@ -26,15 +26,6 @@ pub enum AgentClientError {
     #[error("handshake: {0}")]
     Handshake(String),
 
-    /// The sandbox must be restarted before using filesystem or SFTP features.
-    ///
-    /// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-    /// compatibility for versions before 0.5 is no longer supported.
-    #[error(
-        "filesystem and SFTP features need this sandbox to be restarted: this sandbox was started before microsandbox 0.5; stop and start it, then retry"
-    )]
-    Pre05SandboxRestartRequired,
-
     /// Sandbox name could not be resolved to an agent socket path.
     #[error("sandbox '{0}' not found")]
     SandboxNotFound(String),
@@ -51,16 +42,17 @@ pub enum AgentClientError {
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
 
-    /// The message type requires a newer protocol generation than the
-    /// connected sandbox speaks.
+    /// The connected sandbox's runtime is older than the requested feature
+    /// needs.
     ///
-    /// Raised on send, before any bytes go out, so a feature the runtime is too
-    /// old to handle fails on its own without disturbing the rest of the
-    /// session. See `VERSIONING.md` in `microsandbox-protocol`.
+    /// Raised before any bytes go out, so a feature the runtime is too old to
+    /// handle fails on its own without disturbing the rest of the session.
+    /// Restarting the sandbox re-provisions agentd at the current version, which
+    /// is the fix. See `VERSIONING.md` in `microsandbox-protocol`.
     #[error(
-        "message type '{msg_type}' needs protocol generation {needs} but this sandbox speaks generation {peer}; recreate the sandbox with a newer runtime to use it"
+        "the sandbox runtime is too old for '{msg_type}' (needs protocol generation {needs}, the sandbox speaks {peer}); restart the sandbox to update its runtime"
     )]
-    Unsupported {
+    UnsupportedOperation {
         /// Wire name of the message type that was gated.
         msg_type: &'static str,
         /// Generation the message type was introduced in.

@@ -200,11 +200,13 @@ CBOR { v, t, p }                   <- the envelope: version, message type, paylo
 - **The send gate** lives on the host client (`crates/microsandbox/lib/agent/client.rs`). At
   handshake the client computes `negotiated_version = min(our PROTOCOL_VERSION, the generation the
 sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_version()` against it
-  and rejects too-old sandboxes with `AgentClientError::Unsupported` — except a legacy-generation
-  sandbox, which gets the tailored `Pre05SandboxRestartRequired` ("restart") error, since restarting
-  a pre-0.5 sandbox re-runs agentd at the current version. Callers that can't gate by sending (the
-  SSH/SFTP layer, the filesystem fail-fast) consult `AgentClient::supports(MessageType)`, the single
-  predicate over the same mechanism, instead of inspecting the protocol generation directly. The
+  and rejects too-old sandboxes with `AgentClientError::UnsupportedOperation`. The error's message
+  advises restarting the sandbox, which re-provisions agentd at the current version (agentd is a
+  host build artifact, not baked into the sandbox image). The name is direction-neutral so the same
+  error can later cover the reverse skew (a newer runtime feature an older SDK can't use). Callers
+  that can't gate by sending (the SSH/SFTP layer, the filesystem fail-fast) consult
+  `AgentClient::supports(MessageType)` or `AgentClient::require(MessageType)`, the single predicate
+  over the same mechanism, instead of inspecting the protocol generation directly. The
   guest→host gate is future work (the runtime doesn't yet track the host's generation, and no
   guest→host message type is above generation 1).
 - **Codec vs. gate.** `AgentProtocol` (Current / LegacyV1) selects the wire _codec_ (the container

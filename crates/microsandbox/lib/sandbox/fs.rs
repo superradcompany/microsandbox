@@ -13,10 +13,7 @@ use microsandbox_protocol::{
 };
 use tokio::sync::mpsc;
 
-use crate::{
-    MicrosandboxError, MicrosandboxResult,
-    agent::{AgentClient, AgentClientError},
-};
+use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -136,16 +133,12 @@ impl SandboxFs {
         }
     }
 
-    fn ensure_current_protocol(&self) -> MicrosandboxResult<()> {
-        // Fail fast with the tailored restart error when the sandbox is too old
-        // for filesystem streaming. The send path enforces the same gate; this
-        // is the early, friendlier surface. Feature support is decided in one
-        // place: MessageType::min_protocol_version.
-        if !self.client.supports(MessageType::FsRequest) {
-            return Err(MicrosandboxError::AgentClient(
-                AgentClientError::Pre05SandboxRestartRequired,
-            ));
-        }
+    fn ensure_filesystem_supported(&self) -> MicrosandboxResult<()> {
+        // Fail fast when the sandbox is too old for filesystem streaming. The
+        // send path enforces the same gate; this is the early, friendlier
+        // surface. Feature support is decided in one place:
+        // MessageType::min_protocol_version, via AgentClient::require.
+        self.client.require(MessageType::FsRequest)?;
         Ok(())
     }
 
@@ -217,7 +210,7 @@ impl SandboxFs {
         len: Option<u64>,
         close_handle: Option<FsHandle>,
     ) -> MicrosandboxResult<FsReadStream> {
-        self.ensure_current_protocol()?;
+        self.ensure_filesystem_supported()?;
         let req = FsRequest {
             op: FsOp::Read {
                 handle,
@@ -303,7 +296,7 @@ impl SandboxFs {
         len: Option<u64>,
         close_handle: Option<FsHandle>,
     ) -> MicrosandboxResult<FsWriteSink> {
-        self.ensure_current_protocol()?;
+        self.ensure_filesystem_supported()?;
         let req = FsRequest {
             op: FsOp::Write {
                 handle,
@@ -650,7 +643,7 @@ impl SandboxFs {
     }
 
     async fn request_response(&self, req: FsRequest) -> MicrosandboxResult<FsResponse> {
-        self.ensure_current_protocol()?;
+        self.ensure_filesystem_supported()?;
         let msg = self.client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = msg.payload()?;
         if resp.ok {
@@ -850,6 +843,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
+    use crate::agent::AgentClientError;
 
     #[tokio::test]
     async fn filesystem_operations_reject_legacy_agent_protocol() {
@@ -877,7 +871,11 @@ mod tests {
         let fs = SandboxFs::new(&client);
 
         match fs.stat("/").await {
-            Err(MicrosandboxError::AgentClient(AgentClientError::Pre05SandboxRestartRequired)) => {}
+            Err(MicrosandboxError::AgentClient(AgentClientError::UnsupportedOperation {
+                needs: 2,
+                peer: 1,
+                ..
+            })) => {}
             Err(error) => panic!("unexpected error: {error}"),
             Ok(_) => panic!("legacy filesystem request unexpectedly succeeded"),
         }
