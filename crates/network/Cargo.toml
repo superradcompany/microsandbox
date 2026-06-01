@@ -27,7 +27,7 @@ libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-protocol = { version = "0.5.4", path = "../protocol" }
 microsandbox-utils = { version = "0.5.4", path = "../utils" }
-msb_krun = { version = "0.1.14", features = ["net"] }
+msb_krun = { version = "0.1.15", features = ["net"] }
 parking_lot = { workspace = true }
 pem = "3"
 percent-encoding = "2"

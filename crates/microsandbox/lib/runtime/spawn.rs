@@ -853,6 +853,18 @@ fn sandbox_cli_args(
     args.push(OsString::from(config.cpus.to_string()));
     args.push(OsString::from("--memory-mib"));
     args.push(OsString::from(config.memory_mib.to_string()));
+    if let Some(initial_mib) = config.balloon_initial_mib {
+        args.push(OsString::from("--balloon-initial-mib"));
+        args.push(OsString::from(initial_mib.to_string()));
+    }
+    if let Some(min_mib) = config.balloon_min_mib {
+        args.push(OsString::from("--balloon-min-mib"));
+        args.push(OsString::from(min_mib.to_string()));
+    }
+    if let Some(socket) = &config.balloon_control_socket {
+        args.push(OsString::from("--balloon-control-socket"));
+        args.push(socket.as_os_str().to_os_string());
+    }
     match config.effective_metrics_interval() {
         Some(ms) => {
             args.push(OsString::from("--metrics-sample-interval-ms"));
@@ -1708,6 +1720,35 @@ mod tests {
         let rendered = render_args(&config);
 
         assert!(rendered.contains(&"MSB_TMPFS=/tools:noexec".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_balloon_config() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .memory(4096)
+            .balloon(2048, 512, "/tmp/test-balloon.sock")
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--balloon-initial-mib", "2048"])
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--balloon-min-mib", "512"])
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--balloon-control-socket", "/tmp/test-balloon.sock"])
+        );
     }
 
     #[tokio::test]

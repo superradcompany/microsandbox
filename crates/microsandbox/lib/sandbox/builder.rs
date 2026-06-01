@@ -174,6 +174,22 @@ impl SandboxBuilder {
         self
     }
 
+    /// Enable guest memory ballooning.
+    ///
+    /// `initial` and `min` are guest-visible memory sizes in MiB. The VM still
+    /// boots with [`memory`](Self::memory) as the host-side ceiling.
+    pub fn balloon(
+        mut self,
+        initial: impl Into<Mebibytes>,
+        min: impl Into<Mebibytes>,
+        control_socket: impl Into<PathBuf>,
+    ) -> Self {
+        self.config.balloon_initial_mib = Some(initial.into().as_u32());
+        self.config.balloon_min_mib = Some(min.into().as_u32());
+        self.config.balloon_control_socket = Some(control_socket.into());
+        self
+    }
+
     /// Set the runtime log level for the sandbox process.
     ///
     /// This controls the verbosity of the `msb sandbox` process.
@@ -850,6 +866,33 @@ impl SandboxBuilder {
             )));
         }
 
+        if let Some(initial_mib) = self.config.balloon_initial_mib
+            && initial_mib > self.config.memory_mib
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "balloon initial memory ({initial_mib} MiB) exceeds configured memory ({} MiB)",
+                self.config.memory_mib
+            )));
+        }
+
+        if let Some(min_mib) = self.config.balloon_min_mib
+            && min_mib > self.config.memory_mib
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "balloon minimum memory ({min_mib} MiB) exceeds configured memory ({} MiB)",
+                self.config.memory_mib
+            )));
+        }
+
+        if let (Some(initial_mib), Some(min_mib)) =
+            (self.config.balloon_initial_mib, self.config.balloon_min_mib)
+            && min_mib > initial_mib
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "balloon minimum memory ({min_mib} MiB) exceeds initial memory ({initial_mib} MiB)"
+            )));
+        }
+
         for rlimit in &self.config.rlimits {
             if rlimit.soft > rlimit.hard {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -943,6 +986,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, Some(LogLevel::Debug));
+    }
+
+    #[tokio::test]
+    async fn test_builder_sets_balloon_config() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(4096)
+            .balloon(2048, 512, "/tmp/test-balloon.sock")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.balloon_initial_mib, Some(2048));
+        assert_eq!(config.balloon_min_mib, Some(512));
+        assert_eq!(
+            config.balloon_control_socket,
+            Some("/tmp/test-balloon.sock".into())
+        );
     }
 
     #[cfg(unix)]
