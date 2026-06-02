@@ -52,7 +52,6 @@ use crate::{
 static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
-const PARENT_WATCH_FD: i32 = 97;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -93,11 +92,6 @@ pub async fn spawn_sandbox(
     sandbox_id: i32,
     mode: SpawnMode,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    let parent_watchdog = match mode {
-        SpawnMode::Attached => Some(create_parent_watchdog_pipe()?),
-        SpawnMode::Detached => None,
-    };
-
     // Resolve paths. Per-sandbox `libkrunfw_path` takes precedence over the
     // global resolver so SDK callers can point at a custom firmware bundle.
     let msb_path = config::resolve_msb_path()?;
@@ -162,6 +156,21 @@ pub async fn spawn_sandbox(
         None
     };
 
+    let parent_watchdog = match mode {
+        SpawnMode::Attached => match create_parent_watchdog_pipe() {
+            Ok(pipe) => Some(pipe),
+            Err(err) => {
+                release_metrics_reservation(
+                    config,
+                    metrics_reservation.as_ref(),
+                    ReleaseMode::Free,
+                );
+                return Err(err);
+            }
+        },
+        SpawnMode::Detached => None,
+    };
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(sandbox_cli_args(
@@ -175,7 +184,9 @@ pub async fn spawn_sandbox(
         &libkrunfw_path,
         &staged_file_mounts,
         metrics_reservation.as_ref(),
-        parent_watchdog.as_ref().map(|_| PARENT_WATCH_FD),
+        parent_watchdog
+            .as_ref()
+            .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -187,14 +198,23 @@ pub async fn spawn_sandbox(
         let read_fd = pipe.read_fd.as_raw_fd();
         unsafe {
             cmd.pre_exec(move || {
-                if libc::dup2(read_fd, PARENT_WATCH_FD) < 0 {
+                if libc::dup2(read_fd, microsandbox_runtime::vm::PARENT_WATCH_FD) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                let flags = libc::fcntl(PARENT_WATCH_FD, libc::F_GETFD);
+                if read_fd != microsandbox_runtime::vm::PARENT_WATCH_FD && libc::close(read_fd) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(microsandbox_runtime::vm::PARENT_WATCH_FD, libc::F_GETFD);
                 if flags < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::fcntl(PARENT_WATCH_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                if libc::fcntl(
+                    microsandbox_runtime::vm::PARENT_WATCH_FD,
+                    libc::F_SETFD,
+                    flags & !libc::FD_CLOEXEC,
+                ) < 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -358,7 +378,7 @@ fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<Metri
 
 fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
     let mut fds = [0; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    let rc = create_cloexec_pipe(&mut fds);
     if rc != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -366,12 +386,26 @@ fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
     let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
     let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-    set_cloexec(&read_fd, false)?;
-    set_cloexec(&write_fd, true)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        set_cloexec(&read_fd, true)?;
+        set_cloexec(&write_fd, true)?;
+    }
 
     Ok(ParentWatchdogPipe { read_fd, write_fd })
 }
 
+#[cfg(target_os = "linux")]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe(fds.as_mut_ptr()) }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn set_cloexec(fd: &OwnedFd, enabled: bool) -> MicrosandboxResult<()> {
     let current = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
     if current < 0 {
@@ -1506,7 +1540,7 @@ mod tests {
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
             None,
-            Some(super::PARENT_WATCH_FD),
+            Some(microsandbox_runtime::vm::PARENT_WATCH_FD),
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
