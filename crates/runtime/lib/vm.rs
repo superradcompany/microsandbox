@@ -43,6 +43,7 @@ const EXIT_REASON_COMPLETED: u8 = 0;
 const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
 const EXIT_REASON_MAX_DURATION: u8 = 2;
 const EXIT_REASON_SIGNAL: u8 = 3;
+const EXIT_REASON_PARENT_EXIT: u8 = 4;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -77,6 +78,9 @@ pub struct Config {
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
+
+    /// Read end of the attached-parent watchdog pipe.
+    pub parent_watchdog: Option<OwnedFd>,
 
     /// Whether to forward VM console output to stdout.
     pub forward_output: bool,
@@ -417,6 +421,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_sandbox_root = config
+        .runtime_dir
+        .parent()
+        .map(std::path::Path::to_path_buf);
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
@@ -435,6 +443,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let reason = match reason_tag {
                 EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
                 EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+                EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
                 EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
                 _ if exit_code == 0 => run_entity::TerminationReason::Completed,
                 _ => run_entity::TerminationReason::Failed,
@@ -466,6 +475,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
                     .exec(&exit_db)
                     .await;
+
+                if reason_tag == EXIT_REASON_PARENT_EXIT {
+                    if let Some(path) = exit_sandbox_root.as_ref() {
+                        let _ = std::fs::remove_dir_all(path);
+                    }
+                    let _ = sandbox_entity::Entity::delete_by_id(exit_sandbox_id)
+                        .exec(&exit_db)
+                        .await;
+                }
             });
 
             // Inject the exec.log lifecycle-stop marker before _exit().
@@ -512,6 +530,16 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         };
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let exit_handle = vm.exit_handle();
+
+    if let Some(parent_watchdog) = config.parent_watchdog {
+        spawn_parent_watchdog(
+            parent_watchdog,
+            Arc::clone(&shared),
+            Arc::clone(&exit_reason),
+            exit_handle.clone(),
+            config.sandbox_name.clone(),
+        );
+    }
 
     #[cfg(feature = "net")]
     if let Some(network_termination_handle) = _network_termination_handle {
@@ -1110,6 +1138,47 @@ fn request_guest_shutdown(shared: &ConsoleSharedState) -> RuntimeResult<()> {
     codec::encode_to_buf(&msg, &mut frame)
         .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown frame: {e}")))?;
     relay::push_guest_frame_blocking(shared, frame)
+}
+
+fn spawn_parent_watchdog(
+    parent_watchdog: OwnedFd,
+    shared: Arc<ConsoleSharedState>,
+    exit_reason: Arc<std::sync::atomic::AtomicU8>,
+    exit_handle: msb_krun::ExitHandle,
+    sandbox_name: String,
+) {
+    std::thread::Builder::new()
+        .name(format!("msb-parent-watch-{sandbox_name}"))
+        .spawn(move || {
+            let mut file = std::fs::File::from(parent_watchdog);
+            let mut buf = [0_u8; 1];
+
+            loop {
+                match std::io::Read::read(&mut file, &mut buf) {
+                    Ok(0) => {
+                        tracing::info!("creator process exited; stopping attached sandbox");
+                        exit_reason
+                            .store(EXIT_REASON_PARENT_EXIT, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(err) = request_guest_shutdown(&shared) {
+                            tracing::warn!(error = %err, "parent-watch shutdown request failed");
+                        } else {
+                            std::thread::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT);
+                        }
+                        exit_handle.trigger();
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "parent-watch read failed; stopping sandbox");
+                        exit_reason.store(EXIT_REASON_SIGNAL, std::sync::atomic::Ordering::SeqCst);
+                        exit_handle.trigger();
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("spawn parent watchdog thread");
 }
 
 /// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.

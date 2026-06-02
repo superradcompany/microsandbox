@@ -5,6 +5,7 @@
 //! — the VMM calls `_exit()` on guest shutdown.
 
 use std::path::PathBuf;
+use std::{os::fd::FromRawFd, os::fd::OwnedFd};
 
 use clap::Args;
 use microsandbox_runtime::{
@@ -46,6 +47,10 @@ pub struct SandboxArgs {
     /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
     pub agent_sock: PathBuf,
+
+    /// Read end of the attached-parent watchdog pipe.
+    #[arg(long = "parent-watch-fd", hide = true)]
+    pub parent_watch_fd: Option<i32>,
 
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
@@ -214,6 +219,9 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
+        parent_watchdog: args
+            .parent_watch_fd
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
         forward_output: args.forward_output,
         idle_timeout_secs: args.idle_timeout,
         max_duration_secs: args.max_duration,

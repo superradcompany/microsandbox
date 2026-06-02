@@ -32,6 +32,10 @@ pub struct ProcessHandle {
     /// When true, the Drop impl will NOT send SIGTERM.
     detached: bool,
 
+    /// Writer side of the attached-parent watchdog pipe. Keeping this open
+    /// lets the child detect when the owner process disappears.
+    _parent_watchdog: Option<std::os::fd::OwnedFd>,
+
     /// Ephemeral staging directory for file mounts. Dropped when the
     /// process handle is dropped, which auto-removes all staged files.
     _file_mounts_staging: Option<TempDir>,
@@ -48,6 +52,7 @@ impl ProcessHandle {
         sandbox_name: String,
         child: Child,
         file_mounts_staging: Option<TempDir>,
+        parent_watchdog: Option<std::os::fd::OwnedFd>,
     ) -> Self {
         Self {
             pid,
@@ -55,6 +60,7 @@ impl ProcessHandle {
             child,
             detached: false,
             _file_mounts_staging: file_mounts_staging,
+            _parent_watchdog: parent_watchdog,
         }
     }
 
@@ -124,8 +130,19 @@ impl Drop for ProcessHandle {
             return;
         }
 
-        // Safety net: send SIGTERM so the sandbox process is cleaned up
-        // if the handle is dropped without an explicit stop.
+        // Attached sandboxes are coupled to the owner through the parent
+        // watchdog pipe. Dropping the last writer is enough to trigger guest
+        // shutdown and lets the runtime distinguish owner-exit cleanup from a
+        // normal explicit stop. Keep SIGTERM only for legacy/non-watchdog
+        // cases.
+        if self._parent_watchdog.is_some() {
+            tracing::debug!(
+                sandbox = %self.sandbox_name,
+                "drop: closing parent watchdog writer for attached sandbox cleanup"
+            );
+            return;
+        }
+
         if let Ok(None) = self.child.try_wait()
             && let Some(pid) = self.child.id()
         {
