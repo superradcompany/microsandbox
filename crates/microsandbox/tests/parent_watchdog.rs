@@ -169,6 +169,10 @@ async fn parent_exit_stops_but_preserves_named_sandbox() {
         .arg("--nocapture")
         .env(CHILD_NAME_ENV, name)
         .env(CHILD_READY_ENV, &ready_path)
+        // This helper process must observe the same sandbox database as the
+        // parent test. CI sets MSB_TEST_ISOLATE_HOME=1, and the #[msb_test]
+        // wrapper would otherwise create a fresh MSB_HOME in the child.
+        .env_remove(test_utils::ISOLATE_HOME_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
