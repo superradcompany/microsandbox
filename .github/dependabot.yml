@@ -5,21 +5,26 @@
 
 version: 2
 
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: "weekly"
+
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
     commit-message:
       prefix: "chore"
       include: "scope"
     target-branch: "main"
-    schedule:
-      interval: "weekly"
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
     commit-message:
       prefix: "chore(ci)"
       include: "scope"
     target-branch: "main"
-    schedule:
-      interval: "weekly"
