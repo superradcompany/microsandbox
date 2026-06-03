@@ -206,9 +206,12 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
   error can later cover the reverse skew (a newer runtime feature an older SDK can't use). Callers
   that can't gate by sending (the SSH/SFTP layer, the filesystem fail-fast) consult
   `AgentClient::supports(MessageType)` or `AgentClient::ensure_version_compat(MessageType)`, the single predicate
-  over the same mechanism, instead of inspecting the protocol generation directly. The
-  guest→host gate is future work (the runtime doesn't yet track the host's generation, and no
-  guest→host message type is above generation 1).
+  over the same mechanism, instead of inspecting the protocol generation directly.
+- **Both directions share one primitive:** `MessageType::is_available_at(peer_generation)`. The guest
+  can gate a guest-initiated message the same way, because it already receives each peer's generation
+  on every message (the `v` field). The send-site enforcement on the guest lands with the first
+  feature that needs it — reverse port forwarding, where the guest opens a channel to the host — since
+  no guest-initiated message type is above generation 1 yet.
 - **Codec vs. gate.** `AgentProtocol` (Current / LegacyV1) selects the wire _codec_ (the container
   format). `negotiated_version` drives the _capability gate_. These are the two consumers of the
   one generation number.

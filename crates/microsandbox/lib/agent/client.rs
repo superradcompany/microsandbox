@@ -406,13 +406,12 @@ impl AgentClient {
     /// The single place the rule lives. Exposed for callers that hold the
     /// negotiated generation but not the live client (e.g. the SSH/SFTP layer).
     pub fn ensure_version_compat_for(t: MessageType, negotiated: u8) -> AgentClientResult<()> {
-        let needs = t.min_protocol_version();
-        if needs <= negotiated {
+        if t.is_available_at(negotiated) {
             return Ok(());
         }
         Err(AgentClientError::UnsupportedOperation {
             msg_type: t.as_str(),
-            needs,
+            needs: t.min_protocol_version(),
             peer: negotiated,
         })
     }

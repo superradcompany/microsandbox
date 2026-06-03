@@ -267,6 +267,18 @@ impl MessageType {
         }
     }
 
+    /// Whether a peer that speaks `peer_generation` is new enough to handle this
+    /// message type.
+    ///
+    /// The shared version-compatibility primitive for both directions. The host
+    /// gates its sends on it (`AgentClient::ensure_version_compat`); the guest
+    /// can gate a guest-initiated message the same way, reading the peer's
+    /// generation from the `v` field of the request that established the session.
+    /// See `VERSIONING.md`.
+    pub fn is_available_at(&self, peer_generation: u8) -> bool {
+        self.min_protocol_version() <= peer_generation
+    }
+
     /// Returns the wire string representation.
     ///
     /// Backed by the per-variant `#[strum(serialize = ...)]` attribute, the
@@ -453,6 +465,18 @@ mod tests {
         ciborium::into_writer(&Old { a: 1, b: 2 }, &mut old_bytes).unwrap();
         let as_new: New = ciborium::from_reader(&old_bytes[..]).unwrap();
         assert_eq!(as_new, New { a: 1, b: 2, c: 0 });
+    }
+
+    #[test]
+    fn test_is_available_at() {
+        // Exec is in the generation-1 baseline: available to every peer.
+        assert!(MessageType::ExecRequest.is_available_at(1));
+        assert!(MessageType::ExecRequest.is_available_at(2));
+        assert!(MessageType::ExecRequest.is_available_at(PROTOCOL_VERSION));
+        // Filesystem requires generation 2: unavailable to a legacy (gen 1) peer.
+        assert!(!MessageType::FsRequest.is_available_at(1));
+        assert!(MessageType::FsRequest.is_available_at(2));
+        assert!(MessageType::FsRequest.is_available_at(PROTOCOL_VERSION));
     }
 
     #[test]
