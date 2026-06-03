@@ -148,6 +148,19 @@ struct SshSession {
     channels: HashMap<ChannelId, ChannelState>,
 }
 
+impl Drop for SshSession {
+    fn drop(&mut self) {
+        // If the session is torn down without a per-channel close (e.g. the
+        // connection drops), abort any still-running tcp relay tasks so they
+        // don't linger waiting on a guest acknowledgement.
+        for state in self.channels.values() {
+            if let ChannelState::Tcp { relay, .. } = state {
+                relay.abort();
+            }
+        }
+    }
+}
+
 enum ChannelState {
     Pending {
         channel: Option<Channel<Msg>>,
