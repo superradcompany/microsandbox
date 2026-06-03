@@ -71,47 +71,46 @@ impl TcpSession {
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
     }
-}
 
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
+    /// Open a TCP stream from inside the guest and start relaying it.
+    ///
+    /// Sends `core.tcp.connected` on success, or `core.tcp.failed` on a connect
+    /// error (returning `Ok(None)` in that case, since no live session results).
+    pub async fn open(
+        id: u32,
+        req: TcpConnect,
+        out_buf: &mut Vec<u8>,
+        session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    ) -> Result<Option<Self>, String> {
+        let stream = match TcpStream::connect((req.host.as_str(), req.port)).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                encode_tcp_message(
+                    id,
+                    MessageType::TcpFailed,
+                    &TcpFailed {
+                        error: format!("connect {}:{}: {e}", req.host, req.port),
+                    },
+                    out_buf,
+                )?;
+                return Ok(None);
+            }
+        };
 
-/// Open a TCP stream from inside the guest and start relaying it.
-pub async fn handle_tcp_connect(
-    id: u32,
-    req: TcpConnect,
-    out_buf: &mut Vec<u8>,
-    session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
-) -> Result<Option<TcpSession>, String> {
-    let stream = match TcpStream::connect((req.host.as_str(), req.port)).await {
-        Ok(stream) => stream,
-        Err(e) => {
-            encode_tcp_message(
-                id,
-                MessageType::TcpFailed,
-                &TcpFailed {
-                    error: format!("connect {}:{}: {e}", req.host, req.port),
-                },
-                out_buf,
-            )?;
-            return Ok(None);
-        }
-    };
+        encode_tcp_message(id, MessageType::TcpConnected, &TcpConnected {}, out_buf)?;
 
-    encode_tcp_message(id, MessageType::TcpConnected, &TcpConnected {}, out_buf)?;
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let output_tx = session_tx.clone();
+        let task = tokio::spawn(async move {
+            relay_tcp_session(id, stream, commands_rx, output_tx).await;
+        });
 
-    let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-    let output_tx = session_tx.clone();
-    let task = tokio::spawn(async move {
-        relay_tcp_session(id, stream, commands_rx, output_tx).await;
-    });
-
-    Ok(Some(TcpSession {
-        owner_id: id,
-        commands: commands_tx,
-        task,
-    }))
+        Ok(Some(Self {
+            owner_id: id,
+            commands: commands_tx,
+            task,
+        }))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

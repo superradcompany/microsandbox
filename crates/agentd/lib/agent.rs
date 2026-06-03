@@ -406,7 +406,7 @@ async fn handle_message(
             let req: TcpConnect = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode tcp connect: {e}")))?;
-            match tcp::handle_tcp_connect(msg.id, req, out_buf, session_tx).await {
+            match TcpSession::open(msg.id, req, out_buf, session_tx).await {
                 Ok(Some(session)) => {
                     state.tcp_sessions.insert(msg.id, session);
                 }
