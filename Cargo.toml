@@ -61,7 +61,7 @@ async-compression = "0.4"
 bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
-clap = { version = "4.5", features = ["color", "derive"] }
+clap = { version = "4.6", features = ["color", "derive"] }
 console = "0.16"
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29.0", features = ["events"] }
