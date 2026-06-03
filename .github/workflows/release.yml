@@ -47,7 +47,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
@@ -80,7 +80,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
           path: build/agentd
@@ -246,7 +246,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
@@ -283,7 +283,7 @@ jobs:
           before-script-linux: dnf install -y libcap-ng-devel
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-sdk-${{ matrix.target }}
           path: sdk/python/dist/*.whl
@@ -326,7 +326,7 @@ jobs:
           cp "build/$go_ffi_file" "artifacts/$bundle_name"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: artifacts/
@@ -759,7 +759,7 @@ jobs:
           echo "${{ steps.push.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}.txt
 
       - name: Upload digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: docker-digest-${{ matrix.arch }}
           path: /tmp/digests/${{ matrix.arch }}.txt
