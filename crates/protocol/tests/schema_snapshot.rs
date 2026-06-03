@@ -92,6 +92,51 @@ fn protocol_surface_matches_snapshot() {
 }
 
 #[test]
+fn schema_is_append_only_across_generations() {
+    // Every frozen prior-generation snapshot must remain a subset of the current
+    // surface: a message type, once shipped at a generation, is never removed or
+    // re-numbered. This is what makes "newer peers understand everything older
+    // peers did" hold.
+    let dir = format!("{}/schema", env!("CARGO_MANIFEST_DIR"));
+    let current: serde_json::Value =
+        serde_json::from_str(&render_surface()).expect("current surface is valid json");
+    let current_types = current["message_types"]
+        .as_array()
+        .expect("message_types array");
+    let current_file = format!("gen-{PROTOCOL_VERSION}.json");
+
+    let mut compared = 0;
+    for entry in std::fs::read_dir(&dir).expect("read schema dir") {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if !name.starts_with("gen-") || !name.ends_with(".json") || name == current_file {
+            continue;
+        }
+        let prior: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(format!("{dir}/{name}")).unwrap())
+                .expect("prior snapshot is valid json");
+        for pt in prior["message_types"].as_array().unwrap() {
+            let wire = pt["wire"].as_str().unwrap();
+            let current_entry = current_types
+                .iter()
+                .find(|c| c["wire"] == pt["wire"])
+                .unwrap_or_else(|| {
+                    panic!("message type '{wire}' from {name} is missing at generation {PROTOCOL_VERSION}; message types are append-only and must not be removed")
+                });
+            assert_eq!(
+                current_entry["introduced_in"], pt["introduced_in"],
+                "message type '{wire}' changed its introduced_in versus {name}; a generation's surface is immutable once frozen"
+            );
+        }
+        compared += 1;
+    }
+
+    assert!(
+        compared > 0,
+        "no prior-generation schema snapshot found to compare against in {dir}"
+    );
+}
+
+#[test]
 fn every_message_type_is_sendable_to_a_current_peer() {
     for t in MessageType::iter() {
         assert!(
