@@ -78,6 +78,18 @@ pub struct SandboxArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
+    /// Guest-visible memory at boot when ballooning is enabled, in MiB.
+    #[arg(long = "balloon-initial-mib")]
+    pub balloon_initial_mib: Option<u32>,
+
+    /// Minimum guest-visible memory accepted by the balloon controller, in MiB.
+    #[arg(long = "balloon-min-mib")]
+    pub balloon_min_mib: Option<u32>,
+
+    /// Host Unix socket for runtime balloon target updates.
+    #[arg(long = "balloon-control-socket")]
+    pub balloon_control_socket: Option<PathBuf>,
+
     /// Metrics sampling interval in milliseconds; `0` disables sampling.
     #[arg(long = "metrics-sample-interval-ms", default_value_t = 1000)]
     pub metrics_sample_interval_ms: u64,
@@ -186,6 +198,9 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
+        balloon_initial_mib: args.balloon_initial_mib,
+        balloon_min_mib: args.balloon_min_mib,
+        balloon_control_socket: args.balloon_control_socket,
         rootfs_path: args.rootfs_path,
         rootfs_vmdk: if is_vmdk {
             args.rootfs_disk.clone()

@@ -84,6 +84,18 @@ pub struct SandboxConfig {
     #[serde(default = "default_memory_mib")]
     pub memory_mib: u32,
 
+    /// Guest-visible memory at boot when ballooning is enabled, in MiB.
+    #[serde(default)]
+    pub balloon_initial_mib: Option<u32>,
+
+    /// Minimum guest-visible memory allowed by the balloon controller, in MiB.
+    #[serde(default)]
+    pub balloon_min_mib: Option<u32>,
+
+    /// Host Unix socket used to send runtime balloon memory targets.
+    #[serde(default)]
+    pub balloon_control_socket: Option<PathBuf>,
+
     /// Runtime log level for the sandbox process.
     ///
     /// `None` means the sandbox process stays silent.
@@ -423,6 +435,9 @@ impl Default for SandboxConfig {
             image: RootfsSource::default(),
             cpus: default_cpus(),
             memory_mib: default_memory_mib(),
+            balloon_initial_mib: None,
+            balloon_min_mib: None,
+            balloon_control_socket: None,
             log_level: default_log_level(),
             metrics_sample_interval_ms: default_metrics_sample_interval_ms(),
             disable_metrics_sample: default_disable_metrics_sample(),

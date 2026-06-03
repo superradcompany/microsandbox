@@ -133,3 +133,6 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.61.1"
 russh-sftp = "2.2.2"
+
+[patch.crates-io]
+msb_krun = { git = "https://github.com/enricoschaaf/msb-libkrun", branch = "enrico/host-balloon-control" }

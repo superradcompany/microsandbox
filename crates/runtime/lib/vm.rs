@@ -186,6 +186,15 @@ pub struct VmConfig {
     /// Memory in MiB.
     pub memory_mib: u32,
 
+    /// Guest-visible memory at boot when ballooning is enabled, in MiB.
+    pub balloon_initial_mib: Option<u32>,
+
+    /// Minimum guest-visible memory accepted by the balloon controller, in MiB.
+    pub balloon_min_mib: Option<u32>,
+
+    /// Host Unix socket for runtime balloon target updates.
+    pub balloon_control_socket: Option<PathBuf>,
+
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
 
@@ -291,6 +300,9 @@ impl std::fmt::Debug for VmConfig {
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
+            .field("balloon_initial_mib", &self.balloon_initial_mib)
+            .field("balloon_min_mib", &self.balloon_min_mib)
+            .field("balloon_control_socket", &self.balloon_control_socket)
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -740,6 +752,23 @@ fn build_vm(
                 k
             }
         });
+
+    if vm.balloon_initial_mib.is_some()
+        || vm.balloon_min_mib.is_some()
+        || vm.balloon_control_socket.is_some()
+    {
+        let initial_mib = vm.balloon_initial_mib.unwrap_or(vm.memory_mib);
+        let min_mib = vm.balloon_min_mib.unwrap_or(0);
+        let control_socket = vm.balloon_control_socket.clone();
+        builder = builder.balloon(move |mut balloon| {
+            balloon = balloon.enable().initial_mib(initial_mib).min_mib(min_mib);
+            if let Some(socket) = control_socket {
+                balloon.control_socket_path(socket)
+            } else {
+                balloon
+            }
+        });
+    }
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
