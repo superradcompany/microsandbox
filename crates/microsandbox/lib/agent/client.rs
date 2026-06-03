@@ -638,6 +638,7 @@ fn encode_message_body<T: Serialize>(
 mod tests {
     use microsandbox_protocol::core::Ready;
     use microsandbox_protocol::exec::ExecRequest;
+    use microsandbox_protocol::message::PROTOCOL_VERSION;
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
@@ -818,6 +819,41 @@ mod tests {
         assert_eq!(message.id, id_offset + 1);
         assert_eq!(message.v, LEGACY_PROTOCOL_VERSION);
         assert_eq!(message.t, MessageType::ExecRequest);
+    }
+
+    #[tokio::test]
+    async fn connect_preserves_current_peer_protocol_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+        };
+        let mut ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+        ready_msg.v = 2;
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket
+                .write_all(&microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP.to_be_bytes())
+                .await
+                .unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+        });
+
+        let client =
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        // The runtime reported generation 2, so that is the negotiated capability.
+        assert_eq!(client.negotiated_version(), 2);
+        // TCP forwarding (generation 4) is unavailable to a generation-2 runtime.
+        assert!(!client.supports(MessageType::TcpConnect));
     }
 
     async fn assert_accepts_legacy_relay_handshake(id_offset: u32) {

@@ -9,16 +9,16 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
-/// Set on terminal message types such as `ExecExited` and `FsResponse`.
+/// Set on terminal message types such as `ExecExited`, `FsResponse`, and `TcpClosed`.
 pub const FLAG_TERMINAL: u8 = 0b0000_0001;
 
 /// Frame flag: this is the first message of a new session.
 ///
-/// Set on session-initiating message types such as `ExecRequest` and `FsRequest`.
+/// Set on session-initiating message types such as `ExecRequest`, `FsRequest`, and `TcpConnect`.
 pub const FLAG_SESSION_START: u8 = 0b0000_0010;
 
 /// Frame flag: this message requests sandbox shutdown.
@@ -174,6 +174,34 @@ pub enum MessageType {
     /// Streaming file data chunk (bidirectional).
     #[strum(serialize = "core.fs.data")]
     FsData,
+
+    /// Host requests a TCP connection from inside the guest.
+    #[strum(serialize = "core.tcp.connect")]
+    TcpConnect,
+
+    /// Guest confirms that a TCP connection was opened.
+    #[strum(serialize = "core.tcp.connected")]
+    TcpConnected,
+
+    /// TCP stream data chunk (bidirectional).
+    #[strum(serialize = "core.tcp.data")]
+    TcpData,
+
+    /// One TCP stream side has closed its write half.
+    #[strum(serialize = "core.tcp.eof")]
+    TcpEof,
+
+    /// Host requests a TCP session close.
+    #[strum(serialize = "core.tcp.close")]
+    TcpClose,
+
+    /// Guest reports that a TCP session is closed. Terminal.
+    #[strum(serialize = "core.tcp.closed")]
+    TcpClosed,
+
+    /// Guest reports that a TCP session failed. Terminal.
+    #[strum(serialize = "core.tcp.failed")]
+    TcpFailed,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -221,8 +249,12 @@ impl MessageType {
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
-            Self::ExecExited | Self::ExecFailed | Self::FsResponse => FLAG_TERMINAL,
-            Self::ExecRequest | Self::FsRequest => FLAG_SESSION_START,
+            Self::ExecExited
+            | Self::ExecFailed
+            | Self::FsResponse
+            | Self::TcpClosed
+            | Self::TcpFailed => FLAG_TERMINAL,
+            Self::ExecRequest | Self::FsRequest | Self::TcpConnect => FLAG_SESSION_START,
             Self::Shutdown => FLAG_SHUTDOWN,
             _ => 0,
         }
@@ -264,6 +296,13 @@ impl MessageType {
             | Self::ExecResize
             | Self::ExecSignal => 1,
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
+            Self::TcpConnect
+            | Self::TcpConnected
+            | Self::TcpData
+            | Self::TcpEof
+            | Self::TcpClose
+            | Self::TcpClosed
+            | Self::TcpFailed => 4,
         }
     }
 
@@ -351,6 +390,13 @@ mod tests {
             (MessageType::FsRequest, "core.fs.request"),
             (MessageType::FsResponse, "core.fs.response"),
             (MessageType::FsData, "core.fs.data"),
+            (MessageType::TcpConnect, "core.tcp.connect"),
+            (MessageType::TcpConnected, "core.tcp.connected"),
+            (MessageType::TcpData, "core.tcp.data"),
+            (MessageType::TcpEof, "core.tcp.eof"),
+            (MessageType::TcpClose, "core.tcp.close"),
+            (MessageType::TcpClosed, "core.tcp.closed"),
+            (MessageType::TcpFailed, "core.tcp.failed"),
         ];
 
         for (mt, expected_str) in &types {
@@ -381,6 +427,13 @@ mod tests {
             MessageType::FsRequest,
             MessageType::FsResponse,
             MessageType::FsData,
+            MessageType::TcpConnect,
+            MessageType::TcpConnected,
+            MessageType::TcpData,
+            MessageType::TcpEof,
+            MessageType::TcpClose,
+            MessageType::TcpClosed,
+            MessageType::TcpFailed,
         ];
 
         for mt in &types {
@@ -416,8 +469,11 @@ mod tests {
         assert_eq!(MessageType::ExecExited.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::FsResponse.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::TcpClosed.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::TcpFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
+        assert_eq!(MessageType::TcpConnect.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::Ready.flags(), 0);
         assert_eq!(MessageType::InitResolved.flags(), 0);
         assert_eq!(MessageType::InitAck.flags(), 0);
@@ -430,6 +486,10 @@ mod tests {
         assert_eq!(MessageType::ExecResize.flags(), 0);
         assert_eq!(MessageType::ExecSignal.flags(), 0);
         assert_eq!(MessageType::FsData.flags(), 0);
+        assert_eq!(MessageType::TcpConnected.flags(), 0);
+        assert_eq!(MessageType::TcpData.flags(), 0);
+        assert_eq!(MessageType::TcpEof.flags(), 0);
+        assert_eq!(MessageType::TcpClose.flags(), 0);
     }
 
     #[test]
