@@ -253,7 +253,7 @@ jobs:
         run: npm ci && npm run build
 
       # -- Checks (Python SDK) --
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -603,7 +603,7 @@ jobs:
         with:
           cache-bin: false
 
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
