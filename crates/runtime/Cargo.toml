@@ -22,12 +22,12 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 crossbeam-queue = { workspace = true }
 libc.workspace = true
-microsandbox-db = { version = "0.5.4", path = "../db" }
-microsandbox-filesystem = { version = "0.5.4", path = "../filesystem", default-features = false }
-microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
-microsandbox-network = { version = "0.5.4", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.5.4", path = "../protocol" }
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
+microsandbox-db = { workspace = true }
+microsandbox-filesystem = { workspace = true }
+microsandbox-metrics = { workspace = true }
+microsandbox-network = { workspace = true, optional = true }
+microsandbox-protocol = { workspace = true }
+microsandbox-utils = { workspace = true }
 msb_krun = { version = "0.1.14", features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
 rustls = { workspace = true }

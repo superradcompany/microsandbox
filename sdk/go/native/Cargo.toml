@@ -12,8 +12,8 @@ name = "microsandbox_go_ffi"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-microsandbox = { version = "0.5.4", path = "../../../crates/microsandbox", features = ["net", "ssh"] }
-microsandbox-network = { version = "0.5.4", path = "../../../crates/network" }
+microsandbox = { workspace = true, default-features = true, features = ["net", "ssh"] }
+microsandbox-network = { workspace = true }
 ipnetwork.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
