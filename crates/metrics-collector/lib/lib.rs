@@ -2,8 +2,8 @@
 //! metrics registry, buffers per-exporter, and fans batches out to
 //! registered exporters.
 //!
-//! See `docs/msb-metrics-binary-plan.md` for the architecture and the
-//! `msb-metrics` binary that ships in this crate's `bin/main.rs`.
+//! See `docs/observability/msb-metrics.mdx` for the user-facing overview and
+//! the `msb-metrics` binary that ships in this crate's `bin/main.rs`.
 //!
 //! # Lifecycle
 //!
@@ -70,10 +70,10 @@ pub mod exporters;
 //--------------------------------------------------------------------------------------------------
 
 pub use core::{
-    DEFAULT_COLLECT_INTERVAL, DEFAULT_EXPORT_TIMEOUT, DEFAULT_FLUSH_INTERVAL,
-    DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollection, MetricsCollector, MetricsCollectorBuilder,
-    MetricsErrorPolicy, MetricsExportBatch, MetricsExporter, MetricsExporterConfig,
-    RunningCollector, SandboxMetricSnapshot,
+    CatalogLabelSource, DEFAULT_COLLECT_INTERVAL, DEFAULT_EXPORT_TIMEOUT, DEFAULT_FLUSH_INTERVAL,
+    DEFAULT_MAX_BUFFERED_COLLECTIONS, LabelSource, MetricsCollection, MetricsCollector,
+    MetricsCollectorBuilder, MetricsErrorPolicy, MetricsExportBatch, MetricsExporter,
+    MetricsExporterConfig, RunningCollector, SandboxLabels, SandboxMetricSnapshot,
 };
 pub use error::{MetricsCollectorError, MetricsCollectorResult};
 pub use microsandbox_metrics::SandboxMetrics;

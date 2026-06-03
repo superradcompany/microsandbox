@@ -342,9 +342,8 @@ except BootStartError as e:
 ```
 
 ```go Go
-// The Go SDK currently surfaces boot failures as a generic *m.Error
-// (typically Kind=ErrInternal or ErrInvalidConfig). A dedicated BootStart
-// kind with stage+errno detail lands in a future release.
+// The Go SDK surfaces boot failures as *m.Error.
+// Inspect Kind and Message for the failure details.
 _, err := m.CreateSandbox(ctx, "svc", m.WithImage("alpine"))
 var me *m.Error
 if errors.As(err, &me) {

@@ -153,6 +153,18 @@ func TestFFIWireShape_EnvAndScripts(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_Labels(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithLabels(map[string]string{"user.id": "alice"}),
+		WithLabel("tenant", "acme"),
+	)
+	labels := mustField(t, got, "labels").(map[string]any)
+	if labels["user.id"] != "alice" || labels["tenant"] != "acme" {
+		t.Fatalf("labels = %v", labels)
+	}
+}
+
 func TestFFIWireShape_Ports(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),

@@ -39,7 +39,7 @@
 
 use std::sync::{Arc, Weak};
 
-use futures::future::BoxFuture;
+use async_trait::async_trait;
 use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
@@ -94,9 +94,8 @@ pub enum OtlpProtocol {
 /// Optional payload compression for OTLP exports.
 ///
 /// Compression is only wired through on the gRPC transport in
-/// `opentelemetry-otlp` 0.27; HTTP/Protobuf currently has no
-/// `with_compression` hook. Selecting [`OtlpCompression::Gzip`] together
-/// with [`OtlpProtocol::HttpProtobuf`] returns a build-time error.
+/// the current HTTP/Protobuf build. Selecting [`OtlpCompression::Gzip`]
+/// together with [`OtlpProtocol::HttpProtobuf`] returns a build-time error.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OtlpCompression {
     /// No compression. Default; preserves prior behavior.
@@ -251,9 +250,8 @@ impl OtelExporterBuilder {
     /// OTLP endpoint. Added on top of webpki roots, so a corporate gateway
     /// signed by a private CA works without disabling system trust.
     ///
-    /// gRPC only — the `opentelemetry-otlp` 0.27 HTTP transport does not
-    /// expose a TLS configuration hook. Passing this with `--protocol=http`
-    /// is rejected at build time.
+    /// gRPC only — the HTTP transport does not expose a TLS configuration
+    /// hook. Passing this with `--protocol=http` is rejected at build time.
     pub fn ca_cert_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
         self.ca_cert_pem = Some(pem.into());
         self
@@ -353,80 +351,50 @@ impl OtelExporterBuilder {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[async_trait]
 impl MetricsExporter for OtelExporter {
-    fn export(
-        &self,
-        batch: Arc<MetricsExportBatch>,
-    ) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let instruments = self.instruments.clone();
-        let self_instruments = self.self_instruments.clone();
-        let reader = self.reader.clone();
-        let otlp = self.otlp.clone();
-        let identity = self.identity;
+    async fn export(&self, batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+        // Self-observability: count drops surfaced from the worker buffer first,
+        // so even a fully-empty batch (no sandbox snapshots) still ships the
+        // drop counter.
+        if batch.dropped_collection_count > 0 {
+            self.self_instruments
+                .collections_dropped
+                .add(batch.dropped_collection_count, &[]);
+        }
 
-        Box::pin(async move {
-            // Self-observability: count drops surfaced from the worker
-            // buffer first, so even a fully-empty batch (no sandbox
-            // snapshots) still ships the drop counter.
-            if batch.dropped_collection_count > 0 {
-                self_instruments
-                    .collections_dropped
-                    .add(batch.dropped_collection_count, &[]);
+        if batch.collections.is_empty() {
+            let result = export_recorded_metrics(&self.reader, &self.otlp).await;
+            record_export_outcome(&self.self_instruments, &result);
+            return result;
+        }
+
+        // Synchronous OTel gauges use LastValue aggregation. Record and export
+        // one collection at a time so a buffered flush preserves every collected
+        // sample instead of collapsing to the final value.
+        for collection in &batch.collections {
+            for snapshot in &collection.sandboxes {
+                let labels = collection.labels.get(&snapshot.sandbox_id);
+                let attrs =
+                    build_attributes(snapshot, &self.identity, labels.map(|l| l.as_slice()));
+                record_snapshot(&self.instruments, snapshot, &attrs);
             }
 
-            for collection in &batch.collections {
-                for snapshot in &collection.sandboxes {
-                    let attrs = build_attributes(snapshot, &identity);
-                    record_snapshot(&instruments, snapshot, &attrs);
-                }
-            }
+            let result = export_recorded_metrics(&self.reader, &self.otlp).await;
+            record_export_outcome(&self.self_instruments, &result);
+            result?;
+        }
 
-            // Pull what we just recorded out of the SDK pipeline and ship it.
-            // `ManualReader::collect` populates resource + scope_metrics
-            // synchronously (cheap memory copy); `PushMetricExporter::export`
-            // is genuinely async on the OTLP transport.
-            let mut rm = ResourceMetrics::default();
-            let collect_result = reader.collect(&mut rm).map_err(|e| {
-                MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}"))
-            });
-            let result = match collect_result {
-                Ok(()) => otlp.export(&rm).await.map_err(|e| {
-                    MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}"))
-                }),
-                Err(e) => Err(e),
-            };
-
-            // Record outcome after the transport call; the values ship on
-            // the next successful export. Cumulative counters preserve
-            // the total even if the current export failed.
-            match &result {
-                Ok(()) => {
-                    self_instruments.exports_success.add(1, &[]);
-                    if let Ok(now) =
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    {
-                        self_instruments
-                            .last_success_timestamp
-                            .record(now.as_secs_f64(), &[]);
-                    }
-                }
-                Err(_) => self_instruments.exports_failure.add(1, &[]),
-            }
-
-            result
-        })
+        Ok(())
     }
 
-    fn shutdown(&self) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let provider = self.provider.clone();
-        Box::pin(async move {
-            // ManualReader's shutdown is a non-blocking bool flip, so
-            // provider.shutdown() does not have the PeriodicReader deadlock.
-            provider
-                .shutdown()
-                .map_err(|e| MetricsCollectorError::Custom(format!("otel shutdown failed: {e}")))?;
-            Ok(())
-        })
+    async fn shutdown(&self) -> MetricsCollectorResult<()> {
+        // ManualReader's shutdown is a non-blocking bool flip, so
+        // provider.shutdown() does not have the PeriodicReader deadlock.
+        self.provider
+            .shutdown()
+            .map_err(|e| MetricsCollectorError::Custom(format!("otel shutdown failed: {e}")))?;
+        Ok(())
     }
 }
 
@@ -444,7 +412,7 @@ fn build_otlp_exporter(
     if matches!(protocol, OtlpProtocol::HttpProtobuf) && ca_cert_pem.is_some() {
         return Err(MetricsCollectorError::InvalidConfig(
             "custom CA certificate is currently supported only with --protocol=grpc; \
-             opentelemetry-otlp 0.27 has no TLS configuration hook on the HTTP transport"
+             opentelemetry-otlp has no TLS configuration hook on the HTTP transport"
                 .into(),
         ));
     }
@@ -453,7 +421,7 @@ fn build_otlp_exporter(
     {
         return Err(MetricsCollectorError::InvalidConfig(
             "gzip compression is currently supported only with --protocol=grpc; \
-             opentelemetry-otlp 0.27 has no with_compression hook on the HTTP transport"
+             the HTTP transport was not built with gzip support"
                 .into(),
         ));
     }
@@ -482,6 +450,39 @@ fn build_otlp_exporter(
             .build(),
     };
     result.map_err(|e| MetricsCollectorError::Custom(format!("otel exporter build failed: {e}")))
+}
+
+/// Pull recorded points out of the SDK pipeline and ship them. `collect`
+/// populates resource + scope metrics synchronously; the OTLP transport export
+/// is async.
+async fn export_recorded_metrics(
+    reader: &SharedManualReader,
+    otlp: &OtlpMetricExporter,
+) -> MetricsCollectorResult<()> {
+    let mut rm = ResourceMetrics::default();
+    reader
+        .collect(&mut rm)
+        .map_err(|e| MetricsCollectorError::Custom(format!("otel reader.collect failed: {e}")))?;
+    otlp.export(&rm)
+        .await
+        .map_err(|e| MetricsCollectorError::Custom(format!("otel exporter.export failed: {e}")))?;
+    Ok(())
+}
+
+/// Record exporter self-observability after the transport returns. These
+/// cumulative points ship on the next successful OTLP request.
+fn record_export_outcome(instruments: &SelfInstruments, result: &MetricsCollectorResult<()>) {
+    match result {
+        Ok(()) => {
+            instruments.exports_success.add(1, &[]);
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                instruments
+                    .last_success_timestamp
+                    .record(now.as_secs_f64(), &[]);
+            }
+        }
+        Err(_) => instruments.exports_failure.add(1, &[]),
+    }
 }
 
 /// Apply caller-supplied `--header k=v` pairs by writing them into the
@@ -617,13 +618,20 @@ fn build_instruments(meter: &Meter) -> Instruments {
     }
 }
 
-/// Build the per-snapshot attribute set according to the configured
-/// `IdentityAttributes`.
+/// Build the per-snapshot attribute set: the configured `IdentityAttributes`
+/// plus the sandbox's user labels.
+///
+/// Labels are appended as ordinary per-datapoint attributes (the same path as
+/// identity), NOT as OTel `Resource` attributes — the `Resource` is fixed per
+/// MeterProvider and shared across every sandbox, so per-sandbox labels there
+/// would leak across series.
 fn build_attributes(
     snapshot: &SandboxMetricSnapshot,
     identity: &IdentityAttributes,
+    labels: Option<&[(String, String)]>,
 ) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(4);
+    let label_count = labels.map_or(0, <[_]>::len);
+    let mut attrs = Vec::with_capacity(4 + label_count);
     if identity.emit_name {
         attrs.push(KeyValue::new("sandbox.name", snapshot.name.clone()));
     }
@@ -635,6 +643,9 @@ fn build_attributes(
     }
     if identity.emit_pid {
         attrs.push(KeyValue::new("sandbox.pid", i64::from(snapshot.pid)));
+    }
+    for (key, value) in labels.unwrap_or(&[]) {
+        attrs.push(KeyValue::new(key.clone(), value.clone()));
     }
     attrs
 }
@@ -662,4 +673,74 @@ fn record_snapshot(
         .record(m.net_rx_bytes, attrs);
     instruments.network_bytes_sent.record(m.net_tx_bytes, attrs);
     instruments.uptime.record(m.uptime.as_secs_f64(), attrs);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use microsandbox_metrics::SandboxMetrics;
+
+    use super::*;
+
+    fn snapshot() -> SandboxMetricSnapshot {
+        SandboxMetricSnapshot {
+            name: "dev".into(),
+            sandbox_id: 7,
+            run_id: 70,
+            pid: 1007,
+            metrics: SandboxMetrics {
+                cpu_percent: 1.0,
+                memory_bytes: 1,
+                memory_limit_bytes: 2,
+                disk_read_bytes: 3,
+                disk_write_bytes: 4,
+                net_rx_bytes: 5,
+                net_tx_bytes: 6,
+                uptime: Duration::from_secs(1),
+                timestamp: chrono::Utc::now(),
+            },
+        }
+    }
+
+    fn pairs(attrs: &[KeyValue]) -> Vec<(String, String)> {
+        attrs
+            .iter()
+            .map(|kv| (kv.key.as_str().to_string(), kv.value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn labels_become_datapoint_attributes() {
+        let labels = [
+            ("user.id".to_string(), "alice".to_string()),
+            ("tenant".to_string(), "acme".to_string()),
+        ];
+        let attrs = build_attributes(&snapshot(), &IdentityAttributes::default(), Some(&labels));
+        let got = pairs(&attrs);
+
+        // Identity attributes still present (default emits name + id).
+        assert!(got.iter().any(|(k, _)| k == "sandbox.name"));
+        assert!(got.iter().any(|(k, _)| k == "sandbox.id"));
+        // Labels appended verbatim as their own attributes.
+        assert!(got.contains(&("user.id".to_string(), "alice".to_string())));
+        assert!(got.contains(&("tenant".to_string(), "acme".to_string())));
+    }
+
+    #[test]
+    fn no_labels_adds_no_extra_attributes() {
+        let with_none = build_attributes(&snapshot(), &IdentityAttributes::default(), None);
+        let with_empty = build_attributes(&snapshot(), &IdentityAttributes::default(), Some(&[]));
+        assert_eq!(with_none.len(), with_empty.len());
+        // Only sandbox.* identity attributes remain.
+        assert!(
+            with_none
+                .iter()
+                .all(|kv| kv.key.as_str().starts_with("sandbox."))
+        );
+    }
 }

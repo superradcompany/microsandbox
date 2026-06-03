@@ -52,6 +52,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		User:            o.User,
 		Replace:         o.Replace,
 		Env:             o.Env,
+		Labels:          o.Labels,
 		Detached:        o.Detached,
 		Entrypoint:      o.Entrypoint,
 		LogLevel:        string(o.LogLevel),
@@ -290,10 +291,44 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	return out, nil
 }
 
+// SandboxFilter narrows the results of ListSandboxes. The zero value matches
+// every sandbox. Build one fluently, e.g.
+// NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"}).
+type SandboxFilter struct {
+	labels map[string]string
+}
+
+// NewSandboxFilter returns an empty filter that matches every sandbox.
+func NewSandboxFilter() SandboxFilter { return SandboxFilter{} }
+
+// WithLabels requires matched sandboxes to carry all of these labels
+// (AND-matched). Repeated calls merge; later keys overwrite earlier ones.
+func (f SandboxFilter) WithLabels(labels map[string]string) SandboxFilter {
+	if f.labels == nil {
+		f.labels = make(map[string]string, len(labels))
+	}
+	for k, v := range labels {
+		f.labels[k] = v
+	}
+	return f
+}
+
 // ListSandboxes returns metadata for every known sandbox (running or stopped),
-// ordered by creation time (newest first).
+// ordered by creation time (newest first). Use ListSandboxesWith to narrow the
+// results by labels.
 func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error) {
-	infos, err := ffi.ListSandboxes(ctx)
+	return listSandboxes(ctx, nil)
+}
+
+// ListSandboxesWith returns sandbox metadata narrowed by a SandboxFilter, e.g.
+// NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"}). Label
+// selectors are AND-matched.
+func ListSandboxesWith(ctx context.Context, filter SandboxFilter) ([]*SandboxHandle, error) {
+	return listSandboxes(ctx, filter.labels)
+}
+
+func listSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHandle, error) {
+	infos, err := ffi.ListSandboxes(ctx, labels)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

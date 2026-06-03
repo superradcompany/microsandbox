@@ -117,6 +117,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub env: Vec<(String, String)>,
 
+    /// User-defined labels (`key`/`value`) attached to the sandbox for
+    /// attribution. Surfaced as attributes on the sandbox's emitted metrics so
+    /// backends can build per-user/per-tenant views. Immutable once the sandbox
+    /// is created.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
     /// Sandbox-wide resource limits inherited by guest processes.
     ///
     /// Unlike per-exec rlimits, these are applied by agentd during PID 1
@@ -399,6 +406,7 @@ impl Default for SandboxConfig {
             shell: None,
             scripts: HashMap::new(),
             env: Vec::new(),
+            labels: HashMap::new(),
             rlimits: Vec::new(),
             mounts: Vec::new(),
             patches: Vec::new(),
@@ -562,6 +570,27 @@ mod tests {
         assert!(decoded.registry_auth.is_none());
         assert!(!decoded.replace_existing);
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[test]
+    fn test_sandbox_config_deserializes_legacy_readonly_mounts() {
+        let json = r#"{"name":"legacy","mounts":[{"type":"Tmpfs","guest":"/tmp","size_mib":512,"readonly":false}]}"#;
+
+        let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(decoded.mounts.len(), 1);
+        match &decoded.mounts[0] {
+            VolumeMount::Tmpfs {
+                guest,
+                size_mib,
+                options,
+            } => {
+                assert_eq!(guest, "/tmp");
+                assert_eq!(*size_mib, Some(512));
+                assert_eq!(*options, MountOptions::default());
+            }
+            mount => panic!("expected tmpfs mount, got {mount:?}"),
+        }
     }
 
     #[test]

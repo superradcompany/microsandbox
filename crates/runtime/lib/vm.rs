@@ -43,6 +43,13 @@ const EXIT_REASON_COMPLETED: u8 = 0;
 const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
 const EXIT_REASON_MAX_DURATION: u8 = 2;
 const EXIT_REASON_SIGNAL: u8 = 3;
+const EXIT_REASON_PARENT_EXIT: u8 = 4;
+
+/// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
+pub const PARENT_WATCH_FD: i32 = 97;
+
+/// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
+pub const PARENT_WATCH_DETACH: u8 = 1;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -78,6 +85,9 @@ pub struct Config {
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
 
+    /// Read end of the attached-parent watchdog pipe.
+    pub parent_watchdog: Option<OwnedFd>,
+
     /// Whether to forward VM console output to stdout.
     pub forward_output: bool,
 
@@ -110,6 +120,12 @@ pub struct MetricsSlotHandoff {
     pub slot: u32,
     /// Generation paired with the reservation.
     pub generation: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ParentWatchdogSignal {
+    ParentExited,
+    Detached,
 }
 
 /// Specification for the writable upper layer attached as virtio-blk.
@@ -435,6 +451,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let reason = match reason_tag {
                 EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
                 EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+                EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
                 EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
                 _ if exit_code == 0 => run_entity::TerminationReason::Completed,
                 _ => run_entity::TerminationReason::Failed,
@@ -512,6 +529,25 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         };
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let exit_handle = vm.exit_handle();
+
+    if let Some(parent_watchdog) = config.parent_watchdog
+        && let Err(e) = spawn_parent_watchdog(
+            parent_watchdog,
+            Arc::clone(&shared),
+            Arc::clone(&exit_reason),
+            exit_handle.clone(),
+            config.sandbox_name.clone(),
+        )
+    {
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        if let Some(writer) = metrics_writer.clone() {
+            let _ = writer.release(ReleaseMode::Free);
+        } else {
+            release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+        }
+        let _ = std::fs::remove_file(&config.agent_sock_path);
+        return Err(e);
+    }
 
     #[cfg(feature = "net")]
     if let Some(network_termination_handle) = _network_termination_handle {
@@ -1112,6 +1148,58 @@ fn request_guest_shutdown(shared: &ConsoleSharedState) -> RuntimeResult<()> {
     relay::push_guest_frame_blocking(shared, frame)
 }
 
+fn spawn_parent_watchdog(
+    parent_watchdog: OwnedFd,
+    shared: Arc<ConsoleSharedState>,
+    exit_reason: Arc<std::sync::atomic::AtomicU8>,
+    exit_handle: msb_krun::ExitHandle,
+    sandbox_name: String,
+) -> RuntimeResult<()> {
+    std::thread::Builder::new()
+        .name(format!("msb-parent-watch-{sandbox_name}"))
+        .spawn(move || {
+            let mut file = std::fs::File::from(parent_watchdog);
+
+            match read_parent_watchdog_signal(&mut file) {
+                Ok(ParentWatchdogSignal::ParentExited) => {
+                    tracing::info!("creator process exited; stopping attached sandbox");
+                    exit_reason.store(EXIT_REASON_PARENT_EXIT, std::sync::atomic::Ordering::SeqCst);
+                    if let Err(err) = request_guest_shutdown(&shared) {
+                        tracing::warn!(error = %err, "parent-watch shutdown request failed");
+                    } else {
+                        std::thread::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT);
+                    }
+                    exit_handle.trigger();
+                }
+                Ok(ParentWatchdogSignal::Detached) => {
+                    tracing::debug!("attached-parent watchdog detached; leaving sandbox running");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "parent-watch read failed; stopping sandbox");
+                    exit_reason.store(EXIT_REASON_SIGNAL, std::sync::atomic::Ordering::SeqCst);
+                    exit_handle.trigger();
+                }
+            }
+        })
+        .map_err(RuntimeError::Io)?;
+
+    Ok(())
+}
+
+fn read_parent_watchdog_signal(file: &mut std::fs::File) -> std::io::Result<ParentWatchdogSignal> {
+    let mut buf = [0_u8; 1];
+
+    loop {
+        match std::io::Read::read(file, &mut buf) {
+            Ok(0) => return Ok(ParentWatchdogSignal::ParentExited),
+            Ok(_) if buf[0] == PARENT_WATCH_DETACH => return Ok(ParentWatchdogSignal::Detached),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.
 fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
@@ -1355,12 +1443,14 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, StatVirtualization,
-        append_block_root_env, bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, validate_disk_format,
+        BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, PARENT_WATCH_DETACH,
+        ParentWatchdogSignal, StatVirtualization, append_block_root_env,
+        bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
+        read_parent_watchdog_signal, request_guest_shutdown, validate_disk_format,
     };
 
     use microsandbox_protocol::{codec, message::MessageType};
+    use std::io::Write;
     use std::sync::Arc;
 
     #[test]
@@ -1479,6 +1569,29 @@ mod tests {
         let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
         assert_eq!(msg.t, MessageType::Shutdown);
         assert_eq!(msg.id, 0);
+    }
+
+    #[test]
+    fn test_parent_watchdog_signal_reports_parent_exit_on_eof() {
+        let (read_fd, write_fd) = super::create_pipe().unwrap();
+        drop(write_fd);
+        let mut reader = std::fs::File::from(read_fd);
+
+        let signal = read_parent_watchdog_signal(&mut reader).unwrap();
+
+        assert_eq!(signal, ParentWatchdogSignal::ParentExited);
+    }
+
+    #[test]
+    fn test_parent_watchdog_signal_reports_detach_byte() {
+        let (read_fd, write_fd) = super::create_pipe().unwrap();
+        let mut writer = std::fs::File::from(write_fd);
+        writer.write_all(&[PARENT_WATCH_DETACH]).unwrap();
+        let mut reader = std::fs::File::from(read_fd);
+
+        let signal = read_parent_watchdog_signal(&mut reader).unwrap();
+
+        assert_eq!(signal, ParentWatchdogSignal::Detached);
     }
 
     #[test]

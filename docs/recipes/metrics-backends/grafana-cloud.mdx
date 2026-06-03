@@ -40,12 +40,14 @@ to it using HTTP/Protobuf and Basic auth.
   <Step title="Run msb-metrics">
     ```sh
     msb-metrics otel \
-      --endpoint=https://otlp-gateway-prod-us-east-2.grafana.net/otlp \
+      --endpoint=https://otlp-gateway-prod-us-east-2.grafana.net/otlp/v1/metrics \
       --protocol=http \
       --header="Authorization=${AUTH}"
     ```
 
-    Sub the region in the URL for yours.
+    Sub the region in the URL for yours. If Grafana shows you the base
+    OTLP URL ending in `/otlp`, append `/v1/metrics` for this HTTP
+    metrics-only exporter.
   </Step>
 
   <Step title="Verify">

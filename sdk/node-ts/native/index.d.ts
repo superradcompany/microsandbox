@@ -752,6 +752,8 @@ export declare class Sandbox {
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
   static list(): Promise<Array<SandboxInfo>>
+  /** List sandboxes filtered by labels (AND-matched). */
+  static listWith(filter: SandboxListFilter): Promise<Array<SandboxInfo>>
   /**
    * Remove a stopped sandbox from the database.
    *
@@ -954,6 +956,10 @@ export declare class SandboxBuilder {
   env(key: string, value: string): this
   /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
+  /** Attach a single label for metrics attribution. */
+  label(key: string, value: string): this
+  /** Attach labels from an object for metrics attribution. */
+  labels(labels: Record<string, string>): this
   /** Set a hard rlimit (soft = hard). */
   rlimit(resource: string, limit: number): this
   /** Set a separate soft and hard rlimit. */
@@ -1485,6 +1491,13 @@ export interface ExecOptions {
 export interface ExitStatus {
   code: number
   success: boolean
+}
+/**
+ * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
+ * (AND-matched). Omit or leave empty to match every sandbox.
+ */
+export interface SandboxListFilter {
+  labels?: Record<string, string>
 }
 
 /** Options for `Snapshot.export()`. */

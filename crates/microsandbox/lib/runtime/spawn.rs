@@ -6,6 +6,8 @@
 //! internally.
 
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +15,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt::Write,
+    os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -153,6 +156,21 @@ pub async fn spawn_sandbox(
         None
     };
 
+    let parent_watchdog = match mode {
+        SpawnMode::Attached => match create_parent_watchdog_pipe() {
+            Ok(pipe) => Some(pipe),
+            Err(err) => {
+                release_metrics_reservation(
+                    config,
+                    metrics_reservation.as_ref(),
+                    ReleaseMode::Free,
+                );
+                return Err(err);
+            }
+        },
+        SpawnMode::Detached => None,
+    };
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(sandbox_cli_args(
@@ -166,12 +184,43 @@ pub async fn spawn_sandbox(
         &libkrunfw_path,
         &staged_file_mounts,
         metrics_reservation.as_ref(),
+        parent_watchdog
+            .as_ref()
+            .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
+
+    if let Some(pipe) = parent_watchdog.as_ref() {
+        let read_fd = pipe.read_fd.as_raw_fd();
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(read_fd, microsandbox_runtime::vm::PARENT_WATCH_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if read_fd != microsandbox_runtime::vm::PARENT_WATCH_FD && libc::close(read_fd) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(microsandbox_runtime::vm::PARENT_WATCH_FD, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(
+                    microsandbox_runtime::vm::PARENT_WATCH_FD,
+                    libc::F_SETFD,
+                    flags & !libc::FD_CLOEXEC,
+                ) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     if mode == SpawnMode::Detached {
         // Detached sandboxes outlive the creating CLI process, so the
@@ -263,7 +312,13 @@ pub async fn spawn_sandbox(
         "spawn_sandbox: startup JSON received"
     );
 
-    let handle = ProcessHandle::new(startup.pid, config.name.clone(), child, file_mounts_staging);
+    let handle = ProcessHandle::new(
+        startup.pid,
+        config.name.clone(),
+        child,
+        file_mounts_staging,
+        parent_watchdog.map(|pipe| pipe.write_fd),
+    );
 
     Ok((handle, agent_sock_path))
 }
@@ -277,6 +332,11 @@ struct MetricsReservation {
     shm_name: String,
     slot: u32,
     generation: u64,
+}
+
+struct ParentWatchdogPipe {
+    read_fd: OwnedFd,
+    write_fd: OwnedFd,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -314,6 +374,56 @@ fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<Metri
             None
         }
     }
+}
+
+fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
+    let mut fds = [0; 2];
+    let rc = create_cloexec_pipe(&mut fds);
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        set_cloexec(&read_fd, true)?;
+        set_cloexec(&write_fd, true)?;
+    }
+
+    Ok(ParentWatchdogPipe { read_fd, write_fd })
+}
+
+#[cfg(target_os = "linux")]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe(fds.as_mut_ptr()) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_cloexec(fd: &OwnedFd, enabled: bool) -> MicrosandboxResult<()> {
+    let current = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if current < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let mut next = current;
+    if enabled {
+        next |= libc::FD_CLOEXEC;
+    } else {
+        next &= !libc::FD_CLOEXEC;
+    }
+
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, next) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
 }
 
 /// Build the host-side agent relay socket path for a sandbox name.
@@ -815,6 +925,7 @@ fn sandbox_cli_args(
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
     metrics_reservation: Option<&MetricsReservation>,
+    parent_watch_fd: Option<i32>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -836,6 +947,10 @@ fn sandbox_cli_args(
     args.push(runtime_dir.as_os_str().to_os_string());
     args.push(OsString::from("--agent-sock"));
     args.push(agent_sock_path.as_os_str().to_os_string());
+    if let Some(fd) = parent_watch_fd {
+        args.push(OsString::from("--parent-watch-fd"));
+        args.push(OsString::from(fd.to_string()));
+    }
 
     let sp = &config.policy;
     if let Some(max_dur) = sp.max_duration_secs {
@@ -1159,6 +1274,7 @@ mod tests {
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
             None,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -1215,6 +1331,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
             None,
         )
         .iter()
@@ -1405,6 +1522,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sandbox_cli_args_include_parent_watch_fd_when_present() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            None,
+            Some(microsandbox_runtime::vm::PARENT_WATCH_FD),
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--parent-watch-fd", "97"])
+        );
+    }
+
+    #[tokio::test]
     async fn test_sandbox_cli_args_include_rlimits_env() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -1423,6 +1572,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
             None,
         );
 
@@ -1556,6 +1706,7 @@ mod tests {
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
             Some(&reservation),
+            None,
         )
         .iter()
         .map(|a| a.to_string_lossy().into_owned())

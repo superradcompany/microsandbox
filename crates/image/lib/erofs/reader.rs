@@ -6,9 +6,12 @@
 //! - Sorted directory entries (binary search)
 //! - No shared xattrs, no compression, no chunks
 
+use std::collections::HashSet;
+use std::io::Read;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::{fs::File, io};
+use std::{ffi::OsString, fs::File, io, path::PathBuf};
 
 use super::format::{
     EROFS_BLKSIZ, EROFS_DIRENT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
@@ -16,6 +19,7 @@ use super::format::{
     EROFS_XATTR_INDEX_SECURITY, EROFS_XATTR_INDEX_TRUSTED, EROFS_XATTR_INDEX_USER, S_IFBLK,
     S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, erofs_xattr_align,
 };
+use crate::tree::{InodeMetadata, Xattr};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -44,6 +48,33 @@ pub struct ErofsEntryInfo {
     pub kind: ErofsEntryKind,
     pub opaque: bool,
     pub whiteout: bool,
+}
+
+/// A filesystem entry discovered while walking an EROFS image.
+#[derive(Clone)]
+pub struct ErofsTreeEntry {
+    /// Path relative to the image root.
+    pub path: PathBuf,
+    /// Stable EROFS inode identifier.
+    pub nid: u32,
+    /// Entry kind.
+    pub kind: ErofsEntryKind,
+    /// POSIX inode metadata.
+    pub metadata: InodeMetadata,
+    /// Inline xattrs stored on the inode.
+    pub xattrs: Vec<Xattr>,
+    /// File or symlink data size.
+    pub size: u64,
+    /// Device major/minor for device nodes.
+    pub rdev: Option<(u32, u32)>,
+}
+
+/// Streaming reader for a regular file stored inside an EROFS image.
+pub struct ErofsFileDataReader {
+    file: File,
+    segments: Vec<(u64, u64)>,
+    segment_index: usize,
+    segment_offset: u64,
 }
 
 #[cfg(test)]
@@ -124,6 +155,56 @@ impl ErofsReader {
         })
     }
 
+    /// Walk all entries in the image in stable path order.
+    pub fn walk(&mut self) -> io::Result<Vec<ErofsTreeEntry>> {
+        let root = self.read_inode(self.root_nid)?;
+        let mut entries = Vec::new();
+        let mut visited = HashSet::new();
+        self.walk_dir(&root, PathBuf::new(), &mut entries, &mut visited)?;
+        Ok(entries)
+    }
+
+    /// Walk all entries in stable path order, invoking a callback for each entry.
+    pub fn walk_entries<E, F>(&mut self, mut visit: F) -> Result<(), E>
+    where
+        E: From<io::Error>,
+        F: FnMut(&mut Self, ErofsTreeEntry) -> Result<(), E>,
+    {
+        let root = self.read_inode(self.root_nid)?;
+        let mut visited = HashSet::new();
+        self.walk_dir_entries(&root, PathBuf::new(), &mut visited, &mut visit)
+    }
+
+    /// Create a streaming reader for a regular file inode by NID.
+    pub fn file_data_reader(&mut self, nid: u32) -> io::Result<ErofsFileDataReader> {
+        let inode = self.read_inode(nid)?;
+        if (inode.mode & S_IFMT) != S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target is not a regular file",
+            ));
+        }
+
+        Ok(ErofsFileDataReader {
+            file: self.file.try_clone()?,
+            segments: self.inode_data_segments(&inode)?,
+            segment_index: 0,
+            segment_offset: 0,
+        })
+    }
+
+    /// Read a symlink target by NID.
+    pub fn read_link_by_nid(&mut self, nid: u32) -> io::Result<Vec<u8>> {
+        let inode = self.read_inode(nid)?;
+        if (inode.mode & S_IFMT) != S_IFLNK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target is not a symlink",
+            ));
+        }
+        self.read_inode_data(&inode)
+    }
+
     #[cfg(test)]
     pub(crate) fn inode_debug_info(&mut self, path: &str) -> io::Result<ErofsInodeDebugInfo> {
         let inode = self.lookup_path(path)?;
@@ -152,8 +233,13 @@ impl ErofsReader {
             buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
         let i_u = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
-        #[cfg(test)]
         let nlink = u32::from_le_bytes([buf[44], buf[45], buf[46], buf[47]]);
+        let uid = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        let gid = u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
+        let mtime = u64::from_le_bytes([
+            buf[32], buf[33], buf[34], buf[35], buf[36], buf[37], buf[38], buf[39],
+        ]);
+        let mtime_nsec = u32::from_le_bytes([buf[40], buf[41], buf[42], buf[43]]);
 
         let data_layout = ((i_format >> 1) & 0x07) as u8;
 
@@ -170,8 +256,11 @@ impl ErofsReader {
             nid,
             mode,
             size,
-            #[cfg(test)]
             nlink,
+            uid,
+            gid,
+            mtime,
+            mtime_nsec,
             data_layout,
             startblk_lo: i_u,
             rdev: i_u,
@@ -225,19 +314,18 @@ impl ErofsReader {
     /// same trick). Name lengths are derived from consecutive `nameoff`
     /// values; the last entry's name extends to the end of valid data.
     fn lookup_in_dir(&mut self, dir_inode: &InodeInfo, name: &str) -> io::Result<u32> {
-        let dir_data = self.read_inode_data(dir_inode)?;
         let blksiz = EROFS_BLKSIZ as usize;
         let target = name.as_bytes();
-        let block_count = dir_data.len().div_ceil(blksiz);
+        let block_count = self.checked_inode_data_len(dir_inode)?.div_ceil(blksiz);
         let mut left = 0usize;
         let mut right = block_count;
 
         while left < right {
             let mid = (left + right) / 2;
-            let block = dir_block(&dir_data, mid, blksiz);
-            let dirent_count = dir_block_dirent_count(block)?;
-            let first_name = dirent_name(block, 0, dirent_count)?;
-            let last_name = dirent_name(block, dirent_count - 1, dirent_count)?;
+            let block = self.read_inode_data_block(dir_inode, mid)?;
+            let dirent_count = dir_block_dirent_count(&block)?;
+            let first_name = dirent_name(&block, 0, dirent_count)?;
+            let last_name = dirent_name(&block, dirent_count - 1, dirent_count)?;
 
             if target < first_name {
                 right = mid;
@@ -249,7 +337,7 @@ impl ErofsReader {
                 continue;
             }
 
-            return lookup_in_dir_block(block, dirent_count, target)?.ok_or_else(|| {
+            return lookup_in_dir_block(&block, dirent_count, target)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("entry '{name}' not found in directory"),
@@ -263,8 +351,143 @@ impl ErofsReader {
         ))
     }
 
+    fn walk_dir(
+        &mut self,
+        dir_inode: &InodeInfo,
+        dir_path: PathBuf,
+        entries: &mut Vec<ErofsTreeEntry>,
+        visited: &mut HashSet<u32>,
+    ) -> io::Result<()> {
+        if !visited.insert(dir_inode.nid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cycle detected while walking EROFS directory tree",
+            ));
+        }
+
+        self.visit_dir_entries::<io::Error, _>(dir_inode, &mut |reader, name, nid| {
+            if name.as_bytes() == b"." || name.as_bytes() == b".." {
+                return Ok(());
+            }
+
+            let path = dir_path.join(&name);
+            let inode = reader.read_inode(nid)?;
+            let entry = reader.tree_entry(path.clone(), &inode)?;
+            let is_dir = entry.kind == ErofsEntryKind::Directory;
+            entries.push(entry);
+
+            if is_dir {
+                reader.walk_dir(&inode, path, entries, visited)?;
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    fn walk_dir_entries<E, F>(
+        &mut self,
+        dir_inode: &InodeInfo,
+        dir_path: PathBuf,
+        visited: &mut HashSet<u32>,
+        visit: &mut F,
+    ) -> Result<(), E>
+    where
+        E: From<io::Error>,
+        F: FnMut(&mut Self, ErofsTreeEntry) -> Result<(), E>,
+    {
+        if !visited.insert(dir_inode.nid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cycle detected while walking EROFS directory tree",
+            )
+            .into());
+        }
+
+        self.visit_dir_entries::<E, _>(dir_inode, &mut |reader, name, nid| {
+            if name.as_bytes() == b"." || name.as_bytes() == b".." {
+                return Ok(());
+            }
+
+            let path = dir_path.join(&name);
+            let inode = reader.read_inode(nid)?;
+            let entry = reader.tree_entry(path.clone(), &inode)?;
+            let is_dir = entry.kind == ErofsEntryKind::Directory;
+            visit(reader, entry)?;
+
+            if is_dir {
+                reader.walk_dir_entries(&inode, path, visited, visit)?;
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    fn visit_dir_entries<E, F>(&mut self, dir_inode: &InodeInfo, visit: &mut F) -> Result<(), E>
+    where
+        E: From<io::Error>,
+        F: FnMut(&mut Self, OsString, u32) -> Result<(), E>,
+    {
+        if (dir_inode.mode & S_IFMT) != S_IFDIR {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "target is not a directory").into(),
+            );
+        }
+
+        let blksiz = EROFS_BLKSIZ as usize;
+        let block_count = self.checked_inode_data_len(dir_inode)?.div_ceil(blksiz);
+
+        for block_index in 0..block_count {
+            let block = self.read_inode_data_block(dir_inode, block_index)?;
+            if block.is_empty() {
+                continue;
+            }
+            let dirent_count = dir_block_dirent_count(&block)?;
+            for idx in 0..dirent_count {
+                let name = dirent_name(&block, idx, dirent_count)?;
+                if name.is_empty() {
+                    continue;
+                }
+                visit(
+                    self,
+                    OsString::from_vec(name.to_vec()),
+                    dirent_nid(&block, idx)?,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn tree_entry(&mut self, path: PathBuf, inode: &InodeInfo) -> io::Result<ErofsTreeEntry> {
+        let kind = inode_kind(inode)?;
+        let rdev = if matches!(
+            kind,
+            ErofsEntryKind::CharDevice | ErofsEntryKind::BlockDevice
+        ) {
+            Some(decode_dev(inode.rdev))
+        } else {
+            None
+        };
+
+        Ok(ErofsTreeEntry {
+            path,
+            nid: inode.nid,
+            kind,
+            metadata: inode.metadata(),
+            xattrs: self
+                .read_inode_xattrs(inode)?
+                .into_iter()
+                .map(|(name, value)| Xattr { name, value })
+                .collect(),
+            size: inode.size,
+            rdev,
+        })
+    }
+
     fn read_inode_data(&mut self, inode: &InodeInfo) -> io::Result<Vec<u8>> {
-        let size = inode.size as usize;
+        let size = self.checked_inode_data_len(inode)?;
         if size == 0 {
             return Ok(Vec::new());
         }
@@ -305,6 +528,138 @@ impl ErofsReader {
                 }
 
                 Ok(data)
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("unsupported data layout: {}", inode.data_layout),
+            )),
+        }
+    }
+
+    fn read_inode_data_block(&self, inode: &InodeInfo, block_index: usize) -> io::Result<Vec<u8>> {
+        let blksiz = EROFS_BLKSIZ as usize;
+        let size = self.checked_inode_data_len(inode)?;
+        let start = block_index.checked_mul(blksiz).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "directory block overflow")
+        })?;
+        if start >= size {
+            return Ok(Vec::new());
+        }
+
+        let remaining = size - start;
+        let len = remaining.min(blksiz);
+        self.read_inode_data_range(inode, start as u64, len)
+    }
+
+    fn read_inode_data_range(
+        &self,
+        inode: &InodeInfo,
+        start: u64,
+        len: usize,
+    ) -> io::Result<Vec<u8>> {
+        let size = self.checked_inode_data_len(inode)? as u64;
+        let end = start
+            .checked_add(len as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "inode range overflow"))?;
+        if end > size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inode data range exceeds inode size",
+            ));
+        }
+
+        let segments = self.inode_data_segments(inode)?;
+        let mut data = vec![0u8; len];
+        let mut copied = 0usize;
+        let mut logical_start = 0u64;
+
+        for (file_offset, segment_len) in segments {
+            let logical_end = logical_start.checked_add(segment_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "inode segment range overflow")
+            })?;
+            let overlap_start = start.max(logical_start);
+            let overlap_end = end.min(logical_end);
+
+            if overlap_start < overlap_end {
+                let dst_start = (overlap_start - start) as usize;
+                let read_len = (overlap_end - overlap_start) as usize;
+                let source_offset = file_offset
+                    .checked_add(overlap_start - logical_start)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "inode file offset overflow")
+                    })?;
+                read_exact_at(
+                    &self.file,
+                    source_offset,
+                    &mut data[dst_start..dst_start + read_len],
+                )?;
+                copied += read_len;
+            }
+
+            logical_start = logical_end;
+            if logical_start >= end {
+                break;
+            }
+        }
+
+        if copied != len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "inode data range is not fully backed",
+            ));
+        }
+
+        Ok(data)
+    }
+
+    fn checked_inode_data_len(&self, inode: &InodeInfo) -> io::Result<usize> {
+        let file_len = self.file.metadata()?.len();
+        if inode.size > file_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inode data size exceeds EROFS image size",
+            ));
+        }
+
+        usize::try_from(inode.size).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inode data size does not fit in memory",
+            )
+        })
+    }
+
+    fn inode_data_segments(&self, inode: &InodeInfo) -> io::Result<Vec<(u64, u64)>> {
+        let size = inode.size;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let blksiz = EROFS_BLKSIZ as u64;
+        match inode.data_layout {
+            EROFS_INODE_FLAT_PLAIN => {
+                if inode.startblk_lo == EROFS_NULL_ADDR {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![((inode.startblk_lo as u64) * blksiz, size)])
+                }
+            }
+            EROFS_INODE_FLAT_INLINE => {
+                let full_blocks = size / blksiz;
+                let tail_size = size % blksiz;
+                let mut segments = Vec::new();
+                if full_blocks > 0 && inode.startblk_lo != EROFS_NULL_ADDR {
+                    segments.push(((inode.startblk_lo as u64) * blksiz, full_blocks * blksiz));
+                }
+                if tail_size > 0 {
+                    segments.push((
+                        self.inode_offset(inode.nid)
+                            + EROFS_INODE_EXTENDED_SIZE as u64
+                            + inode.xattr_ibody_size as u64,
+                        tail_size,
+                    ));
+                }
+                Ok(segments)
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -400,12 +755,64 @@ struct InodeInfo {
     nid: u32,
     mode: u16,
     size: u64,
-    #[cfg(test)]
+    #[allow(dead_code)]
     nlink: u32,
+    uid: u32,
+    gid: u32,
+    mtime: u64,
+    mtime_nsec: u32,
     data_layout: u8,
     startblk_lo: u32,
     rdev: u32,
     xattr_ibody_size: u32,
+}
+
+impl InodeInfo {
+    fn metadata(&self) -> InodeMetadata {
+        InodeMetadata {
+            uid: self.uid,
+            gid: self.gid,
+            mode: self.mode,
+            mtime: self.mtime,
+            mtime_nsec: self.mtime_nsec,
+        }
+    }
+}
+
+impl ErofsTreeEntry {
+    /// Return true if this directory carries the overlay opaque marker.
+    pub fn is_opaque(&self) -> bool {
+        self.xattrs
+            .iter()
+            .any(|x| x.name == b"trusted.overlay.opaque" && x.value == b"y")
+    }
+}
+
+impl Read for ErofsFileDataReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        while self.segment_index < self.segments.len() {
+            let (offset, len) = self.segments[self.segment_index];
+            if self.segment_offset >= len {
+                self.segment_index += 1;
+                self.segment_offset = 0;
+                continue;
+            }
+
+            let remaining = (len - self.segment_offset) as usize;
+            let to_read = remaining.min(buf.len());
+            let read = self
+                .file
+                .read_at(&mut buf[..to_read], offset + self.segment_offset)?;
+            self.segment_offset += read as u64;
+            return Ok(read);
+        }
+
+        Ok(0)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -427,12 +834,6 @@ fn read_exact_at(file: &File, offset: u64, mut buf: &mut [u8]) -> io::Result<()>
     }
 
     Ok(())
-}
-
-fn dir_block(dir_data: &[u8], block_idx: usize, blksiz: usize) -> &[u8] {
-    let offset = block_idx * blksiz;
-    let end = (offset + blksiz).min(dir_data.len());
-    &dir_data[offset..end]
 }
 
 fn dir_block_dirent_count(block: &[u8]) -> io::Result<usize> {
@@ -553,6 +954,12 @@ fn inode_kind(inode: &InodeInfo) -> io::Result<ErofsEntryKind> {
             format!("unsupported inode mode type: {other:#o}"),
         )),
     }
+}
+
+fn decode_dev(encoded: u32) -> (u32, u32) {
+    let major = (encoded >> 8) & 0x0000_0fff;
+    let minor = (encoded & 0x0000_00ff) | ((encoded >> 12) & 0xffff_ff00);
+    (major, minor)
 }
 
 /// Read a file from an EROFS image file on disk.

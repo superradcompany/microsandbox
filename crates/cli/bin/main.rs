@@ -86,6 +86,12 @@ enum Commands {
     /// Download an image from a registry.
     Pull(pull::PullArgs),
 
+    /// Load an image archive from tar.
+    Load(image::ImageLoadArgs),
+
+    /// Save one or more cached images to a tar archive.
+    Save(image::ImageSaveArgs),
+
     /// Manage registry credentials.
     Registry(registry::RegistryArgs),
 
@@ -319,6 +325,8 @@ fn run_async_command_anyhow(
             Commands::Logs(args) => logs::run(args).await,
             Commands::Image(args) => image::run(args).await,
             Commands::Pull(args) => image::run_pull(args).await,
+            Commands::Load(args) => image::run_load(args).await,
+            Commands::Save(args) => image::run_save(args).await,
             Commands::Registry(args) => registry::run(args).await,
             #[cfg(feature = "ssh")]
             Commands::Ssh(args) => microsandbox_cli::commands::ssh::run(args).await,
