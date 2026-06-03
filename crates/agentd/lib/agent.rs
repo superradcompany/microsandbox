@@ -30,7 +30,7 @@ use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::serial::AGENT_PORT_NAME;
 use crate::session::{ExecSession, SessionOutput, resolve_default_user};
 use crate::tcp::TcpSession;
-use crate::{clock, fs, heartbeat, serial, tcp};
+use crate::{clock, fs, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

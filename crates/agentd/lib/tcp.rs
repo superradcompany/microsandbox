@@ -246,7 +246,7 @@ mod tests {
         let (session_tx, _session_rx) = mpsc::unbounded_channel();
         let mut out_buf = Vec::new();
 
-        let session = handle_tcp_connect(
+        let session = TcpSession::open(
             7,
             TcpConnect {
                 host: "127.0.0.1".to_string(),
@@ -277,7 +277,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
 
-        let session = handle_tcp_connect(
+        let session = TcpSession::open(
             9,
             TcpConnect {
                 host: "127.0.0.1".to_string(),
@@ -305,8 +305,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (_id, frame_bytes) = session_rx.recv().await.unwrap();
-        let mut frame_bytes = frame_bytes;
+        let (_id, output) = session_rx.recv().await.unwrap();
+        let SessionOutput::Raw(mut frame_bytes) = output else {
+            panic!("expected SessionOutput::Raw frame");
+        };
         let closed = decode_one_message(&mut frame_bytes);
         assert_eq!(closed.t, MessageType::TcpClosed);
         assert_eq!(closed.flags, FLAG_TERMINAL);
