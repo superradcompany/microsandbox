@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Sent by the guest agent to signal that it has finished initialization
 /// and is ready to receive commands. Includes timing data for boot
 /// performance measurement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Ready {
     /// `CLOCK_BOOTTIME` nanoseconds captured at the start of `main()`.
     ///
@@ -25,6 +25,15 @@ pub struct Ready {
     ///
     /// Represents total time from kernel boot to agent readiness.
     pub ready_time_ns: u64,
+
+    /// The agent's package version (`CARGO_PKG_VERSION`), for diagnostics.
+    ///
+    /// Additive and optional: an older agent that predates this field decodes to
+    /// an empty string, and an older host ignores it. Empty means unknown. This
+    /// is the runtime's self-reported product version; the protocol generation is
+    /// carried separately in the message envelope's `v`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_version: String,
 }
 
 /// Payload for `core.clock.sync` messages.

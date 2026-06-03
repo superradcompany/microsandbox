@@ -854,6 +854,7 @@ mod tests {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
+            ..Default::default()
         };
         let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
 

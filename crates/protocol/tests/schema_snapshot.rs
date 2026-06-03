@@ -15,7 +15,7 @@
 //! Prior-generation files are frozen inputs — the generator only ever writes
 //! the file for the current `PROTOCOL_VERSION`.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fs};
 
 use microsandbox_protocol::{
     codec::MAX_FRAME_SIZE,
@@ -24,7 +24,7 @@ use microsandbox_protocol::{
         PROTOCOL_VERSION,
     },
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use strum::IntoEnumIterator;
 
 /// Render the current protocol surface as deterministic, pretty JSON.
@@ -70,12 +70,12 @@ fn protocol_surface_matches_snapshot() {
 
     if std::env::var_os("UPDATE_PROTOCOL_SCHEMA").is_some() {
         let dir = format!("{}/schema", env!("CARGO_MANIFEST_DIR"));
-        std::fs::create_dir_all(&dir).expect("create schema dir");
-        std::fs::write(&path, &rendered).expect("write schema snapshot");
+        fs::create_dir_all(&dir).expect("create schema dir");
+        fs::write(&path, &rendered).expect("write schema snapshot");
         return;
     }
 
-    let existing = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+    let existing = fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!(
             "missing protocol schema snapshot at {path}; create it with \
              `UPDATE_PROTOCOL_SCHEMA=1 cargo test -p microsandbox-protocol --test schema_snapshot`"
@@ -98,33 +98,39 @@ fn schema_is_append_only_across_generations() {
     // re-numbered. This is what makes "newer peers understand everything older
     // peers did" hold.
     let dir = format!("{}/schema", env!("CARGO_MANIFEST_DIR"));
-    let current: serde_json::Value =
-        serde_json::from_str(&render_surface()).expect("current surface is valid json");
+    let current =
+        serde_json::from_str::<Value>(&render_surface()).expect("current surface is valid json");
     let current_types = current["message_types"]
         .as_array()
         .expect("message_types array");
     let current_file = format!("gen-{PROTOCOL_VERSION}.json");
 
     let mut compared = 0;
-    for entry in std::fs::read_dir(&dir).expect("read schema dir") {
+    for entry in fs::read_dir(&dir).expect("read schema dir") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         if !name.starts_with("gen-") || !name.ends_with(".json") || name == current_file {
             continue;
         }
-        let prior: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{dir}/{name}")).unwrap())
-                .expect("prior snapshot is valid json");
+
+        let content = fs::read_to_string(format!("{dir}/{name}")).unwrap();
+        let prior = serde_json::from_str::<Value>(&content).expect("prior snapshot is valid json");
+
         for pt in prior["message_types"].as_array().unwrap() {
             let wire = pt["wire"].as_str().unwrap();
             let current_entry = current_types
                 .iter()
                 .find(|c| c["wire"] == pt["wire"])
                 .unwrap_or_else(|| {
-                    panic!("message type '{wire}' from {name} is missing at generation {PROTOCOL_VERSION}; message types are append-only and must not be removed")
+                    panic!(
+                        "message type '{wire}' from {name} is missing at generation \
+                        {PROTOCOL_VERSION}; message types are append-only and must not be removed"
+                    )
                 });
+
             assert_eq!(
                 current_entry["introduced_in"], pt["introduced_in"],
-                "message type '{wire}' changed its introduced_in versus {name}; a generation's surface is immutable once frozen"
+                "message type '{wire}' changed its introduced_in versus {name}; \
+                a generation's surface is immutable once frozen"
             );
         }
         compared += 1;

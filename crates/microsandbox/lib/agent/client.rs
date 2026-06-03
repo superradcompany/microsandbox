@@ -386,6 +386,13 @@ impl AgentClient {
         self.negotiated_version
     }
 
+    /// The runtime's self-reported package version, taken from its `core.ready`
+    /// frame. Empty when the runtime predates this field (an older agent), in
+    /// which case fall back to the generation for diagnostics.
+    pub fn agent_version(&self) -> &str {
+        &self.ready.agent_version
+    }
+
     /// Whether the connected sandbox is new enough to handle the given message
     /// type. The single source of truth for feature gating: callers that can't
     /// gate by sending (e.g. the SSH/SFTP layer) consult this instead of
@@ -654,6 +661,7 @@ mod tests {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
+            agent_version: "9.9.9".to_string(),
         };
         let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
 
@@ -676,6 +684,8 @@ mod tests {
         // Both peers speak the current generation, so that is what is negotiated.
         assert_eq!(client.negotiated_version(), PROTOCOL_VERSION);
         assert!(client.supports(MessageType::FsRequest));
+        // The runtime's self-reported version round-trips from the ready frame.
+        assert_eq!(client.agent_version(), "9.9.9");
         let decoded = client.ready().unwrap();
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
@@ -694,6 +704,7 @@ mod tests {
             boot_time_ns: 1,
             init_time_ns: 2,
             ready_time_ns: 3,
+            ..Default::default()
         };
         // A current-codec guest that advertises an older capability generation in
         // its ready frame (a runtime one generation behind this host).
@@ -779,6 +790,7 @@ mod tests {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
+            ..Default::default()
         };
         let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
         let id_offset = 268_435_455u32;
@@ -830,6 +842,7 @@ mod tests {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
+            ..Default::default()
         };
         let mut ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
         ready_msg.v = 2;
@@ -864,6 +877,7 @@ mod tests {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
+            ..Default::default()
         };
         let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
 

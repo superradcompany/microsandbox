@@ -112,6 +112,7 @@ pub async fn run(
             boot_time_ns,
             init_time_ns,
             ready_time_ns,
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
