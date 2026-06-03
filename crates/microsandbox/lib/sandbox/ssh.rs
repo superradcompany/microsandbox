@@ -161,6 +161,9 @@ enum ChannelState {
     Tcp {
         id: u32,
         client: Arc<AgentClient>,
+        /// The guest->ssh relay task. Aborted on channel close so teardown is
+        /// immediate instead of waiting for the guest to acknowledge the close.
+        relay: tokio::task::JoinHandle<()>,
     },
     Sftp,
 }
@@ -954,11 +957,17 @@ impl SshSession {
             MessageType::TcpConnected => {
                 let _: TcpConnected = first.payload()?;
                 let session_handle = session.handle();
-                tokio::spawn(async move {
+                let relay = tokio::spawn(async move {
                     relay_tcp_to_ssh(channel_id, tcp_rx, session_handle).await;
                 });
-                self.channels
-                    .insert(channel_id, ChannelState::Tcp { id: tcp_id, client });
+                self.channels.insert(
+                    channel_id,
+                    ChannelState::Tcp {
+                        id: tcp_id,
+                        client,
+                        relay,
+                    },
+                );
                 Ok(true)
             }
             MessageType::TcpFailed => {
@@ -1168,7 +1177,7 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client }) => Some((*id, Arc::clone(client))),
+            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
             _ => None,
         };
         if let Some((id, client)) = tcp {
@@ -1199,7 +1208,7 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client }) => Some((*id, Arc::clone(client))),
+            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
             _ => None,
         };
         if let Some((id, client)) = tcp {
@@ -1221,7 +1230,10 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(ChannelState::Tcp { id, client }) = self.channels.remove(&channel) {
+        if let Some(ChannelState::Tcp { id, client, relay }) = self.channels.remove(&channel) {
+            // Stop the guest->ssh relay immediately; the TcpClose then tells the
+            // guest to close its socket.
+            relay.abort();
             let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
         } else if let Some(ChannelState::Exec { control, stdin }) = self.channels.remove(&channel) {
             if let Some(stdin) = stdin {
