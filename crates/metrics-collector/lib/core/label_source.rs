@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::error::MetricsCollectorResult;
 
-use super::label_cache::LabelCache;
+use super::label_cache::{LabelCache, LabelSet};
 use super::types::SandboxLabels;
 
 //--------------------------------------------------------------------------------------------------
@@ -60,6 +61,12 @@ pub trait LabelSource: Send + Sync {
 /// newly-seen sandbox, presence-based eviction).
 pub struct CatalogLabelSource {
     db_path: PathBuf,
+
+    /// Label keys dropped from emitted metrics. The labels stay in the catalog
+    /// (still visible to `msb inspect`); they are only withheld from metric
+    /// attributes so an operator can cap series cardinality on noisy keys.
+    exclude_keys: HashSet<String>,
+
     state: Mutex<State>,
 }
 
@@ -83,12 +90,20 @@ impl CatalogLabelSource {
     pub fn new(db_path: PathBuf) -> Self {
         Self {
             db_path,
+            exclude_keys: HashSet::new(),
             state: Mutex::new(State {
                 db: None,
                 cache: LabelCache::new(),
                 degraded: false,
             }),
         }
+    }
+
+    /// Withhold the given label keys from emitted metrics. Cumulative with any
+    /// previously set keys.
+    pub fn with_excluded_keys(mut self, keys: impl IntoIterator<Item = String>) -> Self {
+        self.exclude_keys.extend(keys);
+        self
     }
 }
 
@@ -129,7 +144,7 @@ impl LabelSource for CatalogLabelSource {
         let resolved = {
             let State { db, cache, .. } = &mut *state;
             let db = db.as_ref().expect("connection ensured above");
-            resolve_labels(db, cache, &sandbox_ids).await
+            resolve_labels(db, cache, &sandbox_ids, &self.exclude_keys).await
         };
 
         match resolved {
@@ -163,17 +178,36 @@ async fn resolve_labels(
     db: &DbReadConnection,
     cache: &mut LabelCache,
     sandbox_ids: &HashSet<i32>,
+    exclude_keys: &HashSet<String>,
 ) -> MetricsCollectorResult<SandboxLabels> {
     cache.sync(sandbox_ids);
 
     let mut labels = SandboxLabels::with_capacity(sandbox_ids.len());
     for &sandbox_id in sandbox_ids {
-        let set = cache.get_or_fetch(sandbox_id, db).await?;
+        let set = apply_exclusions(cache.get_or_fetch(sandbox_id, db).await?, exclude_keys);
         if !set.is_empty() {
             labels.insert(sandbox_id, set);
         }
     }
     Ok(labels)
+}
+
+/// Drop excluded keys from a cached label set.
+///
+/// The cache holds the full label set; exclusion is an emit-time policy, so it
+/// is applied here rather than baked into the cache. Returns the input `Arc`
+/// untouched (no allocation) when nothing is excluded for this sandbox, which is
+/// the common case.
+fn apply_exclusions(set: Arc<LabelSet>, exclude_keys: &HashSet<String>) -> Arc<LabelSet> {
+    if exclude_keys.is_empty() || !set.iter().any(|(key, _)| exclude_keys.contains(key)) {
+        return set;
+    }
+    Arc::new(
+        set.iter()
+            .filter(|(key, _)| !exclude_keys.contains(key))
+            .cloned()
+            .collect(),
+    )
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -219,6 +253,69 @@ mod tests {
         .insert(write.inner())
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn apply_exclusions_drops_only_matching_keys() {
+        let set = Arc::new(vec![
+            ("user.id".to_string(), "alice".to_string()),
+            (
+                "org.opencontainers.image.revision".to_string(),
+                "abc123".to_string(),
+            ),
+        ]);
+        let exclude = HashSet::from(["org.opencontainers.image.revision".to_string()]);
+
+        let filtered = apply_exclusions(set, &exclude);
+        assert_eq!(
+            filtered.as_slice(),
+            [("user.id".to_string(), "alice".to_string())].as_slice()
+        );
+    }
+
+    #[test]
+    fn apply_exclusions_returns_same_arc_when_nothing_matches() {
+        let set = Arc::new(vec![("user.id".to_string(), "alice".to_string())]);
+
+        // Empty exclude set and a non-matching exclude set both skip allocation.
+        let unchanged = apply_exclusions(set.clone(), &HashSet::new());
+        assert!(Arc::ptr_eq(&set, &unchanged));
+
+        let unmatched = apply_exclusions(set.clone(), &HashSet::from(["other".to_string()]));
+        assert!(Arc::ptr_eq(&set, &unmatched));
+    }
+
+    #[tokio::test]
+    async fn excluded_keys_are_withheld_from_resolved_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db").join("msb.db");
+        seed_catalog(&db_path).await;
+
+        // Add a second, noisy label to the same sandbox.
+        let write = DbWriteConnection::open(
+            &db_path,
+            CONNECT_TIMEOUT,
+            Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS),
+        )
+        .await
+        .unwrap();
+        sandbox_label::ActiveModel {
+            sandbox_id: Set(1),
+            key: Set("org.opencontainers.image.revision".to_string()),
+            value: Set("abc123".to_string()),
+        }
+        .insert(write.inner())
+        .await
+        .unwrap();
+
+        let source = CatalogLabelSource::new(db_path)
+            .with_excluded_keys(["org.opencontainers.image.revision".to_string()]);
+
+        let labels = source.labels_for(HashSet::from([1])).await.unwrap();
+        assert_eq!(
+            labels.get(&1).map(|l| l.as_slice()),
+            Some([("user.id".to_string(), "alice".to_string())].as_slice())
+        );
     }
 
     #[tokio::test]

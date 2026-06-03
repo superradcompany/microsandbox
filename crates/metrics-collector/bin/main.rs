@@ -149,6 +149,14 @@ struct CollectorOpts {
     /// high-cardinality label keys (e.g. `user.id`).
     #[arg(long)]
     no_labels: bool,
+
+    /// Drop a label key from emitted metrics. Repeatable
+    /// (`--exclude-label-key user.id --exclude-label-key request.id`). The
+    /// label stays in the catalog and is still visible to `msb inspect`; it is
+    /// only withheld from metric attributes, so this trims series cardinality on
+    /// noisy keys without losing the metadata. Ignored when `--no-labels` is set.
+    #[arg(long = "exclude-label-key", value_name = "KEY")]
+    exclude_label_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -254,9 +262,8 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
         .register(exporter);
-    if !args.collector.no_labels {
-        let db_path = label_db_path(args.collector.msb_home.as_deref())?;
-        builder = builder.enrich_labels(Arc::new(CatalogLabelSource::new(db_path)));
+    if let Some(source) = label_source(&args.collector)? {
+        builder = builder.enrich_labels(Arc::new(source));
     }
     let collector = builder.build().context("build metrics collector")?;
 
@@ -285,9 +292,8 @@ async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
         .register(exporter);
-    if !args.collector.no_labels {
-        let db_path = label_db_path(args.collector.msb_home.as_deref())?;
-        builder = builder.enrich_labels(Arc::new(CatalogLabelSource::new(db_path)));
+    if let Some(source) = label_source(&args.collector)? {
+        builder = builder.enrich_labels(Arc::new(source));
     }
     let collector = builder.build().context("build metrics collector")?;
 
@@ -371,6 +377,18 @@ fn label_db_path(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> 
     Ok(resolve_msb_home(msb_home)?
         .join(microsandbox_utils::DB_SUBDIR)
         .join(microsandbox_utils::DB_FILENAME))
+}
+
+/// Build the catalog label source for `opts`, or `None` when `--no-labels`
+/// disables enrichment entirely. Applies the `--exclude-label-keys` denylist.
+fn label_source(opts: &CollectorOpts) -> anyhow::Result<Option<CatalogLabelSource>> {
+    if opts.no_labels {
+        return Ok(None);
+    }
+    let db_path = label_db_path(opts.msb_home.as_deref())?;
+    Ok(Some(CatalogLabelSource::new(db_path).with_excluded_keys(
+        opts.exclude_label_keys.iter().cloned(),
+    )))
 }
 
 /// Wait for SIGINT or SIGTERM (on Unix) / Ctrl+C (everywhere else).

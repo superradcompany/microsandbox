@@ -138,14 +138,18 @@ cardinality-billed backends.
 creation (`msb create --label user.id=alice`). They are read from the
 catalog on first sight of each sandbox, cached, and attached to every
 datapoint as a plain attribute with the same key and value, so backends
-can group and filter by them. On by default; disable with `--no-labels`.
+can group and filter by them. On by default; disable with `--no-labels`,
+or drop individual keys with `--exclude-label-keys <key>` (repeatable).
 
 <Warning>
   Labels are emitted unconditionally and are not pre-declared, so a
   high-cardinality key like `user.id` multiplies active series far more
   than the opt-in `run_id` / `pid` do. Backends such as Grafana Cloud and
-  Prometheus bill on active series. Keep label keys low-cardinality, or
-  pass `--no-labels` where attribution is not needed.
+  Prometheus bill on active series. Keep label keys low-cardinality, pass
+  `--no-labels` where attribution is not needed, or `--exclude-label-key`
+  to drop specific noisy keys (e.g. an image's commit-SHA label) while
+  keeping the rest. Excluded keys stay in the catalog and remain visible
+  to `msb inspect`; only the metric attribute is withheld.
 </Warning>
 
 Label enrichment is best-effort and never blocks metrics. If the catalog
@@ -168,6 +172,7 @@ msb-metrics stdout [--collect-interval=<dur>]
                    [--export-timeout=<dur>]
                    [--msb-home=<path>]
                    [--no-labels]
+                   [--exclude-label-key=<key>]...
 ```
 
 The output format is not a stable contract; don't pipe it into
@@ -195,6 +200,7 @@ msb-metrics otel --endpoint=<URL>
                  [--export-timeout=<dur>]
                  [--msb-home=<path>]
                  [--no-labels]
+                 [--exclude-label-key=<key>]...
 ```
 
 | Flag | Default | Notes |
@@ -208,6 +214,7 @@ msb-metrics otel --endpoint=<URL>
 | `--emit-run-id` | off | Add `sandbox.run_id` to every datapoint. Opt-in: high cardinality. |
 | `--emit-pid` | off | Add `sandbox.pid` to every datapoint. Opt-in: high cardinality. |
 | `--no-labels` | off | Stop attaching per-sandbox labels (skips the catalog lookup). Use to cap series cardinality from high-cardinality label keys. |
+| `--exclude-label-key` | none | Label key to drop from emitted metrics, repeatable. The key stays in the catalog (visible to `msb inspect`) and is only withheld from metric attributes. Ignored when `--no-labels` is set. |
 | `--collect-interval` | `1s` | How often shm is read. `humantime` durations (`1s`, `500ms`, `2m`). |
 | `--flush-interval` | `10s` | Per-exporter scheduled flush cadence. |
 | `--max-buffered` | `60` | Per-exporter buffer cap. Oldest collection drops on overflow; drop count surfaces on the next batch. |
