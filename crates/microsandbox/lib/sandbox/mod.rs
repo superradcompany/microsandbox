@@ -2007,26 +2007,30 @@ async fn pull_oci_image(
     }
 }
 
+/// Prefixes reserved for the built-in identity/resource attributes the metrics
+/// exporter emits. User labels must not use them or they would shadow the
+/// `sandbox.*` / `microsandbox.*` / `service.*` attributes downstream.
+pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
+
+/// Return the reserved prefix a label key starts with, if any.
+pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
+    RESERVED_LABEL_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| key.starts_with(prefix))
+}
+
 /// Validate user-defined sandbox labels. Keys must be non-empty and must not
 /// use a reserved prefix. Values may be empty: a valueless label is a plain
 /// marker (e.g. `gpu`), matching Docker's label semantics.
 fn validate_labels(labels: &HashMap<String, String>) -> MicrosandboxResult<()> {
-    /// Prefixes reserved for the built-in identity/resource attributes the
-    /// metrics exporter emits. User labels must not use them or they would
-    /// shadow the `sandbox.*` / `microsandbox.*` / `service.*` attributes
-    /// downstream.
-    const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
-
     for key in labels.keys() {
         if key.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "label key must not be empty".into(),
             ));
         }
-        if let Some(prefix) = RESERVED_LABEL_PREFIXES
-            .iter()
-            .find(|p| key.starts_with(**p))
-        {
+        if let Some(prefix) = reserved_label_prefix(key) {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "label key '{key}' uses reserved prefix '{prefix}'"
             )));

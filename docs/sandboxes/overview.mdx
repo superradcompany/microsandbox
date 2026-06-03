@@ -127,6 +127,13 @@ in Python). On the CLI, repeat `--label` once per entry. Values may be empty: a
 valueless label such as `--label gpu` is a plain marker (it stores `gpu=""`),
 matching Docker's label semantics.
 
+The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`,
+etc.) are imported automatically as sandbox labels at create time; a label you
+set yourself overrides the image's value on a key collision. Image labels using
+a reserved prefix are skipped. Note this can add series cardinality if an image
+carries high-cardinality labels (a commit SHA, a build timestamp); set
+`--no-labels` on `msb-metrics` if that is a concern.
+
 ### Selecting sandboxes by label
 
 Labels double as selectors. `list_with` returns sandboxes carrying **all** of

@@ -265,9 +265,11 @@ impl SandboxConfig {
     /// Apply OCI image config as defaults. User-provided values take precedence.
     ///
     /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
+    /// - `labels`: image labels form the base; user labels override by key.
     /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
         self.env = merge_env(&image.env, &self.env);
+        self.labels = merge_image_labels(&image.labels, &self.labels);
 
         if self.cmd.is_none() {
             self.cmd = image.cmd.clone();
@@ -366,6 +368,28 @@ fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String
         .collect();
 
     merge_env_pairs(&base, user_env)
+}
+
+/// Merge OCI image labels (base) with user labels (override on key collision).
+///
+/// Image labels carrying a reserved prefix or an empty key are skipped: they
+/// cannot become metric attributes and would otherwise bypass user-label
+/// validation (which already ran before the image was pulled).
+fn merge_image_labels(
+    image_labels: &HashMap<String, String>,
+    user_labels: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut merged: HashMap<String, String> = image_labels
+        .iter()
+        .filter(|(key, _)| !key.is_empty() && super::reserved_label_prefix(key).is_none())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    // User labels win on collision.
+    for (key, value) in user_labels {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
 }
 
 fn default_oci_tmpfs_size_mib(memory_mib: u32) -> u32 {
@@ -531,6 +555,53 @@ mod tests {
         assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
         assert_eq!(config.workdir, Some("/workspace".to_string()));
         assert_eq!(config.user, Some("root".to_string()));
+    }
+
+    #[test]
+    fn test_merge_image_defaults_imports_labels() {
+        use std::collections::HashMap;
+
+        let image = ImageConfig {
+            labels: HashMap::from([
+                (
+                    "org.opencontainers.image.source".to_string(),
+                    "https://example.com/repo".to_string(),
+                ),
+                ("vendor".to_string(), "image-vendor".to_string()),
+                // Reserved prefix and empty key must be skipped.
+                ("sandbox.id".to_string(), "spoofed".to_string()),
+                (String::new(), "x".to_string()),
+            ]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            labels: HashMap::from([
+                ("user.id".to_string(), "alice".to_string()),
+                // Collides with an image label; the user value must win.
+                ("vendor".to_string(), "user-vendor".to_string()),
+            ]),
+            ..Default::default()
+        };
+        config.merge_image_defaults(&image);
+
+        assert_eq!(
+            config
+                .labels
+                .get("org.opencontainers.image.source")
+                .map(String::as_str),
+            Some("https://example.com/repo")
+        );
+        assert_eq!(
+            config.labels.get("user.id").map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            config.labels.get("vendor").map(String::as_str),
+            Some("user-vendor")
+        );
+        assert!(!config.labels.contains_key("sandbox.id"));
+        assert!(!config.labels.contains_key(""));
     }
 
     #[test]
