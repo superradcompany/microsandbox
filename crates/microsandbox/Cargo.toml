@@ -41,15 +41,15 @@ flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.5.4", path = "../db" }
-microsandbox-filesystem = { version = "0.5.4", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.5.4", path = "../image" }
-microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
-microsandbox-migration = { version = "0.5.4", path = "../migration" }
-microsandbox-network = { version = "0.5.4", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.5.4", path = "../protocol" }
-microsandbox-runtime = { version = "0.5.4", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
+microsandbox-db.workspace = true
+microsandbox-filesystem.workspace = true
+microsandbox-image.workspace = true
+microsandbox-metrics.workspace = true
+microsandbox-migration.workspace = true
+microsandbox-network = { workspace = true, optional = true }
+microsandbox-protocol.workspace = true
+microsandbox-runtime.workspace = true
+microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 notify.workspace = true
 rand.workspace = true
@@ -71,16 +71,16 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
+microsandbox-utils.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
 ipnetwork.workspace = true
-microsandbox-network = { version = "0.5.4", path = "../network" }
+microsandbox-network.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
-test-utils = { path = "../test-utils" }
+test-utils.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-rustls.workspace = true
 
