@@ -71,15 +71,20 @@ impl DbPools {
 /// lock before returning `SQLITE_BUSY`. It interacts with the
 /// application-level retry policy: a longer busy timeout reduces retry
 /// volume at the cost of higher tail latency on contention.
+///
+/// `create_if_missing` controls whether opening a non-existent DB file creates
+/// it. The write side (owned by `msb`) creates the catalog; read-only consumers
+/// (e.g. `msb-metrics`) pass `false` so they never author or pre-empt it.
 pub(crate) async fn build_pool(
     db_path: &Path,
     max_connections: u32,
     connect_timeout: Duration,
     busy_timeout: Duration,
+    create_if_missing: bool,
 ) -> Result<DatabaseConnection, sqlx::Error> {
     let connect_options = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(true)
+        .create_if_missing(create_if_missing)
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(busy_timeout)
         .foreign_keys(true)
