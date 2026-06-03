@@ -169,7 +169,7 @@ jobs:
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
         if: matrix.os == 'darwin'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: agentd-aarch64-linux-musl
           path: build/
@@ -196,7 +196,7 @@ jobs:
 
       - name: Download kernel.c (macOS)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/
@@ -392,7 +392,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -431,7 +431,7 @@ jobs:
 
       # -- Download pre-built artifacts --
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -499,13 +499,13 @@ jobs:
           node-version: 22
 
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: node-sdk-linux-x86_64
           path: sdk/node-ts/
@@ -609,7 +609,7 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -673,7 +673,7 @@ jobs:
 
       # -- Download pre-built artifacts (msb + libkrunfw + cdylib all in build/) --
       - name: Download build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
