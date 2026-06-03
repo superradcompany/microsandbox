@@ -41,15 +41,15 @@ flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-db = { workspace = true }
-microsandbox-filesystem = { workspace = true }
-microsandbox-image = { workspace = true }
-microsandbox-metrics = { workspace = true }
-microsandbox-migration = { workspace = true }
+microsandbox-db.workspace = true
+microsandbox-filesystem.workspace = true
+microsandbox-image.workspace = true
+microsandbox-metrics.workspace = true
+microsandbox-migration.workspace = true
 microsandbox-network = { workspace = true, optional = true }
-microsandbox-protocol = { workspace = true }
-microsandbox-runtime = { workspace = true }
-microsandbox-utils = { workspace = true }
+microsandbox-protocol.workspace = true
+microsandbox-runtime.workspace = true
+microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 notify.workspace = true
 rand.workspace = true
@@ -71,16 +71,16 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { workspace = true }
+microsandbox-utils.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
 ipnetwork.workspace = true
-microsandbox-network = { workspace = true }
+microsandbox-network.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
-test-utils = { workspace = true }
+test-utils.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-rustls.workspace = true
 

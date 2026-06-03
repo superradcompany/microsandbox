@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 microsandbox = { workspace = true, default-features = true, features = ["ssh"] }
-microsandbox-network = { workspace = true }
+microsandbox-network.workspace = true
 chrono = { workspace = true }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }

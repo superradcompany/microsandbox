@@ -12,7 +12,7 @@ path = "native/lib.rs"
 
 [dependencies]
 microsandbox = { workspace = true, default-features = true, features = ["ssh"] }
-microsandbox-network = { workspace = true }
+microsandbox-network.workspace = true
 ipnetwork = { workspace = true }
 napi = { version = "3", default-features = false, features = [
     "async",
