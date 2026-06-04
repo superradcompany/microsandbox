@@ -169,7 +169,7 @@ func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 }
 
 // WithDetached creates the sandbox in detached mode. The sandbox continues
-// running after the Go process exits. Reattach via GetSandbox or CreateSandboxDetached.
+// running after the Go process exits. Reattach via GetSandbox.
 func WithDetached() SandboxOption {
 	return func(o *SandboxConfig) { o.Detached = true }
 }

@@ -34,7 +34,7 @@ import { SandboxSsh } from "./ssh.js";
  *
  * The instance IS the napi-rs `SandboxBuilder` class — every setter is a
  * native call, no TS-side reimplementation. Only the terminal `create()`
- * / `createDetached()` methods are wrapped here so they return a TS
+ * method is wrapped here so it returns a TS
  * `Sandbox` (which adds `Symbol.asyncDispose`, error-mapping, and a few
  * sync getters on top of the native handle).
  */
@@ -51,9 +51,7 @@ export type SandboxConfig = NapiSandboxConfig;
 
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
-  createDetached(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
-  createDetachedWithPullProgress(): Promise<PullProgressCreate>;
 }
 
 /**
@@ -118,21 +116,22 @@ export class Sandbox implements AsyncDisposable {
   /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     const nb = new napi.SandboxBuilder(name);
+    let detached = false;
+    const origDetached = nb.detached.bind(nb);
     const origCreate = nb.create.bind(nb);
-    const origCreateDetached = nb.createDetached.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
-    const origCreateDetachedWithPP =
-      nb.createDetachedWithPullProgress.bind(nb);
+    const wrapped = nb as unknown as {
+      detached: (enabled: boolean) => SandboxBuilder;
+    };
+    wrapped.detached = (enabled: boolean) => {
+      detached = enabled;
+      origDetached(enabled);
+      return nb as unknown as SandboxBuilder;
+    };
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name, /*ownsLifecycle*/ true);
-    };
-    (
-      nb as unknown as { createDetached: () => Promise<Sandbox> }
-    ).createDetached = async () => {
-      const inner = await withMappedErrors(() => origCreateDetached());
-      return new Sandbox(inner, name, /*ownsLifecycle*/ false);
+      return new Sandbox(inner, name, /*ownsLifecycle*/ !detached);
     };
     (
       nb as unknown as {
@@ -140,15 +139,7 @@ export class Sandbox implements AsyncDisposable {
       }
     ).createWithPullProgress = async () => {
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name, /*attached*/ true);
-    };
-    (
-      nb as unknown as {
-        createDetachedWithPullProgress: () => Promise<PullProgressCreate>;
-      }
-    ).createDetachedWithPullProgress = async () => {
-      const raw = await withMappedErrors(() => origCreateDetachedWithPP());
-      return new PullProgressCreate(raw, name, /*attached*/ false);
+      return new PullProgressCreate(raw, name, /*attached*/ !detached);
     };
     return nb as unknown as SandboxBuilder;
   }

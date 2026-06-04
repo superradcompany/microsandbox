@@ -1072,6 +1072,7 @@ mod tests {
                     boot_time_ns: 0,
                     init_time_ns: 0,
                     ready_time_ns: 0,
+                    ..Default::default()
                 },
             ))
             .unwrap();
@@ -1116,6 +1117,7 @@ mod tests {
                     boot_time_ns: 0,
                     init_time_ns: 0,
                     ready_time_ns: 0,
+                    ..Default::default()
                 },
             ))
             .unwrap();
@@ -1150,6 +1152,7 @@ mod tests {
                 boot_time_ns: 0,
                 init_time_ns: 0,
                 ready_time_ns: 0,
+                ..Default::default()
             },
         );
         shared.tx_ring.push(ready.clone()).unwrap();

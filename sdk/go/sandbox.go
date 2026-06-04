@@ -153,14 +153,6 @@ func durationSecsCeil(d time.Duration) uint64 {
 	return uint64((d + time.Second - 1) / time.Second)
 }
 
-// CreateSandboxDetached creates and boots a sandbox in detached mode. The VM
-// continues running after the returned handle is released or the Go process
-// exits. Reattach via GetSandbox. Sandbox names are limited to 128 UTF-8 bytes.
-func CreateSandboxDetached(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	opts = append(opts, WithDetached())
-	return CreateSandbox(ctx, name, opts...)
-}
-
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{

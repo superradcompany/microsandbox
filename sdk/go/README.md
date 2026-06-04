@@ -481,7 +481,6 @@ sb, err := h.Connect(ctx)
 |----------|-------------|
 | `EnsureInstalled(ctx, opts...)` | Optional — download msb + libkrunfw to `~/.microsandbox/` up front (idempotent) |
 | `CreateSandbox(ctx, name, ...opts)` | Create and start a sandbox |
-| `CreateSandboxDetached(ctx, name, ...opts)` | Create a sandbox in detached mode |
 | `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
 | `StartSandboxDetached(ctx, name)` | Boot a stopped sandbox in detached mode |
 | `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |

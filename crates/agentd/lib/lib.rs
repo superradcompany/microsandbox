@@ -23,6 +23,7 @@ pub mod init;
 pub mod network;
 pub mod serial;
 pub mod session;
+pub mod tcp;
 pub mod tls;
 
 pub use config::{AgentdConfig, BootParams, HandoffInit};

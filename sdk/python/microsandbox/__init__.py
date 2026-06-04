@@ -55,13 +55,13 @@ from microsandbox.errors import (
     MicrosandboxError,
     NetworkPolicyError,
     PathNotFoundError,
-    Pre05SandboxRestartRequiredError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
     SandboxStillRunningError,
     SecretViolationError,
     TlsError,
+    UnsupportedOperationError,
     VolumeNotFoundError,
 )
 from microsandbox.events import (
@@ -256,7 +256,7 @@ __all__ = [
     "TlsError",
     "IoError",
     "MetricsDisabledError",
-    "Pre05SandboxRestartRequiredError",
+    "UnsupportedOperationError",
     # Setup
     "install",
     "is_installed",

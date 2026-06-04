@@ -22,12 +22,14 @@ use microsandbox_protocol::exec::{
 };
 use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 
 use crate::config::AgentdConfig;
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::serial::AGENT_PORT_NAME;
 use crate::session::{ExecSession, SessionOutput, resolve_default_user};
+use crate::tcp::TcpSession;
 use crate::{clock, fs, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
@@ -58,6 +60,7 @@ struct AgentState {
     sessions: HashMap<u32, ExecSession>,
     write_sessions: HashMap<u32, FsWriteSession>,
     read_sessions: HashMap<u32, FsReadSession>,
+    tcp_sessions: HashMap<u32, TcpSession>,
     fs: FsState,
 }
 
@@ -109,6 +112,7 @@ pub async fn run(
             boot_time_ns,
             init_time_ns,
             ready_time_ns,
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -194,6 +198,7 @@ pub async fn run(
                     }
                     SessionOutput::Raw(frame_bytes) => {
                         remove_completed_fs_read(&frame_bytes, &mut state.read_sessions);
+                        remove_completed_tcp_session(&frame_bytes, &mut state.tcp_sessions);
                         // Pre-encoded frame — write directly to output buffer.
                         serial_out_buf.extend_from_slice(&frame_bytes);
                     }
@@ -398,6 +403,51 @@ async fn handle_message(
             }
         }
 
+        MessageType::TcpConnect => {
+            let req: TcpConnect = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode tcp connect: {e}")))?;
+            // The connect runs inside the session task; the agent loop never
+            // blocks on it. Success or failure arrives later as a tcp frame.
+            let session = TcpSession::open(msg.id, req, session_tx);
+            state.tcp_sessions.insert(msg.id, session);
+        }
+
+        MessageType::TcpData => {
+            let data: TcpData = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode tcp data: {e}")))?;
+            if let Some(session) = state.tcp_sessions.get(&msg.id) {
+                if let Err(e) = session.write_data(data.data).await {
+                    state.tcp_sessions.remove(&msg.id);
+                    encode_tcp_failed(msg.id, e, out_buf)?;
+                }
+            } else {
+                encode_tcp_failed(msg.id, format!("unknown TCP session: {}", msg.id), out_buf)?;
+            }
+        }
+
+        MessageType::TcpEof => {
+            let _: TcpEof = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode tcp eof: {e}")))?;
+            if let Some(session) = state.tcp_sessions.get(&msg.id)
+                && let Err(e) = session.close_write().await
+            {
+                state.tcp_sessions.remove(&msg.id);
+                encode_tcp_failed(msg.id, e, out_buf)?;
+            }
+        }
+
+        MessageType::TcpClose => {
+            let _: TcpClose = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode tcp close: {e}")))?;
+            if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                session.close();
+            }
+        }
+
         MessageType::RelayClientDisconnected => {
             let disconnected: RelayClientDisconnected = msg
                 .payload()
@@ -414,6 +464,11 @@ async fn handle_message(
                 let owner_id = session.owner_id();
                 owner_id < disconnected.id_start || owner_id >= disconnected.id_end_exclusive
             });
+            close_tcp_sessions_in_owner_range(
+                &mut state.tcp_sessions,
+                disconnected.id_start,
+                disconnected.id_end_exclusive,
+            );
         }
 
         MessageType::ClockSync => {
@@ -433,6 +488,9 @@ async fn handle_message(
                 let _ = session.send_signal(15); // SIGTERM
             }
             state.write_sessions.clear();
+            for (_, session) in state.tcp_sessions.drain() {
+                session.close();
+            }
             state.fs.clear();
 
             request_guest_poweroff()?;
@@ -472,6 +530,16 @@ fn remove_completed_fs_read(frame_bytes: &[u8], read_sessions: &mut HashMap<u32,
     }
 }
 
+fn remove_completed_tcp_session(frame_bytes: &[u8], tcp_sessions: &mut HashMap<u32, TcpSession>) {
+    let mut buf = frame_bytes.to_vec();
+    let Ok(Some(msg)) = codec::try_decode_from_buf(&mut buf) else {
+        return;
+    };
+    if matches!(msg.t, MessageType::TcpClosed | MessageType::TcpFailed) {
+        tcp_sessions.remove(&msg.id);
+    }
+}
+
 fn abort_read_sessions_in_owner_range(
     read_sessions: &mut HashMap<u32, FsReadSession>,
     id_start: u32,
@@ -487,6 +555,31 @@ fn abort_read_sessions_in_owner_range(
         }
     }
     *read_sessions = retained;
+}
+
+fn close_tcp_sessions_in_owner_range(
+    tcp_sessions: &mut HashMap<u32, TcpSession>,
+    id_start: u32,
+    id_end_exclusive: u32,
+) {
+    let mut retained = HashMap::new();
+    for (id, session) in tcp_sessions.drain() {
+        let owner_id = session.owner_id();
+        if owner_id >= id_start && owner_id < id_end_exclusive {
+            session.close();
+        } else {
+            retained.insert(id, session);
+        }
+    }
+    *tcp_sessions = retained;
+}
+
+fn encode_tcp_failed(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    let reply = Message::with_payload(MessageType::TcpFailed, id, &TcpFailed { error })
+        .map_err(|e| AgentdError::ExecSession(format!("encode tcp failed: {e}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|e| AgentdError::ExecSession(format!("encode tcp failed frame: {e}")))?;
+    Ok(())
 }
 
 /// Build an `ExecStdinError` payload from a failed `write_stdin` result.

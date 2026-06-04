@@ -199,17 +199,17 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
         return 1;
     }
-    if find_pre05_sandbox_restart_required_in_chain(err) {
-        // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-        // compatibility for versions before 0.5 is no longer supported.
+    if find_unsupported_feature_in_chain(err) {
         microsandbox_cli::ui::error_with_lines(
-            "filesystem and SFTP features need this sandbox to be restarted",
+            "this sandbox's runtime is too old for the requested feature",
             &[
                 microsandbox_cli::ui::ErrorLine::Cause(
-                    "this sandbox was started before microsandbox 0.5",
+                    "the sandbox was started by an older microsandbox runtime",
                 ),
-                microsandbox_cli::ui::ErrorLine::Hint("exec and shell still work temporarily"),
-                microsandbox_cli::ui::ErrorLine::Hint("stop and start the sandbox, then retry"),
+                microsandbox_cli::ui::ErrorLine::Hint("exec and shell still work"),
+                microsandbox_cli::ui::ErrorLine::Hint(
+                    "restart the sandbox to update its runtime, then retry",
+                ),
             ],
         );
         return 1;
@@ -260,14 +260,11 @@ fn find_exec_failed_in_chain(
     None
 }
 
-/// Walk the chain looking for a pre-0.5 sandbox restart error.
-///
-/// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-/// compatibility for versions before 0.5 is no longer supported.
-fn find_pre05_sandbox_restart_required_in_chain(err: &anyhow::Error) -> bool {
+/// Walk the chain looking for a too-old-runtime feature rejection.
+fn find_unsupported_feature_in_chain(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         if let Some(microsandbox::MicrosandboxError::AgentClient(
-            microsandbox::AgentClientError::Pre05SandboxRestartRequired,
+            microsandbox::AgentClientError::UnsupportedOperation { .. },
         )) = cause.downcast_ref::<microsandbox::MicrosandboxError>()
         {
             return true;

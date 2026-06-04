@@ -41,7 +41,11 @@ Creating a sandbox boots the microVM, mounts the filesystem, initializes the gue
 let sb = Sandbox::builder("worker").image("python").create().await?;
 
 // Detached: sandbox survives after your process exits
-let sb = Sandbox::builder("worker").image("python").create_detached().await?;
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .detached(true)
+    .create()
+    .await?;
 ```
 
 ```typescript TypeScript
@@ -49,7 +53,10 @@ let sb = Sandbox::builder("worker").image("python").create_detached().await?;
 await using sb = await Sandbox.builder("worker").image("python").create();
 
 // Detached: sandbox survives after your process exits
-const detached = await Sandbox.builder("worker").image("python").createDetached();
+const detached = await Sandbox.builder("worker")
+  .image("python")
+  .detached(true)
+  .create();
 ```
 
 ```python Python

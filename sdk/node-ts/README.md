@@ -308,7 +308,8 @@ Detached sandboxes survive the Node.js process:
 // Create detached — drops the lifecycle on this handle's `Symbol.asyncDispose`.
 const sb = await Sandbox.builder("background")
   .image("python")
-  .createDetached();
+  .detached(true)
+  .create();
 
 // Later, from another process:
 const handle = await Sandbox.get("background");
@@ -462,7 +463,7 @@ await setup()
 | Symbol | Description |
 |---|---|
 | `Sandbox` | Live sandbox — lifecycle, exec, fs, metrics. Implements `AsyncDisposable`. |
-| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()` / `.createDetached()`. |
+| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()`. |
 | `SandboxHandle` | Lightweight DB handle — `connect()`, `start()`, `stop()`, `kill()`. |
 | `SandboxConfig` | Built sandbox configuration (output of `SandboxBuilder.build()`). |
 | `SandboxStatus` | `"running" \| "stopped" \| "crashed" \| "draining"` |

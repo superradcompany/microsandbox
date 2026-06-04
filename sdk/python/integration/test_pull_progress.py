@@ -83,7 +83,7 @@ async def test_create_with_progress_result_rejects_on_second_call(sandbox_name):
 
 
 @pytest.mark.asyncio
-async def test_create_detached_with_progress_returns_detached_sandbox(sandbox_name):
+async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_name):
     name = sandbox_name("py-sdk-progress-detached")
     await remove_sandbox(name)
 

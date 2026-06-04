@@ -879,6 +879,8 @@ export declare class SandboxBuilder {
   logLevel(level: string): this
   /** Suppress sandbox logs. */
   quietLogs(): this
+  /** Create the sandbox in detached/background mode when enabled. */
+  detached(detached: boolean): this
   /** Override the metrics sampling interval in milliseconds; pass `0` to disable. */
   metricsSampleIntervalMs(ms: number): this
   /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */
@@ -990,7 +992,7 @@ export declare class SandboxBuilder {
    */
   build(): Promise<string>
   /**
-   * Create and start the sandbox in attached mode.
+   * Create and start the sandbox.
    *
    * # Safety
    * `&mut self` async is required because we drain `inner`
@@ -998,14 +1000,6 @@ export declare class SandboxBuilder {
    * regardless. JS callers see `create(): Promise<Sandbox>`.
    */
   create(): Promise<JsSandbox>
-  /**
-   * Create and start the sandbox in detached mode (survives the
-   * parent process).
-   *
-   * # Safety
-   * Same justification as `create`.
-   */
-  createDetached(): Promise<JsSandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
@@ -1017,13 +1011,6 @@ export declare class SandboxBuilder {
    * Same justification as `create`.
    */
   createWithPullProgress(): Promise<JsPullProgressCreate>
-  /**
-   * Detached variant of `createWithPullProgress`.
-   *
-   * # Safety
-   * Same justification as `create`.
-   */
-  createDetachedWithPullProgress(): Promise<JsPullProgressCreate>
 }
 export type JsSandboxBuilder = SandboxBuilder
 

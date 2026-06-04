@@ -449,7 +449,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
-    pub const PRE05_SANDBOX_RESTART_REQUIRED: &str = "pre05_sandbox_restart_required";
+    pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
 
@@ -508,12 +508,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::AgentClient(
-                microsandbox::AgentClientError::Pre05SandboxRestartRequired,
-            ) => {
-                // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-                // compatibility for versions before 0.5 is no longer supported.
-                error_kind::PRE05_SANDBOX_RESTART_REQUIRED
-            }
+                microsandbox::AgentClientError::UnsupportedOperation { .. },
+            ) => error_kind::UNSUPPORTED_OPERATION,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -1855,11 +1851,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
-                builder.create_detached().await?
-            } else {
-                builder.create().await?
-            };
+            let sandbox = builder.detached(opts.detached).create().await?;
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
         }))

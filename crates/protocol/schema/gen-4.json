@@ -1,0 +1,116 @@
+{
+  "frame": {
+    "flag_session_start": 2,
+    "flag_shutdown": 4,
+    "flag_terminal": 1,
+    "header_size": 5,
+    "max_frame_size": 4194304
+  },
+  "message_types": [
+    {
+      "introduced_in": 1,
+      "wire": "core.ready"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.init.resolved"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.init.ack"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.shutdown"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.relay.client.disconnected"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.clock.sync"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.request"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.started"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.stdin"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.stdin.error"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.stdout"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.stderr"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.exited"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.failed"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.resize"
+    },
+    {
+      "introduced_in": 1,
+      "wire": "core.exec.signal"
+    },
+    {
+      "introduced_in": 2,
+      "wire": "core.fs.request"
+    },
+    {
+      "introduced_in": 2,
+      "wire": "core.fs.response"
+    },
+    {
+      "introduced_in": 2,
+      "wire": "core.fs.data"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.connect"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.connected"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.data"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.eof"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.close"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.closed"
+    },
+    {
+      "introduced_in": 4,
+      "wire": "core.tcp.failed"
+    }
+  ],
+  "protocol_version": 4
+}
