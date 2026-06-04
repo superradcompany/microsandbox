@@ -3,6 +3,8 @@
 //! Handles `core.tcp.*` protocol messages by opening TCP sockets from
 //! inside the guest and relaying bytes between those sockets and the host.
 
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -21,6 +23,17 @@ use crate::session::SessionOutput;
 /// TCP stream read chunk size.
 const TCP_CHUNK_SIZE: usize = 64 * 1024;
 
+/// How many host->guest command frames may queue before the agent loop has to
+/// wait. Bounding this turns a slow or stalled destination into backpressure
+/// (the serial reader pauses, which throttles the SSH window) instead of
+/// unbounded guest memory growth.
+const TCP_COMMAND_CAPACITY: usize = 32;
+
+/// Upper bound on a single guest-side connect attempt. The connect runs in the
+/// per-session task, so this only bounds that task's lifetime; it never blocks
+/// the agent's serial loop.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -28,14 +41,13 @@ const TCP_CHUNK_SIZE: usize = 64 * 1024;
 /// Tracks an active guest-originated TCP stream.
 pub struct TcpSession {
     owner_id: u32,
-    commands: mpsc::UnboundedSender<TcpCommand>,
+    commands: mpsc::Sender<TcpCommand>,
     task: JoinHandle<()>,
 }
 
 enum TcpCommand {
     Data(Vec<u8>),
     Eof,
-    Close,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -49,22 +61,35 @@ impl TcpSession {
     }
 
     /// Queue stream data to write to the guest socket.
-    pub fn write_data(&self, data: Vec<u8>) -> Result<(), String> {
+    ///
+    /// Awaits queue space when the per-session relay is behind, so a stalled
+    /// destination backpressures the caller instead of growing memory.
+    pub async fn write_data(&self, data: Vec<u8>) -> Result<(), String> {
         self.commands
             .send(TcpCommand::Data(data))
+            .await
             .map_err(|_| "TCP session is closed".to_string())
     }
 
     /// Close the guest socket write half.
-    pub fn close_write(&self) -> Result<(), String> {
+    ///
+    /// Ordered after any queued data, so the destination sees the write shutdown
+    /// only once it has received everything sent before it.
+    pub async fn close_write(&self) -> Result<(), String> {
         self.commands
             .send(TcpCommand::Eof)
+            .await
             .map_err(|_| "TCP session is closed".to_string())
     }
 
-    /// Request that the TCP session close.
+    /// Tear down the TCP session.
+    ///
+    /// Aborts the relay task directly rather than queuing a command, so teardown
+    /// never waits behind a full command queue. Dropping the task closes the
+    /// guest socket. The host has already closed its side before asking for this,
+    /// so no terminal frame is owed back to it.
     pub fn close(&self) {
-        let _ = self.commands.send(TcpCommand::Close);
+        self.task.abort();
     }
 
     /// Returns whether the background relay task has finished.
@@ -74,42 +99,28 @@ impl TcpSession {
 
     /// Open a TCP stream from inside the guest and start relaying it.
     ///
-    /// Sends `core.tcp.connected` on success, or `core.tcp.failed` on a connect
-    /// error (returning `Ok(None)` in that case, since no live session results).
-    pub async fn open(
+    /// The OS connect runs inside the spawned task, not on the caller's serial
+    /// loop, so a hanging or slow destination can never wedge the agent. The
+    /// task reports `core.tcp.connected` on success or a terminal
+    /// `core.tcp.failed` on error/timeout over `session_tx`; the host correlates
+    /// either reply by id. The returned session is live immediately, with
+    /// commands queued until the connect completes.
+    pub fn open(
         id: u32,
         req: TcpConnect,
-        out_buf: &mut Vec<u8>,
         session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
-    ) -> Result<Option<Self>, String> {
-        let stream = match TcpStream::connect((req.host.as_str(), req.port)).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                encode_tcp_message(
-                    id,
-                    MessageType::TcpFailed,
-                    &TcpFailed {
-                        error: format!("connect {}:{}: {e}", req.host, req.port),
-                    },
-                    out_buf,
-                )?;
-                return Ok(None);
-            }
-        };
-
-        encode_tcp_message(id, MessageType::TcpConnected, &TcpConnected {}, out_buf)?;
-
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+    ) -> Self {
+        let (commands_tx, commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
         let output_tx = session_tx.clone();
         let task = tokio::spawn(async move {
-            relay_tcp_session(id, stream, commands_rx, output_tx).await;
+            connect_and_relay(id, req, commands_rx, output_tx).await;
         });
 
-        Ok(Some(Self {
+        Self {
             owner_id: id,
             commands: commands_tx,
             task,
-        }))
+        }
     }
 }
 
@@ -117,10 +128,56 @@ impl TcpSession {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Connects to the destination, reports the outcome, then relays the stream.
+///
+/// Runs entirely inside the per-session task. On a connect error or timeout it
+/// emits a terminal `core.tcp.failed`; the agent loop removes the session when
+/// that frame flows past. On success it emits `core.tcp.connected` and hands off
+/// to the relay loop.
+async fn connect_and_relay(
+    id: u32,
+    req: TcpConnect,
+    commands: mpsc::Receiver<TcpCommand>,
+    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+) {
+    let connect = TcpStream::connect((req.host.as_str(), req.port));
+    let stream = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            send_raw_tcp_message(
+                id,
+                MessageType::TcpFailed,
+                &TcpFailed {
+                    error: format!("connect {}:{}: {e}", req.host, req.port),
+                },
+                &tx,
+            );
+            return;
+        }
+        Err(_elapsed) => {
+            send_raw_tcp_message(
+                id,
+                MessageType::TcpFailed,
+                &TcpFailed {
+                    error: format!("connect {}:{} timed out", req.host, req.port),
+                },
+                &tx,
+            );
+            return;
+        }
+    };
+
+    if !send_raw_tcp_message(id, MessageType::TcpConnected, &TcpConnected {}, &tx) {
+        return;
+    }
+
+    relay_tcp_session(id, stream, commands, tx).await;
+}
+
 async fn relay_tcp_session(
     id: u32,
     mut stream: TcpStream,
-    mut commands: mpsc::UnboundedReceiver<TcpCommand>,
+    mut commands: mpsc::Receiver<TcpCommand>,
     tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
 ) {
     let mut read_buf = vec![0u8; TCP_CHUNK_SIZE];
@@ -190,7 +247,7 @@ async fn relay_tcp_session(
                             break;
                         }
                     }
-                    Some(TcpCommand::Close) | None => {
+                    None => {
                         break;
                     }
                 }
@@ -245,8 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_sends_terminal_failed() {
-        let (session_tx, _session_rx) = mpsc::unbounded_channel();
-        let mut out_buf = Vec::new();
+        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
 
         let session = TcpSession::open(
             7,
@@ -254,18 +310,17 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 0,
             },
-            &mut out_buf,
             &session_tx,
-        )
-        .await
-        .unwrap();
+        );
 
-        assert!(session.is_none());
-        let msg = decode_one_message(&mut out_buf);
+        // The connect runs in the task and reports failure over session_tx.
+        let msg = recv_message(&mut session_rx).await;
         assert_eq!(msg.t, MessageType::TcpFailed);
         assert_eq!(msg.flags, FLAG_TERMINAL);
         let failed: TcpFailed = msg.payload().unwrap();
         assert!(failed.error.contains("connect 127.0.0.1:0"));
+
+        wait_finished(&session).await;
     }
 
     #[tokio::test]
@@ -273,7 +328,6 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (session_tx, mut session_rx) = mpsc::unbounded_channel();
-        let mut out_buf = Vec::new();
         let accept_task = tokio::spawn(async move {
             let (_socket, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -285,31 +339,14 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port,
             },
-            &mut out_buf,
             &session_tx,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        );
 
-        let connected = decode_one_message(&mut out_buf);
+        let connected = recv_message(&mut session_rx).await;
         assert_eq!(connected.t, MessageType::TcpConnected);
 
         session.close();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if session.is_finished() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        let closed = recv_message(&mut session_rx).await;
-        assert_eq!(closed.t, MessageType::TcpClosed);
-        assert_eq!(closed.flags, FLAG_TERMINAL);
+        wait_finished(&session).await;
 
         accept_task.abort();
     }
@@ -319,7 +356,6 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (session_tx, mut session_rx) = mpsc::unbounded_channel();
-        let mut out_buf = Vec::new();
 
         // The destination half-closes its write side, then keeps reading so it
         // still receives whatever the host sends after the EOF.
@@ -338,14 +374,10 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port,
             },
-            &mut out_buf,
             &session_tx,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        );
 
-        let connected = decode_one_message(&mut out_buf);
+        let connected = recv_message(&mut session_rx).await;
         assert_eq!(connected.t, MessageType::TcpConnected);
 
         // The destination's FIN surfaces as a non-terminal TcpEof, and the
@@ -356,21 +388,29 @@ mod tests {
         assert!(!session.is_finished());
 
         // The host can still reach the destination after that EOF.
-        session.write_data(b"after-eof".to_vec()).unwrap();
-        session.close_write().unwrap();
+        session.write_data(b"after-eof".to_vec()).await.unwrap();
+        session.close_write().await.unwrap();
         let received = tokio::time::timeout(Duration::from_secs(1), got_rx)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(received, b"after-eof");
 
-        // Only an explicit close ends the session, with the terminal TcpClosed.
+        // An explicit close tears the session down.
         session.close();
-        let closed = recv_message(&mut session_rx).await;
-        assert_eq!(closed.t, MessageType::TcpClosed);
-        assert_eq!(closed.flags, FLAG_TERMINAL);
+        wait_finished(&session).await;
 
         accept_task.await.unwrap();
+    }
+
+    async fn wait_finished(session: &TcpSession) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     fn decode_one_message(buf: &mut Vec<u8>) -> Message {

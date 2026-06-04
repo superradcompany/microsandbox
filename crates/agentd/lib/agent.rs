@@ -407,16 +407,10 @@ async fn handle_message(
             let req: TcpConnect = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode tcp connect: {e}")))?;
-            match TcpSession::open(msg.id, req, out_buf, session_tx).await {
-                Ok(Some(session)) => {
-                    state.tcp_sessions.insert(msg.id, session);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("tcp connect error for {}: {e}", msg.id);
-                    encode_tcp_failed(msg.id, e, out_buf)?;
-                }
-            }
+            // The connect runs inside the session task; the agent loop never
+            // blocks on it. Success or failure arrives later as a tcp frame.
+            let session = TcpSession::open(msg.id, req, session_tx);
+            state.tcp_sessions.insert(msg.id, session);
         }
 
         MessageType::TcpData => {
@@ -424,7 +418,7 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode tcp data: {e}")))?;
             if let Some(session) = state.tcp_sessions.get(&msg.id) {
-                if let Err(e) = session.write_data(data.data) {
+                if let Err(e) = session.write_data(data.data).await {
                     state.tcp_sessions.remove(&msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
                 }
@@ -438,7 +432,7 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode tcp eof: {e}")))?;
             if let Some(session) = state.tcp_sessions.get(&msg.id)
-                && let Err(e) = session.close_write()
+                && let Err(e) = session.close_write().await
             {
                 state.tcp_sessions.remove(&msg.id);
                 encode_tcp_failed(msg.id, e, out_buf)?;
