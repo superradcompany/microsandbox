@@ -2,7 +2,8 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    HostPermissions, MountOptions, Sandbox, SandboxConfig, StatVirtualization, VolumeMount,
+    HostPermissions, MountOptions, Sandbox, SandboxConfig, SecurityProfile, StatVirtualization,
+    VolumeMount,
 };
 
 use crate::ui;
@@ -110,6 +111,11 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         ui::detail_header("Resources");
         ui::detail_kv_indent("CPUs", &config.cpus.to_string());
         ui::detail_kv_indent("Memory", &format!("{} MiB", config.memory_mib));
+        let security = match config.security_profile {
+            SecurityProfile::Default => "default",
+            SecurityProfile::Restricted => "restricted",
+        };
+        ui::detail_kv("Security", security);
 
         if let Some(ref workdir) = config.workdir {
             ui::detail_kv("Workdir", workdir);

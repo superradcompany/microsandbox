@@ -915,6 +915,7 @@ struct SandboxCreateOpts {
     cpus: Option<u8>,
     workdir: Option<String>,
     shell: Option<String>,
+    security_profile: Option<String>,
     env: Option<HashMap<String, String>>,
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -1036,6 +1037,10 @@ struct MountSpec {
     readonly: bool,
     #[serde(default)]
     noexec: bool,
+    #[serde(default)]
+    nosuid: bool,
+    #[serde(default)]
+    nodev: bool,
     size_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
@@ -1449,6 +1454,16 @@ fn parse_pull_policy(s: &str) -> Result<PullPolicy, FfiError> {
     }
 }
 
+fn parse_security_profile(s: &str) -> Result<microsandbox::sandbox::SecurityProfile, FfiError> {
+    match s {
+        "default" => Ok(microsandbox::sandbox::SecurityProfile::Default),
+        "restricted" => Ok(microsandbox::sandbox::SecurityProfile::Restricted),
+        other => Err(FfiError::invalid_argument(format!(
+            "unknown security profile: {other}"
+        ))),
+    }
+}
+
 fn apply_secret(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     s: &SecretOpts,
@@ -1606,6 +1621,8 @@ fn apply_volume(
     let fstype = m.fstype.clone();
     let readonly = m.readonly;
     let noexec = m.noexec;
+    let nosuid = m.nosuid;
+    let nodev = m.nodev;
     let size_mib = m.size_mib;
 
     let kinds_set: u8 =
@@ -1639,6 +1656,12 @@ fn apply_volume(
         }
         if noexec {
             mb = mb.noexec();
+        }
+        if nosuid {
+            mb = mb.nosuid();
+        }
+        if nodev {
+            mb = mb.nodev();
         }
         if let Some(siz) = size_mib {
             mb = mb.size(siz);
@@ -1730,6 +1753,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_log_level(s)?),
             None => None,
         };
+        let security_profile = match opts.security_profile.as_deref() {
+            Some(s) => Some(parse_security_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -1767,6 +1794,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(s) = opts.shell {
                 builder = builder.shell(s);
+            }
+            if let Some(profile) = security_profile {
+                builder = builder.security(profile);
             }
             if let Some(h) = opts.hostname {
                 builder = builder.hostname(h);

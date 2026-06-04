@@ -550,7 +550,16 @@ impl SandboxBuilder {
     /// Can be called multiple times. Per-command env vars (on exec/shell)
     /// are merged on top.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.config.env.push((key.into(), value.into()));
+        let key = key.into();
+        if key.starts_with("MSB_") {
+            if self.build_error.is_none() {
+                self.build_error = Some(crate::MicrosandboxError::InvalidConfig(format!(
+                    "environment variable {key:?} uses the reserved MSB_ prefix"
+                )));
+            }
+            return self;
+        }
+        self.config.env.push((key, value.into()));
         self
     }
 
@@ -560,7 +569,7 @@ impl SandboxBuilder {
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (k, v) in vars {
-            self.config.env.push((k.into(), v.into()));
+            self = self.env(k, v);
         }
         self
     }
@@ -889,6 +898,7 @@ impl SandboxBuilder {
         }
 
         super::types::validate_volume_mounts(&self.config.mounts)?;
+        super::validate_env(&self.config.env)?;
 
         if let Some(spec) = &self.config.init {
             super::init::validate(spec)?;
@@ -1284,6 +1294,18 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("env_var must not contain NUL"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_reserved_msb_env_key() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .env("MSB_SECURITY_PROFILE", "default")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("uses the reserved MSB_ prefix"));
     }
 
     //----------------------------------------------------------------------------------------------

@@ -351,7 +351,7 @@ export type JsMetricsStream = MetricsStream
  * Fluent builder for a sandbox volume mount.
  *
  * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
- * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`,
+ * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
  * `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
  * Validation is deferred to the terminal `.build()` call.
  */
@@ -376,6 +376,10 @@ export declare class MountBuilder {
   readonly(): this
   /** Prevent direct execution from the mount. */
   noexec(): this
+  /** Ignore setuid and setgid privilege elevation from files on the mount. */
+  nosuid(): this
+  /** Ignore device files on the mount. */
+  nodev(): this
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
@@ -752,7 +756,10 @@ export declare class Sandbox {
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
   static list(): Promise<Array<SandboxInfo>>
-  /** List sandboxes filtered by labels (AND-matched). */
+  /**
+   * List sandboxes filtered to those carrying all of the filter's labels
+   * (AND-matched).
+   */
   static listWith(filter: SandboxListFilter): Promise<Array<SandboxInfo>>
   /**
    * Remove a stopped sandbox from the database.
@@ -887,6 +894,8 @@ export declare class SandboxBuilder {
   workdir(path: string): this
   /** Shell binary used by `Sandbox.shell(...)`. */
   shell(shell: string): this
+  /** In-guest security profile (`"default"` or `"restricted"`). */
+  security(profile: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /**
@@ -1492,13 +1501,6 @@ export interface ExitStatus {
   code: number
   success: boolean
 }
-/**
- * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
- * (AND-matched). Omit or leave empty to match every sandbox.
- */
-export interface SandboxListFilter {
-  labels?: Record<string, string>
-}
 
 /** Options for `Snapshot.export()`. */
 export interface ExportOpts {
@@ -1839,6 +1841,14 @@ export interface SandboxInfo {
   updatedAt?: number
 }
 
+/**
+ * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
+ * (AND-matched). Omit or leave empty to match every sandbox.
+ */
+export interface SandboxListFilter {
+  labels?: Record<string, string>
+}
+
 /** Point-in-time resource metrics for a sandbox. */
 export interface SandboxMetrics {
   cpuPercent: number
@@ -2028,6 +2038,8 @@ export interface VolumeMount {
   guest: string
   readonly: boolean
   noexec: boolean
+  nosuid: boolean
+  nodev: boolean
   host?: string
   name?: string
   sizeMib?: number

@@ -8,6 +8,7 @@ use napi_derive::napi;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
+    SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
 
@@ -176,6 +177,23 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.shell(shell));
         self
+    }
+
+    /// In-guest security profile (`"default"` or `"restricted"`).
+    #[napi]
+    pub fn security(&mut self, profile: String) -> Result<&Self> {
+        let profile = match profile.as_str() {
+            "default" => RustSecurityProfile::Default,
+            "restricted" => RustSecurityProfile::Restricted,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid security profile `{other}` (expected default | restricted)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.security(profile));
+        Ok(self)
     }
 
     /// Configure registry connection settings via a callback.

@@ -107,36 +107,56 @@ impl PyVolume {
 
     /// Create a bind mount config.
     #[staticmethod]
-    #[pyo3(signature = (path, *, readonly = false, noexec = false))]
-    fn bind(py: Python<'_>, path: String, readonly: bool, noexec: bool) -> PyResult<PyObject> {
+    #[pyo3(signature = (path, *, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    fn bind(
+        py: Python<'_>,
+        path: String,
+        readonly: bool,
+        noexec: bool,
+        nosuid: bool,
+        nodev: bool,
+    ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "BIND")?)?;
         kwargs.set_item("bind", path)?;
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
+        kwargs.set_item("nosuid", nosuid)?;
+        kwargs.set_item("nodev", nodev)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a named volume mount config.
     #[staticmethod]
-    #[pyo3(signature = (name, *, readonly = false, noexec = false))]
-    fn named(py: Python<'_>, name: String, readonly: bool, noexec: bool) -> PyResult<PyObject> {
+    #[pyo3(signature = (name, *, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    fn named(
+        py: Python<'_>,
+        name: String,
+        readonly: bool,
+        noexec: bool,
+        nosuid: bool,
+        nodev: bool,
+    ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
+        kwargs.set_item("nosuid", nosuid)?;
+        kwargs.set_item("nodev", nodev)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a tmpfs mount config.
     #[staticmethod]
-    #[pyo3(signature = (*, size_mib = None, readonly = false, noexec = false))]
+    #[pyo3(signature = (*, size_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn tmpfs(
         py: Python<'_>,
         size_mib: Option<u32>,
         readonly: bool,
         noexec: bool,
+        nosuid: bool,
+        nodev: bool,
     ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "TMPFS")?)?;
@@ -145,6 +165,8 @@ impl PyVolume {
         }
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
+        kwargs.set_item("nosuid", nosuid)?;
+        kwargs.set_item("nodev", nodev)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
@@ -156,7 +178,7 @@ impl PyVolume {
     /// omitted, agentd probes `/proc/filesystems` to find a type that
     /// mounts cleanly.
     #[staticmethod]
-    #[pyo3(signature = (path, *, format = None, fstype = None, readonly = false, noexec = false))]
+    #[pyo3(signature = (path, *, format = None, fstype = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn disk(
         py: Python<'_>,
         path: String,
@@ -164,6 +186,8 @@ impl PyVolume {
         fstype: Option<String>,
         readonly: bool,
         noexec: bool,
+        nosuid: bool,
+        nodev: bool,
     ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
@@ -176,6 +200,8 @@ impl PyVolume {
         }
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
+        kwargs.set_item("nosuid", nosuid)?;
+        kwargs.set_item("nodev", nodev)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 }

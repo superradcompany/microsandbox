@@ -17,6 +17,7 @@ type SandboxConfig struct {
 	CPUs            uint8
 	Workdir         string
 	Shell           string
+	SecurityProfile SecurityProfile
 	Hostname        string
 	User            string
 	Replace         bool
@@ -49,6 +50,16 @@ type SandboxConfig struct {
 
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
+
+// SecurityProfile selects the in-guest security profile.
+type SecurityProfile string
+
+const (
+	// SecurityProfileDefault preserves normal guest-root semantics.
+	SecurityProfileDefault SecurityProfile = "default"
+	// SecurityProfileRestricted applies stronger in-guest hardening.
+	SecurityProfileRestricted SecurityProfile = "restricted"
+)
 
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
@@ -99,6 +110,11 @@ func WithWorkdir(path string) SandboxOption {
 // Defaults to /bin/sh on most images.
 func WithShell(shell string) SandboxOption {
 	return func(o *SandboxConfig) { o.Shell = shell }
+}
+
+// WithSecurityProfile selects the in-guest security profile.
+func WithSecurityProfile(profile SecurityProfile) SandboxOption {
+	return func(o *SandboxConfig) { o.SecurityProfile = profile }
 }
 
 // WithEnv adds environment variables to the sandbox. Called repeatedly,
@@ -730,6 +746,8 @@ type MountConfig struct {
 	Fstype   string
 	Readonly bool
 	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
 	SizeMiB  uint32
 
 	// StatVirtualization is the per-mount stat-virtualization policy. Only
@@ -768,6 +786,8 @@ func (m MountConfig) Kind() MountKind { return m.kind }
 type MountOptions struct {
 	Readonly           bool
 	Noexec             bool
+	Nosuid             bool
+	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
 }
@@ -777,6 +797,8 @@ type TmpfsOptions struct {
 	SizeMiB  uint32
 	Readonly bool
 	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
 }
 
 // DiskOptions tunes the Disk factory.
@@ -787,6 +809,8 @@ type DiskOptions struct {
 	Fstype   string
 	Readonly bool
 	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
 }
 
 // mountFactory is the factory namespace for constructing MountConfig values.
@@ -808,6 +832,8 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		Bind:               hostPath,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
 	}
@@ -820,6 +846,8 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 		Named:              name,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
 	}
@@ -833,6 +861,8 @@ func (mountFactory) Tmpfs(opts TmpfsOptions) MountConfig {
 		SizeMiB:  opts.SizeMiB,
 		Readonly: opts.Readonly,
 		Noexec:   opts.Noexec,
+		Nosuid:   opts.Nosuid,
+		Nodev:    opts.Nodev,
 	}
 }
 
@@ -845,6 +875,8 @@ func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig {
 		Fstype:   opts.Fstype,
 		Readonly: opts.Readonly,
 		Noexec:   opts.Noexec,
+		Nosuid:   opts.Nosuid,
+		Nodev:    opts.Nodev,
 	}
 }
 

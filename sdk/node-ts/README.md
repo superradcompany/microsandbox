@@ -497,7 +497,7 @@ await setup()
 | `Volume` / `VolumeBuilder` / `VolumeHandle` | Named persistent storage with quotas and labels. |
 | `VolumeFs` | Host-side fs ops on a volume's directory (no sandbox required). |
 | `VolumeFsReadStream` / `VolumeFsWriteSink` | Streaming variants. |
-| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `size`. |
+| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `noexec`, `nosuid`, `nodev`, `size`. |
 | `VolumeMount` | Discriminated union of mount kinds. |
 
 ### Image Cache

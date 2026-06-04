@@ -444,6 +444,7 @@ if not is_installed():
 |------|--------|
 | `PullPolicy` | `ALWAYS`, `IF_MISSING`, `NEVER` |
 | `LogLevel` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` |
+| `SecurityProfile` | `DEFAULT`, `RESTRICTED` |
 | `SandboxStatus` | `RUNNING`, `STOPPED`, `CRASHED`, `DRAINING`, `PAUSED` |
 | `Action` | `ALLOW`, `DENY` |
 | `Direction` | `EGRESS`, `INGRESS` |

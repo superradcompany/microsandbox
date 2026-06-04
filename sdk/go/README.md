@@ -563,6 +563,7 @@ sb, err := h.Connect(ctx)
 | `WithVolumeLabels(map)` | Key-value labels for organising volumes |
 | `WithHostname(hostname)` | Guest hostname |
 | `WithUser(user)` | User to run the sandbox process as (UID or name) |
+| `WithSecurityProfile(profile)` | In-guest security profile (`SecurityProfileDefault` or `SecurityProfileRestricted`) |
 | `WithReplace()` | Kill any existing sandbox with the same name before creating |
 | `WithShell(path)` | Default shell binary inside the guest |
 | `WithEntrypoint(cmd...)` | Override the user-workload entrypoint |

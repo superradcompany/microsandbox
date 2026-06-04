@@ -32,6 +32,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
         .expect("create default sandbox");
 
     assert_no_new_privs(&default, "0").await;
+    assert_cap_sys_admin(&default, true).await;
     assert_mount_tmpfs(&default, true).await;
     default.stop_and_wait().await.expect("stop default");
     let _ = Sandbox::remove(default_name).await;
@@ -42,11 +43,19 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
         .memory(256)
         .replace()
         .security(SecurityProfile::Restricted)
+        .volume("/mnt/msb-restricted-flags", |m| m.tmpfs().size(16))
         .create()
         .await
         .expect("create restricted sandbox");
 
     assert_no_new_privs(&restricted, "1").await;
+    assert_cap_sys_admin(&restricted, false).await;
+    assert_mount_has_flags(
+        &restricted,
+        "/mnt/msb-restricted-flags",
+        &["nosuid", "nodev"],
+    )
+    .await;
     assert_mount_tmpfs(&restricted, false).await;
     restricted.stop_and_wait().await.expect("stop restricted");
     let _ = Sandbox::remove(restricted_name).await;
@@ -66,6 +75,29 @@ async fn assert_no_new_privs(sandbox: &Sandbox, expected: &str) {
         expected,
         "unexpected NoNewPrivs value"
     );
+}
+
+async fn assert_cap_sys_admin(sandbox: &Sandbox, expected: bool) {
+    let out = sandbox
+        .shell("awk '/^CapEff:/{print $2}' /proc/self/status")
+        .await
+        .expect("read CapEff");
+    let caps =
+        u64::from_str_radix(out.stdout().expect("utf8").trim(), 16).expect("parse CapEff hex");
+    let has_cap = (caps & (1_u64 << 21)) != 0;
+    assert_eq!(has_cap, expected, "unexpected CAP_SYS_ADMIN state");
+}
+
+async fn assert_mount_has_flags(sandbox: &Sandbox, path: &str, expected_flags: &[&str]) {
+    let script = format!("awk '$5 == \"{path}\" {{print $6}}' /proc/self/mountinfo");
+    let out = sandbox.shell(&script).await.expect("read mount options");
+    let options = out.stdout().expect("utf8");
+    for flag in expected_flags {
+        assert!(
+            options.trim().split(',').any(|option| option == *flag),
+            "expected mount {path} to include {flag}, got `{options}`"
+        );
+    }
 }
 
 async fn assert_mount_tmpfs(sandbox: &Sandbox, should_succeed: bool) {

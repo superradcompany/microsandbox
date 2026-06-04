@@ -969,8 +969,8 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindPatchFailed            = "patch_failed"
-	KindUnsupportedOperation = "unsupported_operation"
-	KindIO            = "io"
+	KindUnsupportedOperation   = "unsupported_operation"
+	KindIO                     = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
@@ -1361,6 +1361,7 @@ type CreateOptions struct {
 	CPUs                 uint8                `json:"cpus,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
+	SecurityProfile      string               `json:"security_profile,omitempty"`
 	Hostname             string               `json:"hostname,omitempty"`
 	User                 string               `json:"user,omitempty"`
 	Replace              bool                 `json:"replace,omitempty"`
@@ -1409,6 +1410,8 @@ type MountSpec struct {
 	Fstype             string `json:"fstype,omitempty"`
 	Readonly           bool   `json:"readonly,omitempty"`
 	Noexec             bool   `json:"noexec,omitempty"`
+	Nosuid             bool   `json:"nosuid,omitempty"`
+	Nodev              bool   `json:"nodev,omitempty"`
 	SizeMiB            uint32 `json:"size_mib,omitempty"`
 	StatVirtualization string `json:"stat_virtualization,omitempty"`
 	HostPermissions    string `json:"host_permissions,omitempty"`

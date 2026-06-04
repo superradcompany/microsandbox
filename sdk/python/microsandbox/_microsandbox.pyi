@@ -372,12 +372,31 @@ class Volume:
     @staticmethod
     async def remove(name: str) -> None: ...
     @staticmethod
-    def bind(path: str, *, readonly: bool = False, noexec: bool = False) -> MountConfig: ...
+    def bind(
+        path: str,
+        *,
+        readonly: bool = False,
+        noexec: bool = False,
+        nosuid: bool = False,
+        nodev: bool = False,
+    ) -> MountConfig: ...
     @staticmethod
-    def named(name: str, *, readonly: bool = False, noexec: bool = False) -> MountConfig: ...
+    def named(
+        name: str,
+        *,
+        readonly: bool = False,
+        noexec: bool = False,
+        nosuid: bool = False,
+        nodev: bool = False,
+    ) -> MountConfig: ...
     @staticmethod
     def tmpfs(
-        *, size_mib: int | None = None, readonly: bool = False, noexec: bool = False
+        *,
+        size_mib: int | None = None,
+        readonly: bool = False,
+        noexec: bool = False,
+        nosuid: bool = False,
+        nodev: bool = False,
     ) -> MountConfig: ...
     @staticmethod
     def disk(
@@ -387,6 +406,8 @@ class Volume:
         fstype: str | None = None,
         readonly: bool = False,
         noexec: bool = False,
+        nosuid: bool = False,
+        nodev: bool = False,
     ) -> MountConfig: ...
     @property
     def name(self) -> str: ...
