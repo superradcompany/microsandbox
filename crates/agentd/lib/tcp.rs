@@ -125,15 +125,17 @@ async fn relay_tcp_session(
 ) {
     let mut read_buf = vec![0u8; TCP_CHUNK_SIZE];
     let mut terminal_sent = false;
+    // The destination half-closed its write side. We stop reading but keep the
+    // loop alive so host->destination data still flows until the host closes.
+    let mut read_eof = false;
 
     loop {
         tokio::select! {
-            read = stream.read(&mut read_buf) => {
+            read = stream.read(&mut read_buf), if !read_eof => {
                 match read {
                     Ok(0) => {
                         send_raw_tcp_message(id, MessageType::TcpEof, &TcpEof {}, &tx);
-                        terminal_sent = send_raw_tcp_message(id, MessageType::TcpClosed, &TcpClosed {}, &tx);
-                        break;
+                        read_eof = true;
                     }
                     Ok(n) => {
                         if !send_raw_tcp_message(
@@ -305,18 +307,81 @@ mod tests {
         .await
         .unwrap();
 
-        let (_id, output) = session_rx.recv().await.unwrap();
-        let SessionOutput::Raw(mut frame_bytes) = output else {
-            panic!("expected SessionOutput::Raw frame");
-        };
-        let closed = decode_one_message(&mut frame_bytes);
+        let closed = recv_message(&mut session_rx).await;
         assert_eq!(closed.t, MessageType::TcpClosed);
         assert_eq!(closed.flags, FLAG_TERMINAL);
 
         accept_task.abort();
     }
 
+    #[tokio::test]
+    async fn destination_eof_keeps_session_open_for_host_writes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+        let mut out_buf = Vec::new();
+
+        // The destination half-closes its write side, then keeps reading so it
+        // still receives whatever the host sends after the EOF.
+        let (got_tx, got_rx) = tokio::sync::oneshot::channel();
+        let accept_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.shutdown().await.unwrap();
+            let mut buf = Vec::new();
+            socket.read_to_end(&mut buf).await.unwrap();
+            let _ = got_tx.send(buf);
+        });
+
+        let session = TcpSession::open(
+            11,
+            TcpConnect {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            &mut out_buf,
+            &session_tx,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let connected = decode_one_message(&mut out_buf);
+        assert_eq!(connected.t, MessageType::TcpConnected);
+
+        // The destination's FIN surfaces as a non-terminal TcpEof, and the
+        // session stays alive.
+        let eof = recv_message(&mut session_rx).await;
+        assert_eq!(eof.t, MessageType::TcpEof);
+        assert_ne!(eof.flags, FLAG_TERMINAL);
+        assert!(!session.is_finished());
+
+        // The host can still reach the destination after that EOF.
+        session.write_data(b"after-eof".to_vec()).unwrap();
+        session.close_write().unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(1), got_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, b"after-eof");
+
+        // Only an explicit close ends the session, with the terminal TcpClosed.
+        session.close();
+        let closed = recv_message(&mut session_rx).await;
+        assert_eq!(closed.t, MessageType::TcpClosed);
+        assert_eq!(closed.flags, FLAG_TERMINAL);
+
+        accept_task.await.unwrap();
+    }
+
     fn decode_one_message(buf: &mut Vec<u8>) -> Message {
         codec::try_decode_from_buf(buf).unwrap().unwrap()
+    }
+
+    async fn recv_message(rx: &mut mpsc::UnboundedReceiver<(u32, SessionOutput)>) -> Message {
+        let (_id, output) = rx.recv().await.unwrap();
+        let SessionOutput::Raw(mut bytes) = output else {
+            panic!("expected SessionOutput::Raw frame");
+        };
+        decode_one_message(&mut bytes)
     }
 }
