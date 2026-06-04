@@ -5,6 +5,7 @@
 //! SDK reads; this module wraps `MetricsRegistry` directly so the
 //! orchestrator stays decoupled from the umbrella.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -12,6 +13,7 @@ use microsandbox_metrics::{MetricsError, MetricsRegistry};
 
 use crate::error::MetricsCollectorResult;
 
+use super::label_source::LabelSource;
 use super::types::{MetricsCollection, SandboxMetricSnapshot};
 
 //--------------------------------------------------------------------------------------------------
@@ -48,7 +50,90 @@ pub(crate) fn registry_collect_fn(registry_name: String) -> CollectFn {
             Ok(MetricsCollection {
                 collected_at,
                 sandboxes,
+                labels: HashMap::new(),
             })
         })
     })
+}
+
+/// Run the base collect, then resolve and attach per-sandbox labels.
+///
+/// Label resolution is non-fatal: if the source errors, the collection is
+/// emitted with no labels rather than dropping the whole tick's metrics. Labels
+/// are additive enrichment, not a precondition for shipping metrics.
+async fn enriched_collection(
+    base: CollectFn,
+    source: Arc<dyn LabelSource>,
+) -> MetricsCollectorResult<MetricsCollection> {
+    let mut collection = base().await?;
+    let ids: HashSet<i32> = collection.sandboxes.iter().map(|s| s.sandbox_id).collect();
+    match source.labels_for(ids).await {
+        Ok(labels) => collection.labels = labels,
+        Err(error) => {
+            tracing::warn!(%error, "label resolution failed; emitting metrics without labels");
+        }
+    }
+    Ok(collection)
+}
+
+/// Wrap a base `CollectFn` so each tick's collection is enriched with
+/// per-sandbox labels resolved from a [`LabelSource`].
+pub(crate) fn enrich_with_labels(base: CollectFn, source: Arc<dyn LabelSource>) -> CollectFn {
+    Arc::new(move || Box::pin(enriched_collection(base.clone(), source.clone())))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory [`LabelSource`] returning labels for known ids only.
+    struct MapSource(super::super::types::SandboxLabels);
+
+    #[async_trait::async_trait]
+    impl LabelSource for MapSource {
+        async fn labels_for(
+            &self,
+            sandbox_ids: HashSet<i32>,
+        ) -> MetricsCollectorResult<super::super::types::SandboxLabels> {
+            let mut out = HashMap::new();
+            for id in sandbox_ids {
+                if let Some(labels) = self.0.get(&id) {
+                    out.insert(id, labels.clone());
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_attaches_labels_by_sandbox_id() {
+        let source = Arc::new(MapSource(HashMap::from([(
+            1,
+            Arc::new(vec![("user.id".to_string(), "alice".to_string())]),
+        )])));
+
+        // Base collect fn returns sandbox 1 (labelled) and 2 (unlabelled).
+        let base: CollectFn = Arc::new(|| {
+            Box::pin(async {
+                let mut c = super::super::mocks::collection(1);
+                c.sandboxes
+                    .push(super::super::mocks::collection(2).sandboxes.remove(0));
+                Ok(c)
+            })
+        });
+
+        let enriched = enrich_with_labels(base, source);
+        let collection = enriched().await.unwrap();
+
+        assert_eq!(
+            collection.labels.get(&1).map(|l| l.as_slice()),
+            Some([("user.id".to_string(), "alice".to_string())].as_slice())
+        );
+        // Sandbox 2 has no labels, so no entry is added.
+        assert!(collection.labels.get(&2).is_none());
+    }
 }

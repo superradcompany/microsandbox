@@ -152,13 +152,14 @@ describe("Node.js SDK Pull Progress", () => {
 		await sb.stopAndWait();
 	}, 120_000);
 
-	it("createDetachedWithPullProgress yields events and creates a detached sandbox", async () => {
+	it("detached createWithPullProgress yields events and creates a detached sandbox", async () => {
 		const session = await Sandbox.builder(NAME_DETACHED)
 			.image("mirror.gcr.io/library/alpine")
 			.cpus(1)
 			.memory(512)
 			.replace()
-			.createDetachedWithPullProgress();
+			.detached(true)
+			.createWithPullProgress();
 
 		const types: string[] = [];
 		for await (const ev of session) types.push(ev.kind);
@@ -205,4 +206,50 @@ describe("Node.js SDK Pull Progress", () => {
 
 		await sb.stopAndWait();
 	}, 120_000);
+});
+
+describe.skipIf(!msbPath())("listWith by labels", () => {
+  const owner = `sdk-owner-${process.pid}`;
+  const webName = "sdk-label-web";
+  const jobName = "sdk-label-job";
+  const otherName = "sdk-label-other";
+  let created: Sandbox[] = [];
+
+  const build = (name: string) =>
+    Sandbox.builder(name)
+      .image("mirror.gcr.io/library/alpine")
+      .cpus(1)
+      .memory(512)
+      .replace();
+
+  beforeAll(async () => {
+    created = [
+      await build(webName).label("owner", owner).label("tier", "web").create(),
+      await build(jobName).label("owner", owner).label("tier", "job").create(),
+      await build(otherName).label("owner", `${owner}-else`).create(),
+    ];
+  }, 180_000);
+
+  afterAll(async () => {
+    for (const sb of created) await sb.stopAndWait().catch(() => undefined);
+    for (const n of [webName, jobName, otherName]) {
+      await Sandbox.remove(n).catch(() => undefined);
+    }
+  });
+
+  it("filters by a single label (AND across sandboxes)", async () => {
+    const names = (await Sandbox.listWith({ labels: { owner } })).map((h) => h.name);
+    expect(names).toContain(webName);
+    expect(names).toContain(jobName);
+    expect(names).not.toContain(otherName);
+  });
+
+  it("AND-matches multiple labels", async () => {
+    const names = (
+      await Sandbox.listWith({ labels: { owner, tier: "web" } })
+    ).map((h) => h.name);
+    expect(names).toContain(webName);
+    expect(names).not.toContain(jobName);
+    expect(names).not.toContain(otherName);
+  });
 });

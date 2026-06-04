@@ -5,6 +5,8 @@ use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus
 
 use crate::ui;
 
+use super::common;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -18,6 +20,11 @@ pub struct PsArgs {
     /// Show all sandboxes, not just running ones.
     #[arg(short, long, conflicts_with = "name")]
     pub all: bool,
+
+    /// Show only sandboxes carrying this label (`KEY=VALUE`). Repeatable;
+    /// AND-matched.
+    #[arg(long, conflicts_with = "name")]
+    pub label: Vec<String>,
 
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
@@ -46,7 +53,7 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     let handles: Vec<SandboxHandle> = if let Some(name) = args.name.as_deref() {
         vec![Sandbox::get(name).await?]
     } else {
-        let mut sandboxes = Sandbox::list().await?;
+        let mut sandboxes = Sandbox::list_with(common::label_filter(&args.label)).await?;
         if !args.all {
             sandboxes.retain(|s| {
                 s.status() == SandboxStatus::Running || s.status() == SandboxStatus::Draining

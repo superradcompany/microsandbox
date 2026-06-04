@@ -27,6 +27,7 @@ type SandboxConfig struct {
 	// SIGKILLs immediately. Use WithReplaceWithTimeout.
 	ReplaceWithTimeout *time.Duration
 	Env                map[string]string
+	Labels             map[string]string
 	Detached           bool
 	Entrypoint         []string
 	Init               *InitConfig
@@ -113,6 +114,30 @@ func WithEnv(env map[string]string) SandboxOption {
 	}
 }
 
+// WithLabels attaches labels to the sandbox for metrics attribution. Called
+// repeatedly, the maps merge; later keys overwrite earlier ones. Keys must not
+// use the reserved prefixes "sandbox.", "microsandbox.", or "service.".
+func WithLabels(labels map[string]string) SandboxOption {
+	return func(o *SandboxConfig) {
+		if o.Labels == nil {
+			o.Labels = make(map[string]string, len(labels))
+		}
+		for k, v := range labels {
+			o.Labels[k] = v
+		}
+	}
+}
+
+// WithLabel attaches a single label to the sandbox. See WithLabels.
+func WithLabel(key, value string) SandboxOption {
+	return func(o *SandboxConfig) {
+		if o.Labels == nil {
+			o.Labels = make(map[string]string, 1)
+		}
+		o.Labels[key] = value
+	}
+}
+
 // WithHostname sets the guest hostname.
 func WithHostname(hostname string) SandboxOption {
 	return func(o *SandboxConfig) { o.Hostname = hostname }
@@ -144,7 +169,7 @@ func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 }
 
 // WithDetached creates the sandbox in detached mode. The sandbox continues
-// running after the Go process exits. Reattach via GetSandbox or CreateSandboxDetached.
+// running after the Go process exits. Reattach via GetSandbox.
 func WithDetached() SandboxOption {
 	return func(o *SandboxConfig) { o.Detached = true }
 }
@@ -216,8 +241,8 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	}
 }
 
-// WithPorts publishes host TCP ports into the sandbox. The map key is the
-// host port and the value is the guest port.
+// WithPorts makes TCP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPorts(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.Ports == nil {
@@ -229,7 +254,8 @@ func WithPorts(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// WithPortsUDP publishes host UDP ports into the sandbox.
+// WithPortsUDP makes UDP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.PortsUDP == nil {
@@ -241,7 +267,8 @@ func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// PortBinding publishes a host port on a specific host bind address.
+// PortBinding describes how to expose a service running in the sandbox on a
+// specific host address and port.
 // Protocol defaults to TCP when empty. Use Bind "0.0.0.0" to expose the
 // published port on all IPv4 interfaces.
 type PortBinding struct {
@@ -251,7 +278,7 @@ type PortBinding struct {
 	Protocol  PortProtocol
 }
 
-// PortProtocol identifies the protocol for a published port binding.
+// PortProtocol identifies the protocol for an exposed sandbox service.
 type PortProtocol string
 
 const (
@@ -259,7 +286,8 @@ const (
 	PortProtocolUDP PortProtocol = "udp"
 )
 
-// WithPortBindings publishes explicit bind-address host ports into the sandbox.
+// WithPortBindings makes services running in the sandbox reachable on explicit
+// host addresses and ports.
 func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.PortBindings = append(o.PortBindings, bindings...)
@@ -366,10 +394,10 @@ type NetworkConfig struct {
 	// TLS configures the transparent TLS interception proxy.
 	TLS *TLSConfig
 
-	// Ports publishes host TCP ports into the sandbox (host→guest).
+	// Ports makes sandbox TCP services reachable on localhost ports on the host.
 	Ports map[uint16]uint16
 
-	// PortBindings publishes host ports on explicit host bind addresses.
+	// PortBindings makes sandbox services reachable on explicit host bind addresses.
 	PortBindings []PortBinding
 
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.

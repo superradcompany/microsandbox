@@ -19,7 +19,7 @@
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex};
 
-use futures::future::BoxFuture;
+use async_trait::async_trait;
 use microsandbox_utils::format::{format_bytes, format_duration};
 
 use crate::core::{MetricsExportBatch, MetricsExporter, SandboxMetricSnapshot};
@@ -66,55 +66,53 @@ impl StdoutExporter {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[async_trait]
 impl MetricsExporter for StdoutExporter {
-    fn export(
-        &self,
-        batch: Arc<MetricsExportBatch>,
-    ) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let sink = self.sink.clone();
-        Box::pin(async move {
-            let mut buf = String::new();
-            for collection in &batch.collections {
-                if collection.sandboxes.is_empty() {
-                    buf.push_str(&format!(
-                        "{} (no active sandboxes)\n",
-                        collection.collected_at.to_rfc3339()
-                    ));
-                    continue;
-                }
-                let ts = collection.collected_at.to_rfc3339();
-                for snapshot in &collection.sandboxes {
-                    buf.push_str(&format_snapshot(&ts, snapshot));
-                    buf.push('\n');
-                }
-            }
-            if batch.dropped_collection_count > 0 {
+    async fn export(&self, batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+        let mut buf = String::new();
+        for collection in &batch.collections {
+            if collection.sandboxes.is_empty() {
                 buf.push_str(&format!(
-                    "  (dropped {} stale collections from buffer)\n",
-                    batch.dropped_collection_count
+                    "{} (no active sandboxes)\n",
+                    collection.collected_at.to_rfc3339()
                 ));
+                continue;
             }
-            let mut guard = sink
-                .lock()
-                .map_err(|e| MetricsCollectorError::Custom(format!("stdout sink poisoned: {e}")))?;
-            guard
-                .write_all(buf.as_bytes())
-                .map_err(|e| MetricsCollectorError::Custom(format!("stdout write failed: {e}")))?;
-            guard
-                .flush()
-                .map_err(|e| MetricsCollectorError::Custom(format!("stdout flush failed: {e}")))?;
-            Ok(())
-        })
+            let ts = collection.collected_at.to_rfc3339();
+            for snapshot in &collection.sandboxes {
+                let labels = collection.labels.get(&snapshot.sandbox_id);
+                buf.push_str(&format_snapshot(
+                    &ts,
+                    snapshot,
+                    labels.map(|l| l.as_slice()),
+                ));
+                buf.push('\n');
+            }
+        }
+        if batch.dropped_collection_count > 0 {
+            buf.push_str(&format!(
+                "  (dropped {} stale collections from buffer)\n",
+                batch.dropped_collection_count
+            ));
+        }
+        let mut guard = self
+            .sink
+            .lock()
+            .map_err(|e| MetricsCollectorError::Custom(format!("stdout sink poisoned: {e}")))?;
+        guard
+            .write_all(buf.as_bytes())
+            .map_err(|e| MetricsCollectorError::Custom(format!("stdout write failed: {e}")))?;
+        guard
+            .flush()
+            .map_err(|e| MetricsCollectorError::Custom(format!("stdout flush failed: {e}")))?;
+        Ok(())
     }
 
-    fn shutdown(&self) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let sink = self.sink.clone();
-        Box::pin(async move {
-            if let Ok(mut guard) = sink.lock() {
-                let _ = guard.flush();
-            }
-            Ok(())
-        })
+    async fn shutdown(&self) -> MetricsCollectorResult<()> {
+        if let Ok(mut guard) = self.sink.lock() {
+            let _ = guard.flush();
+        }
+        Ok(())
     }
 }
 
@@ -122,9 +120,13 @@ impl MetricsExporter for StdoutExporter {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn format_snapshot(ts: &str, s: &SandboxMetricSnapshot) -> String {
+fn format_snapshot(
+    ts: &str,
+    s: &SandboxMetricSnapshot,
+    labels: Option<&[(String, String)]>,
+) -> String {
     let m = &s.metrics;
-    format!(
+    let mut line = format!(
         "{ts} sandbox={name} id={id} cpu={cpu:.6} mem={mem} / {mem_lim} \
          disk_r={dr} disk_w={dw} net_rx={nrx} net_tx={ntx} uptime={uptime}",
         ts = ts,
@@ -138,7 +140,16 @@ fn format_snapshot(ts: &str, s: &SandboxMetricSnapshot) -> String {
         nrx = format_bytes(m.net_rx_bytes),
         ntx = format_bytes(m.net_tx_bytes),
         uptime = format_duration(m.uptime),
-    )
+    );
+    if let Some(labels) = labels.filter(|l| !l.is_empty()) {
+        let rendered = labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        line.push_str(&format!(" labels={{{rendered}}}"));
+    }
+    line
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -197,6 +208,7 @@ mod tests {
             collections: vec![MetricsCollection {
                 collected_at: chrono::Utc.with_ymd_and_hms(2026, 5, 30, 1, 2, 3).unwrap(),
                 sandboxes: vec![snapshot("devbox", 33), snapshot("devenv", 38)],
+                labels: std::collections::HashMap::new(),
             }],
             dropped_collection_count: 0,
         });
@@ -214,6 +226,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn appends_labels_when_present() {
+        let sink = CapturedSink::default();
+        let exporter = StdoutExporter::with_writer(sink.clone());
+        let batch = Arc::new(MetricsExportBatch {
+            collections: vec![MetricsCollection {
+                collected_at: chrono::Utc.with_ymd_and_hms(2026, 5, 30, 1, 2, 3).unwrap(),
+                sandboxes: vec![snapshot("devbox", 33)],
+                labels: std::collections::HashMap::from([(
+                    33,
+                    Arc::new(vec![("user.id".to_string(), "alice".to_string())]),
+                )]),
+            }],
+            dropped_collection_count: 0,
+        });
+        exporter.export(batch).await.expect("export");
+
+        let out = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("labels={user.id=alice}"),
+            "label should be rendered, got: {out}"
+        );
+    }
+
+    #[tokio::test]
     async fn writes_marker_line_for_empty_collection() {
         let sink = CapturedSink::default();
         let exporter = StdoutExporter::with_writer(sink.clone());
@@ -221,6 +257,7 @@ mod tests {
             collections: vec![MetricsCollection {
                 collected_at: chrono::Utc.with_ymd_and_hms(2026, 5, 30, 1, 2, 3).unwrap(),
                 sandboxes: vec![],
+                labels: std::collections::HashMap::new(),
             }],
             dropped_collection_count: 0,
         });

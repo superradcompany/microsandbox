@@ -123,7 +123,7 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
                     "name": v.name(),
                     "quota_mib": v.quota_mib(),
                     "used_bytes": v.used_bytes(),
-                    "created_at": v.created_at().map(|dt| ui::format_datetime(&dt)),
+                    "created_at": v.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 })
             })
             .collect();

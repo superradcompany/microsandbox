@@ -125,20 +125,6 @@ defer func() {
 
 ---
 
-#### CreateSandboxDetached()
-
-```go
-func CreateSandboxDetached(
-    ctx context.Context,
-    name string,
-    opts ...SandboxOption,
-) (*Sandbox, error)
-```
-
-Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox). Sandbox names are limited to 128 UTF-8 bytes.
-
----
-
 #### StartSandbox()
 
 ```go

@@ -69,8 +69,8 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             "name": handle.name(),
             "status": format!("{:?}", handle.status()),
             "config": config,
-            "created_at": handle.created_at().map(|dt| ui::format_datetime(&dt)),
-            "updated_at": handle.updated_at().map(|dt| ui::format_datetime(&dt)),
+            "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
+            "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
@@ -116,6 +116,15 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         if !config.env.is_empty() {
             ui::detail_header("Environment");
             for (k, v) in &config.env {
+                println!("  {k}={v}");
+            }
+        }
+
+        if !config.labels.is_empty() {
+            ui::detail_header("Labels");
+            let mut labels: Vec<_> = config.labels.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in labels {
                 println!("  {k}={v}");
             }
         }

@@ -43,7 +43,7 @@ The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.micro
 
 ## msb ssh serve
 
-Serve a sandbox over SSH for external OpenSSH, SFTP, or `ProxyCommand` clients.
+Serve a sandbox over SSH for external OpenSSH, SFTP, local TCP forwarding, dynamic TCP forwarding, or `ProxyCommand` clients.
 
 ```bash
 msb ssh serve devbox
@@ -62,7 +62,11 @@ Listener mode accepts ordinary OpenSSH clients:
 ```bash
 ssh -p 2222 root@127.0.0.1
 sftp -P 2222 root@127.0.0.1
+ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
+ssh -p 2222 -D 1080 root@127.0.0.1
 ```
+
+Forwarded TCP connections originate inside the guest through microsandbox's agent. Sandbox network policy still applies, and guest loopback addresses refer to the sandbox, not the host. Reverse forwarding (`-R`) and stream-local forwarding are not supported.
 
 `--stdio` is for clients that spawn `msb` as a transport bridge:
 

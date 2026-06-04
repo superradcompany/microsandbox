@@ -222,6 +222,16 @@ pub fn sandbox_builder_from_args(
         }
     }
 
+    // Labels.
+    if let Some(labels) = kwargs.get_item("labels")? {
+        let labels_dict: &Bound<'_, PyDict> = labels.downcast()?;
+        for (k, v) in labels_dict.iter() {
+            let key: String = k.extract()?;
+            let val: String = v.extract()?;
+            builder = builder.label(key, val);
+        }
+    }
+
     // Scripts.
     if let Some(scripts) = kwargs.get_item("scripts")? {
         let scripts_dict: &Bound<'_, PyDict> = scripts.downcast()?;

@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, SandboxFilter, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -449,7 +449,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
-    pub const PRE05_SANDBOX_RESTART_REQUIRED: &str = "pre05_sandbox_restart_required";
+    pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
 
@@ -508,12 +508,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::AgentClient(
-                microsandbox::AgentClientError::Pre05SandboxRestartRequired,
-            ) => {
-                // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-                // compatibility for versions before 0.5 is no longer supported.
-                error_kind::PRE05_SANDBOX_RESTART_REQUIRED
-            }
+                microsandbox::AgentClientError::UnsupportedOperation { .. },
+            ) => error_kind::UNSUPPORTED_OPERATION,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -903,6 +899,12 @@ struct RegistryAuthOpts {
     password: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct SandboxListFilter {
+    #[serde(default)]
+    labels: HashMap<String, String>,
+}
+
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
@@ -914,6 +916,8 @@ struct SandboxCreateOpts {
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
     #[serde(default)]
     detached: bool,
     hostname: Option<String>,
@@ -1817,6 +1821,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
             }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
+            }
             // Top-level ports.
             for (host, guest) in &opts.ports {
                 builder = builder.port(*host, *guest);
@@ -1844,11 +1851,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
-                builder.create_detached().await?
-            } else {
-                builder.create().await?
-            };
+            let sandbox = builder.detached(opts.detached).create().await?;
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
         }))
@@ -2190,12 +2193,17 @@ pub unsafe extern "C" fn msb_sandbox_owns_lifecycle(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_list(
     cancel_id: u64,
+    filter_json: *const c_char,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
+        let filter_raw = unsafe { cstr(filter_json) }?;
+        let filter: SandboxListFilter = serde_json::from_str(&filter_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid filter JSON: {e}")))?;
+        let filter = SandboxFilter::new().labels(filter.labels);
         Ok(Box::pin(async move {
-            let handles = Sandbox::list().await.map_err(FfiError::from)?;
+            let handles = Sandbox::list_with(filter).await.map_err(FfiError::from)?;
             let mut out = String::from("[");
             for (i, h) in handles.iter().enumerate() {
                 if i > 0 {

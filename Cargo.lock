@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "ciborium",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3210,6 +3210,7 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "tempfile",
  "test-utils",
  "thiserror 2.0.18",
  "tokio",
@@ -3219,18 +3220,19 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "sea-orm",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3242,7 +3244,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "base64 0.22.1",
  "cbindgen",
@@ -3260,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -3287,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "libc",
@@ -3298,20 +3300,24 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "dirs",
  "futures",
  "humantime",
  "libc",
+ "microsandbox-db",
  "microsandbox-metrics",
+ "microsandbox-migration",
  "microsandbox-utils",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "sea-orm",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3322,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "sea-orm-migration",
  "serde_json",
@@ -3330,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3369,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -3386,19 +3392,21 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "ciborium",
  "serde",
  "serde_bytes",
+ "serde_json",
+ "strum 0.27.2",
  "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "microsandbox-py"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "futures",
@@ -3407,12 +3415,13 @@ dependencies = [
  "microsandbox-network",
  "pyo3",
  "pyo3-async-runtimes",
+ "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -3439,7 +3448,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "dirs",
  "libc",
@@ -6307,6 +6316,9 @@ name = "strum"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+dependencies = [
+ "strum_macros",
+]
 
 [[package]]
 name = "strum_macros"
@@ -6410,14 +6422,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6426,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "tempfile",
  "test-macros",

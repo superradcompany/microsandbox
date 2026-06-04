@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use microsandbox::sandbox::{Patch, SandboxBuilder};
+use microsandbox::sandbox::{Patch, Sandbox, SandboxBuilder, SandboxFilter};
 
 use crate::ui;
 
@@ -41,6 +41,12 @@ pub struct SandboxOpts {
     /// Set an environment variable (KEY=value).
     #[arg(short, long)]
     pub env: Vec<String>,
+
+    /// Attach a label to the sandbox for metrics attribution (`KEY=VALUE`, or
+    /// bare `KEY` for a valueless marker). Repeatable. Surfaced as attributes on
+    /// the sandbox's metrics.
+    #[arg(long, value_name = "KEY[=VALUE]")]
+    pub label: Vec<String>,
 
     /// Replace an existing sandbox with the same name.
     #[arg(long)]
@@ -433,6 +439,12 @@ pub fn apply_sandbox_opts(
     for env_str in &opts.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
         builder = builder.env(k, v);
+    }
+
+    // --- Labels ---
+    for label_str in &opts.label {
+        let (k, v) = ui::parse_label(label_str);
+        builder = builder.label(k, v);
     }
 
     // --- Volumes ---
@@ -1503,6 +1515,65 @@ pub fn parse_rlimit(
         RlimitResource::try_from(rlimit.resource.as_str()).map_err(anyhow::Error::msg)?;
 
     Ok((resource, rlimit.soft, rlimit.hard))
+}
+
+/// Parse repeatable `--label KEY[=VALUE]` selector flags into key/value pairs.
+/// A bare `KEY` yields an empty value (a valueless marker label).
+pub fn parse_label_selectors(labels: &[String]) -> Vec<(String, String)> {
+    labels.iter().map(|s| ui::parse_label(s)).collect()
+}
+
+/// Build a [`SandboxFilter`] from repeatable `--label KEY[=VALUE]` selector flags.
+pub fn label_filter(labels: &[String]) -> SandboxFilter {
+    SandboxFilter::new().labels(parse_label_selectors(labels))
+}
+
+/// Resolve the set of sandbox names a command should act on, given explicit
+/// `names` plus `--label KEY=VALUE` selectors. Label-matched sandboxes are
+/// unioned with the explicit names (order-preserving, de-duplicated). Selectors
+/// are AND-matched: a sandbox must carry every label to be selected.
+pub async fn resolve_selected_sandboxes(
+    names: &[String],
+    labels: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::new();
+
+    for name in names {
+        if seen.insert(name.clone()) {
+            resolved.push(name.clone());
+        }
+    }
+
+    if !labels.is_empty() {
+        for handle in Sandbox::list_with(label_filter(labels)).await? {
+            if seen.insert(handle.name().to_string()) {
+                resolved.push(handle.name().to_string());
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// Resolve target sandboxes for a bulk command (`stop`/`start`/`remove`),
+/// applying the standard guards: error when neither names nor `--label`
+/// selectors are given, and emit a notice when selectors matched nothing.
+pub async fn resolve_bulk_targets(
+    names: &[String],
+    labels: &[String],
+    quiet: bool,
+) -> anyhow::Result<Vec<String>> {
+    if names.is_empty() && labels.is_empty() {
+        anyhow::bail!("specify one or more sandbox names or --label selectors");
+    }
+
+    let resolved = resolve_selected_sandboxes(names, labels).await?;
+    if resolved.is_empty() && !quiet {
+        ui::warn("no sandboxes matched the given labels");
+    }
+
+    Ok(resolved)
 }
 
 //--------------------------------------------------------------------------------------------------

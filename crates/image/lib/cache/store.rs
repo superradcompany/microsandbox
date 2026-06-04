@@ -77,6 +77,10 @@ pub struct CachedImageMetadata {
     pub manifest_digest: String,
     /// Content-addressable digest of the config blob.
     pub config_digest: String,
+    /// Raw resolved image manifest JSON.
+    pub raw_manifest_json: String,
+    /// Raw image config JSON.
+    pub raw_config_json: String,
     /// Parsed OCI image configuration.
     pub config: ImageConfig,
     /// Layer metadata in bottom-to-top order.

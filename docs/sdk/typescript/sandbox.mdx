@@ -5,7 +5,7 @@ description: TypeScript SDK - Sandbox API reference
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()` or `.createDetached()`. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
+The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()`. Use `.detached(true)` before `.create()` for detached/background mode. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 ```typescript
 import { Sandbox } from "microsandbox";
@@ -27,7 +27,7 @@ await using sandbox = await Sandbox.builder("demo")
 static builder(name: string): SandboxBuilder
 ```
 
-Begin building a new sandbox. Configure it with chainable setters, then call `.create()` or `.createDetached()` to boot it.
+Begin building a new sandbox. Configure it with chainable setters, then call `.create()` to boot it.
 
 **Parameters**
 
@@ -587,11 +587,10 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
 | `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<env_var>`. |
+| `detached(enabled)` | Create in detached/background mode when `true` |
 | `build(): Promise<SandboxConfig>` | Materialize without booting. Consumes the builder |
-| `create(): Promise<Sandbox>` | Build and boot in attached mode |
-| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
-| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
-| `createDetachedWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in detached mode while streaming image pull progress |
+| `create(): Promise<Sandbox>` | Build and boot |
+| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot while streaming image pull progress |
 
 ### LogLevel
 
@@ -702,7 +701,7 @@ const sandbox = await creation.awaitSandbox();
 
 ### PullProgressCreate
 
-Async iterable creation handle returned by `Sandbox.builder(name).createWithPullProgress()` and `Sandbox.builder(name).createDetachedWithPullProgress()`. Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
+Async iterable creation handle returned by `Sandbox.builder(name).createWithPullProgress()`. Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
 
 | Method | Returns | Description |
 |--------|---------|-------------|

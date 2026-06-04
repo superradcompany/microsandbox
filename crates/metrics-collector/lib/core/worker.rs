@@ -297,12 +297,10 @@ mod tests {
     }
 
     struct NoopExporter;
+    #[async_trait::async_trait]
     impl MetricsExporter for NoopExporter {
-        fn export(
-            &self,
-            _batch: Arc<MetricsExportBatch>,
-        ) -> futures::future::BoxFuture<'static, MetricsCollectorResult<()>> {
-            Box::pin(async { Ok(()) })
+        async fn export(&self, _batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+            Ok(())
         }
     }
 
@@ -347,16 +345,12 @@ mod tests {
     #[tokio::test]
     async fn flush_now_increments_failures_and_arms_backoff_on_error() {
         struct AlwaysFail;
+        #[async_trait::async_trait]
         impl MetricsExporter for AlwaysFail {
-            fn export(
-                &self,
-                _batch: Arc<MetricsExportBatch>,
-            ) -> futures::future::BoxFuture<'static, MetricsCollectorResult<()>> {
-                Box::pin(async {
-                    Err(MetricsCollectorError::Custom(
-                        "simulated transport error".into(),
-                    ))
-                })
+            async fn export(&self, _batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+                Err(MetricsCollectorError::Custom(
+                    "simulated transport error".into(),
+                ))
             }
         }
         let mut worker = worker_with_flush_interval(Duration::from_secs(1));

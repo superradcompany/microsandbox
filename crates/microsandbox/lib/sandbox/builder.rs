@@ -28,6 +28,7 @@ use std::time::Duration;
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
     config: SandboxConfig,
+    detached: bool,
     build_error: Option<crate::MicrosandboxError>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
@@ -77,6 +78,7 @@ impl SandboxBuilder {
                 name: name.into(),
                 ..Default::default()
             },
+            detached: false,
             build_error: None,
             pending_snapshot: None,
         }
@@ -185,6 +187,14 @@ impl SandboxBuilder {
     /// Disable runtime logs for this sandbox, even if a global default exists.
     pub fn quiet_logs(mut self) -> Self {
         self.config.log_level = None;
+        self
+    }
+
+    /// Configure whether the sandbox process is created in detached/background mode.
+    ///
+    /// Detached sandboxes survive the creating process. Defaults to `false`.
+    pub fn detached(mut self, detached: bool) -> Self {
+        self.detached = detached;
         self
     }
 
@@ -564,6 +574,26 @@ impl SandboxBuilder {
         self
     }
 
+    /// Attach a label (`key`/`value`) to the sandbox for attribution. Labels
+    /// are surfaced as attributes on the sandbox's metrics, letting backends
+    /// build per-user or per-tenant views. Can be called multiple times; the
+    /// last value for a given key wins.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.labels.insert(key.into(), value.into());
+        self
+    }
+
+    /// Attach multiple labels at once. See [`label`](Self::label).
+    pub fn labels(
+        mut self,
+        labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        for (k, v) in labels {
+            self.config.labels.insert(k.into(), v.into());
+        }
+        self
+    }
+
     /// Set a sandbox-wide resource limit inherited by all guest processes.
     ///
     /// This is applied during agentd PID 1 startup, so bootstrap scripts and
@@ -746,14 +776,13 @@ impl SandboxBuilder {
 
     /// Create the sandbox. Boots the VM with agentd ready.
     pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
+        let mode = if self.detached {
+            crate::runtime::SpawnMode::Detached
+        } else {
+            crate::runtime::SpawnMode::Attached
+        };
         let config = self.build().await?;
-        super::Sandbox::create(config).await
-    }
-
-    /// Create the sandbox for detached/background use.
-    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
-        let config = self.build().await?;
-        super::Sandbox::create_detached(config).await
+        super::Sandbox::create_with_mode(config, mode, None).await
     }
 
     /// Create the sandbox with pull progress reporting.
@@ -772,36 +801,15 @@ impl SandboxBuilder {
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
+        let mode = if self.detached {
+            crate::runtime::SpawnMode::Detached
+        } else {
+            crate::runtime::SpawnMode::Attached
+        };
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
             let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Attached,
-                Some(sender),
-            )
-            .await
-        });
-        Ok((handle, task))
-    }
-
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
-    pub fn create_detached_with_pull_progress(
-        self,
-    ) -> crate::MicrosandboxResult<(
-        PullProgressHandle,
-        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
-    )> {
-        let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(async move {
-            let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Detached,
-                Some(sender),
-            )
-            .await
+            super::Sandbox::create_with_mode(config, mode, Some(sender)).await
         });
         Ok((handle, task))
     }
@@ -820,6 +828,18 @@ impl SandboxBuilder {
             ));
         }
         super::validate_sandbox_name_for_runtime(&self.config.name)?;
+
+        if self.config.cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cpus must be greater than 0".into(),
+            ));
+        }
+
+        if self.config.memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "memory must be greater than 0".into(),
+            ));
+        }
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
@@ -911,6 +931,7 @@ impl From<SandboxConfig> for SandboxBuilder {
     fn from(config: SandboxConfig) -> Self {
         Self {
             config,
+            detached: false,
             build_error: None,
             pending_snapshot: None,
         }
@@ -970,6 +991,36 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_cpus() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(0)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: cpus must be greater than 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_memory() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(0u32)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: memory must be greater than 0"
         );
     }
 

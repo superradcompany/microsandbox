@@ -1015,3 +1015,68 @@ func TestRemoveSandbox(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestListSandboxesWithLabels
+// ---------------------------------------------------------------------------
+
+// TestListSandboxesWithLabels verifies that ListSandboxesWith narrows results
+// by labels, AND-matching multiple selectors.
+func TestListSandboxesWithLabels(t *testing.T) {
+	ctx := integrationCtx(t)
+	owner := "go-sdk-owner-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+	mineWeb := owner + "-web"
+	mineJob := owner + "-job"
+	other := owner + "-other"
+
+	create := func(name string, labels map[string]string) {
+		sb, err := microsandbox.CreateSandbox(ctx, name,
+			microsandbox.WithImage("alpine:3.19"),
+			microsandbox.WithLabels(labels),
+		)
+		if err != nil {
+			t.Fatalf("CreateSandbox %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = sb.Stop(c)
+			_ = sb.Close()
+			_ = microsandbox.RemoveSandbox(c, name)
+		})
+	}
+
+	create(mineWeb, map[string]string{"owner": owner, "tier": "web"})
+	create(mineJob, map[string]string{"owner": owner, "tier": "job"})
+	create(other, map[string]string{"owner": owner + "-someone-else"})
+
+	names := func(filter microsandbox.SandboxFilter) map[string]bool {
+		handles, err := microsandbox.ListSandboxesWith(ctx, filter)
+		if err != nil {
+			t.Fatalf("ListSandboxesWith: %v", err)
+		}
+		set := make(map[string]bool, len(handles))
+		for _, h := range handles {
+			set[h.Name()] = true
+		}
+		return set
+	}
+
+	// Single selector → both of mine, not the other owner's.
+	byOwner := names(microsandbox.NewSandboxFilter().WithLabels(map[string]string{"owner": owner}))
+	if !byOwner[mineWeb] || !byOwner[mineJob] {
+		t.Errorf("owner filter missing own sandboxes: %v", byOwner)
+	}
+	if byOwner[other] {
+		t.Errorf("owner filter leaked another owner's sandbox: %v", byOwner)
+	}
+
+	// AND of two selectors → only the web one.
+	byOwnerWeb := names(microsandbox.NewSandboxFilter().WithLabels(map[string]string{"owner": owner, "tier": "web"}))
+	if !byOwnerWeb[mineWeb] {
+		t.Errorf("owner+tier filter missing the web sandbox: %v", byOwnerWeb)
+	}
+	if byOwnerWeb[mineJob] || byOwnerWeb[other] {
+		t.Errorf("owner+tier filter matched too broadly: %v", byOwnerWeb)
+	}
+}

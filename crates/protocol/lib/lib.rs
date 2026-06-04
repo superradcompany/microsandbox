@@ -1,5 +1,9 @@
 //! `microsandbox-protocol` defines the shared protocol types used for communication
 //! between the host and the guest agent over CBOR-over-virtio-serial.
+//!
+//! For how the protocol is versioned and evolved while staying backward compatible
+//! across independently-upgraded hosts and live sandboxes, see `VERSIONING.md` in
+//! this crate.
 
 #![warn(missing_docs)]
 
@@ -362,5 +366,6 @@ pub mod exec;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;
+pub mod tcp;
 
 pub use error::*;

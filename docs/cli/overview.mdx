@@ -52,9 +52,9 @@ msb ssh devbox -- uname -a
 msb ssh serve devbox --host 127.0.0.1 --port 2222
 
 # Images
-msb pull python     # Pre-pull to cache
-msb image ls             # List cached images
-msb image rm python # Remove a cached image
+msb pull python       # Pre-pull to cache
+msb images            # List cached images
+msb rmi python        # Remove a cached image
 
 # Volumes
 msb volume create data --size 10G

@@ -51,14 +51,23 @@ impl DbReadConnection {
     }
 
     /// Open a stand-alone read pool at `db_path` with shared PRAGMAs.
+    ///
+    /// Read-only: opening a non-existent DB fails rather than creating it, so a
+    /// read consumer never authors or pre-empts the catalog owned by `msb`.
     pub async fn open(
         db_path: &Path,
         max_connections: u32,
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sqlx::Error> {
-        let conn =
-            pool::build_pool(db_path, max_connections, connect_timeout, busy_timeout).await?;
+        let conn = pool::build_pool(
+            db_path,
+            max_connections,
+            connect_timeout,
+            busy_timeout,
+            false,
+        )
+        .await?;
         Ok(Self(conn))
     }
 
@@ -83,7 +92,7 @@ impl DbWriteConnection {
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sqlx::Error> {
-        let conn = pool::build_pool(db_path, 1, connect_timeout, busy_timeout).await?;
+        let conn = pool::build_pool(db_path, 1, connect_timeout, busy_timeout, true).await?;
         Ok(Self(conn))
     }
 
@@ -194,5 +203,45 @@ impl ConnectionTrait for DbWriteConnection {
 
     fn is_mock_connection(&self) -> bool {
         self.0.is_mock_connection()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn read_open_does_not_create_db() {
+        // Existing directory, missing DB file.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("catalog.db");
+
+        let result = DbReadConnection::open(&db_path, 1, TIMEOUT, TIMEOUT).await;
+
+        assert!(result.is_err(), "read open should fail on a missing db");
+        assert!(
+            !db_path.exists(),
+            "read open must not create the catalog db file"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_open_creates_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("catalog.db");
+
+        let conn = DbWriteConnection::open(&db_path, TIMEOUT, TIMEOUT).await;
+
+        assert!(conn.is_ok(), "write open should succeed");
+        assert!(
+            db_path.exists(),
+            "write open should create the catalog db file"
+        );
     }
 }

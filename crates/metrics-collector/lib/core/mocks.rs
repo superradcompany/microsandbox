@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use futures::future::BoxFuture;
+use async_trait::async_trait;
 use microsandbox_metrics::SandboxMetrics;
 
 use crate::error::{MetricsCollectorError, MetricsCollectorResult};
@@ -50,31 +50,22 @@ impl RecordingExporter {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[async_trait]
 impl MetricsExporter for Arc<RecordingExporter> {
-    fn export(
-        &self,
-        batch: Arc<MetricsExportBatch>,
-    ) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let collector = self.clone();
-        Box::pin(async move {
-            if collector.fail_exports.load(Ordering::Acquire) {
-                return Err(MetricsCollectorError::Custom("export failed".into()));
-            }
-            collector
-                .batches
-                .lock()
-                .expect("RecordingExporter batches lock poisoned")
-                .push((*batch).clone());
-            Ok(())
-        })
+    async fn export(&self, batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()> {
+        if self.fail_exports.load(Ordering::Acquire) {
+            return Err(MetricsCollectorError::Custom("export failed".into()));
+        }
+        self.batches
+            .lock()
+            .expect("RecordingExporter batches lock poisoned")
+            .push((*batch).clone());
+        Ok(())
     }
 
-    fn shutdown(&self) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        let collector = self.clone();
-        Box::pin(async move {
-            collector.shutdown_count.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        })
+    async fn shutdown(&self) -> MetricsCollectorResult<()> {
+        self.shutdown_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 }
 
@@ -103,5 +94,6 @@ pub(crate) fn collection(seq: i32) -> MetricsCollection {
                 timestamp: chrono::Utc::now(),
             },
         }],
+        labels: std::collections::HashMap::new(),
     }
 }
