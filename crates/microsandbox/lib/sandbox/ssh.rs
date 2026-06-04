@@ -1243,18 +1243,22 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(ChannelState::Tcp { id, client, relay }) = self.channels.remove(&channel) {
-            // Stop the guest->ssh relay immediately; the TcpClose then tells the
-            // guest to close its socket.
-            relay.abort();
-            let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
-        } else if let Some(ChannelState::Exec { control, stdin }) = self.channels.remove(&channel) {
-            if let Some(stdin) = stdin {
-                let _ = stdin.close().await;
+        // Remove once and match on the state; an earlier `remove` per arm would drop
+        // a non-Tcp channel before the Exec arm could run its process teardown.
+        match self.channels.remove(&channel) {
+            Some(ChannelState::Tcp { id, client, relay }) => {
+                // Stop the guest->ssh relay immediately; the TcpClose then tells the
+                // guest to close its socket.
+                relay.abort();
+                let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
             }
-            let _ = control.kill().await;
-        } else {
-            self.channels.remove(&channel);
+            Some(ChannelState::Exec { control, stdin }) => {
+                if let Some(stdin) = stdin {
+                    let _ = stdin.close().await;
+                }
+                let _ = control.kill().await;
+            }
+            _ => {}
         }
         Ok(())
     }
