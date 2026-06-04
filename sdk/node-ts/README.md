@@ -369,8 +369,8 @@ const detail = await Image.inspect("python:3.12");
 console.log(detail.config?.entrypoint, detail.config?.workingDir);
 
 await Image.remove("old:tag", { force: true });
-const reclaimed = await Image.gcLayers();
-console.log(`reclaimed ${reclaimed} orphaned layers`);
+const report = await Image.prune();
+console.log(`removed ${report.imageRefsRemoved} unused image refs`);
 ```
 
 ### Replace Existing
@@ -505,7 +505,7 @@ await setup()
 
 | Symbol | Description |
 |---|---|
-| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `gcLayers`, `gc`. |
+| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `prune`. |
 | `ImageHandle` / `ImageDetail` / `ImageConfigDetail` / `ImageLayerDetail` | Cached image metadata. |
 | `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type. |
 | `intoRootfsSource(input)` | Resolve a string into the right `RootfsSource`. |

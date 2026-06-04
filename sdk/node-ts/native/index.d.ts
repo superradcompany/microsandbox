@@ -1546,12 +1546,6 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
-/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
-export declare function imageGc(): Promise<number>
-
-/** Garbage-collect orphaned layers. Returns the number reclaimed. */
-export declare function imageGcLayers(): Promise<number>
-
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1582,6 +1576,19 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
+
+/** Summary of artifacts removed by `imagePrune`. */
+export interface ImagePruneReportJs {
+  imageRefsRemoved: number
+  manifestsRemoved: number
+  layersRemoved: number
+  fsmetaRemoved: number
+  vmdkRemoved: number
+  bytesReclaimed?: number
+}
+
+/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
+export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a

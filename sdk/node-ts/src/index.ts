@@ -89,6 +89,7 @@ export type {
   ImageConfigDetail,
   ImageDetail,
   ImageLayerDetail,
+  ImagePruneReport,
 } from "./image.js";
 
 // Logs

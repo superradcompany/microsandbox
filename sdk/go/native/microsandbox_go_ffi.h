@@ -540,9 +540,7 @@ char *msb_image_remove(uint64_t cancel_id,
                        unsigned char *buf,
                        uintptr_t buf_len);
 
-char *msb_image_gc_layers(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
-
-char *msb_image_gc(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+char *msb_image_prune(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_handle_snapshot(uint64_t cancel_id,
                                   const char *sandbox_name,

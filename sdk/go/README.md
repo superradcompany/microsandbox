@@ -623,7 +623,7 @@ Each example is a self-contained `main.go` under `sdk/go/examples/`. Run any of 
 | `detached` | detached lifecycle: detach, list, reattach by name, run, stop |
 | `tls` | TLS interception with a bypass list, intercepted-port set, and HTTP/3 fallback |
 | `metrics` | point-in-time `Metrics()`, streaming `MetricsStream()`, `AllSandboxMetrics()` |
-| `image-cache` | `Image.List` / `Get` / `Inspect` / `GCLayers` with full handle metadata, config, and layer listing |
+| `image-cache` | `Image.List` / `Get` / `Inspect` / `Prune` with full handle metadata, config, and layer listing |
 | `errors` | typed-error categories via `IsKind`, `errors.As`, and `*microsandbox.Error` |
 
 ## Development

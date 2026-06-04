@@ -4293,6 +4293,17 @@ fn image_handle_json(h: &microsandbox::image::ImageHandle) -> serde_json::Value 
     })
 }
 
+fn image_prune_report_json(report: microsandbox::image::ImagePruneReport) -> serde_json::Value {
+    serde_json::json!({
+        "image_refs_removed": report.image_refs_removed,
+        "manifests_removed": report.manifests_removed,
+        "layers_removed": report.layers_removed,
+        "fsmeta_removed": report.fsmeta_removed,
+        "vmdk_removed": report.vmdk_removed,
+        "bytes_reclaimed": report.bytes_reclaimed,
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_image_get(
     cancel_id: u64,
@@ -4400,33 +4411,17 @@ pub unsafe extern "C" fn msb_image_remove(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc_layers(
+pub unsafe extern "C" fn msb_image_prune(
     cancel_id: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc_layers()
+            let report = microsandbox::image::Image::prune()
                 .await
                 .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
-        }))
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc(
-    cancel_id: u64,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc()
-                .await
-                .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
+            Ok(image_prune_report_json(report).to_string())
         }))
     })
 }

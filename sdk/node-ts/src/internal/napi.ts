@@ -53,8 +53,7 @@ export interface NativeBindings {
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
-  readonly imageGcLayers: () => Promise<number>;
-  readonly imageGc: () => Promise<number>;
+  readonly imagePrune: () => Promise<NapiImagePruneReport>;
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
@@ -518,6 +517,15 @@ export interface NapiImageLayerDetail {
 export interface NapiImageDetail extends NapiImageInfo {
   readonly config: NapiImageConfigDetail | null | undefined;
   readonly layers: NapiImageLayerDetail[];
+}
+
+export interface NapiImagePruneReport {
+  readonly imageRefsRemoved: number;
+  readonly manifestsRemoved: number;
+  readonly layersRemoved: number;
+  readonly fsmetaRemoved: number;
+  readonly vmdkRemoved: number;
+  readonly bytesReclaimed: number | null | undefined;
 }
 
 export interface NapiSetup {

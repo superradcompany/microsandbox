@@ -156,8 +156,7 @@ typedef char *(*msb_image_get_fn)(uint64_t cancel_id, const char *reference, uin
 typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_image_gc_layers_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_image_gc_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_handle_snapshot_fn)(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_snapshot_to_fn)(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len);
@@ -295,8 +294,7 @@ static msb_image_get_fn            ptr_msb_image_get            = NULL;
 static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
-static msb_image_gc_layers_fn      ptr_msb_image_gc_layers      = NULL;
-static msb_image_gc_fn             ptr_msb_image_gc             = NULL;
+static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
 static msb_sandbox_handle_snapshot_to_fn ptr_msb_sandbox_handle_snapshot_to = NULL;
 static msb_snapshot_create_fn      ptr_msb_snapshot_create      = NULL;
@@ -444,8 +442,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_list);
 	RESOLVE(msb_image_inspect);
 	RESOLVE(msb_image_remove);
-	RESOLVE(msb_image_gc_layers);
-	RESOLVE(msb_image_gc);
+	RESOLVE(msb_image_prune);
 	RESOLVE(msb_sandbox_handle_snapshot);
 	RESOLVE(msb_sandbox_handle_snapshot_to);
 	RESOLVE(msb_snapshot_create);
@@ -777,11 +774,8 @@ char *call_msb_image_inspect(uint64_t cancel_id, const char *reference, uint8_t 
 char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_remove ? ptr_msb_image_remove(cancel_id, reference, force, buf, buf_len) : NULL;
 }
-char *call_msb_image_gc_layers(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_image_gc_layers ? ptr_msb_image_gc_layers(cancel_id, buf, buf_len) : NULL;
-}
-char *call_msb_image_gc(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_image_gc ? ptr_msb_image_gc(cancel_id, buf, buf_len) : NULL;
+char *call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_prune ? ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_handle_snapshot(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_snapshot ? ptr_msb_sandbox_handle_snapshot(cancel_id, sandbox_name, snapshot_name, buf, buf_len) : NULL;
@@ -3704,6 +3698,16 @@ type ImageDetailInfo struct {
 	Layers []ImageLayerDetail `json:"layers"`
 }
 
+// ImagePruneReportInfo is the JSON shape returned by image prune.
+type ImagePruneReportInfo struct {
+	ImageRefsRemoved uint32  `json:"image_refs_removed"`
+	ManifestsRemoved uint32  `json:"manifests_removed"`
+	LayersRemoved    uint32  `json:"layers_removed"`
+	FsmetaRemoved    uint32  `json:"fsmeta_removed"`
+	VMDKRemoved      uint32  `json:"vmdk_removed"`
+	BytesReclaimed   *uint64 `json:"bytes_reclaimed"`
+}
+
 // ImageGet fetches a single image by reference.
 func ImageGet(ctx context.Context, reference string) (*ImageHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
@@ -3776,44 +3780,22 @@ func ImageRemove(ctx context.Context, reference string, force bool) error {
 	return err
 }
 
-// ImageGCLayers garbage-collects orphaned layers and returns the count removed.
-func ImageGCLayers(ctx context.Context) (uint32, error) {
+// ImagePrune removes cached image data that is not used by sandboxes.
+func ImagePrune(ctx context.Context) (*ImagePruneReportInfo, error) {
 	if err := ensureLoaded(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_image_gc_layers(cancelID, buf, bufLen)
+		return C.call_msb_image_prune(cancelID, buf, bufLen)
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var resp struct {
-		Removed uint32 `json:"removed"`
+	var info ImagePruneReportInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse image_prune: %w", err)
 	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		return 0, fmt.Errorf("parse image_gc_layers: %w", err)
-	}
-	return resp.Removed, nil
-}
-
-// ImageGC garbage-collects everything reclaimable. Returns the count removed.
-func ImageGC(ctx context.Context) (uint32, error) {
-	if err := ensureLoaded(); err != nil {
-		return 0, err
-	}
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_image_gc(cancelID, buf, bufLen)
-	})
-	if err != nil {
-		return 0, err
-	}
-	var resp struct {
-		Removed uint32 `json:"removed"`
-	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		return 0, fmt.Errorf("parse image_gc: %w", err)
-	}
-	return resp.Removed, nil
+	return &info, nil
 }
 
 // ---------------------------------------------------------------------------
