@@ -64,24 +64,15 @@ image raise `ImageInUseError`.
 
 ---
 
-#### Image.gc_layers()
+#### Image.prune()
 
 ```python
-async def Image.gc_layers() -> int
+async def Image.prune() -> ImagePruneReport
 ```
 
-Garbage-collect orphaned layers and return the count reclaimed.
-
----
-
-#### Image.gc()
-
-```python
-async def Image.gc() -> int
-```
-
-Garbage-collect everything reclaimable from the image cache and return the
-count reclaimed.
+Remove cached image data that is not used by any sandbox or indexed snapshot.
+The returned report includes the count of removed refs, manifests, layers,
+fsmeta files, VMDK files, and any measured bytes reclaimed.
 
 ## ImageHandle
 
@@ -131,3 +122,14 @@ Returned by `Image.get()` and `Image.list()`.
 | `compressed_size_bytes` | `int \| None` |
 | `erofs_size_bytes` | `int \| None` |
 | `position` | `int` |
+
+### ImagePruneReport
+
+| Property | Type |
+|----------|------|
+| `image_refs_removed` | `int` |
+| `manifests_removed` | `int` |
+| `layers_removed` | `int` |
+| `fsmeta_removed` | `int` |
+| `vmdk_removed` | `int` |
+| `bytes_reclaimed` | `int \| None` |

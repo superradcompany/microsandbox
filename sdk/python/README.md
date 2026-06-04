@@ -426,6 +426,7 @@ if not is_installed():
 | `VolumeHandle` | Lightweight volume handle from the database |
 | `Image` | Image source factories and local OCI image-cache management |
 | `ImageHandle` | Lightweight cached image handle from the database |
+| `ImagePruneReport` | Summary returned by `Image.prune()` |
 | `MetricsStream` | Async iterator over metrics snapshots |
 | `PullSession` | Async context manager for creation with pull progress |
 

@@ -4,6 +4,7 @@ use pyo3::types::{PyBool, PyDict, PyList, PyModule};
 use microsandbox::image::{
     Image as RustImage, ImageConfigDetail as RustImageConfigDetail, ImageDetail as RustImageDetail,
     ImageHandle as RustImageHandle, ImageLayerDetail as RustImageLayerDetail,
+    ImagePruneReport as RustImagePruneReport,
 };
 
 use crate::error::to_py_err;
@@ -62,6 +63,18 @@ pub struct PyImageLayerDetail {
     compressed_size_bytes: Option<i64>,
     erofs_size_bytes: Option<i64>,
     position: i32,
+}
+
+/// Summary of cached image data removed by `Image.prune()`.
+#[pyclass(name = "ImagePruneReport")]
+#[derive(Clone)]
+pub struct PyImagePruneReport {
+    image_refs_removed: u32,
+    manifests_removed: u32,
+    layers_removed: u32,
+    fsmeta_removed: u32,
+    vmdk_removed: u32,
+    bytes_reclaimed: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -146,19 +159,12 @@ impl PyImage {
         })
     }
 
-    /// Garbage-collect orphaned layers. Returns the number reclaimed.
+    /// Remove cached image data that is not used by any sandbox or indexed snapshot.
     #[staticmethod]
-    fn gc_layers<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn prune<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            RustImage::gc_layers().await.map_err(to_py_err)
-        })
-    }
-
-    /// Garbage-collect everything reclaimable. Returns the number reclaimed.
-    #[staticmethod]
-    fn gc<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            RustImage::gc().await.map_err(to_py_err)
+            let report = RustImage::prune().await.map_err(to_py_err)?;
+            Ok(PyImagePruneReport::from_rust(report))
         })
     }
 }
@@ -394,6 +400,56 @@ impl PyImageLayerDetail {
     #[getter]
     fn position(&self) -> i32 {
         self.position
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: ImagePruneReport
+//--------------------------------------------------------------------------------------------------
+
+impl PyImagePruneReport {
+    fn from_rust(inner: RustImagePruneReport) -> Self {
+        Self {
+            image_refs_removed: inner.image_refs_removed,
+            manifests_removed: inner.manifests_removed,
+            layers_removed: inner.layers_removed,
+            fsmeta_removed: inner.fsmeta_removed,
+            vmdk_removed: inner.vmdk_removed,
+            bytes_reclaimed: inner.bytes_reclaimed,
+        }
+    }
+}
+
+#[pymethods]
+impl PyImagePruneReport {
+    #[getter]
+    fn image_refs_removed(&self) -> u32 {
+        self.image_refs_removed
+    }
+
+    #[getter]
+    fn manifests_removed(&self) -> u32 {
+        self.manifests_removed
+    }
+
+    #[getter]
+    fn layers_removed(&self) -> u32 {
+        self.layers_removed
+    }
+
+    #[getter]
+    fn fsmeta_removed(&self) -> u32 {
+        self.fsmeta_removed
+    }
+
+    #[getter]
+    fn vmdk_removed(&self) -> u32 {
+        self.vmdk_removed
+    }
+
+    #[getter]
+    fn bytes_reclaimed(&self) -> Option<u64> {
+        self.bytes_reclaimed
     }
 }
 
