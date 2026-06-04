@@ -1352,6 +1352,8 @@ pub(super) fn resolve_platform_digest(
     target: &Platform,
 ) -> Option<String> {
     let mut arch_only_match: Option<String> = None;
+    let target_os = target.os.to_string();
+    let target_arch = target.arch.to_string();
 
     for entry in manifests {
         if entry.media_type.contains("attestation") {
@@ -1361,7 +1363,8 @@ pub(super) fn resolve_platform_digest(
         let Some(platform) = entry.platform.as_ref() else {
             continue;
         };
-        if platform.os != target.os || platform.architecture != target.arch {
+        if platform.os.to_string() != target_os || platform.architecture.to_string() != target_arch
+        {
             continue;
         }
 
@@ -1594,6 +1597,7 @@ mod tests {
                     features: None,
                 }),
                 annotations: None,
+                artifact_type: None,
             },
             ImageIndexEntry {
                 media_type: "application/vnd.oci.image.manifest.v1+json".into(),
@@ -1608,6 +1612,7 @@ mod tests {
                     features: None,
                 }),
                 annotations: None,
+                artifact_type: None,
             },
         ];
 
