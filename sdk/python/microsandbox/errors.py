@@ -67,6 +67,11 @@ class ImageNotFoundError(MicrosandboxError):
     code = "image-not-found"
 
 
+class ImageInUseError(MicrosandboxError):
+    """Image is still referenced by one or more sandboxes."""
+    code = "image-in-use"
+
+
 class ImagePullFailedError(MicrosandboxError):
     """Image pull failed."""
     code = "image-pull-failed"

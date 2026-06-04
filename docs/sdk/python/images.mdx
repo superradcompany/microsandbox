@@ -1,0 +1,133 @@
+---
+title: Images
+description: Python SDK - Image cache API reference
+---
+
+The Python SDK exposes local OCI image-cache operations through `Image`.
+These APIs inspect and prune images that have already been pulled by sandbox
+creation. `Image` also remains the namespace for explicit rootfs source
+configuration such as `Image.oci(...)`, `Image.bind(...)`, and `Image.disk(...)`.
+
+```python
+from microsandbox import Image
+```
+
+## Image
+
+---
+
+#### Image.get()
+
+```python
+async def Image.get(reference: str) -> ImageHandle
+```
+
+Fetch one cached image by reference. Raises `ImageNotFoundError` when the image
+is not present in the local cache.
+
+---
+
+#### Image.list()
+
+```python
+async def Image.list() -> list[ImageHandle]
+```
+
+Return every cached image, ordered newest first.
+
+```python
+images = await Image.list()
+for image in images:
+    print(image.reference, image.layer_count)
+```
+
+---
+
+#### Image.inspect()
+
+```python
+async def Image.inspect(reference: str) -> ImageDetail
+```
+
+Return handle metadata plus parsed OCI config and layer details.
+
+---
+
+#### Image.remove()
+
+```python
+async def Image.remove(reference: str, *, force: bool = False) -> None
+```
+
+Delete a cached image. When `force` is false, sandboxes still referencing the
+image raise `ImageInUseError`.
+
+---
+
+#### Image.gc_layers()
+
+```python
+async def Image.gc_layers() -> int
+```
+
+Garbage-collect orphaned layers and return the count reclaimed.
+
+---
+
+#### Image.gc()
+
+```python
+async def Image.gc() -> int
+```
+
+Garbage-collect everything reclaimable from the image cache and return the
+count reclaimed.
+
+## ImageHandle
+
+Returned by `Image.get()` and `Image.list()`.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| `reference` | `str` | Image reference |
+| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
+| `architecture` | `str \| None` | Resolved architecture |
+| `os` | `str \| None` | Resolved operating system |
+| `layer_count` | `int` | Number of layers |
+| `size_bytes` | `int \| None` | Total size, or `None` when unknown |
+| `created_at` | `float \| None` | First-pulled time as milliseconds since epoch |
+| `last_used_at` | `float \| None` | Last referenced time as milliseconds since epoch |
+| `await remove(force=False)` | `None` | Delete this image |
+| `await inspect()` | `ImageDetail` | Fetch full detail for this image |
+
+## ImageDetail
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `handle` | `ImageHandle` | Core cached image metadata |
+| `config` | `ImageConfigDetail \| None` | Parsed OCI config block |
+| `layers` | `list[ImageLayerDetail]` | Layers in bottom-to-top order |
+
+### ImageConfigDetail
+
+| Property | Type |
+|----------|------|
+| `digest` | `str` |
+| `env` | `list[str]` |
+| `cmd` | `list[str] \| None` |
+| `entrypoint` | `list[str] \| None` |
+| `working_dir` | `str \| None` |
+| `user` | `str \| None` |
+| `labels` | `dict[str, Any] \| None` |
+| `stop_signal` | `str \| None` |
+
+### ImageLayerDetail
+
+| Property | Type |
+|----------|------|
+| `diff_id` | `str` |
+| `blob_digest` | `str` |
+| `media_type` | `str \| None` |
+| `compressed_size_bytes` | `int \| None` |
+| `erofs_size_bytes` | `int \| None` |
+| `position` | `int` |

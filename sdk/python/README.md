@@ -424,6 +424,8 @@ if not is_installed():
 | `FsWriteSink` | Async context manager for streaming writes |
 | `Volume` | Persistent named volume |
 | `VolumeHandle` | Lightweight volume handle from the database |
+| `Image` | Image source factories and local OCI image-cache management |
+| `ImageHandle` | Lightweight cached image handle from the database |
 | `MetricsStream` | Async iterator over metrics snapshots |
 | `PullSession` | Async context manager for creation with pull progress |
 
