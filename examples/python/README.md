@@ -38,7 +38,6 @@ uv run --project sdk/python python examples/python/fs-read-stream/main.py
 | Example | Description |
 |---------|-------------|
 | `root-oci` | OCI image rootfs |
-| `image-cache` | List, inspect, remove, and prune cached OCI images |
 | `root-bind` | Bind-mounted local directory |
 | `root-block` | qcow2 disk image |
 | `rootfs-patch` | Pre-boot filesystem patches |
