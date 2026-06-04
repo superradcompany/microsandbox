@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use clap::Args;
 use microsandbox::sandbox::ExecOutput;
-use tokio::io::AsyncReadExt;
+use microsandbox::sandbox::exec::ExecEvent;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::ui;
 
@@ -47,6 +48,11 @@ pub struct ExecArgs {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Stream stdin/stdout bidirectionally without a PTY
+    /// (no echo/CRLF translation — safe for JSON lines).
+    #[arg(long)]
+    pub stream: bool,
+
     /// Command to run inside the sandbox (after --).
     /// When omitted in interactive mode, attaches to the default shell.
     #[arg(last = true)]
@@ -72,7 +78,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     let interactive = std::io::stdin().is_terminal();
 
     // Read piped stdin upfront so it can be forwarded into the sandbox.
-    let piped_stdin = if !interactive {
+    // Skipped in `--stream` mode, where stdin is forwarded incrementally.
+    let piped_stdin = if !interactive && !args.stream {
         let mut buf = Vec::new();
         tokio::io::stdin().read_to_end(&mut buf).await.ok();
         Some(buf)
@@ -103,6 +110,90 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         Some(t) => Some(Duration::from_secs(super::common::parse_duration_secs(t)?)),
         None => None,
     };
+
+    if args.stream {
+        // The buffered `exec_with` path below reads stdin to EOF up front;
+        // streaming keeps stdin open so a host driver can drive the guest
+        // turn by turn.
+        let mut handle = sandbox
+            .exec_stream_with(cmd, |e| {
+                let mut e = e.args(cmd_args).stdin_pipe();
+                for (k, v) in &env_pairs {
+                    e = e.env(k, v);
+                }
+                if let Some(ref cwd) = workdir {
+                    e = e.cwd(cwd);
+                }
+                if let Some(ref user) = args.user {
+                    e = e.user(user);
+                }
+                if let Some(t) = timeout {
+                    e = e.timeout(t);
+                }
+                for &(resource, soft, hard) in &rlimits {
+                    e = e.rlimit_range(resource, soft, hard);
+                }
+                e
+            })
+            .await?;
+
+        // Background task so stdin forwarding runs concurrently with recv().
+        if let Some(sink) = handle.take_stdin() {
+            tokio::spawn(async move {
+                let mut stdin = tokio::io::stdin();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stdin.read(&mut buf).await {
+                        Ok(0) => {
+                            let _ = sink.close().await;
+                            break;
+                        }
+                        Ok(n) => {
+                            if sink.write(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = sink.close().await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Flush each chunk so the host reader sees output before exit.
+        let mut stdout = tokio::io::stdout();
+        let mut stderr = tokio::io::stderr();
+        let mut exit_code = 0;
+        while let Some(event) = handle.recv().await {
+            match event {
+                ExecEvent::Stdout(data) => {
+                    stdout.write_all(&data).await?;
+                    stdout.flush().await?;
+                }
+                ExecEvent::Stderr(data) => {
+                    stderr.write_all(&data).await?;
+                    stderr.flush().await?;
+                }
+                ExecEvent::Exited { code } => {
+                    exit_code = code;
+                    break;
+                }
+                ExecEvent::Failed(payload) => {
+                    super::maybe_stop(&sandbox).await;
+                    anyhow::bail!("exec failed to start: {:?}", payload);
+                }
+                _ => {}
+            }
+        }
+
+        super::maybe_stop(&sandbox).await;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
+    }
 
     if interactive {
         // Interactive mode with TTY — use attach.
