@@ -388,7 +388,6 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
-          sudo -n rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || true
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -417,7 +416,6 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
-          sudo -n rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || true
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -497,7 +495,6 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/{sdk,build}
           rm -rf ~/.microsandbox
-          sudo -n rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || true
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -599,7 +596,6 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
-          sudo -n rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || true
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -667,7 +663,6 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
-          sudo -n rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || rm -rf /tmp/msb-* /tmp/msb-node-* /tmp/msb-python-* /tmp/msb-go-* 2>/dev/null || true
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
