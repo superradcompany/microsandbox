@@ -274,7 +274,7 @@ jobs:
           cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
 
       - name: Build Python wheel
-        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: sdk/python
           command: build
