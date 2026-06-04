@@ -24,6 +24,7 @@ pub mod registry;
 pub mod remove;
 pub mod run;
 pub mod self_cmd;
+pub mod serve;
 pub mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;

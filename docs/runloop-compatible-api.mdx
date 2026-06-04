@@ -1,0 +1,82 @@
+# RunLoop-Compatible Local API
+
+Microsandbox can run a local HTTP API with RunLoop-shaped Devbox endpoints.
+This POC implements endpoints backed by local Microsandbox primitives and
+documents cloud-only RunLoop endpoints as unsupported locally.
+
+## Run
+
+```bash
+microsandbox-api --addr 127.0.0.1:8080
+msb serve --addr 127.0.0.1:8080
+msb serve --api-db ~/.microsandbox/api.sqlite
+```
+
+The server binds to `127.0.0.1:8080` by default. Passing a non-loopback address
+requires `--allow-non-loopback`.
+
+Pass `--api-db PATH` to override the SQLite database used for persisted
+execution records.
+
+Authentication is permissive in this POC. Do not expose the server outside a
+trusted local environment until token enforcement is implemented.
+
+## Create From A Public Image
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/devboxes \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"python:3.12","metadata":{"project":"demo"}}'
+```
+
+Public Docker Hub and GHCR image references are supported when Microsandbox can
+pull them.
+
+## Execute
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/devboxes/dbx_example/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"command_id":"exec_example","command":"python --version","optimistic_timeout":25}'
+```
+
+Execution records are persisted in the API database. Live execution control is
+not recoverable after API server restart because Microsandbox does not persist
+exec sessions.
+
+## Implemented Endpoints
+
+- `POST /v1/devboxes`
+- `GET /v1/devboxes`
+- `GET /v1/devboxes/{id}`
+- `POST /v1/devboxes/{id}/shutdown`
+- `POST /v1/devboxes/{id}/wait_for_status`
+- `POST /v1/devboxes/{id}/keep_alive`
+- `POST /v1/devboxes/{id}/execute`
+- `POST /v1/devboxes/{id}/execute_async`
+- `POST /v1/devboxes/{id}/execute_sync`
+- `GET /v1/devboxes/{devbox_id}/executions/{execution_id}`
+- `POST /v1/devboxes/{devbox_id}/executions/{execution_id}/kill`
+- `POST /v1/devboxes/{devbox_id}/executions/{execution_id}/send_std_in`
+- `POST /v1/devboxes/{devbox_id}/executions/{execution_id}/wait_for_status`
+- `POST /v1/devboxes/{id}/read_file_contents`
+- `POST /v1/devboxes/{id}/write_file_contents`
+- `POST /v1/devboxes/{id}/download_file`
+- `POST /v1/devboxes/{id}/upload_file`
+- `GET /v1/devboxes/{id}/logs`
+- `GET /v1/devboxes/{id}/logs/tail`
+- `GET /v1/devboxes/{id}/usage`
+- `POST /v1/devboxes/{id}/snapshot_disk`
+- `GET /v1/devboxes/disk_snapshots`
+- `GET /v1/devboxes/disk_snapshots/{id}/status`
+- `POST /v1/devboxes/disk_snapshots/{id}/delete`
+
+## Unsupported Locally
+
+Unsupported endpoint groups: PTY and tunnels, accounts and API keys, agents,
+axons, benchmarks, scenarios, hosted blueprints, snapshot metadata and async
+snapshot jobs, cloud suspend/resume/SSH-key features, gateway configs, MCP
+configs, network policy resources, objects, and secrets.
+
+Unmatched RunLoop-shaped API routes return `501 Not Implemented` with error code
+`unsupported_locally`.

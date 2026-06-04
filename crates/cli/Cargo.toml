@@ -41,6 +41,7 @@ indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox.workspace = true
+microsandbox-api = { path = "../api", default-features = false, features = ["net", "prebuilt"] }
 microsandbox-image.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true

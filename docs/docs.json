@@ -178,6 +178,13 @@
             "pages": [
               "configuration"
             ]
+          },
+          {
+            "group": "Local API",
+            "icon": "plug",
+            "pages": [
+              "runloop-compatible-api"
+            ]
           }
         ]
       },

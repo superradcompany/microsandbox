@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
         copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
-        remove, run, self_cmd, snapshot, start, stop, uninstall, volume,
+        remove, run, self_cmd, serve, snapshot, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -117,6 +117,9 @@ enum Commands {
     /// Manage disk snapshots.
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
+
+    /// Serve the local RunLoop-compatible API.
+    Serve(serve::ServeArgs),
 
     /// Install a sandbox as a system command.
     Install(install::InstallArgs),
@@ -335,6 +338,7 @@ fn run_async_command_anyhow(
             Commands::Inspect(args) => inspect::run(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
+            Commands::Serve(args) => serve::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
