@@ -41,6 +41,35 @@ for image in images:
     print(image.reference, image.layer_count)
 ```
 
+### Example
+
+```python
+from microsandbox import Image, Sandbox
+
+image = "mirror.gcr.io/library/alpine"
+
+sandbox = await Sandbox.create(
+    "image-cache-demo",
+    image=Image.oci(image),
+    cpus=1,
+    memory=512,
+    replace=True,
+    pull_policy="if_missing",
+)
+await sandbox.stop_and_wait()
+await Sandbox.remove("image-cache-demo")
+
+handle = await Image.get(image)
+detail = await handle.inspect()
+
+print(handle.reference, handle.layer_count)
+for layer in detail.layers:
+    print(layer.position, layer.diff_id, layer.blob_digest)
+
+report = await Image.prune()
+print(report.image_refs_removed, report.layers_removed)
+```
+
 ---
 
 #### Image.inspect()
