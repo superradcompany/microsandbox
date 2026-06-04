@@ -115,7 +115,7 @@ tar = "0.4"
 time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

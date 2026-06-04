@@ -17,8 +17,8 @@ serde.workspace = true
 serde_bytes.workspace = true
 strum.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.42", default-features = false, features = ["io-util"] }
+tokio = { version = "1.52", default-features = false, features = ["io-util"] }
 
 [dev-dependencies]
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 serde_json.workspace = true

@@ -11,7 +11,7 @@ path = "bin/main.rs"
 [dependencies]
 microsandbox = { path = "../../../crates/microsandbox" }
 microsandbox-network = { path = "../../../crates/network" }
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 axum = "0.7"
 rcgen = "0.13"
 rustls = "0.23"

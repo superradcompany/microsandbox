@@ -10,4 +10,4 @@ path = "bin/main.rs"
 
 [dependencies]
 microsandbox = { path = "../../../crates/microsandbox" }
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
