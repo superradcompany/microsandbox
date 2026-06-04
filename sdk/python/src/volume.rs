@@ -180,7 +180,6 @@ impl PyVolume {
     #[staticmethod]
     #[pyo3(signature = (path, *, format = None, fstype = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn disk(
-        py: Python<'_>,
         path: String,
         format: Option<String>,
         fstype: Option<String>,
@@ -189,20 +188,22 @@ impl PyVolume {
         nosuid: bool,
         nodev: bool,
     ) -> PyResult<PyObject> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
-        kwargs.set_item("disk", path)?;
-        if let Some(format) = format {
-            kwargs.set_item("format", format)?;
-        }
-        if let Some(fstype) = fstype {
-            kwargs.set_item("fstype", fstype)?;
-        }
-        kwargs.set_item("readonly", readonly)?;
-        kwargs.set_item("noexec", noexec)?;
-        kwargs.set_item("nosuid", nosuid)?;
-        kwargs.set_item("nodev", nodev)?;
-        Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
+            kwargs.set_item("disk", path)?;
+            if let Some(format) = format {
+                kwargs.set_item("format", format)?;
+            }
+            if let Some(fstype) = fstype {
+                kwargs.set_item("fstype", fstype)?;
+            }
+            kwargs.set_item("readonly", readonly)?;
+            kwargs.set_item("noexec", noexec)?;
+            kwargs.set_item("nosuid", nosuid)?;
+            kwargs.set_item("nodev", nodev)?;
+            Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
+        })
     }
 }
 
