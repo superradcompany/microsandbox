@@ -841,6 +841,18 @@ impl SandboxBuilder {
         }
         super::validate_sandbox_name_for_runtime(&self.config.name)?;
 
+        if self.config.cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cpus must be greater than 0".into(),
+            ));
+        }
+
+        if self.config.memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "memory must be greater than 0".into(),
+            ));
+        }
+
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
             RootfsSource::Oci(oci) if oci.reference.is_empty() => {
@@ -990,6 +1002,36 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_cpus() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(0)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: cpus must be greater than 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_memory() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(0u32)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: memory must be greater than 0"
         );
     }
 
