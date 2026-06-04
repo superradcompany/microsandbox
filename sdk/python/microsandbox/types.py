@@ -790,7 +790,7 @@ class Network:
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
     `deny Domain("...")` policy rule that fires at DNS resolution
-    (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback).
+    (NXDOMAIN), TLS first-flight (SNI), and TCP egress (cache fallback).
     Prepended onto the policy so it takes precedence over later allow
     rules."""
     deny_domain_suffixes: tuple[str, ...] = ()

@@ -14,7 +14,7 @@ pub(crate) enum Expect {
     /// `status: NOERROR` with an `ANSWER SECTION` present.
     Resolves,
     /// `status: NXDOMAIN` (block list, rebind, or policy denial). The
-    /// forwarder returns an authoritative negative so stub resolvers fail
+    /// forwarder returns a synthetic negative so stub resolvers fail
     /// closed immediately instead of hanging on REFUSED.
     NxDomain,
     /// Neither a successful answer nor a synthesized NXDOMAIN — upstream was
@@ -93,7 +93,7 @@ fn matches_expectation(raw: &str, want: Expect) -> bool {
 }
 
 /// Extract the RCODE from a `dig` header line like:
-/// `;; ->>HEADER<<- opcode: QUERY, status: REFUSED, id: 12345`.
+/// `;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 12345`.
 fn parse_status(output: &str) -> Option<String> {
     for line in output.lines() {
         if let Some(pos) = line.find("status: ") {

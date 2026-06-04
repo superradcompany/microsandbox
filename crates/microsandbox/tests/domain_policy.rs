@@ -252,10 +252,10 @@ async fn domain_policy_allows_whitelisted_https() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// `deny Domain("example.com")` refuses DNS for that name; unrelated
+/// `deny Domain("example.com")` denies DNS for that name; unrelated
 /// names still resolve.
 #[msb_test]
-async fn domain_policy_deny_domain_refuses_dns() {
+async fn domain_policy_deny_domain_denies_dns() {
     let name = "net-domain-policy-deny-dns";
     let policy = NetworkPolicy {
         default_egress: Action::Allow,
@@ -266,7 +266,7 @@ async fn domain_policy_deny_domain_refuses_dns() {
     };
     let sb = setup_alpine(name, policy).await;
 
-    // Denied: gateway returns REFUSED, getent prints nothing.
+    // Denied: gateway returns NXDOMAIN, getent prints nothing.
     let denied = sb
         .shell("getent hosts example.com | awk '{print $1; exit}'")
         .await
@@ -274,7 +274,7 @@ async fn domain_policy_deny_domain_refuses_dns() {
     let denied_out = denied.stdout().unwrap_or_default().trim().to_string();
     assert!(
         denied_out.is_empty(),
-        "example.com DNS lookup should be refused: got `{denied_out}`"
+        "example.com DNS lookup should be denied: got `{denied_out}`"
     );
 
     // Companion: an unrelated name still resolves. We pick the alpine
@@ -328,10 +328,10 @@ async fn domain_policy_deny_domain_blocks_sni_direct_ip_without_dns_cache() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// `deny DomainSuffix(".example.com")` refuses DNS for the apex and
+/// `deny DomainSuffix(".example.com")` denies DNS for the apex and
 /// any subdomain.
 #[msb_test]
-async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
+async fn domain_policy_deny_suffix_denies_dns_apex_and_subdomain() {
     let name = "net-domain-policy-deny-suffix-dns";
     let policy = NetworkPolicy {
         default_egress: Action::Allow,
@@ -350,7 +350,7 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     let apex_out = apex.stdout().unwrap_or_default().trim().to_string();
     assert!(
         apex_out.is_empty(),
-        "example.com (apex) should be refused by .example.com suffix: got `{apex_out}`"
+        "example.com (apex) should be denied by .example.com suffix: got `{apex_out}`"
     );
 
     // Subdomain: `www.example.com` also matches.
@@ -361,10 +361,10 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     let sub_out = sub.stdout().unwrap_or_default().trim().to_string();
     assert!(
         sub_out.is_empty(),
-        "www.example.com should be refused by .example.com suffix: got `{sub_out}`"
+        "www.example.com should be denied by .example.com suffix: got `{sub_out}`"
     );
 
-    // No baseline lookup here — `domain_policy_deny_domain_refuses_dns`
+    // No baseline lookup here — `domain_policy_deny_domain_denies_dns`
     // already covers "unrelated names still resolve under default-allow,"
     // and rapid back-to-back queries trip the runner's egress DNS
     // rate-limit.
