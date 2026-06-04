@@ -241,8 +241,8 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	}
 }
 
-// WithPorts publishes host TCP ports into the sandbox. The map key is the
-// host port and the value is the guest port.
+// WithPorts makes TCP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPorts(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.Ports == nil {
@@ -254,7 +254,8 @@ func WithPorts(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// WithPortsUDP publishes host UDP ports into the sandbox.
+// WithPortsUDP makes UDP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.PortsUDP == nil {
@@ -266,7 +267,8 @@ func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// PortBinding publishes a host port on a specific host bind address.
+// PortBinding describes how to expose a service running in the sandbox on a
+// specific host address and port.
 // Protocol defaults to TCP when empty. Use Bind "0.0.0.0" to expose the
 // published port on all IPv4 interfaces.
 type PortBinding struct {
@@ -276,7 +278,7 @@ type PortBinding struct {
 	Protocol  PortProtocol
 }
 
-// PortProtocol identifies the protocol for a published port binding.
+// PortProtocol identifies the protocol for an exposed sandbox service.
 type PortProtocol string
 
 const (
@@ -284,7 +286,8 @@ const (
 	PortProtocolUDP PortProtocol = "udp"
 )
 
-// WithPortBindings publishes explicit bind-address host ports into the sandbox.
+// WithPortBindings makes services running in the sandbox reachable on explicit
+// host addresses and ports.
 func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.PortBindings = append(o.PortBindings, bindings...)
@@ -391,10 +394,10 @@ type NetworkConfig struct {
 	// TLS configures the transparent TLS interception proxy.
 	TLS *TLSConfig
 
-	// Ports publishes host TCP ports into the sandbox (host→guest).
+	// Ports makes sandbox TCP services reachable on localhost ports on the host.
 	Ports map[uint16]uint16
 
-	// PortBindings publishes host ports on explicit host bind addresses.
+	// PortBindings makes sandbox services reachable on explicit host bind addresses.
 	PortBindings []PortBinding
 
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
