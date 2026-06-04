@@ -129,6 +129,7 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
+  detached(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;
@@ -174,9 +175,7 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
-  createDetached(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
-  createDetachedWithPullProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandbox {

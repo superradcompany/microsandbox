@@ -83,11 +83,11 @@ impl PySandbox {
             .unwrap_or(false);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sb = if detached {
-                builder.create_detached().await.map_err(to_py_err)?
-            } else {
-                builder.create().await.map_err(to_py_err)?
-            };
+            let sb = builder
+                .detached(detached)
+                .create()
+                .await
+                .map_err(to_py_err)?;
             Ok(PySandbox::from_rust(sb))
         })
     }
@@ -136,13 +136,10 @@ impl PySandbox {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let _runtime_guard = runtime.enter();
 
-        let (progress, task) = if detached {
-            builder
-                .create_detached_with_pull_progress()
-                .map_err(to_py_err)?
-        } else {
-            builder.create_with_pull_progress().map_err(to_py_err)?
-        };
+        let (progress, task) = builder
+            .detached(detached)
+            .create_with_pull_progress()
+            .map_err(to_py_err)?;
 
         Ok(PyPullSession::new(progress, task))
     }

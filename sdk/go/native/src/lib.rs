@@ -1851,11 +1851,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
-                builder.create_detached().await?
-            } else {
-                builder.create().await?
-            };
+            let sandbox = builder.detached(opts.detached).create().await?;
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
         }))

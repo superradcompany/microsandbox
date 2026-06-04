@@ -189,15 +189,6 @@ impl Sandbox {
         Self::create_with_mode(config, SpawnMode::Attached, None).await
     }
 
-    /// Create a sandbox that must survive after the creating process exits.
-    ///
-    /// This is intended for detached CLI workflows such as `msb create` and
-    /// `msb run --detach`, where the sandbox should keep running in the
-    /// background after the command returns.
-    pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        Self::create_with_mode(config, SpawnMode::Detached, None).await
-    }
-
     /// Create a sandbox with pull progress reporting.
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
@@ -209,32 +200,10 @@ impl Sandbox {
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
-        Self::create_with_pull_progress_and_mode(config, SpawnMode::Attached)
-    }
-
-    /// Create a detached sandbox with pull progress reporting.
-    ///
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
-    pub fn create_detached_with_pull_progress(
-        config: SandboxConfig,
-    ) -> (
-        PullProgressHandle,
-        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
-    ) {
-        Self::create_with_pull_progress_and_mode(config, SpawnMode::Detached)
-    }
-
-    fn create_with_pull_progress_and_mode(
-        config: SandboxConfig,
-        mode: SpawnMode,
-    ) -> (
-        PullProgressHandle,
-        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
-    ) {
         let (handle, sender) = progress_channel();
-        let task =
-            tokio::spawn(async move { Self::create_with_mode(config, mode, Some(sender)).await });
+        let task = tokio::spawn(async move {
+            Self::create_with_mode(config, SpawnMode::Attached, Some(sender)).await
+        });
         (handle, task)
     }
 

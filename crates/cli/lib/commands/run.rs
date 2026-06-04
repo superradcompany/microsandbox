@@ -162,11 +162,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
     // Create sandbox with pull progress — select attached vs detached mode.
-    let (mut progress, task) = if args.detach {
-        builder.create_detached_with_pull_progress()?
-    } else {
-        builder.create_with_pull_progress()?
-    };
+    let (mut progress, task) = builder.detached(args.detach).create_with_pull_progress()?;
 
     let display_label = args
         .snapshot

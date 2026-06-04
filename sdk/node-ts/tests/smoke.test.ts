@@ -152,13 +152,14 @@ describe("Node.js SDK Pull Progress", () => {
 		await sb.stopAndWait();
 	}, 120_000);
 
-	it("createDetachedWithPullProgress yields events and creates a detached sandbox", async () => {
+	it("detached createWithPullProgress yields events and creates a detached sandbox", async () => {
 		const session = await Sandbox.builder(NAME_DETACHED)
 			.image("mirror.gcr.io/library/alpine")
 			.cpus(1)
 			.memory(512)
 			.replace()
-			.createDetachedWithPullProgress();
+			.detached(true)
+			.createWithPullProgress();
 
 		const types: string[] = [];
 		for await (const ev of session) types.push(ev.kind);

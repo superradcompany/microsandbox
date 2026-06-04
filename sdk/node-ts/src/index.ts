@@ -144,7 +144,6 @@ function wrapMethodWithErrorMap(cls: any, method: string) {
 
 wrapMethodWithErrorMap(napi.MountBuilder, "build");
 wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
-wrapMethodWithErrorMap(napi.SandboxBuilder, "createDetached");
 wrapMethodWithErrorMap(napi.PatchBuilder, "build");
 wrapMethodWithErrorMap(napi.DnsBuilder, "build");
 wrapMethodWithErrorMap(napi.SecretBuilder, "build");
