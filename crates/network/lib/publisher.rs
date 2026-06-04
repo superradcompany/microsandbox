@@ -765,6 +765,8 @@ async fn inbound_relay_task(
                             tracing::debug!(error = %e, "write to host client failed");
                             break;
                         }
+                        // Wake the poll loop so it can refill the channel from smoltcp.
+                        shared.proxy_wake.wake();
                     }
                     None => break,
                 }
