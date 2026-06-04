@@ -45,7 +45,7 @@ func TestWithShellRoundTripsThroughConfig(t *testing.T) {
 	name := "go-sdk-shell-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithShell("/bin/sh"),
 	)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestWithEntrypointVisibleInConfig(t *testing.T) {
 	name := "go-sdk-entrypoint-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithEntrypoint("/bin/sh", "-c", "echo hi"),
 	)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestWithInitAuto(t *testing.T) {
 	name := "go-sdk-init-auto-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithInit(microsandbox.Init.Auto()),
 	)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestWithLogLevelRoundTrip(t *testing.T) {
 	name := "go-sdk-log-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithLogLevel(microsandbox.LogLevelInfo),
 	)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestWithQuietLogsClearsLogLevel(t *testing.T) {
 	name := "go-sdk-quiet-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithQuietLogs(),
 	)
 	if err != nil {
@@ -202,7 +202,7 @@ func TestWithMaxDurationAndIdleTimeoutCreates(t *testing.T) {
 	name := "go-sdk-timeouts-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMaxDuration(2*time.Hour),
 		microsandbox.WithIdleTimeout(30*time.Minute),
 	)
@@ -237,7 +237,7 @@ func TestWithScriptsRoundTrip(t *testing.T) {
 	name := "go-sdk-scripts-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithScripts(map[string]string{
 			"hello": "echo hello-from-script",
 			"date":  "date +%Y",
@@ -275,7 +275,7 @@ func TestWithPullPolicyRoundTrip(t *testing.T) {
 			ctx := integrationCtx(t)
 			name := "go-sdk-pull-" + t.Name()
 			sb, err := microsandbox.CreateSandbox(ctx, name,
-				microsandbox.WithImage("alpine:3.19"),
+				microsandbox.WithImage(goIntegrationImage),
 				microsandbox.WithPullPolicy(p),
 			)
 			if err != nil {

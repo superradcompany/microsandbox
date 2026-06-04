@@ -14,6 +14,8 @@ import (
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
 
+var goIntegrationImage = getenv("MICROSANDBOX_GO_INTEGRATION_IMAGE", "mirror.gcr.io/library/alpine")
+
 // TestMain ensures the microsandbox runtime is loaded once before any
 // integration test runs. Without this every test would fail with
 // ErrLibraryNotLoaded.
@@ -35,12 +37,19 @@ func integrationCtx(t *testing.T) context.Context {
 	return ctx
 }
 
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
 // newTestSandbox creates a sandbox named after the test and registers cleanup.
 func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 	t.Helper()
 	ctx := integrationCtx(t)
 	name := "go-sdk-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -59,7 +68,7 @@ func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 func TestCreateSandboxAndClose(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-lifecycle-" + t.Name()
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -374,7 +383,7 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	name := "go-sdk-detached-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithDetached(),
 	)
 	if err != nil {
@@ -423,7 +432,7 @@ func TestPortPublishing(t *testing.T) {
 	name := "go-sdk-ports-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPorts(map[uint16]uint16{17777: 7777}),
 	)
 	if err != nil {
@@ -491,7 +500,7 @@ func TestNetworkPolicyNone(t *testing.T) {
 	name := "go-sdk-netpolicy-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "none"}),
 	)
 	if err != nil {
@@ -525,7 +534,7 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 	name := "go-sdk-netallow-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "allow-all"}),
 	)
 	if err != nil {
@@ -559,7 +568,7 @@ func TestDNSBlockDomain(t *testing.T) {
 	name := "go-sdk-dns-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:      microsandbox.NetworkPolicyPresetAllowAll,
 			DenyDomains: []string{"blocked-domain-test.example.com"},
@@ -596,7 +605,7 @@ func TestDNSBlockDomainSuffix(t *testing.T) {
 	name := "go-sdk-dnssuffix-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:             microsandbox.NetworkPolicyPresetAllowAll,
 			DenyDomainSuffixes: []string{".blocked-suffix-test.invalid"},
@@ -638,7 +647,7 @@ func TestPatchText(t *testing.T) {
 	name := "go-sdk-patch-text-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Text("/etc/go-sdk-test.conf", "hello-from-patch\n", microsandbox.PatchOptions{}),
 		),
@@ -669,7 +678,7 @@ func TestPatchMkdir(t *testing.T) {
 
 	mode := uint32(0o755)
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Mkdir("/opt/go-sdk-dir", microsandbox.PatchOptions{Mode: &mode}),
 		),
@@ -702,7 +711,7 @@ func TestPatchAppend(t *testing.T) {
 
 	const marker = "go-sdk-append-marker"
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Append("/etc/profile", "\n# "+marker+"\n"),
 		),
@@ -734,7 +743,7 @@ func TestPatchSymlink(t *testing.T) {
 	// /etc, not /tmp: alpine's default sandbox config mounts a fresh
 	// tmpfs over /tmp at boot, which wipes anything patches put there.
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Text("/etc/original.txt", "original\n", microsandbox.PatchOptions{}),
 			microsandbox.Patch.Symlink("/etc/original.txt", "/etc/link.txt", microsandbox.PatchOptions{}),
@@ -947,7 +956,7 @@ func TestSecretPlaceholderSubstitution(t *testing.T) {
 	name := "go-sdk-secret-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithSecrets(microsandbox.Secret.Env(
 			"MY_API_KEY",
 			"super-secret-value-xyz",
@@ -991,7 +1000,7 @@ func TestRemoveSandbox(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-remove-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -1031,7 +1040,7 @@ func TestListSandboxesWithLabels(t *testing.T) {
 
 	create := func(name string, labels map[string]string) {
 		sb, err := microsandbox.CreateSandbox(ctx, name,
-			microsandbox.WithImage("alpine:3.19"),
+			microsandbox.WithImage(goIntegrationImage),
 			microsandbox.WithLabels(labels),
 		)
 		if err != nil {
