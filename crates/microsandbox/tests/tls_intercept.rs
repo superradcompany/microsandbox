@@ -22,6 +22,7 @@ const LARGE_POST_BODY_LEN: usize = 135_000; // 135 kb, above the old ~128 kib fa
 const LARGE_SECRET_PAD_LEN: usize = 1024 * 1024; // 1 MiB on each side of the placeholder.
 const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
 const REAL_SECRET: &[u8] = b"real-secret";
+const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
 
 //--------------------------------------------------------------------------------------------------
 // Types
