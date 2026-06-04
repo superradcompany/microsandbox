@@ -30,8 +30,8 @@ use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReleaseMode, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
-    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
-    HANDOFF_INIT_SEP_STR,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
+    ENV_USER, HANDOFF_INIT_SEP_STR,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -737,6 +737,12 @@ fn mount_option_tokens(options: MountOptions) -> Vec<String> {
     if options.noexec {
         tokens.push("noexec".to_string());
     }
+    if options.nosuid {
+        tokens.push("nosuid".to_string());
+    }
+    if options.nodev {
+        tokens.push("nodev".to_string());
+    }
     tokens
 }
 
@@ -1170,6 +1176,15 @@ fn sandbox_cli_args(
         )));
     }
 
+    args.push(OsString::from("--env"));
+    args.push(OsString::from(format!(
+        "{ENV_SECURITY_PROFILE}={}",
+        match config.security_profile {
+            crate::sandbox::SecurityProfile::Default => "default",
+            crate::sandbox::SecurityProfile::Restricted => "restricted",
+        }
+    )));
+
     // Network configuration.
     #[cfg(feature = "net")]
     {
@@ -1375,6 +1390,25 @@ mod tests {
             !m.contains("stat-virt") && !m.contains("host-perms"),
             "default-policy mount leaked policy options into wire format: {m}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_explicit_security_mount_flags() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data").nosuid().nodev())
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains("nosuid"), "expected nosuid flag: {m}");
+        assert!(m.contains("nodev"), "expected nodev flag: {m}");
     }
 
     #[tokio::test]
@@ -1787,6 +1821,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sandbox_cli_args_include_security_profile_env() {
+        let default_config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+        let restricted_config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .security(crate::sandbox::SecurityProfile::Restricted)
+            .build()
+            .await
+            .unwrap();
+
+        let default_args = render_args(&default_config);
+        let restricted_args = render_args(&restricted_config);
+
+        assert!(default_args.contains(&"MSB_SECURITY_PROFILE=default".to_string()));
+        assert!(restricted_args.contains(&"MSB_SECURITY_PROFILE=restricted".to_string()));
+    }
+
+    #[tokio::test]
     async fn test_sandbox_cli_args_use_passthrough_for_bind_rootfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -1851,14 +1906,14 @@ mod tests {
     async fn test_sandbox_cli_args_tmpfs_noexec_appends_noexec() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .volume("/tools", |m| m.tmpfs().noexec())
+            .volume("/tools", |m| m.tmpfs().noexec().nosuid().nodev())
             .build()
             .await
             .unwrap();
 
         let rendered = render_args(&config);
 
-        assert!(rendered.contains(&"MSB_TMPFS=/tools:noexec".to_string()));
+        assert!(rendered.contains(&"MSB_TMPFS=/tools:noexec,nosuid,nodev".to_string()));
     }
 
     #[tokio::test]

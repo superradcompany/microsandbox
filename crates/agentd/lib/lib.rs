@@ -26,5 +26,5 @@ pub mod session;
 pub mod tcp;
 pub mod tls;
 
-pub use config::{AgentdConfig, BootParams, HandoffInit};
+pub use config::{AgentdConfig, BootParams, HandoffInit, SecurityProfile};
 pub use error::*;

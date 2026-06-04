@@ -1276,7 +1276,7 @@ struct ParsedMountSpec {
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
 ///
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
-/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`) and keyed policies
+/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`) and keyed policies
 /// (`stat-virt=...`, `host-perms=...`).
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
@@ -1308,6 +1308,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
+    let mut seen_nodev = false;
 
     if let Some(opts) = options {
         for opt in opts.split(',') {
@@ -1334,6 +1335,12 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                         return Err("mount option `nosuid` specified more than once".to_string());
                     }
                     seen_nosuid = true;
+                }
+                "nodev" => {
+                    if seen_nodev {
+                        return Err("mount option `nodev` specified more than once".to_string());
+                    }
+                    seen_nodev = true;
                 }
                 "suid" | "exec" | "dev" => {
                     return Err(format!("unsupported mount option {opt:?}"));

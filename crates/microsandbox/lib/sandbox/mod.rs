@@ -104,7 +104,8 @@ pub use ssh::{
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, Patch, PatchBuilder, RootfsSource, StatVirtualization, VolumeMount,
+    MountOptions, Patch, PatchBuilder, RootfsSource, SecurityProfile, StatVirtualization,
+    VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

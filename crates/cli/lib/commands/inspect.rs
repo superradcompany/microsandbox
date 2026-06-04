@@ -31,12 +31,17 @@ fn mount_policy_suffix(sv: StatVirtualization, hp: HostPermissions) -> String {
 
 /// Render mount access and execution flags for `msb inspect` output.
 fn mount_flags_suffix(options: MountOptions) -> String {
-    let access = if options.readonly { "ro" } else { "rw" };
+    let mut flags = vec![if options.readonly { "ro" } else { "rw" }];
     if options.noexec {
-        format!(" ({access},noexec)")
-    } else {
-        format!(" ({access})")
+        flags.push("noexec");
     }
+    if options.nosuid {
+        flags.push("nosuid");
+    }
+    if options.nodev {
+        flags.push("nodev");
+    }
+    format!(" ({})", flags.join(","))
 }
 
 //--------------------------------------------------------------------------------------------------

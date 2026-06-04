@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
 
+use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
 use crate::rlimit;
 
@@ -198,11 +199,12 @@ impl ExecSession {
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
         default_user: Option<&str>,
+        security_profile: SecurityProfile,
     ) -> AgentdResult<Self> {
         if req.tty {
-            Self::spawn_pty(id, req, tx, default_user)
+            Self::spawn_pty(id, req, tx, default_user, security_profile)
         } else {
-            Self::spawn_pipe(id, req, tx, default_user)
+            Self::spawn_pipe(id, req, tx, default_user, security_profile)
         }
     }
 
@@ -263,6 +265,7 @@ impl ExecSession {
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
         default_user: Option<&str>,
+        security_profile: SecurityProfile,
     ) -> AgentdResult<Self> {
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
@@ -387,7 +390,7 @@ impl ExecSession {
                 }
             }
 
-            if drop_mount_admin_privileges().is_err() {
+            if apply_exec_security_profile(security_profile).is_err() {
                 unsafe { libc::_exit(1) };
             }
 
@@ -454,6 +457,7 @@ impl ExecSession {
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
         default_user: Option<&str>,
+        security_profile: SecurityProfile,
     ) -> AgentdResult<Self> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
@@ -476,11 +480,11 @@ impl ExecSession {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
 
-        // Drop mount privileges and apply resource limits in the child before exec.
+        // Apply the security profile and resource limits in the child before exec.
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
         unsafe {
             cmd.pre_exec(move || {
-                drop_mount_admin_privileges().map_err(agentd_to_io_error)?;
+                apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
                 if let Some(ref user) = resolved_user {
                     apply_resolved_user(user).map_err(agentd_to_io_error)?;
                 }
@@ -565,6 +569,13 @@ fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+fn apply_exec_security_profile(profile: SecurityProfile) -> AgentdResult<()> {
+    match profile {
+        SecurityProfile::Default => Ok(()),
+        SecurityProfile::Restricted => drop_mount_admin_privileges(),
+    }
 }
 
 fn drop_mount_admin_privileges() -> AgentdResult<()> {
@@ -1113,7 +1124,8 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx, None).expect("spawn pty session");
+        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default)
+            .expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
 
@@ -1322,7 +1334,8 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let err = ExecSession::spawn(9, &req, tx, None).expect_err("spawn should fail");
+        let err = ExecSession::spawn(9, &req, tx, None, SecurityProfile::Default)
+            .expect_err("spawn should fail");
 
         // Spawn failures now produce the typed `ExecSpawnFailed` so
         // the host can render a useful message + hint. The classifier

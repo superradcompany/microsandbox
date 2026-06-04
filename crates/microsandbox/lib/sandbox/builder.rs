@@ -1,25 +1,26 @@
 //! Fluent builder for [`SandboxConfig`].
 
+#[cfg(feature = "net")]
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
 use microsandbox_network::config::{PortProtocol, PublishedPort};
-#[cfg(feature = "net")]
-use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
-        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
+        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, SecurityProfile,
+        VolumeMount,
     },
 };
 use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
-use std::time::Duration;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -637,6 +638,12 @@ impl SandboxBuilder {
     /// Inactivity is detected via agentd heartbeat. Omit to disable (default).
     pub fn idle_timeout(mut self, secs: u64) -> Self {
         self.config.policy.idle_timeout_secs = Some(secs);
+        self
+    }
+
+    /// Set the in-guest security profile.
+    pub fn security(mut self, profile: SecurityProfile) -> Self {
+        self.config.security_profile = profile;
         self
     }
 

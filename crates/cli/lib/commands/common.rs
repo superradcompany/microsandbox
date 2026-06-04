@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use microsandbox::sandbox::{Patch, Sandbox, SandboxBuilder, SandboxFilter};
+use microsandbox::sandbox::{Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile};
 
 use crate::ui;
 
@@ -68,6 +68,10 @@ pub struct SandboxOpts {
     /// Mount a temporary in-memory filesystem (PATH, PATH:SIZE, or PATH:SIZE:OPTIONS).
     #[arg(long)]
     pub tmpfs: Vec<String>,
+
+    /// In-guest security profile (default or restricted).
+    #[arg(long, value_parser = ["default", "restricted"])]
+    pub security: Option<String>,
 
     /// Register a shell snippet as a named script (NAME=BODY). The body
     /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
@@ -321,6 +325,8 @@ pub struct SandboxOpts {
 struct CliMountOptions {
     readonly: bool,
     noexec: bool,
+    nosuid: bool,
+    nodev: bool,
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
@@ -373,7 +379,8 @@ impl SandboxOpts {
             || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
-            || self.idle_timeout.is_some();
+            || self.idle_timeout.is_some()
+            || self.security.is_some();
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
@@ -466,6 +473,12 @@ pub fn apply_sandbox_opts(
             if options.noexec {
                 m = m.noexec();
             }
+            if options.nosuid {
+                m = m.nosuid();
+            }
+            if options.nodev {
+                m = m.nodev();
+            }
             m
         });
     }
@@ -499,6 +512,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref size) = opts.oci_upper_size {
         let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
         builder = builder.oci_upper_size(size_mib);
+    }
+    if let Some(ref security) = opts.security {
+        builder = builder.security(parse_security_profile(security)?);
     }
 
     // --- Handoff init ---
@@ -644,7 +660,7 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,stat-virt=...][,host-perms=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
     let (source, guest_and_opts) = spec
         .split_once(':')
@@ -689,6 +705,12 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         if options.noexec {
             m = m.noexec();
         }
+        if options.nosuid {
+            m = m.nosuid();
+        }
+        if options.nodev {
+            m = m.nodev();
+        }
         if let Some(sv) = options.stat_virtualization {
             m = m.stat_virtualization(sv);
         }
@@ -715,6 +737,7 @@ fn parse_cli_mount_options(
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
+    let mut seen_nodev = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_size = false;
@@ -748,6 +771,14 @@ fn parse_cli_mount_options(
                     anyhow::bail!("mount option `nosuid` specified more than once");
                 }
                 seen_nosuid = true;
+                parsed.nosuid = true;
+            }
+            "nodev" => {
+                if seen_nodev {
+                    anyhow::bail!("mount option `nodev` specified more than once");
+                }
+                seen_nodev = true;
+                parsed.nodev = true;
             }
             "suid" | "exec" | "dev" => {
                 anyhow::bail!("unsupported mount option {opt:?}");
@@ -1257,8 +1288,16 @@ fn looks_like_mount_options(segment: &str) -> bool {
         || segment.contains('=')
         || matches!(
             segment,
-            "ro" | "rw" | "noexec" | "nosuid" | "suid" | "exec" | "dev"
+            "ro" | "rw" | "noexec" | "nosuid" | "nodev" | "suid" | "exec" | "dev"
         )
+}
+
+fn parse_security_profile(value: &str) -> anyhow::Result<SecurityProfile> {
+    match value {
+        "default" => Ok(SecurityProfile::Default),
+        "restricted" => Ok(SecurityProfile::Restricted),
+        other => anyhow::bail!("invalid security profile {other:?}"),
+    }
 }
 
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
@@ -1710,6 +1749,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_sandbox_opts_sets_security_profile() {
+        let opts = SandboxOpts {
+            security: Some("restricted".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
     async fn apply_sandbox_opts_adds_cli_rootfs_patches() {
         let file = write_temp("config");
         let dir = make_temp_dir("msb-patch-dir");
@@ -1785,6 +1839,20 @@ mod tests {
         let mount = build_one("/host:/guest:ro").await;
         match mount {
             VolumeMount::Bind { options, .. } => assert!(options.readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_explicit_security_mount_flags() {
+        let mount = build_one("/host:/guest:nosuid,nodev").await;
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert!(!options.readonly);
+                assert!(!options.noexec);
+                assert!(options.nosuid);
+                assert!(options.nodev);
+            }
             other => panic!("expected Bind, got {other:?}"),
         }
     }
@@ -1929,11 +1997,13 @@ mod tests {
 
     #[test]
     fn test_parse_tmpfs_accepts_keyed_size_and_flags() {
-        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec").unwrap();
+        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec,nosuid,nodev").unwrap();
         assert_eq!(path, "/seed");
         assert_eq!(size, Some(64));
         assert!(options.readonly);
         assert!(options.noexec);
+        assert!(options.nosuid);
+        assert!(options.nodev);
     }
 
     #[tokio::test]

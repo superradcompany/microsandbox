@@ -275,7 +275,13 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
             prepend_scripts_to_path(&mut req);
-            match ExecSession::spawn(msg.id, &req, session_tx.clone(), config.user.as_deref()) {
+            match ExecSession::spawn(
+                msg.id,
+                &req,
+                session_tx.clone(),
+                config.user.as_deref(),
+                config.security_profile,
+            ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
                         MessageType::ExecStarted,
