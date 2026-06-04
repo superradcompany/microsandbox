@@ -97,7 +97,7 @@ ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 nix = "0.30"
 notify = "8"
-oci-client = "0.16"
+oci-client = "0.17"
 oci-spec = "0.9.0"
 rand = "0.10.1"
 reflink-copy = "0.1"
