@@ -1,6 +1,6 @@
 //! Entry point for the `msb` CLI binary.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
@@ -11,6 +11,32 @@ use microsandbox_cli::{
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
+    CommandGroup {
+        heading: "Sandboxes",
+        commands: &[
+            "run", "create", "start", "stop", "list", "status", "metrics", "remove", "exec",
+            "copy", "logs", "ssh", "inspect",
+        ],
+    },
+    CommandGroup {
+        heading: "Images",
+        commands: &["image", "pull", "load", "save", "registry"],
+    },
+    CommandGroup {
+        heading: "Storage",
+        commands: &["volume", "snapshot"],
+    },
+    CommandGroup {
+        heading: "Installation",
+        commands: &["install", "uninstall", "self"],
+    },
+];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -129,6 +155,80 @@ enum Commands {
     Self_(self_cmd::SelfArgs),
 }
 
+/// A visual group for top-level command help.
+struct CommandGroup {
+    heading: &'static str,
+    commands: &'static [&'static str],
+}
+
+/// Rendered help text for one top-level command.
+#[derive(Clone)]
+struct CommandHelpLine {
+    name: String,
+    help: String,
+}
+
+/// ANSI styling state for custom top-level help.
+struct HelpStyles {
+    enabled: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl HelpStyles {
+    /// Detect whether custom help should include ANSI styling.
+    fn detect() -> Self {
+        Self {
+            enabled: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+        }
+    }
+
+    /// Style a help heading like clap's configured header style.
+    fn header(&self, value: &str) -> String {
+        if !self.enabled {
+            return value.to_string();
+        }
+
+        format!("\x1b[1;33m{value}\x1b[0m")
+    }
+
+    /// Style a command or flag literal like clap's configured literal style.
+    fn literal(&self, value: &str) -> String {
+        if !self.enabled {
+            return value.to_string();
+        }
+
+        format!("\x1b[1;34m{value}\x1b[0m")
+    }
+
+    /// Add light styling to the default clap help fragments we preserve.
+    fn style_default_help_fragment(&self, value: &str) -> String {
+        if !self.enabled {
+            return value.to_string();
+        }
+
+        value.replacen("Usage:", &self.header("Usage:"), 1)
+    }
+
+    /// Style alias annotations in the same literal color as command names.
+    fn style_aliases(&self, value: &str) -> String {
+        if !self.enabled {
+            return value.to_string();
+        }
+
+        let Some((help, aliases)) = value.split_once(" [aliases: ") else {
+            return value.to_string();
+        };
+        let Some(aliases) = aliases.strip_suffix(']') else {
+            return value.to_string();
+        };
+
+        format!("{help} [aliases: {}]", self.literal(aliases))
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -151,6 +251,9 @@ fn main() {
     // required arguments (e.g. `msb run --tree`) are missing.
     if let Some(tree) = microsandbox_cli::tree::try_show_tree(&Cli::command()) {
         println!("{tree}");
+        return;
+    }
+    if try_show_grouped_top_level_help() {
         return;
     }
 
@@ -187,6 +290,150 @@ fn main() {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
+}
+
+/// Print grouped top-level help for `msb` and `msb --help`.
+fn try_show_grouped_top_level_help() -> bool {
+    if !is_top_level_help_request() {
+        return false;
+    }
+
+    print!("{}", render_grouped_top_level_help());
+    std::io::stdout()
+        .flush()
+        .expect("flushing grouped help should not fail");
+    true
+}
+
+/// Return whether the current invocation is asking for only top-level help.
+fn is_top_level_help_request() -> bool {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.is_empty() {
+        return true;
+    }
+
+    let mut saw_help = false;
+    for arg in args {
+        let Some(arg) = arg.to_str() else {
+            return false;
+        };
+        match arg {
+            "-h" | "--help" => saw_help = true,
+            "--error" | "--warn" | "--info" | "--debug" | "--trace" => {}
+            _ => return false,
+        }
+    }
+
+    saw_help
+}
+
+/// Render the top-level help with visually grouped commands.
+fn render_grouped_top_level_help() -> String {
+    let mut cmd = Cli::command();
+    let styles = HelpStyles::detect();
+    let mut help = Vec::new();
+    cmd.write_help(&mut help)
+        .expect("writing clap help into memory should not fail");
+
+    let default_help = String::from_utf8(help).expect("clap help should be valid UTF-8");
+    let Some((prefix, _)) = default_help.split_once("\nCommands:\n") else {
+        return default_help;
+    };
+    let Some((_, suffix)) = default_help.split_once("\nOptions:\n") else {
+        return default_help;
+    };
+
+    let mut output = String::new();
+    output.push_str(&styles.style_default_help_fragment(prefix));
+    output.push('\n');
+    output.push_str(&render_grouped_commands(&cmd, &styles));
+    output.push('\n');
+    output.push_str(&styles.header("Options:"));
+    output.push('\n');
+    output.push_str(&styles.style_default_help_fragment(suffix));
+    output
+}
+
+/// Render top-level commands under the configured visual groups.
+fn render_grouped_commands(cmd: &clap::Command, styles: &HelpStyles) -> String {
+    let lines = visible_command_help_lines(cmd, styles);
+    let name_width = lines.iter().map(|line| line.name.len()).max().unwrap_or(0);
+    let mut output = String::new();
+    let mut rendered_commands = Vec::new();
+
+    for (group_index, group) in TOP_LEVEL_COMMAND_GROUPS.iter().enumerate() {
+        if group_index > 0 {
+            output.push('\n');
+        }
+
+        output.push_str(&styles.header(&format!("{}:", group.heading)));
+        output.push('\n');
+
+        for command in group.commands {
+            if let Some(line) = lines.iter().find(|line| line.name == *command) {
+                output.push_str(&format_command_help_line(line, name_width, styles));
+                rendered_commands.push(line.name.as_str());
+            }
+        }
+    }
+
+    let mut other_lines: Vec<_> = lines
+        .iter()
+        .filter(|line| !rendered_commands.contains(&line.name.as_str()))
+        .cloned()
+        .collect();
+    if !other_lines.iter().any(|line| line.name == "help") {
+        other_lines.push(CommandHelpLine {
+            name: "help".to_string(),
+            help: "Print this message or the help of the given subcommand(s)".to_string(),
+        });
+    }
+
+    output.push('\n');
+    output.push_str(&styles.header("Other:"));
+    output.push('\n');
+    for line in &other_lines {
+        output.push_str(&format_command_help_line(line, name_width, styles));
+    }
+
+    output
+}
+
+/// Collect visible top-level commands from clap.
+fn visible_command_help_lines(cmd: &clap::Command, styles: &HelpStyles) -> Vec<CommandHelpLine> {
+    cmd.get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| {
+            let aliases: Vec<_> = command.get_visible_aliases().collect();
+            let mut help = command
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+
+            if !aliases.is_empty() {
+                help.push_str(&format!(" [aliases: {}]", aliases.join(", ")));
+            }
+
+            CommandHelpLine {
+                name: command.get_name().to_string(),
+                help: styles.style_aliases(&help),
+            }
+        })
+        .collect()
+}
+
+/// Format one command help line with clap-like spacing.
+fn format_command_help_line(
+    line: &CommandHelpLine,
+    name_width: usize,
+    styles: &HelpStyles,
+) -> String {
+    let padded_name = format!("{:<width$}", line.name, width = name_width);
+    format!(
+        "  {name}  {help}\n",
+        name = styles.literal(&padded_name),
+        help = line.help
+    )
 }
 
 /// Render an `anyhow::Error`, preferring the structured boot-error
