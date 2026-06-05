@@ -12,6 +12,16 @@ Mounts use normal Linux behavior by default: writable, executable, suid-enabled,
 
 For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
 
+CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
+
+| Flag | Source | Options |
+|------|--------|---------|
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
+| `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
+
 ## Bind mounts
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
@@ -61,11 +71,18 @@ sb, err := m.CreateSandbox(ctx, "dev",
 
 ```bash CLI
 msb create python --name dev \
-  -v ./src:/app/src:ro,noexec \
-  -v ./data:/app/data
+  --mount-dir ./src:/app/src:ro,noexec \
+  --mount-dir ./data:/app/data
 ```
 
 </CodeGroup>
+
+Use `--mount-file` when you want to bind one host file instead of an entire directory.
+
+```bash
+msb create alpine --name config-reader \
+  --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
+```
 
 ## Named volumes
 
@@ -142,7 +159,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ```bash CLI
 msb create python --name worker \
-  -v pip-cache:/root/.cache/pip
+  --mount-named pip-cache:/root/.cache/pip
 ```
 
 </CodeGroup>
@@ -219,6 +236,11 @@ sb, err := m.CreateSandbox(ctx, "seeded",
     }),
 )
 ```
+
+```bash CLI
+msb create alpine --name seeded \
+  --mount-disk ./seed.raw:/seed:ro,noexec,fstype=ext4
+```
 </CodeGroup>
 
 ## Tmpfs
@@ -267,4 +289,39 @@ msb create alpine --name worker \
   --tmpfs /tmp/scratch:100:noexec
 ```
 
+</CodeGroup>
+
+## Combining mounts
+
+Mount flags may be repeated, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("full")
+    .image("python")
+    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
+    .volume("/app/pyproject.toml", |v| v.bind("./pyproject.toml").readonly())
+    .volume("/root/.cache/pip", |v| {
+        v.named("pip-cache")
+            .stat_virtualization(StatVirtualization::Relaxed)
+    })
+    .volume("/dataset", |v| {
+        v.disk("./dataset.qcow2")
+            .format(DiskImageFormat::Qcow2)
+            .fstype("ext4")
+            .readonly()
+    })
+    .volume("/tmp", |v| v.tmpfs().size(1024).noexec().nosuid().nodev())
+    .create()
+    .await?;
+```
+
+```bash CLI
+msb create python --name full \
+  --mount-dir ./src:/app/src:ro,noexec \
+  --mount-file ./pyproject.toml:/app/pyproject.toml:ro \
+  --mount-named pip-cache:/root/.cache/pip:stat-virt=relaxed \
+  --mount-disk ./dataset.qcow2:/dataset:ro,format=qcow2,fstype=ext4 \
+  --tmpfs /tmp:1G:noexec,nosuid,nodev
+```
 </CodeGroup>
