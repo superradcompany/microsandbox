@@ -43,7 +43,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.5.4"
+version = "0.5.5"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -58,16 +58,16 @@ panic = "abort"
 # manifest; members reference them via `{ workspace = true }`.
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
-microsandbox = { version = "0.5.4", path = "crates/microsandbox", default-features = false }
-microsandbox-db = { version = "0.5.4", path = "crates/db" }
-microsandbox-filesystem = { version = "0.5.4", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "0.5.4", path = "crates/image" }
-microsandbox-metrics = { version = "0.5.4", path = "crates/metrics" }
-microsandbox-migration = { version = "0.5.4", path = "crates/migration" }
-microsandbox-network = { version = "0.5.4", path = "crates/network" }
-microsandbox-protocol = { version = "0.5.4", path = "crates/protocol" }
-microsandbox-runtime = { version = "0.5.4", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "0.5.4", path = "crates/utils" }
+microsandbox = { version = "0.5.5", path = "crates/microsandbox", default-features = false }
+microsandbox-db = { version = "0.5.5", path = "crates/db" }
+microsandbox-filesystem = { version = "0.5.5", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "0.5.5", path = "crates/image" }
+microsandbox-metrics = { version = "0.5.5", path = "crates/metrics" }
+microsandbox-migration = { version = "0.5.5", path = "crates/migration" }
+microsandbox-network = { version = "0.5.5", path = "crates/network" }
+microsandbox-protocol = { version = "0.5.5", path = "crates/protocol" }
+microsandbox-runtime = { version = "0.5.5", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "0.5.5", path = "crates/utils" }
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }
 
