@@ -165,7 +165,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         // Flush each chunk so the host reader sees output before exit.
         let mut stdout = tokio::io::stdout();
         let mut stderr = tokio::io::stderr();
-        let mut exit_code = 0;
+        let mut exit_code = None;
         while let Some(event) = handle.recv().await {
             match event {
                 ExecEvent::Stdout(data) => {
@@ -177,7 +177,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
                     stderr.flush().await?;
                 }
                 ExecEvent::Exited { code } => {
-                    exit_code = code;
+                    exit_code = Some(code);
                     break;
                 }
                 ExecEvent::Failed(payload) => {
@@ -190,10 +190,13 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         }
 
         super::maybe_stop(&sandbox).await;
-        if exit_code != 0 {
-            std::process::exit(exit_code);
+        // No Exited event = abnormal end (e.g. agent dropped); fail like the
+        // buffered `collect()` path instead of reporting success.
+        match exit_code {
+            Some(0) => return Ok(()),
+            Some(code) => std::process::exit(code),
+            None => anyhow::bail!("exec session ended without exit event"),
         }
-        return Ok(());
     }
 
     if interactive {
