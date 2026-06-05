@@ -544,7 +544,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
         ui::detail_kv_indent("User", config.user.as_deref().unwrap_or("-"));
 
         if !config.env.is_empty() {
-            println!("  {}", style("Env:").cyan());
+            println!("  {}", style("Env:").dim());
             for var in &config.env {
                 println!("    {var}");
             }
