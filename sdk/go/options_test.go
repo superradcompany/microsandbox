@@ -570,16 +570,16 @@ func TestMountFactoryKinds(t *testing.T) {
 }
 
 func TestMountReadonlyOption(t *testing.T) {
-	m := Mount.Bind("/etc/hosts", MountOptions{Readonly: true, Noexec: true})
-	if !m.Readonly || !m.Noexec {
-		t.Error("Bind readonly/noexec: want true")
+	m := Mount.Bind("/etc/hosts", MountOptions{Readonly: true, Noexec: true, Nosuid: true, Nodev: true})
+	if !m.Readonly || !m.Noexec || !m.Nosuid || !m.Nodev {
+		t.Error("Bind readonly/noexec/nosuid/nodev: want true")
 	}
-	tm := Mount.Tmpfs(TmpfsOptions{SizeMiB: 64, Readonly: true, Noexec: true})
-	if !tm.Readonly || !tm.Noexec || tm.SizeMiB != 64 {
+	tm := Mount.Tmpfs(TmpfsOptions{SizeMiB: 64, Readonly: true, Noexec: true, Nosuid: true, Nodev: true})
+	if !tm.Readonly || !tm.Noexec || !tm.Nosuid || !tm.Nodev || tm.SizeMiB != 64 {
 		t.Errorf("Tmpfs: got %+v", tm)
 	}
-	d := Mount.Disk("/host/img", DiskOptions{Readonly: true, Noexec: true, Fstype: "xfs"})
-	if !d.Readonly || !d.Noexec || d.Fstype != "xfs" {
+	d := Mount.Disk("/host/img", DiskOptions{Readonly: true, Noexec: true, Nosuid: true, Nodev: true, Fstype: "xfs"})
+	if !d.Readonly || !d.Noexec || !d.Nosuid || !d.Nodev || d.Fstype != "xfs" {
 		t.Errorf("Disk: got %+v", d)
 	}
 }

@@ -6,6 +6,10 @@ icon: "chart-line"
 
 Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
 
+<Note>
+Need continuous shipping to Grafana, Datadog, Prometheus, or any other OTel-compatible backend? See [`msb-metrics`](/observability/msb-metrics), a sidecar binary that reads the same data and ships it over OTLP.
+</Note>
+
 ## Point-in-time
 
 <CodeGroup>
@@ -79,7 +83,7 @@ for {
 
 ## Fleet-wide metrics
 
-Get metrics for all running sandboxes at once. Useful for dashboards or capacity planning.
+Get the latest metrics for every running sandbox at once. Useful for dashboards or capacity planning.
 
 <CodeGroup>
 ```rust Rust

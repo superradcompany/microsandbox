@@ -4,7 +4,9 @@
 //! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
 //! — the VMM calls `_exit()` on guest shutdown.
 
+use std::mem::MaybeUninit;
 use std::path::PathBuf;
+use std::{os::fd::FromRawFd, os::fd::OwnedFd};
 
 use clap::Args;
 use microsandbox_runtime::{
@@ -46,6 +48,10 @@ pub struct SandboxArgs {
     /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
     pub agent_sock: PathBuf,
+
+    /// Read end of the attached-parent watchdog pipe.
+    #[arg(long = "parent-watch-fd", hide = true)]
+    pub parent_watch_fd: Option<i32>,
 
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
@@ -157,6 +163,17 @@ pub struct SandboxArgs {
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
+    let parent_watchdog = match args
+        .parent_watch_fd
+        .map(parent_watchdog_from_fd)
+        .transpose()
+    {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
     let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&args.disk) {
         Ok(disks) => disks,
@@ -214,6 +231,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
+        parent_watchdog,
         forward_output: args.forward_output,
         idle_timeout_secs: args.idle_timeout,
         max_duration_secs: args.max_duration,
@@ -238,6 +256,47 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
     };
 
     microsandbox_runtime::vm::enter(config)
+}
+
+fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_parent_watchdog_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn validate_parent_watchdog_fd(fd: i32, expected_fd: i32) -> Result<(), String> {
+    if fd < 0 {
+        return Err(format!(
+            "invalid --parent-watch-fd: fd must be non-negative, got {fd}"
+        ));
+    }
+    if fd != expected_fd {
+        return Err(format!(
+            "invalid --parent-watch-fd: expected {expected_fd}, got {fd}",
+        ));
+    }
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "invalid --parent-watch-fd {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "invalid --parent-watch-fd {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFIFO as libc::mode_t {
+        return Err(format!("invalid --parent-watch-fd {fd}: fd is not a pipe"));
+    }
+
+    Ok(())
 }
 
 /// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
@@ -305,6 +364,8 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
     use super::*;
 
     fn fmt(s: &str) -> String {
@@ -386,5 +447,41 @@ mod tests {
         assert_eq!(specs[0].id, "good");
         assert_eq!(specs[1].id, "another");
         assert!(specs[1].readonly);
+    }
+
+    #[test]
+    fn test_validate_parent_watchdog_fd_rejects_negative_fd() {
+        let err =
+            validate_parent_watchdog_fd(-1, microsandbox_runtime::vm::PARENT_WATCH_FD).unwrap_err();
+
+        assert!(err.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_validate_parent_watchdog_fd_rejects_wrong_fd_number() {
+        let err =
+            validate_parent_watchdog_fd(0, microsandbox_runtime::vm::PARENT_WATCH_FD).unwrap_err();
+
+        assert!(err.contains("expected 97"));
+    }
+
+    #[test]
+    fn test_validate_parent_watchdog_fd_rejects_regular_file() {
+        let file = tempfile::tempfile().unwrap();
+        let fd = file.as_raw_fd();
+
+        let err = validate_parent_watchdog_fd(fd, fd).unwrap_err();
+
+        assert!(err.contains("not a pipe"));
+    }
+
+    #[test]
+    fn test_validate_parent_watchdog_fd_accepts_pipe() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        validate_parent_watchdog_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd()).unwrap();
     }
 }

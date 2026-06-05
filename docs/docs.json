@@ -47,8 +47,7 @@
               "sandboxes/customize",
               "sandboxes/snapshots",
               "sandboxes/logs",
-              "sandboxes/metrics",
-              "sandboxes/events"
+              "sandboxes/metrics"
             ]
           },
           {
@@ -59,6 +58,14 @@
               "networking/dns",
               "networking/tls",
               "networking/security-model"
+            ]
+          },
+          {
+            "group": "Observability",
+            "icon": "gauge",
+            "pages": [
+              "observability/msb-metrics",
+              "observability/deep-dive"
             ]
           },
           {
@@ -99,7 +106,6 @@
                   "sdk/rust/networking",
                   "sdk/rust/secrets",
                   "sdk/rust/snapshots",
-                  "sdk/rust/events",
                   "sdk/rust/agent-client"
                 ]
               },
@@ -116,7 +122,6 @@
                   "sdk/typescript/networking",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
-                  "sdk/typescript/events",
                   "sdk/typescript/agent-client"
                 ]
               },
@@ -133,7 +138,7 @@
                   "sdk/python/networking",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
-                  "sdk/python/events",
+                  "sdk/python/images",
                   "sdk/python/agent-client"
                 ]
               },
@@ -151,7 +156,6 @@
                   "sdk/go/networking",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
-                  "sdk/go/events",
                   "sdk/go/agent-client"
                 ]
               }
@@ -184,16 +188,27 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker",
-              "recipes/docker-in-sandbox",
-              "recipes/local-images"
+              "recipes/docker/docker",
+              "recipes/docker/docker-in-sandbox",
+              "recipes/docker/local-images"
             ]
           },
           {
             "group": "Guest",
             "icon": "server",
             "pages": [
-              "recipes/systemd-services"
+              "recipes/guest/systemd-services"
+            ]
+          },
+          {
+            "group": "Metrics backends",
+            "icon": "paper-plane",
+            "pages": [
+              "recipes/metrics-backends/grafana-cloud",
+              "recipes/metrics-backends/grafana-alloy",
+              "recipes/metrics-backends/otel-collector",
+              "recipes/metrics-backends/prometheus",
+              "recipes/metrics-backends/datadog"
             ]
           }
         ]

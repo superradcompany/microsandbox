@@ -124,32 +124,20 @@ update_shell_config() {
     fi
 }
 
-# Configure all relevant shell config files with PATH and library path.
+# Configure all relevant shell config files with PATH.
 configure_shell() {
     detect_current_shell
 
     # Build POSIX block (sh, bash, zsh)
-    if [ "$OS" = "linux" ]; then
-        _lib_line='export LD_LIBRARY_PATH="$HOME/.microsandbox/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"'
-    else
-        _lib_line='export DYLD_LIBRARY_PATH="$HOME/.microsandbox/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"'
-    fi
     _path_line='export PATH="$HOME/.microsandbox/bin:$PATH"'
     _posix_block="${MARKER_START}
 ${_path_line}
-${_lib_line}
 ${MARKER_END}"
 
     # Build fish block
-    if [ "$OS" = "linux" ]; then
-        _fish_lib='set -gx LD_LIBRARY_PATH "$HOME/.microsandbox/lib" $LD_LIBRARY_PATH'
-    else
-        _fish_lib='set -gx DYLD_LIBRARY_PATH "$HOME/.microsandbox/lib" $DYLD_LIBRARY_PATH'
-    fi
     _fish_path='set -gx PATH "$HOME/.microsandbox/bin" $PATH'
     _fish_block="${MARKER_START}
 ${_fish_path}
-${_fish_lib}
 ${MARKER_END}"
 
     _did_bashrc=false
@@ -501,10 +489,8 @@ main() {
         printf "\n"
         if [ "$OS" = "linux" ]; then
             printf "    ${DIM}export${RESET} PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
-            printf "    ${DIM}export${RESET} LD_LIBRARY_PATH=\"%s\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"\n" "$LIB_DIR"
         elif [ "$OS" = "darwin" ]; then
             printf "    ${DIM}export${RESET} PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
-            printf "    ${DIM}export${RESET} DYLD_LIBRARY_PATH=\"%s\${DYLD_LIBRARY_PATH:+:\$DYLD_LIBRARY_PATH}\"\n" "$LIB_DIR"
         fi
         printf "\n"
     fi

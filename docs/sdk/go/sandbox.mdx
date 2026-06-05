@@ -125,20 +125,6 @@ defer func() {
 
 ---
 
-#### CreateSandboxDetached()
-
-```go
-func CreateSandboxDetached(
-    ctx context.Context,
-    name string,
-    opts ...SandboxOption,
-) (*Sandbox, error)
-```
-
-Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox). Sandbox names are limited to 128 UTF-8 bytes.
-
----
-
 #### StartSandbox()
 
 ```go
@@ -234,7 +220,7 @@ Return the sandbox's name.
 func (s *Sandbox) FS() *SandboxFs
 ```
 
-Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for the full API.
+Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for API details.
 
 ---
 
@@ -712,6 +698,16 @@ Shell binary used by [`Sandbox.Shell`](#shell) and [`Sandbox.AttachShell`](#atta
 
 ---
 
+#### WithSecurityProfile()
+
+```go
+func WithSecurityProfile(profile SecurityProfile) SandboxOption
+```
+
+Set the in-guest security profile. Use `SecurityProfileRestricted` for stronger hardening that sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts.
+
+---
+
 #### WithEnv()
 
 ```go
@@ -952,8 +948,8 @@ A lightweight metadata reference to a sandbox returned by [`GetSandbox`](#getsan
 | `Stop(ctx)`             | `error`                           | Graceful shutdown                                 |
 | `Kill(ctx)`             | `error`                           | Force terminate                                   |
 | `Remove(ctx)`           | `error`                           | Delete sandbox and persisted state                |
-| `Snapshot(ctx, name)`   | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox under a bare name   |
-| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox to an explicit path |
+| `Snapshot(ctx, name)`   | `(*SnapshotArtifact, error)`      | Snapshot stopped/crashed sandbox under a bare name |
+| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)`      | Snapshot stopped/crashed sandbox to an explicit path |
 
 ---
 
@@ -973,6 +969,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | CPUs             | `uint8`                                              | Virtual CPUs                                                         |
 | Workdir          | `string`                                             | Default working directory                                            |
 | Shell            | `string`                                             | Shell binary used by `Shell` calls                                   |
+| SecurityProfile  | [`SecurityProfile`](#securityprofile)                | In-guest security profile                                            |
 | Hostname         | `string`                                             | Guest hostname                                                       |
 | User             | `string`                                             | Default guest user                                                   |
 | Replace          | `bool`                                               | Replace existing sandbox with same name                              |
@@ -1003,6 +1000,19 @@ type SandboxOption func(*SandboxConfig)
 ```
 
 A functional option for [`CreateSandbox`](#createsandbox). All `WithX` helpers listed above return a `SandboxOption`.
+
+### SecurityProfile
+
+```go
+type SecurityProfile string
+
+const (
+    SecurityProfileDefault    SecurityProfile = "default"
+    SecurityProfileRestricted SecurityProfile = "restricted"
+)
+```
+
+Sandbox-wide in-guest security profile.
 
 ### InitConfig
 

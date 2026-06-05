@@ -53,8 +53,7 @@ export interface NativeBindings {
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
-  readonly imageGcLayers: () => Promise<number>;
-  readonly imageGc: () => Promise<number>;
+  readonly imagePrune: () => Promise<NapiImagePruneReport>;
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
@@ -94,11 +93,16 @@ export interface NapiAgentClient {
 export type NapiBuilderCtor<T> = new () => T;
 export type NapiSandboxConfig = Record<string, unknown>;
 
+export interface NapiSandboxListFilter {
+  labels?: Record<string, string>;
+}
+
 export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
   list(): Promise<NapiSandboxInfo[]>;
+  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxInfo[]>;
   remove(name: string): Promise<void>;
 }
 
@@ -124,10 +128,12 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
+  detached(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;
   shell(shell: string): this;
+  security(profile: "default" | "restricted"): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
@@ -152,6 +158,8 @@ export interface NapiSandboxBuilderSetters {
   secretEnv(envVar: string, value: string, allowedHost: string): this;
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
+  label(key: string, value: string): this;
+  labels(labels: Record<string, string>): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
   script(name: string, content: string): this;
@@ -167,9 +175,7 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
-  createDetached(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
-  createDetachedWithPullProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandbox {
@@ -511,6 +517,15 @@ export interface NapiImageLayerDetail {
 export interface NapiImageDetail extends NapiImageInfo {
   readonly config: NapiImageConfigDetail | null | undefined;
   readonly layers: NapiImageLayerDetail[];
+}
+
+export interface NapiImagePruneReport {
+  readonly imageRefsRemoved: number;
+  readonly manifestsRemoved: number;
+  readonly layersRemoved: number;
+  readonly fsmetaRemoved: number;
+  readonly vmdkRemoved: number;
+  readonly bytesReclaimed: number | null | undefined;
 }
 
 export interface NapiSetup {
@@ -888,6 +903,8 @@ export interface NapiMountBuilder {
   fstype(fstype: string): this;
   readonly(): this;
   noexec(): this;
+  nosuid(): this;
+  nodev(): this;
   size(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
@@ -899,6 +916,8 @@ export interface NapiVolumeMount {
   readonly guest: string;
   readonly readonly: boolean;
   readonly noexec: boolean;
+  readonly nosuid: boolean;
+  readonly nodev: boolean;
   readonly host?: string;
   readonly name?: string;
   readonly sizeMib?: number;

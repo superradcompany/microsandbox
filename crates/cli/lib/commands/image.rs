@@ -1,12 +1,17 @@
 //! `msb image` command — manage OCI images.
 
+use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use console::style;
 use microsandbox::image::Image;
-use microsandbox_image::Registry;
+use microsandbox_image::{
+    CachedImageMetadata, ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer,
+    ImageSaveRequest, Registry,
+};
 
 use crate::ui;
 
@@ -37,9 +42,18 @@ pub enum ImageCommands {
     /// Show detailed image information.
     Inspect(ImageInspectArgs),
 
+    /// Load an image archive from tar.
+    Load(ImageLoadArgs),
+
+    /// Save one or more cached images to a tar archive.
+    Save(ImageSaveArgs),
+
     /// Delete one or more cached images.
     #[command(visible_alias = "rm")]
     Remove(ImageRemoveArgs),
+
+    /// Remove cached images not used by sandboxes.
+    Prune(ImagePruneArgs),
 }
 
 /// Arguments for `msb image list`.
@@ -65,6 +79,51 @@ pub struct ImageInspectArgs {
     pub format: Option<String>,
 }
 
+/// Arguments for `msb image load`.
+#[derive(Debug, Args)]
+pub struct ImageLoadArgs {
+    /// Read archive from a tar file instead of stdin.
+    #[arg(short, long, value_name = "PATH")]
+    pub input: Option<PathBuf>,
+
+    /// Add a local image reference to the first imported image.
+    #[arg(short, long, value_name = "REF")]
+    pub tag: Vec<String>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Arguments for `msb image save`.
+#[derive(Debug, Args)]
+pub struct ImageSaveArgs {
+    /// Image reference(s) to save.
+    #[arg(required = true)]
+    pub references: Vec<String>,
+
+    /// Archive format to write.
+    #[arg(long, value_enum, default_value = "docker")]
+    pub format: ImageSaveFormat,
+
+    /// Write archive to a tar file instead of stdout.
+    #[arg(short, long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Archive format for `msb image save`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ImageSaveFormat {
+    /// Docker `docker save` compatible archive.
+    Docker,
+    /// OCI Image Layout archive.
+    Oci,
+}
+
 /// Arguments for `msb image remove`.
 #[derive(Debug, Args)]
 pub struct ImageRemoveArgs {
@@ -75,6 +134,22 @@ pub struct ImageRemoveArgs {
     /// Remove even if the image is used by existing sandboxes.
     #[arg(short, long)]
     pub force: bool,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Arguments for `msb image prune`.
+#[derive(Debug, Args)]
+pub struct ImagePruneArgs {
+    /// Do not prompt for confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    /// Output format (json).
+    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
+    pub format: Option<String>,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -101,7 +176,10 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
         }
         ImageCommands::List(args) => run_list(args).await,
         ImageCommands::Inspect(args) => run_inspect(args).await,
+        ImageCommands::Load(args) => run_load(args).await,
+        ImageCommands::Save(args) => run_save(args).await,
         ImageCommands::Remove(args) => run_remove(args).await,
+        ImageCommands::Prune(args) => run_prune(args).await,
     }
 }
 
@@ -250,7 +328,10 @@ async fn run_pull_inner(
         } else {
             let elapsed = start.elapsed();
             if elapsed.as_millis() > 500 {
-                format!(" ({})", ui::format_duration(elapsed))
+                format!(
+                    " ({})",
+                    microsandbox_utils::format::format_duration(elapsed)
+                )
             } else {
                 String::new()
             }
@@ -326,7 +407,7 @@ pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
                     "architecture": img.architecture(),
                     "os": img.os(),
                     "layer_count": img.layer_count(),
-                    "created_at": img.created_at().map(|dt| ui::format_datetime(&dt)),
+                    "created_at": img.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 })
             })
             .collect();
@@ -410,7 +491,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
             "architecture": detail.handle.architecture(),
             "os": detail.handle.os(),
             "layer_count": detail.handle.layer_count(),
-            "created_at": detail.handle.created_at().map(|dt| ui::format_datetime(&dt)),
+            "created_at": detail.handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "config": config_json,
             "layers": layers_json,
         });
@@ -463,7 +544,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
         ui::detail_kv_indent("User", config.user.as_deref().unwrap_or("-"));
 
         if !config.env.is_empty() {
-            println!("  {}", style("Env:").cyan());
+            println!("  {}", style("Env:").dim());
             for var in &config.env {
                 println!("    {var}");
             }
@@ -487,6 +568,115 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
                 media
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Execute `msb image load` / `msb load`.
+pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
+    let global = microsandbox::config::config();
+    let cache_dir = global.cache_dir();
+    let temp_input;
+    let input_path = if let Some(path) = args.input.as_ref() {
+        path
+    } else {
+        temp_input = tempfile::NamedTempFile::new()?;
+        let mut input = io::stdin().lock();
+        let mut output = temp_input.reopen()?;
+        io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        temp_input.path()
+    };
+
+    let loaded = microsandbox_image::load_archive(
+        &cache_dir,
+        input_path,
+        ImageLoadOptions {
+            tags: args.tag.clone(),
+        },
+    )
+    .await?;
+
+    for image in &loaded {
+        Image::persist(&image.reference, image.metadata.clone()).await?;
+    }
+
+    if !args.quiet {
+        for image in &loaded {
+            eprintln!(
+                "   {} {:<12} {}",
+                style("✓").green(),
+                "Loaded",
+                image.reference
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute `msb image save` / `msb save`.
+pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
+    let global = microsandbox::config::config();
+    let cache_dir = global.cache_dir();
+    let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
+    let mut requests = Vec::with_capacity(args.references.len());
+
+    for reference in &args.references {
+        let parsed: microsandbox_image::Reference = reference.parse()?;
+        let metadata = cache
+            .read_image_metadata(&parsed)?
+            .ok_or_else(|| anyhow::anyhow!("image metadata not cached: {reference}"))?;
+        let config = save_config_from_metadata(&metadata);
+        let layers = metadata
+            .layers
+            .iter()
+            .map(|layer| ImageSaveLayer {
+                diff_id: layer.diff_id.clone(),
+            })
+            .collect();
+
+        requests.push(ImageSaveRequest {
+            reference: reference.clone(),
+            config,
+            raw_config_json: metadata.raw_config_json,
+            layers,
+        });
+    }
+
+    let temp_output;
+    let output_path = if let Some(path) = args.output.as_ref() {
+        path
+    } else {
+        temp_output = tempfile::NamedTempFile::new()?;
+        temp_output.path()
+    };
+    let output_path_for_task = output_path.to_path_buf();
+    let format = match args.format {
+        ImageSaveFormat::Docker => ImageArchiveFormat::Docker,
+        ImageSaveFormat::Oci => ImageArchiveFormat::Oci,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
+        microsandbox_image::save_archive(&cache, &output_path_for_task, &requests, format)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("save task panicked: {e}"))??;
+
+    if args.output.is_none() {
+        let mut file = std::fs::File::open(output_path)?;
+        let mut stdout = io::stdout().lock();
+        io::copy(&mut file, &mut stdout)?;
+        stdout.flush()?;
+    } else if !args.quiet {
+        eprintln!(
+            "   {} {:<12} {}",
+            style("✓").green(),
+            "Saved",
+            output_path.display()
+        );
     }
 
     Ok(())
@@ -524,13 +714,87 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Execute `msb image prune`.
+pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
+    if !args.yes {
+        if !io::stdin().is_terminal() {
+            anyhow::bail!("non-interactive terminal; use --yes to prune cached images");
+        }
+
+        eprint!("Remove all cached images not used by sandboxes? [y/N] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            if !args.quiet {
+                eprintln!("Aborted.");
+            }
+            return Ok(());
+        }
+    }
+
+    let report = Image::prune().await?;
+
+    if args.format.as_deref() == Some("json") {
+        let json = serde_json::json!({
+            "image_refs_removed": report.image_refs_removed,
+            "manifests_removed": report.manifests_removed,
+            "layers_removed": report.layers_removed,
+            "fsmeta_removed": report.fsmeta_removed,
+            "vmdk_removed": report.vmdk_removed,
+            "bytes_reclaimed": report.bytes_reclaimed,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    if args.quiet {
+        return Ok(());
+    }
+
+    if report.image_refs_removed == 0
+        && report.manifests_removed == 0
+        && report.layers_removed == 0
+        && report.fsmeta_removed == 0
+        && report.vmdk_removed == 0
+    {
+        eprintln!("Nothing to prune.");
+        return Ok(());
+    }
+
+    ui::success("Pruned", "image cache");
+    ui::detail_kv_indent("Image refs", &report.image_refs_removed.to_string());
+    ui::detail_kv_indent("Manifests", &report.manifests_removed.to_string());
+    ui::detail_kv_indent("Layers", &report.layers_removed.to_string());
+
+    if report.fsmeta_removed > 0 {
+        ui::detail_kv_indent("Fsmeta", &report.fsmeta_removed.to_string());
+    }
+
+    if report.vmdk_removed > 0 {
+        ui::detail_kv_indent("VMDK", &report.vmdk_removed.to_string());
+    }
+
+    if let Some(bytes) = report.bytes_reclaimed {
+        ui::detail_kv_indent("Reclaimed", &format_bytes_u64(bytes));
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
 /// Format bytes as a human-readable string.
 fn format_bytes(bytes: i64) -> String {
-    super::ui::format_bytes(bytes.max(0) as u64)
+    microsandbox_utils::format::format_bytes(bytes.max(0) as u64)
+}
+
+/// Format bytes as a human-readable string.
+fn format_bytes_u64(bytes: u64) -> String {
+    microsandbox_utils::format::format_bytes(bytes)
 }
 
 /// Print the pull failure indicator line to stderr.
@@ -547,4 +811,41 @@ fn truncate_digest(digest: &str) -> String {
     } else {
         digest.chars().take(19).collect()
     }
+}
+
+fn save_config_from_metadata(metadata: &CachedImageMetadata) -> ImageSaveConfig {
+    let (architecture, os) = raw_config_platform(&metadata.raw_config_json);
+
+    ImageSaveConfig {
+        architecture,
+        os,
+        env: metadata.config.env.clone(),
+        entrypoint: metadata.config.entrypoint.clone(),
+        cmd: metadata.config.cmd.clone(),
+        working_dir: metadata.config.working_dir.clone(),
+        user: metadata.config.user.clone(),
+        labels: metadata
+            .config
+            .labels
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    }
+}
+
+fn raw_config_platform(raw_config_json: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config_json) else {
+        return (None, None);
+    };
+
+    let architecture = value
+        .get("architecture")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let os = value
+        .get("os")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    (architecture, os)
 }

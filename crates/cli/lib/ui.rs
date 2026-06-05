@@ -101,7 +101,10 @@ impl Spinner {
         if !self.quiet {
             let elapsed = self.start.elapsed();
             let duration = if elapsed.as_millis() > 500 {
-                format!(" ({})", format_duration(elapsed))
+                format!(
+                    " ({})",
+                    microsandbox_utils::format::format_duration(elapsed)
+                )
             } else {
                 String::new()
             };
@@ -345,7 +348,7 @@ pub fn detail_kv(key: &str, value: &str) {
 
 /// Print an indented key-value pair in detail views.
 pub fn detail_kv_indent(key: &str, value: &str) {
-    println!("  {:<14}{value}", style(format!("{key}:")).cyan());
+    println!("  {:<14}{value}", style(format!("{key}:")).dim());
 }
 
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.
@@ -385,6 +388,16 @@ pub fn parse_env(s: &str) -> Result<(String, String), String> {
     }
 }
 
+/// Parse a `KEY=VALUE` label argument. Unlike [`parse_env`], a missing `=` does
+/// not trigger a host-environment lookup — a bare `KEY` is a valueless marker
+/// label (empty value), matching Docker's label semantics.
+pub fn parse_label(s: &str) -> (String, String) {
+    match s.find('=') {
+        Some(eq_pos) => (s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()),
+        None => (s.to_string(), String::new()),
+    }
+}
+
 /// Generate a random sandbox name.
 pub fn generate_name() -> String {
     use rand::RngExt;
@@ -392,39 +405,61 @@ pub fn generate_name() -> String {
     format!("msb-{id:08x}")
 }
 
-/// Format a duration for display.
-pub fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else {
-        let mins = secs as u64 / 60;
-        let remaining = secs as u64 % 60;
-        format!("{mins}m{remaining}s")
-    }
-}
-
-/// Format a byte count with binary units.
-pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// Format a chrono DateTime for display.
+/// Format a UTC timestamp for human display in the system's local timezone.
 pub fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    dt.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// Format a UTC timestamp for machine-readable JSON output.
+pub fn format_json_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339()
+}
+
+/// Format an RFC 3339 timestamp for human display in the system's local timezone.
+pub fn format_rfc3339_datetime(s: &str) -> Result<String, chrono::ParseError> {
+    chrono::DateTime::parse_from_rfc3339(s).map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn json_datetime_uses_rfc3339_utc() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-05-31T09:09:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            super::format_json_datetime(&dt),
+            "2026-05-31T09:09:00+00:00"
+        );
+    }
+
+    #[test]
+    fn display_datetime_uses_local_timezone() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-05-31T09:09:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let expected = dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert_eq!(super::format_datetime(&dt), expected);
+        assert_eq!(
+            super::format_rfc3339_datetime("2026-05-31T09:09:00Z").unwrap(),
+            expected
+        );
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

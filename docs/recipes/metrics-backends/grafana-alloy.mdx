@@ -1,0 +1,104 @@
+---
+title: Grafana Alloy
+description: Forward msb-metrics output to Grafana Cloud (or anywhere) via local Alloy
+icon: "route"
+---
+
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
+
+[Grafana Alloy](https://grafana.com/oss/alloy/) is Grafana's
+OpenTelemetry Collector distribution with a programmable pipeline
+DSL. Run it locally as a forwarder so `msb-metrics` doesn't have to
+deal with retries, batching, credential rotation, or backend hiccups.
+
+This is the recommended setup for production deployments.
+
+```mermaid
+flowchart LR
+    MSB[msb-metrics] -->|OTLP<br/>localhost:4317| ALLOY[Alloy]
+    ALLOY -->|OTLP HTTP<br/>+ Basic auth| GC[Grafana Cloud<br/>OTLP gateway]
+    ALLOY -.->|buffers,<br/>retries,<br/>fan-out| OTHER[Other backends<br/>(optional)]
+```
+
+Alloy sits between `msb-metrics` and the upstream backend. `msb-metrics`
+ships locally over plain OTLP with no auth; Alloy owns the credentials,
+the upstream connection, and the buffering through hiccups.
+
+<Steps>
+  <Step title="Install Alloy">
+    Follow the [Alloy install guide](https://grafana.com/docs/alloy/latest/set-up/install/)
+    for your platform.
+  </Step>
+
+  <Step title="Configure an OTLP receiver and Grafana Cloud exporter">
+    Save as `/etc/alloy/config.alloy`:
+
+    ```alloy
+    otelcol.receiver.otlp "ingest" {
+      grpc { endpoint = "127.0.0.1:4317" }
+      http { endpoint = "127.0.0.1:4318" }
+
+      output {
+        metrics = [otelcol.processor.batch.metrics.input]
+      }
+    }
+
+    otelcol.processor.batch "metrics" {
+      output {
+        metrics = [otelcol.exporter.otlphttp.grafana_cloud.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "grafana_cloud" {
+      client {
+        endpoint = "https://otlp-gateway-prod-us-east-2.grafana.net/otlp"
+        auth     = otelcol.auth.basic.grafana_cloud.handler
+      }
+    }
+
+    otelcol.auth.basic "grafana_cloud" {
+      username = sys.env("GC_INSTANCE_ID")
+      password = sys.env("GC_API_TOKEN")
+    }
+    ```
+
+    Sub the OTLP gateway region for yours.
+  </Step>
+
+  <Step title="Start Alloy">
+    ```sh
+    GC_INSTANCE_ID=...  GC_API_TOKEN=...  alloy run /etc/alloy/config.alloy
+    ```
+  </Step>
+
+  <Step title="Point msb-metrics at Alloy">
+    ```sh
+    msb-metrics otel --endpoint=http://localhost:4317
+    ```
+
+    Alloy owns the upstream connection from here.
+  </Step>
+</Steps>
+
+## Why this is better for production
+
+- **Buffering survives backend hiccups.** Alloy holds data when
+  Grafana Cloud is slow or unreachable; `msb-metrics`'s per-exporter
+  buffer alone has a ~20MB cap at the default `--max-buffered=60` with
+  1000 sandboxes.
+- **Credential rotation doesn't touch `msb-metrics`.** Rotate the
+  Grafana Cloud token in Alloy's config (or via env vars + a
+  config reload) without restarting the collector.
+- **Multiple destinations.** Alloy can fan out to additional backends
+  (Prometheus remote-write, Mimir, etc.) without changing the
+  `msb-metrics` configuration.
+
+## Reference
+
+- [Alloy `otelcol.receiver.otlp`](https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.receiver.otlp/)
+- [Alloy `otelcol.exporter.otlphttp`](https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.exporter.otlphttp/)
+- [Forward OpenTelemetry data with Alloy](https://grafana.com/docs/alloy/latest/collect/opentelemetry-to-lgtm-stack/)

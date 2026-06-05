@@ -5,7 +5,7 @@ description: TypeScript SDK - Sandbox API reference
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()` or `.createDetached()`. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
+The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()`. Use `.detached(true)` before `.create()` for detached/background mode. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 ```typescript
 import { Sandbox } from "microsandbox";
@@ -27,7 +27,7 @@ await using sandbox = await Sandbox.builder("demo")
 static builder(name: string): SandboxBuilder
 ```
 
-Begin building a new sandbox. Configure it with chainable setters, then call `.create()` or `.createDetached()` to boot it.
+Begin building a new sandbox. Configure it with chainable setters, then call `.create()` to boot it.
 
 **Parameters**
 
@@ -193,7 +193,7 @@ Start a graceful drain. Existing commands run to completion, new `exec` calls ar
 fs(): SandboxFs
 ```
 
-Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem) for the full API.
+Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem) for API details.
 
 **Returns**
 
@@ -562,6 +562,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `quietLogs()` | Suppress log output |
 | `workdir(path)` | Default working directory for commands |
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
+| `security(profile)` | In-guest security profile (`"default"` or `"restricted"`) |
 | `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
 | `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
@@ -586,12 +587,11 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `disableNetwork()` | Disable networking entirely |
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
-| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
+| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<env_var>`. |
+| `detached(enabled)` | Create in detached/background mode when `true` |
 | `build(): Promise<SandboxConfig>` | Materialize without booting. Consumes the builder |
-| `create(): Promise<Sandbox>` | Build and boot in attached mode |
-| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
-| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
-| `createDetachedWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in detached mode while streaming image pull progress |
+| `create(): Promise<Sandbox>` | Build and boot |
+| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot while streaming image pull progress |
 
 ### LogLevel
 
@@ -702,7 +702,7 @@ const sandbox = await creation.awaitSandbox();
 
 ### PullProgressCreate
 
-Async iterable creation handle returned by `Sandbox.builder(name).createWithPullProgress()` and `Sandbox.builder(name).createDetachedWithPullProgress()`. Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
+Async iterable creation handle returned by `Sandbox.builder(name).createWithPullProgress()`. Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -724,6 +724,7 @@ Configuration object produced by `SandboxBuilder.build()` and returned by `sandb
 | quietLogs | `boolean` | Suppress log output |
 | workdir | `string \| null` | Default working directory |
 | shell | `string \| null` | Shell binary |
+| securityProfile | `"default" \| "restricted"` | In-guest security profile |
 | entrypoint | `string[] \| null` | Override image entrypoint |
 | cmd | `string[] \| null` | Override image cmd |
 | hostname | `string \| null` | Guest hostname |

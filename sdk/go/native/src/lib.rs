@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, SandboxFilter, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -449,7 +449,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
-    pub const PRE05_SANDBOX_RESTART_REQUIRED: &str = "pre05_sandbox_restart_required";
+    pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
 
@@ -508,12 +508,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::AgentClient(
-                microsandbox::AgentClientError::Pre05SandboxRestartRequired,
-            ) => {
-                // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-                // compatibility for versions before 0.5 is no longer supported.
-                error_kind::PRE05_SANDBOX_RESTART_REQUIRED
-            }
+                microsandbox::AgentClientError::UnsupportedOperation { .. },
+            ) => error_kind::UNSUPPORTED_OPERATION,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -903,6 +899,12 @@ struct RegistryAuthOpts {
     password: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct SandboxListFilter {
+    #[serde(default)]
+    labels: HashMap<String, String>,
+}
+
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
@@ -913,7 +915,10 @@ struct SandboxCreateOpts {
     cpus: Option<u8>,
     workdir: Option<String>,
     shell: Option<String>,
+    security_profile: Option<String>,
     env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
     #[serde(default)]
     detached: bool,
     hostname: Option<String>,
@@ -1032,6 +1037,10 @@ struct MountSpec {
     readonly: bool,
     #[serde(default)]
     noexec: bool,
+    #[serde(default)]
+    nosuid: bool,
+    #[serde(default)]
+    nodev: bool,
     size_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
@@ -1445,6 +1454,16 @@ fn parse_pull_policy(s: &str) -> Result<PullPolicy, FfiError> {
     }
 }
 
+fn parse_security_profile(s: &str) -> Result<microsandbox::sandbox::SecurityProfile, FfiError> {
+    match s {
+        "default" => Ok(microsandbox::sandbox::SecurityProfile::Default),
+        "restricted" => Ok(microsandbox::sandbox::SecurityProfile::Restricted),
+        other => Err(FfiError::invalid_argument(format!(
+            "unknown security profile: {other}"
+        ))),
+    }
+}
+
 fn apply_secret(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     s: &SecretOpts,
@@ -1602,6 +1621,8 @@ fn apply_volume(
     let fstype = m.fstype.clone();
     let readonly = m.readonly;
     let noexec = m.noexec;
+    let nosuid = m.nosuid;
+    let nodev = m.nodev;
     let size_mib = m.size_mib;
 
     let kinds_set: u8 =
@@ -1635,6 +1656,12 @@ fn apply_volume(
         }
         if noexec {
             mb = mb.noexec();
+        }
+        if nosuid {
+            mb = mb.nosuid();
+        }
+        if nodev {
+            mb = mb.nodev();
         }
         if let Some(siz) = size_mib {
             mb = mb.size(siz);
@@ -1726,6 +1753,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_log_level(s)?),
             None => None,
         };
+        let security_profile = match opts.security_profile.as_deref() {
+            Some(s) => Some(parse_security_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -1763,6 +1794,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(s) = opts.shell {
                 builder = builder.shell(s);
+            }
+            if let Some(profile) = security_profile {
+                builder = builder.security(profile);
             }
             if let Some(h) = opts.hostname {
                 builder = builder.hostname(h);
@@ -1817,6 +1851,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
             }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
+            }
             // Top-level ports.
             for (host, guest) in &opts.ports {
                 builder = builder.port(*host, *guest);
@@ -1844,11 +1881,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
-                builder.create_detached().await?
-            } else {
-                builder.create().await?
-            };
+            let sandbox = builder.detached(opts.detached).create().await?;
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
         }))
@@ -2190,12 +2223,17 @@ pub unsafe extern "C" fn msb_sandbox_owns_lifecycle(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_list(
     cancel_id: u64,
+    filter_json: *const c_char,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
+        let filter_raw = unsafe { cstr(filter_json) }?;
+        let filter: SandboxListFilter = serde_json::from_str(&filter_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid filter JSON: {e}")))?;
+        let filter = SandboxFilter::new().labels(filter.labels);
         Ok(Box::pin(async move {
-            let handles = Sandbox::list().await.map_err(FfiError::from)?;
+            let handles = Sandbox::list_with(filter).await.map_err(FfiError::from)?;
             let mut out = String::from("[");
             for (i, h) in handles.iter().enumerate() {
                 if i > 0 {
@@ -4255,6 +4293,17 @@ fn image_handle_json(h: &microsandbox::image::ImageHandle) -> serde_json::Value 
     })
 }
 
+fn image_prune_report_json(report: microsandbox::image::ImagePruneReport) -> serde_json::Value {
+    serde_json::json!({
+        "image_refs_removed": report.image_refs_removed,
+        "manifests_removed": report.manifests_removed,
+        "layers_removed": report.layers_removed,
+        "fsmeta_removed": report.fsmeta_removed,
+        "vmdk_removed": report.vmdk_removed,
+        "bytes_reclaimed": report.bytes_reclaimed,
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_image_get(
     cancel_id: u64,
@@ -4362,33 +4411,17 @@ pub unsafe extern "C" fn msb_image_remove(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc_layers(
+pub unsafe extern "C" fn msb_image_prune(
     cancel_id: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc_layers()
+            let report = microsandbox::image::Image::prune()
                 .await
                 .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
-        }))
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc(
-    cancel_id: u64,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let removed = microsandbox::image::Image::gc()
-                .await
-                .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
+            Ok(image_prune_report_json(report).to_string())
         }))
     })
 }

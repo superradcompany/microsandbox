@@ -8,6 +8,7 @@ use napi_derive::napi;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
+    SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
 
@@ -146,6 +147,14 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Create the sandbox in detached/background mode when enabled.
+    #[napi]
+    pub fn detached(&mut self, detached: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.detached(detached));
+        self
+    }
+
     /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
     #[napi(js_name = "metricsSampleIntervalMs")]
     pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {
@@ -176,6 +185,23 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.shell(shell));
         self
+    }
+
+    /// In-guest security profile (`"default"` or `"restricted"`).
+    #[napi]
+    pub fn security(&mut self, profile: String) -> Result<&Self> {
+        let profile = match profile.as_str() {
+            "default" => RustSecurityProfile::Default,
+            "restricted" => RustSecurityProfile::Restricted,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid security profile `{other}` (expected default | restricted)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.security(profile));
+        Ok(self)
     }
 
     /// Configure registry connection settings via a callback.
@@ -430,6 +456,22 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Attach a single label for metrics attribution.
+    #[napi]
+    pub fn label(&mut self, key: String, value: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.label(key, value));
+        self
+    }
+
+    /// Attach labels from an object for metrics attribution.
+    #[napi]
+    pub fn labels(&mut self, labels: std::collections::HashMap<String, String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.labels(labels));
+        self
+    }
+
     /// Set a hard rlimit (soft = hard).
     #[napi]
     pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
@@ -545,7 +587,7 @@ impl JsSandboxBuilder {
             .map_err(|e| napi::Error::from_reason(format!("failed to serialize config: {e}")))
     }
 
-    /// Create and start the sandbox in attached mode.
+    /// Create and start the sandbox.
     ///
     /// # Safety
     /// `&mut self` async is required because we drain `inner`
@@ -558,21 +600,6 @@ impl JsSandboxBuilder {
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner: RustSandbox = b.create().await.map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
-    }
-
-    /// Create and start the sandbox in detached mode (survives the
-    /// parent process).
-    ///
-    /// # Safety
-    /// Same justification as `create`.
-    #[napi(js_name = "createDetached")]
-    pub async unsafe fn create_detached(&mut self) -> Result<JsSandbox> {
-        let b = self
-            .inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
-        let inner: RustSandbox = b.create_detached().await.map_err(to_napi_error)?;
         Ok(JsSandbox::from_rust(inner))
     }
 
@@ -591,27 +618,6 @@ impl JsSandboxBuilder {
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let (handle, task) = b.create_with_pull_progress().map_err(to_napi_error)?;
-        Ok(JsPullProgressCreate {
-            stream: JsPullProgressStream::from_handle(handle),
-            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
-        })
-    }
-
-    /// Detached variant of `createWithPullProgress`.
-    ///
-    /// # Safety
-    /// Same justification as `create`.
-    #[napi(js_name = "createDetachedWithPullProgress")]
-    pub async unsafe fn create_detached_with_pull_progress(
-        &mut self,
-    ) -> Result<JsPullProgressCreate> {
-        let b = self
-            .inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
-        let (handle, task) = b
-            .create_detached_with_pull_progress()
-            .map_err(to_napi_error)?;
         Ok(JsPullProgressCreate {
             stream: JsPullProgressStream::from_handle(handle),
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),

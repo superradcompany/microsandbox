@@ -1,0 +1,72 @@
+---
+title: Grafana Cloud
+description: Ship msb-metrics output to Grafana Cloud's OTLP gateway
+icon: "cloud-arrow-up"
+---
+
+<Note>
+This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+See the msb-metrics page for the flag reference, metric names, and
+deployment constraints.
+</Note>
+
+Grafana Cloud exposes a region-specific OTLP gateway at
+`otlp-gateway-prod-<region>.grafana.net`. `msb-metrics` ships directly
+to it using HTTP/Protobuf and Basic auth.
+
+<Steps>
+  <Step title="Get your OTLP endpoint and credentials">
+    In the Grafana Cloud admin console, open **My Account → Connections
+    → OpenTelemetry**. Copy three values:
+
+    - **Endpoint URL** (looks like
+      `https://otlp-gateway-prod-us-east-2.grafana.net/otlp`)
+    - **Instance ID** (a numeric instance identifier)
+    - **API token** with scope `metrics:write` (create one if you
+      don't already have it)
+  </Step>
+
+  <Step title="Build the Basic auth header">
+    Grafana Cloud's OTLP gateway uses HTTP Basic auth, where the
+    username is your instance ID and the password is the API token.
+
+    ```sh
+    GC_ID=...      # numeric instance id
+    GC_TOKEN=...   # API token with metrics:write
+    AUTH="Basic $(printf '%s:%s' "$GC_ID" "$GC_TOKEN" | base64 | tr -d '\n')"
+    ```
+  </Step>
+
+  <Step title="Run msb-metrics">
+    ```sh
+    msb-metrics otel \
+      --endpoint=https://otlp-gateway-prod-us-east-2.grafana.net/otlp/v1/metrics \
+      --protocol=http \
+      --header="Authorization=${AUTH}"
+    ```
+
+    Sub the region in the URL for yours. If Grafana shows you the base
+    OTLP URL ending in `/otlp`, append `/v1/metrics` for this HTTP
+    metrics-only exporter.
+  </Step>
+
+  <Step title="Verify">
+    Boot a sandbox (`msb run alpine`) and open Grafana → **Explore**.
+    Query `microsandbox_cpu_utilization` (PromQL view of the OTel
+    `microsandbox.cpu.utilization` gauge). You should see data within
+    the next flush interval (default 10s).
+  </Step>
+</Steps>
+
+## Production: prefer Grafana Alloy
+
+For long-running deployments, point `msb-metrics` at a local
+[Grafana Alloy](/recipes/metrics-backends/grafana-alloy)
+instance instead of the OTLP gateway directly. Alloy handles
+batching, retries, credential rotation, and buffering through Grafana
+Cloud hiccups without touching `msb-metrics`.
+
+## Reference
+
+- [Grafana Cloud OTLP endpoint reference](https://grafana.com/docs/grafana-cloud/send-data/otlp/send-data-otlp/)
+- [Grafana Cloud OTLP format considerations](https://grafana.com/docs/grafana-cloud/send-data/otlp/otlp-format-considerations/)

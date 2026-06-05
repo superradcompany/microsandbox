@@ -131,8 +131,30 @@ pub enum HostPermissions {
     Mirror,
 }
 
+/// Sandbox-level in-guest security profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityProfile {
+    /// Preserve normal guest-root semantics.
+    ///
+    /// Exec sessions do not set `no_new_privs` and keep `CAP_SYS_ADMIN`, so
+    /// workflows such as `sudo`, package managers, and Docker-in-Docker work
+    /// as they would in a regular VM.
+    #[default]
+    Default,
+
+    /// Harden guest exec sessions.
+    ///
+    /// Agentd sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces
+    /// `nosuid,nodev` on user mounts. Workloads that need privilege
+    /// elevation or guest mount administration, such as `sudo` and
+    /// Docker-in-Docker, are intentionally incompatible with this profile.
+    Restricted,
+}
+
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
     ///
@@ -146,9 +168,14 @@ pub struct MountOptions {
     /// This prevents `execve` of binaries or scripts located on the mount.
     /// Interpreters can still read files from the mount, for example
     /// `sh /mnt/script.sh`, because the interpreter itself executes from a
-    /// different filesystem. Guest volume mounts always also use internal
-    /// `nosuid` and `nodev` safety defaults.
+    /// different filesystem.
     pub noexec: bool,
+
+    /// Whether setuid and setgid privilege elevation from files on the mount is ignored.
+    pub nosuid: bool,
+
+    /// Whether device files on the mount are ignored.
+    pub nodev: bool,
 }
 
 /// A volume mount specification for a sandbox.
@@ -430,6 +457,18 @@ impl MountBuilder {
     /// different filesystem.
     pub fn noexec(mut self) -> Self {
         self.options.noexec = true;
+        self
+    }
+
+    /// Ignore setuid and setgid privilege elevation from files on this mount.
+    pub fn nosuid(mut self) -> Self {
+        self.options.nosuid = true;
+        self
+    }
+
+    /// Ignore device files on this mount.
+    pub fn nodev(mut self) -> Self {
+        self.options.nodev = true;
         self
     }
 
@@ -1099,6 +1138,13 @@ fn validate_virtiofs_policies(
     Ok(())
 }
 
+fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountOptions {
+    options.unwrap_or(MountOptions {
+        readonly,
+        ..MountOptions::default()
+    })
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations: IntoImage
 //--------------------------------------------------------------------------------------------------
@@ -1255,7 +1301,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Bind {
                 host: PathBuf,
                 guest: String,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1264,7 +1313,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
             Named {
                 name: String,
                 guest: String,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
                 #[serde(default = "default_strict")]
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
@@ -1274,7 +1326,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 size_mib: Option<u32>,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
             },
             DiskImage {
                 host: PathBuf,
@@ -1282,7 +1337,10 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 format: DiskImageFormat,
                 #[serde(default)]
                 fstype: Option<String>,
-                options: MountOptions,
+                #[serde(default)]
+                options: Option<MountOptions>,
+                #[serde(default)]
+                readonly: bool,
             },
         }
 
@@ -1292,12 +1350,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host,
                 guest,
                 options,
+                readonly,
                 stat_virtualization,
                 host_permissions,
             } => Self::Bind {
                 host,
                 guest,
-                options,
+                options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
             },
@@ -1305,12 +1364,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 name,
                 guest,
                 options,
+                readonly,
                 stat_virtualization,
                 host_permissions,
             } => Self::Named {
                 name,
                 guest,
-                options,
+                options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
             },
@@ -1318,10 +1378,11 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest,
                 size_mib,
                 options,
+                readonly,
             } => Self::Tmpfs {
                 guest,
                 size_mib,
-                options,
+                options: decode_mount_options(options, readonly),
             },
             VolumeMountHelper::DiskImage {
                 host,
@@ -1329,12 +1390,13 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 format,
                 fstype,
                 options,
+                readonly,
             } => Self::DiskImage {
                 host,
                 guest,
                 format,
                 fstype,
-                options,
+                options: decode_mount_options(options, readonly),
             },
         })
     }
@@ -1576,6 +1638,7 @@ mod tests {
             options: MountOptions {
                 readonly: true,
                 noexec: true,
+                ..MountOptions::default()
             },
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
@@ -1595,6 +1658,55 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_volume_mount_json_accepts_legacy_readonly_field() {
+        let bind: VolumeMount = serde_json::from_str(
+            r#"{"type":"Bind","host":"/host/data","guest":"/data","readonly":true}"#,
+        )
+        .unwrap();
+        match bind {
+            VolumeMount::Bind { options, .. } => {
+                assert!(options.readonly);
+                assert!(!options.noexec);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+
+        let named: VolumeMount =
+            serde_json::from_str(r#"{"type":"Named","name":"cache","guest":"/cache"}"#).unwrap();
+        match named {
+            VolumeMount::Named { options, .. } => assert_eq!(options, MountOptions::default()),
+            other => panic!("expected Named, got {other:?}"),
+        }
+
+        let tmpfs: VolumeMount =
+            serde_json::from_str(r#"{"type":"Tmpfs","guest":"/tmp","readonly":false}"#).unwrap();
+        match tmpfs {
+            VolumeMount::Tmpfs { options, .. } => assert_eq!(options, MountOptions::default()),
+            other => panic!("expected Tmpfs, got {other:?}"),
+        }
+
+        let disk: VolumeMount = serde_json::from_str(
+            r#"{"type":"DiskImage","host":"/host/data.raw","guest":"/data","format":"Raw","readonly":true}"#,
+        )
+        .unwrap();
+        match disk {
+            VolumeMount::DiskImage { options, .. } => {
+                assert!(options.readonly);
+                assert!(!options.noexec);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_options_json_defaults_missing_fields() {
+        let options: MountOptions = serde_json::from_str(r#"{"readonly":true}"#).unwrap();
+
+        assert!(options.readonly);
+        assert!(!options.noexec);
     }
 
     #[test]

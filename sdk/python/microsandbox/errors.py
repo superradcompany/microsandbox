@@ -67,6 +67,11 @@ class ImageNotFoundError(MicrosandboxError):
     code = "image-not-found"
 
 
+class ImageInUseError(MicrosandboxError):
+    """Image is still referenced by one or more sandboxes."""
+    code = "image-in-use"
+
+
 class ImagePullFailedError(MicrosandboxError):
     """Image pull failed."""
     code = "image-pull-failed"
@@ -97,8 +102,6 @@ class MetricsDisabledError(MicrosandboxError):
     code = "metrics-disabled"
 
 
-# TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-# compatibility for versions before 0.5 is no longer supported.
-class Pre05SandboxRestartRequiredError(MicrosandboxError):
-    """Filesystem and SFTP features need this sandbox to be restarted."""
-    code = "pre05-sandbox-restart-required"
+class UnsupportedOperationError(MicrosandboxError):
+    """The sandbox runtime is too old for the requested operation."""
+    code = "unsupported-operation"

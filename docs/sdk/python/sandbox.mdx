@@ -29,6 +29,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | memory | `int` | Guest memory in MiB (default `512`) |
 | workdir | `str` | Default working directory for commands |
 | shell | `str` | Shell for `shell()` calls (default `"/bin/sh"`) |
+| security | [`SecurityProfile`](#securityprofile) \| `str` | In-guest security profile. `RESTRICTED` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
 | hostname | `str` | Guest hostname |
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
@@ -201,7 +202,7 @@ Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [
 def fs(self) -> SandboxFs
 ```
 
-Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property -- use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for the full API.
+Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property -- use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
 
 **Returns**
 
@@ -788,6 +789,16 @@ Sandbox process log verbosity.
 | `"trace"` | Most verbose -- all diagnostic output |
 | `"warn"` | Warnings and errors only |
 
+### SecurityProfile
+
+```python
+class SecurityProfile(StrEnum):
+    DEFAULT = "default"
+    RESTRICTED = "restricted"
+```
+
+Sandbox-wide in-guest security profile.
+
 ### LogEntry
 
 A single captured log entry returned by [`logs()`](#logs).
@@ -922,6 +933,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
+| security | [`SecurityProfile`](#securityprofile) \| `str` | `SecurityProfile.DEFAULT` | In-guest security profile |
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |

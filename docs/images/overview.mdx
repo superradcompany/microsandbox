@@ -192,7 +192,9 @@ Images are cached in the global microsandbox home directory:
 
 | Path | Description |
 |------|-------------|
-| `~/.microsandbox/cache/layers/` | Downloaded and extracted image layers |
+| `~/.microsandbox/cache/layers/` | Materialized EROFS image layers |
+| `~/.microsandbox/cache/fsmeta/` | Merged metadata images for cached manifests |
+| `~/.microsandbox/cache/vmdk/` | VMDK descriptors used to boot cached images |
 | `~/.microsandbox/db/` | Database tracking image metadata and digests |
 
 Layers are content-addressable and deduplicated. If `python` and `python` share a base layer, it's stored once.
@@ -200,3 +202,7 @@ Layers are content-addressable and deduplicated. If `python` and `python` share 
 <Tip>
   Use `msb pull` from the CLI to pre-pull images before creating sandboxes. This avoids blocking on a download during `Sandbox.create`.
 </Tip>
+
+Use `msb image prune` to remove cached images that are not used by any sandbox and reclaim dangling image artifacts. Prune keeps images referenced by existing sandboxes.
+
+`msb load` accepts Docker image archives and OCI Image Layout archives. `msb save` exports from the materialized EROFS cache as a Docker archive by default, or as an OCI Image Layout archive with `--format oci`. The expanded forms are `msb image load` and `msb image save`. The exported image should run the same way after `msb load`, but it is a regenerated archive: manifest digest and layer digests can differ from the original registry image.

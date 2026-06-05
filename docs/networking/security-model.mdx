@@ -39,7 +39,7 @@ NetworkPolicy::builder()
 
 An attacker who controls a domain can set up records that resolve to a public IP during the initial allowlist check and then flip to a private IP on a subsequent lookup. The guest ends up making a request that *looked* like it was going to `evil.example.com` and actually lands on `192.168.1.10`.
 
-Rebind protection catches this at the response level: when the DNS interceptor sees an answer resolving a domain to a private, loopback, or link-local IP, the response is rewritten to `REFUSED` and the connection never gets made. This is on by default. You can turn it off when you genuinely need domains to resolve to internal hosts (local development, split-horizon DNS):
+Rebind protection catches this at the response level: when the DNS interceptor sees an answer resolving a domain to a private, loopback, or link-local IP, the response is rewritten to `NXDOMAIN` and the connection never gets made. This is on by default. You can turn it off when you genuinely need domains to resolve to internal hosts (local development, split-horizon DNS):
 
 <CodeGroup>
 ```rust Rust

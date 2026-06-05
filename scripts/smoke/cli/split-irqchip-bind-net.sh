@@ -37,8 +37,6 @@ trap cleanup EXIT
 
 mkdir -p "$smoke_root"/bind-{a,b,c}
 
-export LD_LIBRARY_PATH="$ROOT_DIR/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
 "$MSB_BIN" run \
   --name "$SANDBOX_NAME" \
   --replace \

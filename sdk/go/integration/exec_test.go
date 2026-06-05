@@ -243,7 +243,7 @@ func TestExecWithExecUserOverride(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-execuser-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestExecWithExecEnvOverlay(t *testing.T) {
 	name := "go-sdk-execenv-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithEnv(map[string]string{"BASE_VAR": "from-sandbox"}),
 	)
 	if err != nil {

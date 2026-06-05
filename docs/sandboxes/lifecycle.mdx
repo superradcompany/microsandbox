@@ -12,8 +12,6 @@ Understanding the lifecycle is useful once you start managing long-running sandb
 stateDiagram-v2
     [*] --> Creating: create()
     Creating --> Running: boot complete
-    Running --> Paused: pause()
-    Paused --> Running: resume()
     Running --> Draining: drain()
     Running --> Stopped: stop()
     Running --> Crashed: unexpected exit
@@ -28,8 +26,7 @@ stateDiagram-v2
 | Status | Description |
 |--------|-------------|
 | **Creating** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing (configuring network, setting up the environment). |
-| **Running** | The guest agent is ready. You can call `exec`, `shell`, `fs`, and `emit`. |
-| **Paused** | All guest processes are frozen. No CPU cycles consumed. Resume is instant with no re-boot or re-init. |
+| **Running** | The guest agent is ready. You can call `exec`, `shell`, and `fs`. |
 | **Draining** | Graceful shutdown in progress. Existing commands run to completion, but new `exec` calls are rejected. Transitions to Stopped when all commands finish. |
 | **Stopped** | The VM has shut down. Sandbox configuration and state are persisted to the database and can be restarted. |
 | **Crashed** | The VM exited unexpectedly (e.g., kernel panic, OOM kill). |
@@ -44,7 +41,11 @@ Creating a sandbox boots the microVM, mounts the filesystem, initializes the gue
 let sb = Sandbox::builder("worker").image("python").create().await?;
 
 // Detached: sandbox survives after your process exits
-let sb = Sandbox::builder("worker").image("python").create_detached().await?;
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .detached(true)
+    .create()
+    .await?;
 ```
 
 ```typescript TypeScript
@@ -52,7 +53,10 @@ let sb = Sandbox::builder("worker").image("python").create_detached().await?;
 await using sb = await Sandbox.builder("worker").image("python").create();
 
 // Detached: sandbox survives after your process exits
-const detached = await Sandbox.builder("worker").image("python").createDetached();
+const detached = await Sandbox.builder("worker")
+  .image("python")
+  .detached(true)
+  .create();
 ```
 
 ```python Python
@@ -153,12 +157,6 @@ msb stop --force worker
 
 </CodeGroup>
 
-## Pause and resume <sup><sup>coming soon</sup></sup>
-
-Freeze all guest processes without shutting down. The VM uses zero CPU while paused, and resume is instant. The guest continues exactly where it left off with no boot time and no re-init.
-
-The SDK and CLI pause/resume APIs are not available yet.
-
 ## Detach
 
 Keeps a sandbox running after the parent process exits. It becomes a background process that you can reconnect to later with `Sandbox::get("worker")`.
@@ -181,10 +179,6 @@ err := sb.Detach(ctx)
 ```
 
 </CodeGroup>
-
-<Tip>
-  Detached sandboxes are tracked at `~/.microsandbox/db/`. A background reaper periodically checks for stale sandboxes that have exited unexpectedly and cleans up their records.
-</Tip>
 
 ## Drain
 
@@ -305,7 +299,7 @@ msb ps worker
 
 ## Runtime process architecture
 
-Here's what's running and how the pieces talk to each other.
+At runtime, your application talks to a host-side sandbox process, and that process relays requests to the guest agent inside the VM.
 
 ```mermaid
 graph TD
@@ -315,7 +309,7 @@ graph TD
     end
 
     subgraph Guest["Guest VM"]
-        F["agentd<br/><small>exec, fs, events</small>"]
+        F["agentd<br/><small>exec, fs</small>"]
     end
 
     A -- "spawn" --> B
@@ -329,86 +323,15 @@ graph TD
     style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
 ```
 
-There are two layers here. The **sandbox process** runs the VM and the networking stack on the host side, and relays messages between the application and the **guest agent** inside the VM. Up to 16 clients can connect to the same sandbox simultaneously.
-
 The sandbox process also handles:
 
 - Graceful stop and drain signals
 - Cleanup when the sandbox exits
-- Idle detection (auto-drain after a configurable timeout)
-- Maximum sandbox lifetime enforcement
-
-The sandbox process does not execute guest commands itself. It only relays traffic between your application and the guest agent.
+- Idle detection and maximum lifetime enforcement
 
 ## Logs and diagnostics
 
-Each sandbox keeps four files under `<sandbox-dir>/logs/`:
-
-| File | Producer | Contents |
-|------|----------|----------|
-| `exec.log` | Host relay (tap on guest frames) | User-program stdout/stderr/output as JSON Lines |
-| `runtime.log` | Sandbox process (host) | Runtime tracing — relay setup, lifecycle, network |
-| `kernel.log` | Guest VM virtio-console | Kernel boot messages and `agentd` console |
-| `boot-error.json` | Sandbox process | Present only when the most recent start failed before the agent came up |
-
-The user-facing surface for these is [`msb logs`](/cli/sandbox-commands#msb-logs) and the SDK [`logs()`](/sandboxes/logs) method — both work on running and stopped sandboxes alike. See the [Logs](/sandboxes/logs) page for the capture model, source semantics, and diagnostic flows.
-
-When a sandbox is in the **Crashed** state, its log directory is left in place so you can read what happened. Use `msb logs --source system <name>` to see the runtime/kernel diagnostic merge.
-
-## Graceful shutdown with timeout fallback
-
-Attempt a graceful stop, then force-kill if the sandbox doesn't shut down in time.
-
-<CodeGroup>
-```rust Rust
-use microsandbox::Sandbox;
-use std::time::Duration;
-
-let mut handle = Sandbox::get("worker").await?;
-match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
-    Ok(Ok(())) => println!("Stopped"),
-    Ok(Err(e)) => eprintln!("Error: {e}"),
-    Err(_) => handle.kill().await?,
-}
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-const sb = await Sandbox.get("worker");
-try {
-    await Promise.race([
-        sb.stop(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
-    ]);
-} catch {
-    await sb.kill();
-}
-```
-
-```python Python
-import asyncio
-from microsandbox import Sandbox
-
-handle = await Sandbox.get("worker")
-sb = await handle.connect()
-try:
-    await asyncio.wait_for(sb.stop(), timeout=30)
-except asyncio.TimeoutError:
-    await sb.kill()
-```
-
-```go Go
-handle, err := m.GetSandbox(ctx, "worker")
-sb, err := handle.Connect(ctx)
-stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-defer cancel()
-if err := sb.Stop(stopCtx); err != nil {
-    _ = sb.Kill(ctx)
-}
-```
-
-</CodeGroup>
+Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read captured output from running, stopped, or crashed sandboxes. For source semantics, boot errors, and diagnostic flows, see [Logs](/sandboxes/logs).
 
 ## Sandbox process policies
 

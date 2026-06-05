@@ -308,7 +308,8 @@ Detached sandboxes survive the Node.js process:
 // Create detached — drops the lifecycle on this handle's `Symbol.asyncDispose`.
 const sb = await Sandbox.builder("background")
   .image("python")
-  .createDetached();
+  .detached(true)
+  .create();
 
 // Later, from another process:
 const handle = await Sandbox.get("background");
@@ -368,8 +369,8 @@ const detail = await Image.inspect("python:3.12");
 console.log(detail.config?.entrypoint, detail.config?.workingDir);
 
 await Image.remove("old:tag", { force: true });
-const reclaimed = await Image.gcLayers();
-console.log(`reclaimed ${reclaimed} orphaned layers`);
+const report = await Image.prune();
+console.log(`removed ${report.imageRefsRemoved} unused image refs`);
 ```
 
 ### Replace Existing
@@ -462,7 +463,7 @@ await setup()
 | Symbol | Description |
 |---|---|
 | `Sandbox` | Live sandbox — lifecycle, exec, fs, metrics. Implements `AsyncDisposable`. |
-| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()` / `.createDetached()`. |
+| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()`. |
 | `SandboxHandle` | Lightweight DB handle — `connect()`, `start()`, `stop()`, `kill()`. |
 | `SandboxConfig` | Built sandbox configuration (output of `SandboxBuilder.build()`). |
 | `SandboxStatus` | `"running" \| "stopped" \| "crashed" \| "draining"` |
@@ -497,14 +498,14 @@ await setup()
 | `Volume` / `VolumeBuilder` / `VolumeHandle` | Named persistent storage with quotas and labels. |
 | `VolumeFs` | Host-side fs ops on a volume's directory (no sandbox required). |
 | `VolumeFsReadStream` / `VolumeFsWriteSink` | Streaming variants. |
-| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `size`. |
+| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `noexec`, `nosuid`, `nodev`, `size`. |
 | `VolumeMount` | Discriminated union of mount kinds. |
 
 ### Image Cache
 
 | Symbol | Description |
 |---|---|
-| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `gcLayers`, `gc`. |
+| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `prune`. |
 | `ImageHandle` / `ImageDetail` / `ImageConfigDetail` / `ImageLayerDetail` | Cached image metadata. |
 | `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type. |
 | `intoRootfsSource(input)` | Resolve a string into the right `RootfsSource`. |

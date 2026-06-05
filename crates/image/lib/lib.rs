@@ -16,6 +16,7 @@
     clippy::needless_update
 )]
 
+mod archive;
 mod auth;
 mod cache;
 mod config;
@@ -38,6 +39,10 @@ pub mod tree;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use archive::{
+    ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
+    LoadedImage, load_archive, save_archive, save_docker_archive,
+};
 pub use auth::RegistryAuth;
 pub use cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};
 pub use config::ImageConfig;

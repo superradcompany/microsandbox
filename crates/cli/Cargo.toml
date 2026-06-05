@@ -40,12 +40,12 @@ futures.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox = { version = "0.5.3", path = "../microsandbox", default-features = false }
-microsandbox-image = { version = "0.5.3", path = "../image" }
-microsandbox-network = { version = "0.5.3", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.5.3", path = "../protocol" }
-microsandbox-runtime = { version = "0.5.3", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.5.3", path = "../utils" }
+microsandbox.workspace = true
+microsandbox-image.workspace = true
+microsandbox-network = { workspace = true, optional = true }
+microsandbox-protocol.workspace = true
+microsandbox-runtime.workspace = true
+microsandbox-utils.workspace = true
 rand.workspace = true
 regex = "1"
 reqwest.workspace = true
@@ -53,10 +53,11 @@ rpassword.workspace = true
 russh = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-test-utils = { path = "../test-utils" }
+test-utils.workspace = true

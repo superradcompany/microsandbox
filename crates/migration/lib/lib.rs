@@ -8,6 +8,8 @@ mod m20260410_000001_erofs_image_schema;
 mod m20260501_000001_create_snapshot_index;
 mod m20260517_000001_drop_sandbox_metric;
 mod m20260527_000001_migrate_oci_rootfs_source;
+mod m20260531_000001_create_sandbox_labels;
+mod m20260531_000002_index_sandbox_labels_key_value;
 
 use sea_orm_migration::prelude::*;
 
@@ -40,6 +42,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260501_000001_create_snapshot_index::Migration),
             Box::new(m20260517_000001_drop_sandbox_metric::Migration),
             Box::new(m20260527_000001_migrate_oci_rootfs_source::Migration),
+            Box::new(m20260531_000001_create_sandbox_labels::Migration),
+            Box::new(m20260531_000002_index_sandbox_labels_key_value::Migration),
         ]
     }
 }
