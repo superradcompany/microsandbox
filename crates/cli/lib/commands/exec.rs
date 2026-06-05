@@ -184,7 +184,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
                     super::maybe_stop(&sandbox).await;
                     anyhow::bail!("exec failed to start: {:?}", payload);
                 }
-                _ => {}
+                // Explicit (not `_`) so a new ExecEvent variant fails to compile here.
+                ExecEvent::Started { .. } | ExecEvent::StdinError(_) => {}
             }
         }
 
