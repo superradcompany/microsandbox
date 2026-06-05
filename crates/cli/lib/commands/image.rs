@@ -763,18 +763,21 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    eprintln!(
-        "Removed {} image {}, {} {}, {} {}",
-        report.image_refs_removed,
-        plural("ref", report.image_refs_removed),
-        report.manifests_removed,
-        plural("manifest", report.manifests_removed),
-        report.layers_removed,
-        plural("layer", report.layers_removed),
-    );
+    ui::success("Pruned", "image cache");
+    ui::detail_kv("Image refs", &report.image_refs_removed.to_string());
+    ui::detail_kv("Manifests", &report.manifests_removed.to_string());
+    ui::detail_kv("Layers", &report.layers_removed.to_string());
+
+    if report.fsmeta_removed > 0 {
+        ui::detail_kv("Fsmeta", &report.fsmeta_removed.to_string());
+    }
+
+    if report.vmdk_removed > 0 {
+        ui::detail_kv("VMDK", &report.vmdk_removed.to_string());
+    }
 
     if let Some(bytes) = report.bytes_reclaimed {
-        eprintln!("Reclaimed {}", format_bytes_u64(bytes));
+        ui::detail_kv("Reclaimed", &format_bytes_u64(bytes));
     }
 
     Ok(())
@@ -792,20 +795,6 @@ fn format_bytes(bytes: i64) -> String {
 /// Format bytes as a human-readable string.
 fn format_bytes_u64(bytes: u64) -> String {
     microsandbox_utils::format::format_bytes(bytes)
-}
-
-/// Return a singular or plural noun for a count.
-fn plural(singular: &'static str, count: u32) -> &'static str {
-    if count == 1 {
-        singular
-    } else {
-        match singular {
-            "ref" => "refs",
-            "manifest" => "manifests",
-            "layer" => "layers",
-            _ => singular,
-        }
-    }
 }
 
 /// Print the pull failure indicator line to stderr.
