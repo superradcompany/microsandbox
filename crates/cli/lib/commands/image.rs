@@ -764,20 +764,20 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
     }
 
     ui::success("Pruned", "image cache");
-    ui::detail_kv("Image refs", &report.image_refs_removed.to_string());
-    ui::detail_kv("Manifests", &report.manifests_removed.to_string());
-    ui::detail_kv("Layers", &report.layers_removed.to_string());
+    ui::detail_kv_indent("Image refs", &report.image_refs_removed.to_string());
+    ui::detail_kv_indent("Manifests", &report.manifests_removed.to_string());
+    ui::detail_kv_indent("Layers", &report.layers_removed.to_string());
 
     if report.fsmeta_removed > 0 {
-        ui::detail_kv("Fsmeta", &report.fsmeta_removed.to_string());
+        ui::detail_kv_indent("Fsmeta", &report.fsmeta_removed.to_string());
     }
 
     if report.vmdk_removed > 0 {
-        ui::detail_kv("VMDK", &report.vmdk_removed.to_string());
+        ui::detail_kv_indent("VMDK", &report.vmdk_removed.to_string());
     }
 
     if let Some(bytes) = report.bytes_reclaimed {
-        ui::detail_kv("Reclaimed", &format_bytes_u64(bytes));
+        ui::detail_kv_indent("Reclaimed", &format_bytes_u64(bytes));
     }
 
     Ok(())
