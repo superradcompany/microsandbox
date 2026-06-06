@@ -809,7 +809,7 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
-        let client = Arc::new(AgentClient::connect_sandbox(self.settings.sandbox.name()).await?);
+        let client = Arc::new(crate::agent::connect_sandbox(self.settings.sandbox.name()).await?);
         self.client = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -1734,7 +1734,7 @@ fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<S
 
 async fn relay_tcp_to_ssh(
     channel: ChannelId,
-    mut tcp_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
+    mut tcp_rx: tokio::sync::mpsc::Receiver<Message>,
     session: russh::server::Handle,
 ) {
     while let Some(msg) = tcp_rx.recv().await {

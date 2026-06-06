@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "agent-client/rust",
     "crates/agentd",
     "crates/cli",
     "crates/db",
@@ -59,6 +60,7 @@ panic = "abort"
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
 microsandbox = { version = "0.5.5", path = "crates/microsandbox", default-features = false }
+microsandbox-agent-client = { version = "0.5.5", path = "agent-client/rust" }
 microsandbox-db = { version = "0.5.5", path = "crates/db" }
 microsandbox-filesystem = { version = "0.5.5", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "0.5.5", path = "crates/image" }
@@ -87,6 +89,7 @@ dirs = "6.0"
 etherparse = "0.19"
 flate2 = "1.0"
 futures = "0.3"
+futures-util = "0.3"
 hex = "0.4"
 hickory-client = "0.26.0-alpha.1"
 hickory-proto = "0.26.0-alpha.1"
@@ -116,6 +119,7 @@ time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
+tokio-tungstenite = "0.29.0"
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

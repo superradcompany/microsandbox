@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 4;
+pub const PROTOCOL_VERSION: u8 = 5;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -117,6 +117,10 @@ pub enum MessageType {
     /// Host asks the guest to synchronize `CLOCK_REALTIME`.
     #[strum(serialize = "core.clock.sync")]
     ClockSync,
+
+    /// Peer reports a recoverable protocol-level error.
+    #[strum(serialize = "core.error")]
+    CoreError,
 
     /// Host requests command execution.
     #[strum(serialize = "core.exec.request")]
@@ -249,7 +253,8 @@ impl MessageType {
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
-            Self::ExecExited
+            Self::CoreError
+            | Self::ExecExited
             | Self::ExecFailed
             | Self::FsResponse
             | Self::TcpClosed
@@ -272,6 +277,8 @@ impl MessageType {
     /// every runtime we still talk to, including the pre-0.5 legacy one.
     /// Filesystem streaming did not exist in the pre-0.5 legacy protocol
     /// (generation 1), so the `Fs*` types require generation 2 or newer.
+    /// TCP forwarding was introduced in generation 4. `core.error` was
+    /// introduced in generation 5.
     ///
     /// There is deliberately no wildcard arm: adding a new `MessageType` must
     /// force a conscious choice of the generation that introduced it (and a
@@ -296,6 +303,7 @@ impl MessageType {
             | Self::ExecResize
             | Self::ExecSignal => 1,
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
+            Self::CoreError => 5,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -377,6 +385,7 @@ mod tests {
                 "core.relay.client.disconnected",
             ),
             (MessageType::ClockSync, "core.clock.sync"),
+            (MessageType::CoreError, "core.error"),
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
             (MessageType::ExecStdin, "core.exec.stdin"),
@@ -414,6 +423,7 @@ mod tests {
             MessageType::Shutdown,
             MessageType::RelayClientDisconnected,
             MessageType::ClockSync,
+            MessageType::CoreError,
             MessageType::ExecRequest,
             MessageType::ExecStarted,
             MessageType::ExecStdin,

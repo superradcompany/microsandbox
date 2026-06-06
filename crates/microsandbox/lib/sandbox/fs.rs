@@ -108,7 +108,7 @@ pub struct FsMetadata {
 
 /// A streaming reader for file data from the sandbox.
 pub struct FsReadStream {
-    rx: mpsc::UnboundedReceiver<Message>,
+    rx: mpsc::Receiver<Message>,
     client: Arc<AgentClient>,
     close_handle: Option<FsHandle>,
 }
@@ -117,7 +117,7 @@ pub struct FsReadStream {
 pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
-    rx: mpsc::UnboundedReceiver<Message>,
+    rx: mpsc::Receiver<Message>,
     close_handle: Option<FsHandle>,
 }
 
@@ -799,7 +799,7 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 }
 
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
-async fn wait_for_ok_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> MicrosandboxResult<()> {
+async fn wait_for_ok_response(rx: &mut mpsc::Receiver<Message>) -> MicrosandboxResult<()> {
     while let Some(msg) = rx.recv().await {
         if msg.t == MessageType::FsResponse {
             return check_response(msg);

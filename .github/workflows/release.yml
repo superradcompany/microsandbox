@@ -492,6 +492,15 @@ jobs:
           npm ci
           npm run build:ts
 
+      - name: Build and publish agent client package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: agent-client/typescript
+        run: |
+          npm ci
+          npm run build
+          npm publish --access public
+
       - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -599,6 +608,7 @@ jobs:
           for crate in \
             microsandbox-utils \
             microsandbox-protocol \
+            microsandbox-agent-client \
             microsandbox-agentd \
             microsandbox-db \
             microsandbox-migration \

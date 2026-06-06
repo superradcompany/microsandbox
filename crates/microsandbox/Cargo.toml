@@ -42,6 +42,7 @@ futures.workspace = true
 hex.workspace = true
 libc.workspace = true
 microsandbox-db.workspace = true
+microsandbox-agent-client = { workspace = true, features = ["uds"] }
 microsandbox-filesystem.workspace = true
 microsandbox-image.workspace = true
 microsandbox-metrics.workspace = true
