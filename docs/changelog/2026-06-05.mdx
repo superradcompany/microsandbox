@@ -1,0 +1,107 @@
+---
+title: "Week of June 5, 2026"
+description: "OTLP metrics sidecar with per-sandbox labels, SSH TCP forwarding, agent protocol versioning, image archive load and save, image prune, Python image management, and Homebrew install."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.5.3](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.3) · [v0.5.4](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.4) · [v0.5.5](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.5)
+</Tip>
+
+## New features
+
+**`msb-metrics` sidecar with per-sandbox labels**
+
+A new `msb-metrics` binary reads live sandbox metrics from the shared-memory registry and ships them over OTLP to any compatible backend (Grafana Cloud, Prometheus, Datadog, Alloy, OpenTelemetry Collector). It exports eight per-sandbox gauges covering CPU, memory, disk, and network, plus four operational series for the collector itself. Sandboxes now also carry per-sandbox labels: set them with `--label key=value` on `msb create` and `msb run`, in `msb.yaml`, or through the builder in every SDK, and filter operations with `--label` on `msb stop`, `start`, `rm`, `ls`, and `ps`. OCI image labels (including `org.opencontainers.image.*`) are imported as the base label set so common attribution flows through without re-declaring it on every sandbox, and `msb-metrics` attaches those labels as OTLP attributes on every datapoint. Use `--exclude-label-key <key>` to drop individual high-cardinality keys without losing all attribution, or `--no-labels` to opt out entirely.
+
+```bash
+msb run python --name worker --label team=ml --label tier=prod
+msb ls --label team=ml
+msb-metrics otel --endpoint https://otlp.example.com/v1/metrics \
+  --exclude-label-key org.opencontainers.image.revision
+```
+
+See the [`msb-metrics` overview](/observability/msb-metrics).
+
+**SSH TCP forwarding**
+
+The built-in SSH server now supports OpenSSH local (`-L`) and dynamic (`-D`) TCP forwarding. Forwarded connections are opened by the guest agent from inside the sandbox, so reachability follows the sandbox network policy and `127.0.0.1` always means the sandbox loopback, not the host. Reverse (`-R`) and stream-local forwarding remain unsupported.
+
+```bash
+msb ssh serve devbox --host 127.0.0.1 --port 2222
+ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
+ssh -p 2222 -D 1080 root@127.0.0.1
+```
+
+See the [SSH overview](/sandboxes/ssh).
+
+**Agent protocol versioning**
+
+The agent inside a sandbox is frozen at creation time, but the host upgrades whenever you update microsandbox. The agent protocol now agrees a single generation number at handshake time, and each call checks the sandbox is new enough before sending. When a newer host calls into an older sandbox, only the specific unsupported operation fails with a typed `UnsupportedOperation` error; the rest of the session keeps working. The previous `Pre05SandboxRestartRequired` error is replaced by `UnsupportedOperation` across the Rust, Python, TypeScript, and Go SDKs.
+
+**Image archive load and save**
+
+`msb image load` (alias `msb load`) and `msb image save` (alias `msb save`) move Docker and OCI Image Layout archives into and out of the local image cache without standing up a registry. Save defaults to Docker format and switches to OCI Image Layout with `--format oci`. Both commands work with stdin and `--input` / `--output`. Loaded images materialize through the normal cache path, so they get EROFS layers and VMDK data like pulled images; saved archives are semantically equivalent exports rather than byte-for-byte copies of the source.
+
+```bash
+docker save alpine:3.20 | msb image load
+msb image save alpine:3.20 --output alpine.tar
+msb image save alpine:3.20 --format oci --output alpine-oci.tar
+```
+
+See the [image commands reference](/cli/image-commands).
+
+**Image prune**
+
+`msb image prune` removes cached image refs, manifests, layers, fsmeta files, and VMDK data that are not referenced by any sandbox or indexed snapshot, and reports how many bytes were reclaimed. The Rust, TypeScript, and Go SDKs gain `Image.prune()` / `Image.Prune(ctx)`; the previous `Image.gc()` and `Image.gcLayers()` helpers are removed in favor of the single prune entry point.
+
+```bash
+msb image prune --yes --format json
+```
+
+See the [images overview](/images/overview).
+
+**Python image management API**
+
+The Python SDK gains a full image cache surface matching the other SDKs: `Image.get`, `Image.list`, `Image.inspect`, `Image.remove`, `Image.gc_layers`, and `Image.gc`, plus typed `ImageHandle`, `ImageDetail`, `ImageConfigDetail`, and `ImageLayerDetail` exports. `Image.oci`, `Image.bind`, and `Image.disk` remain on the same namespace for rootfs configuration, and image-in-use failures surface as `ImageInUseError`.
+
+```python
+from microsandbox import Image
+
+images = await Image.list()
+detail = await Image.inspect("python:3.12")
+await Image.remove("old:tag")
+```
+
+See the [Python SDK reference](/sdk/python/sandbox).
+
+**Homebrew install on macOS**
+
+microsandbox is now available through a Homebrew tap, and each release publishes a matching formula update automatically.
+
+```bash
+brew install superradcompany/tap/microsandbox
+```
+
+See the [quickstart](/getting-started/quickstart).
+
+**Other features**
+
+- **Grouped `msb` help output.** Top-level `msb --help` now groups commands into Sandboxes, Images, Storage, Installation, and other sections so the surface is easier to scan. Subcommand help is unchanged.
+- **Unified detached creation across SDKs.** Detached sandboxes are created through `SandboxBuilder::detached(true)` (or `WithDetached()` in Go) on the normal create path, replacing the separate detached-only helpers in Rust and TypeScript. This is a breaking SDK source change; the CLI is unaffected.
+- **Attached sandboxes stop on creator exit.** When the process that created an attached sandbox dies unexpectedly, the sandbox now detects it through a parent-watch pipe and shuts itself down instead of lingering until the host handle is reaped.
+- **`--security restricted` profile.** A new opt-in security profile preserves the previous `no_new_privs` and `CAP_SYS_ADMIN` drop on every exec session, while the default profile restores the guest-root behavior that workloads like Docker-in-Docker need. Volume options, tmpfs flags, and `msb inspect` now show `ro`/`rw` along with any explicit `noexec`, `nosuid`, or `nodev` flags.
+
+## Bug fixes
+
+- Non-loopback published-port throughput is no longer throttled to roughly 30 to 120 KB/s; the network poll loop is now woken immediately after draining the inbound relay channel, instead of waiting for the next poll timeout.
+- DNS queries that the sandbox network policy denies now return `NXDOMAIN` instead of an empty answer, so stub resolvers fail closed and fall through to the next configured server cleanly.
+- The default exec profile no longer applies `no_new_privs` and the `CAP_SYS_ADMIN` drop, so `sudo` and Docker-in-Docker work again on the default profile. Use `--security restricted` to opt back into the previous hardening.
+- Sandbox builders now reject zero CPU and zero memory configurations at build time with a typed error, instead of failing later during runtime startup.
+- Read-only consumers like `msb-metrics` no longer pre-create an empty, schema-less `msb.db` when they start before the main daemon; the read pool opens with `create_if_missing(false)` and waits for the catalog owner to materialize the file.
+- Human-facing CLI timestamps (`msb ls`, `msb ps`, image and snapshot listings) now render in the local system timezone. JSON output continues to emit RFC 3339 timestamps with an explicit UTC offset for machine consumers.
+- Sandboxes persisted by microsandbox 0.5.2 with the legacy `readonly` mount field now start successfully on 0.5.3 and later; missing mount option fields fall back to writable and executable defaults.
+- Idle-timeout restarts no longer race against stale heartbeat files from the previous boot; per-boot heartbeats are cleared before each start, and idle-timeout shutdowns now flow through agentd first so the guest can flush state before the host exit fallback runs.
+- Sandboxes with large environment-variable payloads now boot reliably against the released `msb_krun` 0.1.14 with the merged libkrunfw boot-argument limit fixes.
+- `agentd` now sets `HOME` from the guest passwd entry for implicit root execs, so images like `ubuntu:24.04` get `/root` instead of inheriting `HOME=/`. Explicit users, sandbox or image users, and explicit `HOME` env values still take precedence.
+- `msb-metrics` OTLP HTTP endpoints are now preserved exactly as provided (including `/v1/metrics` or Prometheus's `/api/v1/otlp/v1/metrics`), and buffered gauge collections are exported one at a time so OpenTelemetry LastValue aggregation no longer collapses a flush down to a single sample. Release builds now ship the `msb-metrics` binary alongside `msb`.
