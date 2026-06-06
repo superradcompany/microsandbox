@@ -70,7 +70,7 @@ fn build_tls_config(hostname: &str) -> (Arc<ServerConfig>, String) {
         generate_simple_self_signed(vec![hostname.to_string()]).expect("cert generation failed");
     let cert_pem = cert.cert.pem();
     let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
 
     let config = Arc::new(
         ServerConfig::builder()

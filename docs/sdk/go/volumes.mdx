@@ -331,6 +331,8 @@ Tuning struct for `Mount.Bind` and `Mount.Named`.
 |-------|------|-------------|
 | Readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### TmpfsOptions
 
@@ -341,6 +343,8 @@ Tuning struct for `Mount.Tmpfs`.
 | SizeMiB | `uint32` | Maximum size in MiB |
 | Readonly | `bool` | Mount as read-only |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### DiskOptions
 
@@ -352,6 +356,8 @@ Tuning struct for `Mount.Disk`.
 | Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional; omitted means auto-detect |
 | Readonly | `bool` | Mount as read-only |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### MountConfig
 
@@ -367,6 +373,8 @@ Discriminated mount configuration produced by `Mount` helpers. Inspect the kind 
 | Fstype | `string` | Inner filesystem type |
 | Readonly | `bool` | Whether the mount is read-only |
 | Noexec | `bool` | Whether direct execution from the mount is disabled |
+| Nosuid | `bool` | Whether setuid/setgid privilege elevation from files on the mount is ignored |
+| Nodev | `bool` | Whether device files on the mount are ignored |
 | SizeMiB | `uint32` | Size limit for tmpfs mounts |
 
 ### MountKind

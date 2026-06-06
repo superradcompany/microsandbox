@@ -481,7 +481,6 @@ sb, err := h.Connect(ctx)
 |----------|-------------|
 | `EnsureInstalled(ctx, opts...)` | Optional — download msb + libkrunfw to `~/.microsandbox/` up front (idempotent) |
 | `CreateSandbox(ctx, name, ...opts)` | Create and start a sandbox |
-| `CreateSandboxDetached(ctx, name, ...opts)` | Create a sandbox in detached mode |
 | `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
 | `StartSandboxDetached(ctx, name)` | Boot a stopped sandbox in detached mode |
 | `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |
@@ -563,6 +562,7 @@ sb, err := h.Connect(ctx)
 | `WithVolumeLabels(map)` | Key-value labels for organising volumes |
 | `WithHostname(hostname)` | Guest hostname |
 | `WithUser(user)` | User to run the sandbox process as (UID or name) |
+| `WithSecurityProfile(profile)` | In-guest security profile (`SecurityProfileDefault` or `SecurityProfileRestricted`) |
 | `WithReplace()` | Kill any existing sandbox with the same name before creating |
 | `WithShell(path)` | Default shell binary inside the guest |
 | `WithEntrypoint(cmd...)` | Override the user-workload entrypoint |
@@ -623,7 +623,7 @@ Each example is a self-contained `main.go` under `sdk/go/examples/`. Run any of 
 | `detached` | detached lifecycle: detach, list, reattach by name, run, stop |
 | `tls` | TLS interception with a bypass list, intercepted-port set, and HTTP/3 fallback |
 | `metrics` | point-in-time `Metrics()`, streaming `MetricsStream()`, `AllSandboxMetrics()` |
-| `image-cache` | `Image.List` / `Get` / `Inspect` / `GCLayers` with full handle metadata, config, and layer listing |
+| `image-cache` | `Image.List` / `Get` / `Inspect` / `Prune` with full handle metadata, config, and layer listing |
 | `errors` | typed-error categories via `IsKind`, `errors.As`, and `*microsandbox.Error` |
 
 ## Development

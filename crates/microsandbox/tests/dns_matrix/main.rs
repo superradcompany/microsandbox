@@ -66,22 +66,22 @@ async fn dns_matrix_plain() {
     let scenarios: Vec<(&str, String, Expect)> = vec![
         // UDP/53, gateway.
         ("udp/53 gateway: allowed",         dig("example.com",   &[]),                          Expect::Resolves),
-        ("udp/53 gateway: blocked exact",   dig(BLOCKED_EXACT,   &[]),                          Expect::Refused),
-        ("udp/53 gateway: blocked suffix",  dig(&blocked_suffix, &[]),                          Expect::Refused),
+        ("udp/53 gateway: blocked exact",   dig(BLOCKED_EXACT,   &[]),                          Expect::NxDomain),
+        ("udp/53 gateway: blocked suffix",  dig(&blocked_suffix, &[]),                          Expect::NxDomain),
         // UDP/53, @allowed external target.
         ("udp/53 @1.1.1.1: allowed",        dig("example.com",   &["@1.1.1.1"]),                Expect::Resolves),
-        ("udp/53 @1.1.1.1: blocked exact",  dig(BLOCKED_EXACT,   &["@1.1.1.1"]),                Expect::Refused),
+        ("udp/53 @1.1.1.1: blocked exact",  dig(BLOCKED_EXACT,   &["@1.1.1.1"]),                Expect::NxDomain),
         // UDP/53, @policy-denied target.
-        ("udp/53 @8.8.8.8 (denied)",        dig("example.com",   &[&denied]),                   Expect::Refused),
+        ("udp/53 @8.8.8.8 (denied)",        dig("example.com",   &[&denied]),                   Expect::NxDomain),
         // TCP/53, gateway.
         ("tcp/53 gateway: allowed",         dig("example.com",   &["+tcp"]),                    Expect::Resolves),
-        ("tcp/53 gateway: blocked exact",   dig(BLOCKED_EXACT,   &["+tcp"]),                    Expect::Refused),
-        ("tcp/53 gateway: blocked suffix",  dig(&blocked_suffix, &["+tcp"]),                    Expect::Refused),
+        ("tcp/53 gateway: blocked exact",   dig(BLOCKED_EXACT,   &["+tcp"]),                    Expect::NxDomain),
+        ("tcp/53 gateway: blocked suffix",  dig(&blocked_suffix, &["+tcp"]),                    Expect::NxDomain),
         // TCP/53, @allowed external target.
         ("tcp/53 @1.1.1.1: allowed",        dig("example.com",   &["+tcp", "@1.1.1.1"]),        Expect::Resolves),
-        ("tcp/53 @1.1.1.1: blocked exact",  dig(BLOCKED_EXACT,   &["+tcp", "@1.1.1.1"]),        Expect::Refused),
+        ("tcp/53 @1.1.1.1: blocked exact",  dig(BLOCKED_EXACT,   &["+tcp", "@1.1.1.1"]),        Expect::NxDomain),
         // TCP/53, @policy-denied target.
-        ("tcp/53 @8.8.8.8 (denied)",        dig("example.com",   &["+tcp", &denied]),           Expect::Refused),
+        ("tcp/53 @8.8.8.8 (denied)",        dig("example.com",   &["+tcp", &denied]),           Expect::NxDomain),
         // DoT without MITM: smoltcp RSTs, stub should fall back.
         ("dot/853 @1.1.1.1 without MITM",   dig("example.com",   &["+tls", "@1.1.1.1"]),        Expect::NoAnswer),
     ];
@@ -119,13 +119,13 @@ async fn dns_matrix_dot() {
     let scenarios: Vec<(&str, String, Expect)> = vec![
         // DoT to gateway: forwarder uses configured upstream (plain DNS).
         ("dot/853 @<gateway>: allowed",        dig("example.com",   &["+tls", ca, &gateway_hostname, &gateway]),             Expect::Resolves),
-        ("dot/853 @<gateway>: blocked exact",  dig(BLOCKED_EXACT,   &["+tls", ca, &gateway_hostname, &gateway]),             Expect::Refused),
-        ("dot/853 @<gateway>: blocked suffix", dig(&blocked_suffix, &["+tls", ca, &gateway_hostname, &gateway]),             Expect::Refused),
+        ("dot/853 @<gateway>: blocked exact",  dig(BLOCKED_EXACT,   &["+tls", ca, &gateway_hostname, &gateway]),             Expect::NxDomain),
+        ("dot/853 @<gateway>: blocked suffix", dig(&blocked_suffix, &["+tls", ca, &gateway_hostname, &gateway]),             Expect::NxDomain),
         // DoT to @target: forwarder re-TLS upstream.
         ("dot/853 @1.1.1.1: allowed",          dig("example.com",   &["+tls", ca, "+tls-hostname=1.1.1.1", "@1.1.1.1"]),     Expect::Resolves),
-        ("dot/853 @1.1.1.1: blocked exact",    dig(BLOCKED_EXACT,   &["+tls", ca, "+tls-hostname=1.1.1.1", "@1.1.1.1"]),     Expect::Refused),
+        ("dot/853 @1.1.1.1: blocked exact",    dig(BLOCKED_EXACT,   &["+tls", ca, "+tls-hostname=1.1.1.1", "@1.1.1.1"]),     Expect::NxDomain),
         // DoT to policy-denied @target: forwarder refuses before upstream.
-        ("dot/853 @8.8.8.8 (denied)",          dig("example.com",   &["+tls", ca, "+tls-hostname=8.8.8.8", &denied]),        Expect::Refused),
+        ("dot/853 @8.8.8.8 (denied)",          dig("example.com",   &["+tls", ca, "+tls-hostname=8.8.8.8", &denied]),        Expect::NxDomain),
     ];
 
     for (scenario, cmd, want) in &scenarios {

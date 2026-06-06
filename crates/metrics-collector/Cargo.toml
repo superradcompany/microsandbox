@@ -17,13 +17,15 @@ path = "bin/main.rs"
 
 [dependencies]
 # Shared-memory primitives — the read source for every tick.
-microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
+microsandbox-metrics.workspace = true
 # ENOENT detection on shm_open failures.
 libc.workspace = true
 # Async runtime + primitives (broadcast, mpsc, JoinSet, time).
 tokio = { workspace = true }
-# BoxFuture, StreamExt — used by the MetricsExporter trait + worker.
+# BoxFuture, StreamExt — used by the CollectFn type alias + worker.
 futures.workspace = true
+# `async fn` in the MetricsExporter / LabelSource traits (object-safe).
+async-trait = "0.1"
 # Wall-clock timestamps on each collection.
 chrono.workspace = true
 # Binary CLI.
@@ -35,8 +37,12 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
+# Catalog access for per-sandbox labels (read-only connection + entity).
+microsandbox-db.workspace = true
+# Query traits (EntityTrait, ColumnTrait, QueryFilter) for the label lookup.
+sea-orm = { workspace = true }
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
+microsandbox-utils.workspace = true
 # CLI duration parsing (e.g. "1s", "500ms").
 humantime = "2"
 # Resolving the default `~/.microsandbox` path when --msb-home is omitted.
@@ -68,6 +74,8 @@ tonic = { version = "0.14", default-features = false, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# Apply the catalog schema to a temp DB in LabelCache tests.
+microsandbox-migration.workspace = true
 tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",

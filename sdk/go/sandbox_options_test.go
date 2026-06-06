@@ -153,6 +153,18 @@ func TestFFIWireShape_EnvAndScripts(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_Labels(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithLabels(map[string]string{"user.id": "alice"}),
+		WithLabel("tenant", "acme"),
+	)
+	labels := mustField(t, got, "labels").(map[string]any)
+	if labels["user.id"] != "alice" || labels["tenant"] != "acme" {
+		t.Fatalf("labels = %v", labels)
+	}
+}
+
 func TestFFIWireShape_Ports(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
@@ -240,8 +252,8 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 		WithImage("alpine"),
 		WithMounts(map[string]MountConfig{
 			"/data":    Mount.Named("vol-a", MountOptions{}),
-			"/host":    Mount.Bind("/var/lib", MountOptions{Readonly: true, Noexec: true}),
-			"/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 128, Noexec: true}),
+			"/host":    Mount.Bind("/var/lib", MountOptions{Readonly: true, Noexec: true, Nosuid: true, Nodev: true}),
+			"/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 128, Noexec: true, Nosuid: true}),
 			"/img":     Mount.Disk("/tmp/pool.img", DiskOptions{Format: "raw", Readonly: true}),
 		}),
 	)
@@ -249,14 +261,24 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 	if v := volumes["/data"].(map[string]any); v["named"] != "vol-a" {
 		t.Fatalf("/data named = %v", v)
 	}
-	if v := volumes["/host"].(map[string]any); v["bind"] != "/var/lib" || v["readonly"] != true || v["noexec"] != true {
+	if v := volumes["/host"].(map[string]any); v["bind"] != "/var/lib" || v["readonly"] != true || v["noexec"] != true || v["nosuid"] != true || v["nodev"] != true {
 		t.Fatalf("/host = %v", v)
 	}
-	if v := volumes["/scratch"].(map[string]any); v["tmpfs"] != true || v["size_mib"] != float64(128) || v["noexec"] != true {
+	if v := volumes["/scratch"].(map[string]any); v["tmpfs"] != true || v["size_mib"] != float64(128) || v["noexec"] != true || v["nosuid"] != true {
 		t.Fatalf("/scratch = %v", v)
 	}
 	if v := volumes["/img"].(map[string]any); v["disk"] != "/tmp/pool.img" || v["format"] != "raw" {
 		t.Fatalf("/img = %v", v)
+	}
+}
+
+func TestFFIWireShape_SecurityProfile(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithSecurityProfile(SecurityProfileRestricted),
+	)
+	if got["security_profile"] != "restricted" {
+		t.Fatalf("security_profile = %v", got["security_profile"])
 	}
 }
 

@@ -9,16 +9,16 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
-/// Set on terminal message types such as `ExecExited` and `FsResponse`.
+/// Set on terminal message types such as `ExecExited`, `FsResponse`, and `TcpClosed`.
 pub const FLAG_TERMINAL: u8 = 0b0000_0001;
 
 /// Frame flag: this is the first message of a new session.
 ///
-/// Set on session-initiating message types such as `ExecRequest` and `FsRequest`.
+/// Set on session-initiating message types such as `ExecRequest`, `FsRequest`, and `TcpConnect`.
 pub const FLAG_SESSION_START: u8 = 0b0000_0010;
 
 /// Frame flag: this message requests sandbox shutdown.
@@ -45,7 +45,13 @@ pub const FRAME_HEADER_SIZE: usize = 5;
 /// so that relay intermediaries can route frames without CBOR parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// Protocol version.
+    /// Protocol generation, echoed into the frame.
+    ///
+    /// This is the single protocol version axis (see `VERSIONING.md`), the same
+    /// number negotiated once at the handshake — not a second, message-local
+    /// version. It is carried here so a frame is self-describing for debugging
+    /// and telemetry; behavior is gated on the negotiated generation, not on
+    /// reading this field per message.
     pub v: u8,
 
     /// Message type.
@@ -70,69 +76,132 @@ pub struct Message {
 }
 
 /// Identifies the type of a protocol message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// The `#[strum(serialize = ...)]` attribute on each variant is the single
+/// source for its wire string: [`as_str`](Self::as_str) and
+/// [`from_wire_str`](Self::from_wire_str) are derived from it, and
+/// [`strum::IntoEnumIterator`] yields every variant for exhaustive iteration
+/// (the schema snapshot) without a hand-maintained list.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
 pub enum MessageType {
     /// Guest agent is ready.
+    #[strum(serialize = "core.ready")]
     Ready,
 
     /// Guest reports init context before user mounts.
+    #[strum(serialize = "core.init.resolved")]
     InitResolved,
 
     /// Host acknowledges init-context setup.
+    #[strum(serialize = "core.init.ack")]
     InitAck,
 
     /// Host requests shutdown.
+    #[strum(serialize = "core.shutdown")]
     Shutdown,
 
     /// Host relay reports that one SDK client disconnected.
+    #[strum(serialize = "core.relay.client.disconnected")]
     RelayClientDisconnected,
 
     /// Host asks the guest to synchronize `CLOCK_REALTIME`.
+    #[strum(serialize = "core.clock.sync")]
     ClockSync,
 
     /// Host requests command execution.
+    #[strum(serialize = "core.exec.request")]
     ExecRequest,
 
     /// Guest confirms command started.
+    #[strum(serialize = "core.exec.started")]
     ExecStarted,
 
     /// Host sends stdin data.
+    #[strum(serialize = "core.exec.stdin")]
     ExecStdin,
 
     /// Guest reports that a prior `ExecStdin` write to the child's
     /// stdin failed (e.g. the child closed its read end). Non-terminal:
     /// the session continues and may still produce stdout/stderr and
     /// an exit code.
+    #[strum(serialize = "core.exec.stdin.error")]
     ExecStdinError,
 
     /// Guest sends stdout data.
+    #[strum(serialize = "core.exec.stdout")]
     ExecStdout,
 
     /// Guest sends stderr data.
+    #[strum(serialize = "core.exec.stderr")]
     ExecStderr,
 
     /// Guest reports command exit.
+    #[strum(serialize = "core.exec.exited")]
     ExecExited,
 
     /// Guest reports command failed to spawn (binary not found,
     /// permission denied, etc.). Distinct from `ExecExited` —
     /// `ExecFailed` means the user code never ran. Terminal.
+    #[strum(serialize = "core.exec.failed")]
     ExecFailed,
 
     /// Host requests PTY resize.
+    #[strum(serialize = "core.exec.resize")]
     ExecResize,
 
     /// Host sends signal to process.
+    #[strum(serialize = "core.exec.signal")]
     ExecSignal,
 
     /// Host requests a filesystem operation.
+    #[strum(serialize = "core.fs.request")]
     FsRequest,
 
     /// Guest sends a terminal filesystem response.
+    #[strum(serialize = "core.fs.response")]
     FsResponse,
 
     /// Streaming file data chunk (bidirectional).
+    #[strum(serialize = "core.fs.data")]
     FsData,
+
+    /// Host requests a TCP connection from inside the guest.
+    #[strum(serialize = "core.tcp.connect")]
+    TcpConnect,
+
+    /// Guest confirms that a TCP connection was opened.
+    #[strum(serialize = "core.tcp.connected")]
+    TcpConnected,
+
+    /// TCP stream data chunk (bidirectional).
+    #[strum(serialize = "core.tcp.data")]
+    TcpData,
+
+    /// One TCP stream side has closed its write half.
+    #[strum(serialize = "core.tcp.eof")]
+    TcpEof,
+
+    /// Host requests a TCP session close.
+    #[strum(serialize = "core.tcp.close")]
+    TcpClose,
+
+    /// Guest reports that a TCP session is closed. Terminal.
+    #[strum(serialize = "core.tcp.closed")]
+    TcpClosed,
+
+    /// Guest reports that a TCP session failed. Terminal.
+    #[strum(serialize = "core.tcp.failed")]
+    TcpFailed,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -180,62 +249,87 @@ impl MessageType {
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
-            Self::ExecExited | Self::ExecFailed | Self::FsResponse => FLAG_TERMINAL,
-            Self::ExecRequest | Self::FsRequest => FLAG_SESSION_START,
+            Self::ExecExited
+            | Self::ExecFailed
+            | Self::FsResponse
+            | Self::TcpClosed
+            | Self::TcpFailed => FLAG_TERMINAL,
+            Self::ExecRequest | Self::FsRequest | Self::TcpConnect => FLAG_SESSION_START,
             Self::Shutdown => FLAG_SHUTDOWN,
             _ => 0,
         }
     }
 
-    /// Returns the wire string representation.
-    pub fn as_str(&self) -> &'static str {
+    /// The protocol generation that introduced this message type.
+    ///
+    /// A per-type label on the single protocol generation axis (see
+    /// `VERSIONING.md`), not a separate version counter. The send path gates on
+    /// it: a type whose generation exceeds the peer's negotiated generation is
+    /// rejected locally with a typed error instead of being sent to a peer that
+    /// cannot handle it, so only that one feature fails rather than the session.
+    ///
+    /// Core and exec types belong to the generation-1 baseline; they work on
+    /// every runtime we still talk to, including the pre-0.5 legacy one.
+    /// Filesystem streaming did not exist in the pre-0.5 legacy protocol
+    /// (generation 1), so the `Fs*` types require generation 2 or newer.
+    ///
+    /// There is deliberately no wildcard arm: adding a new `MessageType` must
+    /// force a conscious choice of the generation that introduced it (and a
+    /// matching `PROTOCOL_VERSION` bump). Message types are append-only — never
+    /// lower or re-purpose an existing value.
+    pub fn min_protocol_version(&self) -> u8 {
         match self {
-            Self::Ready => "core.ready",
-            Self::InitResolved => "core.init.resolved",
-            Self::InitAck => "core.init.ack",
-            Self::Shutdown => "core.shutdown",
-            Self::RelayClientDisconnected => "core.relay.client.disconnected",
-            Self::ClockSync => "core.clock.sync",
-            Self::ExecRequest => "core.exec.request",
-            Self::ExecStarted => "core.exec.started",
-            Self::ExecStdin => "core.exec.stdin",
-            Self::ExecStdinError => "core.exec.stdin.error",
-            Self::ExecStdout => "core.exec.stdout",
-            Self::ExecStderr => "core.exec.stderr",
-            Self::ExecExited => "core.exec.exited",
-            Self::ExecFailed => "core.exec.failed",
-            Self::ExecResize => "core.exec.resize",
-            Self::ExecSignal => "core.exec.signal",
-            Self::FsRequest => "core.fs.request",
-            Self::FsResponse => "core.fs.response",
-            Self::FsData => "core.fs.data",
+            Self::Ready
+            | Self::InitResolved
+            | Self::InitAck
+            | Self::Shutdown
+            | Self::RelayClientDisconnected
+            | Self::ClockSync
+            | Self::ExecRequest
+            | Self::ExecStarted
+            | Self::ExecStdin
+            | Self::ExecStdinError
+            | Self::ExecStdout
+            | Self::ExecStderr
+            | Self::ExecExited
+            | Self::ExecFailed
+            | Self::ExecResize
+            | Self::ExecSignal => 1,
+            Self::FsRequest | Self::FsResponse | Self::FsData => 2,
+            Self::TcpConnect
+            | Self::TcpConnected
+            | Self::TcpData
+            | Self::TcpEof
+            | Self::TcpClose
+            | Self::TcpClosed
+            | Self::TcpFailed => 4,
         }
     }
 
-    /// Parses a wire string into a message type.
+    /// Whether a peer that speaks `peer_generation` is new enough to handle this
+    /// message type.
+    ///
+    /// The shared version-compatibility primitive for both directions. The host
+    /// gates its sends on it (`AgentClient::ensure_version_compat`); the guest
+    /// can gate a guest-initiated message the same way, reading the peer's
+    /// generation from the `v` field of the request that established the session.
+    /// See `VERSIONING.md`.
+    pub fn is_available_at(&self, peer_generation: u8) -> bool {
+        self.min_protocol_version() <= peer_generation
+    }
+
+    /// Returns the wire string representation.
+    ///
+    /// Backed by the per-variant `#[strum(serialize = ...)]` attribute, the
+    /// single source of truth for wire strings.
+    pub fn as_str(&self) -> &'static str {
+        (*self).into()
+    }
+
+    /// Parses a wire string into a message type, the inverse of
+    /// [`as_str`](Self::as_str). Returns `None` for an unknown string.
     pub fn from_wire_str(s: &str) -> Option<Self> {
-        match s {
-            "core.ready" => Some(Self::Ready),
-            "core.init.resolved" => Some(Self::InitResolved),
-            "core.init.ack" => Some(Self::InitAck),
-            "core.shutdown" => Some(Self::Shutdown),
-            "core.relay.client.disconnected" => Some(Self::RelayClientDisconnected),
-            "core.clock.sync" => Some(Self::ClockSync),
-            "core.exec.request" => Some(Self::ExecRequest),
-            "core.exec.started" => Some(Self::ExecStarted),
-            "core.exec.stdin" => Some(Self::ExecStdin),
-            "core.exec.stdin.error" => Some(Self::ExecStdinError),
-            "core.exec.stdout" => Some(Self::ExecStdout),
-            "core.exec.stderr" => Some(Self::ExecStderr),
-            "core.exec.exited" => Some(Self::ExecExited),
-            "core.exec.failed" => Some(Self::ExecFailed),
-            "core.exec.resize" => Some(Self::ExecResize),
-            "core.exec.signal" => Some(Self::ExecSignal),
-            "core.fs.request" => Some(Self::FsRequest),
-            "core.fs.response" => Some(Self::FsResponse),
-            "core.fs.data" => Some(Self::FsData),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -296,6 +390,13 @@ mod tests {
             (MessageType::FsRequest, "core.fs.request"),
             (MessageType::FsResponse, "core.fs.response"),
             (MessageType::FsData, "core.fs.data"),
+            (MessageType::TcpConnect, "core.tcp.connect"),
+            (MessageType::TcpConnected, "core.tcp.connected"),
+            (MessageType::TcpData, "core.tcp.data"),
+            (MessageType::TcpEof, "core.tcp.eof"),
+            (MessageType::TcpClose, "core.tcp.close"),
+            (MessageType::TcpClosed, "core.tcp.closed"),
+            (MessageType::TcpFailed, "core.tcp.failed"),
         ];
 
         for (mt, expected_str) in &types {
@@ -326,6 +427,13 @@ mod tests {
             MessageType::FsRequest,
             MessageType::FsResponse,
             MessageType::FsData,
+            MessageType::TcpConnect,
+            MessageType::TcpConnected,
+            MessageType::TcpData,
+            MessageType::TcpEof,
+            MessageType::TcpClose,
+            MessageType::TcpClosed,
+            MessageType::TcpFailed,
         ];
 
         for mt in &types {
@@ -361,8 +469,11 @@ mod tests {
         assert_eq!(MessageType::ExecExited.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::FsResponse.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::TcpClosed.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::TcpFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
+        assert_eq!(MessageType::TcpConnect.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::Ready.flags(), 0);
         assert_eq!(MessageType::InitResolved.flags(), 0);
         assert_eq!(MessageType::InitAck.flags(), 0);
@@ -375,6 +486,97 @@ mod tests {
         assert_eq!(MessageType::ExecResize.flags(), 0);
         assert_eq!(MessageType::ExecSignal.flags(), 0);
         assert_eq!(MessageType::FsData.flags(), 0);
+        assert_eq!(MessageType::TcpConnected.flags(), 0);
+        assert_eq!(MessageType::TcpData.flags(), 0);
+        assert_eq!(MessageType::TcpEof.flags(), 0);
+        assert_eq!(MessageType::TcpClose.flags(), 0);
+    }
+
+    #[test]
+    fn test_additive_fields_keep_old_and_new_compatible() {
+        // The core backward-compatibility guarantee from VERSIONING.md: a new,
+        // always-optional field is safe in both directions across a version skew.
+        use serde::{Deserialize, Serialize};
+
+        // A payload as it existed at an older generation.
+        #[derive(Serialize, Deserialize)]
+        struct Old {
+            a: u32,
+            b: u32,
+        }
+
+        // The same payload after a later generation added `c` (optional).
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct New {
+            a: u32,
+            b: u32,
+            #[serde(default)]
+            c: u32,
+        }
+
+        // New sender -> old receiver: the unknown `c` is ignored, not an error.
+        let mut new_bytes = Vec::new();
+        ciborium::into_writer(&New { a: 1, b: 2, c: 3 }, &mut new_bytes).unwrap();
+        let as_old: Old = ciborium::from_reader(&new_bytes[..]).unwrap();
+        assert_eq!((as_old.a, as_old.b), (1, 2));
+
+        // Old sender -> new receiver: the missing `c` falls back to its default.
+        let mut old_bytes = Vec::new();
+        ciborium::into_writer(&Old { a: 1, b: 2 }, &mut old_bytes).unwrap();
+        let as_new: New = ciborium::from_reader(&old_bytes[..]).unwrap();
+        assert_eq!(as_new, New { a: 1, b: 2, c: 0 });
+    }
+
+    #[test]
+    fn test_is_available_at() {
+        // Exec is in the generation-1 baseline: available to every peer.
+        assert!(MessageType::ExecRequest.is_available_at(1));
+        assert!(MessageType::ExecRequest.is_available_at(2));
+        assert!(MessageType::ExecRequest.is_available_at(PROTOCOL_VERSION));
+        // Filesystem requires generation 2: unavailable to a legacy (gen 1) peer.
+        assert!(!MessageType::FsRequest.is_available_at(1));
+        assert!(MessageType::FsRequest.is_available_at(2));
+        assert!(MessageType::FsRequest.is_available_at(PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn test_min_protocol_version_per_type() {
+        // Core and exec types are the generation-1 baseline: usable on every
+        // runtime we still talk to, including the pre-0.5 legacy one.
+        let baseline = [
+            MessageType::Ready,
+            MessageType::InitResolved,
+            MessageType::InitAck,
+            MessageType::Shutdown,
+            MessageType::RelayClientDisconnected,
+            MessageType::ClockSync,
+            MessageType::ExecRequest,
+            MessageType::ExecStarted,
+            MessageType::ExecStdin,
+            MessageType::ExecStdinError,
+            MessageType::ExecStdout,
+            MessageType::ExecStderr,
+            MessageType::ExecExited,
+            MessageType::ExecFailed,
+            MessageType::ExecResize,
+            MessageType::ExecSignal,
+        ];
+        for mt in &baseline {
+            assert_eq!(mt.min_protocol_version(), 1, "{mt:?} should be v1 baseline");
+        }
+
+        // Filesystem streaming did not exist in the pre-0.5 legacy protocol, so
+        // these require a post-legacy generation.
+        for mt in [
+            MessageType::FsRequest,
+            MessageType::FsResponse,
+            MessageType::FsData,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 2, "{mt:?} should require gen 2");
+        }
+
+        // Every current type must be sendable to a current peer.
+        assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);
     }
 
     #[test]

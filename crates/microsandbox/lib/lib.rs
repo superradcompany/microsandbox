@@ -26,7 +26,9 @@ pub use agent::{
     RawFrame, StreamHandle,
 };
 pub use error::*;
-pub use image::{Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail};
+pub use image::{
+    Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail, ImagePruneReport,
+};
 pub use microsandbox_image::RegistryAuth;
 pub use microsandbox_protocol as protocol;
 pub use microsandbox_runtime::logging::LogLevel;

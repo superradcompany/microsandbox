@@ -25,7 +25,7 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 		removeSnapshotBestEffort(snapshotName)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
+	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
 		removeSnapshotBestEffort(snapshotDir)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
+	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use microsandbox::sandbox::{Patch, SandboxBuilder};
+use microsandbox::sandbox::{Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile};
 
 use crate::ui;
 
@@ -42,6 +42,12 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub env: Vec<String>,
 
+    /// Attach a label to the sandbox for metrics attribution (`KEY=VALUE`, or
+    /// bare `KEY` for a valueless marker). Repeatable. Surfaced as attributes on
+    /// the sandbox's metrics.
+    #[arg(long, value_name = "KEY[=VALUE]")]
+    pub label: Vec<String>,
+
     /// Replace an existing sandbox with the same name.
     #[arg(long)]
     pub replace: bool,
@@ -62,6 +68,10 @@ pub struct SandboxOpts {
     /// Mount a temporary in-memory filesystem (PATH, PATH:SIZE, or PATH:SIZE:OPTIONS).
     #[arg(long)]
     pub tmpfs: Vec<String>,
+
+    /// In-guest security profile (default or restricted).
+    #[arg(long, value_parser = ["default", "restricted"])]
+    pub security: Option<String>,
 
     /// Register a shell snippet as a named script (NAME=BODY). The body
     /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
@@ -315,6 +325,8 @@ pub struct SandboxOpts {
 struct CliMountOptions {
     readonly: bool,
     noexec: bool,
+    nosuid: bool,
+    nodev: bool,
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
@@ -367,7 +379,8 @@ impl SandboxOpts {
             || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
-            || self.idle_timeout.is_some();
+            || self.idle_timeout.is_some()
+            || self.security.is_some();
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
@@ -435,6 +448,12 @@ pub fn apply_sandbox_opts(
         builder = builder.env(k, v);
     }
 
+    // --- Labels ---
+    for label_str in &opts.label {
+        let (k, v) = ui::parse_label(label_str);
+        builder = builder.label(k, v);
+    }
+
     // --- Volumes ---
     for vol_str in &opts.volume {
         builder = apply_volume(builder, vol_str)?;
@@ -453,6 +472,12 @@ pub fn apply_sandbox_opts(
             }
             if options.noexec {
                 m = m.noexec();
+            }
+            if options.nosuid {
+                m = m.nosuid();
+            }
+            if options.nodev {
+                m = m.nodev();
             }
             m
         });
@@ -487,6 +512,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref size) = opts.oci_upper_size {
         let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
         builder = builder.oci_upper_size(size_mib);
+    }
+    if let Some(ref security) = opts.security {
+        builder = builder.security(parse_security_profile(security)?);
     }
 
     // --- Handoff init ---
@@ -632,7 +660,7 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,stat-virt=...][,host-perms=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
     let (source, guest_and_opts) = spec
         .split_once(':')
@@ -677,6 +705,12 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         if options.noexec {
             m = m.noexec();
         }
+        if options.nosuid {
+            m = m.nosuid();
+        }
+        if options.nodev {
+            m = m.nodev();
+        }
         if let Some(sv) = options.stat_virtualization {
             m = m.stat_virtualization(sv);
         }
@@ -703,6 +737,7 @@ fn parse_cli_mount_options(
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
+    let mut seen_nodev = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_size = false;
@@ -736,6 +771,14 @@ fn parse_cli_mount_options(
                     anyhow::bail!("mount option `nosuid` specified more than once");
                 }
                 seen_nosuid = true;
+                parsed.nosuid = true;
+            }
+            "nodev" => {
+                if seen_nodev {
+                    anyhow::bail!("mount option `nodev` specified more than once");
+                }
+                seen_nodev = true;
+                parsed.nodev = true;
             }
             "suid" | "exec" | "dev" => {
                 anyhow::bail!("unsupported mount option {opt:?}");
@@ -1245,8 +1288,16 @@ fn looks_like_mount_options(segment: &str) -> bool {
         || segment.contains('=')
         || matches!(
             segment,
-            "ro" | "rw" | "noexec" | "nosuid" | "suid" | "exec" | "dev"
+            "ro" | "rw" | "noexec" | "nosuid" | "nodev" | "suid" | "exec" | "dev"
         )
+}
+
+fn parse_security_profile(value: &str) -> anyhow::Result<SecurityProfile> {
+    match value {
+        "default" => Ok(SecurityProfile::Default),
+        "restricted" => Ok(SecurityProfile::Restricted),
+        other => anyhow::bail!("invalid security profile {other:?}"),
+    }
 }
 
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
@@ -1505,6 +1556,65 @@ pub fn parse_rlimit(
     Ok((resource, rlimit.soft, rlimit.hard))
 }
 
+/// Parse repeatable `--label KEY[=VALUE]` selector flags into key/value pairs.
+/// A bare `KEY` yields an empty value (a valueless marker label).
+pub fn parse_label_selectors(labels: &[String]) -> Vec<(String, String)> {
+    labels.iter().map(|s| ui::parse_label(s)).collect()
+}
+
+/// Build a [`SandboxFilter`] from repeatable `--label KEY[=VALUE]` selector flags.
+pub fn label_filter(labels: &[String]) -> SandboxFilter {
+    SandboxFilter::new().labels(parse_label_selectors(labels))
+}
+
+/// Resolve the set of sandbox names a command should act on, given explicit
+/// `names` plus `--label KEY=VALUE` selectors. Label-matched sandboxes are
+/// unioned with the explicit names (order-preserving, de-duplicated). Selectors
+/// are AND-matched: a sandbox must carry every label to be selected.
+pub async fn resolve_selected_sandboxes(
+    names: &[String],
+    labels: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::new();
+
+    for name in names {
+        if seen.insert(name.clone()) {
+            resolved.push(name.clone());
+        }
+    }
+
+    if !labels.is_empty() {
+        for handle in Sandbox::list_with(label_filter(labels)).await? {
+            if seen.insert(handle.name().to_string()) {
+                resolved.push(handle.name().to_string());
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// Resolve target sandboxes for a bulk command (`stop`/`start`/`remove`),
+/// applying the standard guards: error when neither names nor `--label`
+/// selectors are given, and emit a notice when selectors matched nothing.
+pub async fn resolve_bulk_targets(
+    names: &[String],
+    labels: &[String],
+    quiet: bool,
+) -> anyhow::Result<Vec<String>> {
+    if names.is_empty() && labels.is_empty() {
+        anyhow::bail!("specify one or more sandbox names or --label selectors");
+    }
+
+    let resolved = resolve_selected_sandboxes(names, labels).await?;
+    if resolved.is_empty() && !quiet {
+        ui::warn("no sandboxes matched the given labels");
+    }
+
+    Ok(resolved)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1639,6 +1749,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_sandbox_opts_sets_security_profile() {
+        let opts = SandboxOpts {
+            security: Some("restricted".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
     async fn apply_sandbox_opts_adds_cli_rootfs_patches() {
         let file = write_temp("config");
         let dir = make_temp_dir("msb-patch-dir");
@@ -1714,6 +1839,20 @@ mod tests {
         let mount = build_one("/host:/guest:ro").await;
         match mount {
             VolumeMount::Bind { options, .. } => assert!(options.readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_explicit_security_mount_flags() {
+        let mount = build_one("/host:/guest:nosuid,nodev").await;
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert!(!options.readonly);
+                assert!(!options.noexec);
+                assert!(options.nosuid);
+                assert!(options.nodev);
+            }
             other => panic!("expected Bind, got {other:?}"),
         }
     }
@@ -1858,11 +1997,13 @@ mod tests {
 
     #[test]
     fn test_parse_tmpfs_accepts_keyed_size_and_flags() {
-        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec").unwrap();
+        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec,nosuid,nodev").unwrap();
         assert_eq!(path, "/seed");
         assert_eq!(size, Some(64));
         assert!(options.readonly);
         assert!(options.noexec);
+        assert!(options.nosuid);
+        assert!(options.nodev);
     }
 
     #[tokio::test]

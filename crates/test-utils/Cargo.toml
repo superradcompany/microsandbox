@@ -12,5 +12,5 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-test-macros = { path = "../test-macros" }
+test-macros.workspace = true
 tempfile.workspace = true

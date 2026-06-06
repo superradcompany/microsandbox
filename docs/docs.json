@@ -138,6 +138,7 @@
                   "sdk/python/networking",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
+                  "sdk/python/images",
                   "sdk/python/agent-client"
                 ]
               },

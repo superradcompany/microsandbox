@@ -28,13 +28,12 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             SandboxFs(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
+            ImageInUse(_) => ("ImageInUseError", err.to_string()),
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
             MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
-            AgentClient(microsandbox::AgentClientError::Pre05SandboxRestartRequired) => {
-                // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-                // compatibility for versions before 0.5 is no longer supported.
-                ("Pre05SandboxRestartRequiredError", err.to_string())
+            AgentClient(microsandbox::AgentClientError::UnsupportedOperation { .. }) => {
+                ("UnsupportedOperationError", err.to_string())
             }
             Terminal(_) => ("MicrosandboxError", err.to_string()),
             _ => ("MicrosandboxError", err.to_string()),

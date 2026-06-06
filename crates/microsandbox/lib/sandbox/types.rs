@@ -131,6 +131,27 @@ pub enum HostPermissions {
     Mirror,
 }
 
+/// Sandbox-level in-guest security profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityProfile {
+    /// Preserve normal guest-root semantics.
+    ///
+    /// Exec sessions do not set `no_new_privs` and keep `CAP_SYS_ADMIN`, so
+    /// workflows such as `sudo`, package managers, and Docker-in-Docker work
+    /// as they would in a regular VM.
+    #[default]
+    Default,
+
+    /// Harden guest exec sessions.
+    ///
+    /// Agentd sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces
+    /// `nosuid,nodev` on user mounts. Workloads that need privilege
+    /// elevation or guest mount administration, such as `sudo` and
+    /// Docker-in-Docker, are intentionally incompatible with this profile.
+    Restricted,
+}
+
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -147,9 +168,14 @@ pub struct MountOptions {
     /// This prevents `execve` of binaries or scripts located on the mount.
     /// Interpreters can still read files from the mount, for example
     /// `sh /mnt/script.sh`, because the interpreter itself executes from a
-    /// different filesystem. Guest volume mounts always also use internal
-    /// `nosuid` and `nodev` safety defaults.
+    /// different filesystem.
     pub noexec: bool,
+
+    /// Whether setuid and setgid privilege elevation from files on the mount is ignored.
+    pub nosuid: bool,
+
+    /// Whether device files on the mount are ignored.
+    pub nodev: bool,
 }
 
 /// A volume mount specification for a sandbox.
@@ -431,6 +457,18 @@ impl MountBuilder {
     /// different filesystem.
     pub fn noexec(mut self) -> Self {
         self.options.noexec = true;
+        self
+    }
+
+    /// Ignore setuid and setgid privilege elevation from files on this mount.
+    pub fn nosuid(mut self) -> Self {
+        self.options.nosuid = true;
+        self
+    }
+
+    /// Ignore device files on this mount.
+    pub fn nodev(mut self) -> Self {
+        self.options.nodev = true;
         self
     }
 
@@ -1600,6 +1638,7 @@ mod tests {
             options: MountOptions {
                 readonly: true,
                 noexec: true,
+                ..MountOptions::default()
             },
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,

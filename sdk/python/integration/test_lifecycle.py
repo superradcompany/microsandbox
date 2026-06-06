@@ -80,3 +80,30 @@ async def test_replace_rejects_duplicate_then_replaces(sandbox_name):
         with suppress(Exception):
             await first.stop_and_wait()
         await remove_sandbox(name)
+
+
+@pytest.mark.asyncio
+async def test_list_with_labels(sandbox_factory, sandbox_name):
+    owner = sandbox_name("py-sdk-owner")
+
+    web = await sandbox_factory(prefix="py-sdk-web", labels={"owner": owner, "tier": "web"})
+    job = await sandbox_factory(prefix="py-sdk-job", labels={"owner": owner, "tier": "job"})
+    other = await sandbox_factory(prefix="py-sdk-other", labels={"owner": owner + "-else"})
+
+    web_name = await web.name
+    job_name = await job.name
+    other_name = await other.name
+
+    # Single selector → both of this owner's sandboxes, not the other's.
+    by_owner = {h.name for h in await Sandbox.list_with(labels={"owner": owner})}
+    assert web_name in by_owner
+    assert job_name in by_owner
+    assert other_name not in by_owner
+
+    # AND of two selectors → only the web sandbox.
+    by_owner_web = {
+        h.name for h in await Sandbox.list_with(labels={"owner": owner, "tier": "web"})
+    }
+    assert web_name in by_owner_web
+    assert job_name not in by_owner_web
+    assert other_name not in by_owner_web

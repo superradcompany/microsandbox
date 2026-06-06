@@ -3,10 +3,12 @@
 //! Integration tests for the `msb ssh` CLI surface.
 
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{io::Read, net::TcpStream};
 
 use microsandbox::Sandbox;
+use russh::keys::{Algorithm, PrivateKey, PublicKeyBase64};
 use test_utils::msb_test;
 
 //--------------------------------------------------------------------------------------------------
@@ -115,6 +117,73 @@ async fn msb_ssh_interactive_session_works_under_tmux() {
     );
 }
 
+#[msb_test]
+async fn msb_ssh_serve_supports_openssh_local_forwarding() {
+    if !command_exists("ssh") {
+        eprintln!("skipping OpenSSH forwarding test; ssh is not installed");
+        return;
+    }
+
+    let name = "cli-ssh-direct-tcpip";
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let nc_check = sandbox
+        .shell("command -v nc >/dev/null")
+        .await
+        .expect("check guest nc");
+    if !nc_check.status().success {
+        cleanup_sandbox(sandbox, name).await;
+        eprintln!("skipping OpenSSH forwarding test; guest image does not provide nc");
+        return;
+    }
+    let mut listener = sandbox
+        .exec_stream("sh", ["-lc", "printf 'tcp-forward-ok' | nc -l -p 18080"])
+        .await
+        .expect("start guest TCP listener");
+
+    let temp = make_temp_dir("msb-ssh-forward");
+    let key_path = temp.join("id_ed25519");
+    let authorized_key = write_test_key(&key_path);
+    command_ok(
+        Command::new(env!("CARGO_BIN_EXE_msb")).args([
+            "ssh",
+            "authorize",
+            "--key",
+            &authorized_key,
+        ]),
+        "authorize OpenSSH test key",
+    )
+    .expect("authorize OpenSSH test key");
+
+    let local_port = reserve_local_port();
+    let mut ssh = spawn_ssh_forward(name, &key_path, local_port);
+    let result = read_forwarded_bytes(local_port, Duration::from_secs(30)).await;
+
+    terminate_child(&mut ssh);
+    finish_guest_listener(&mut listener).await;
+    cleanup_sandbox(sandbox, name).await;
+    let _ = std::fs::remove_dir_all(&temp);
+
+    let data = match result {
+        Ok(data) => data,
+        Err(error) => {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = ssh.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!("{error}; ssh stderr={stderr}");
+        }
+    };
+    assert_eq!(data, b"tcp-forward-ok");
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -172,6 +241,118 @@ async fn run_tmux_cli_session(
         "send interactive SSH command",
     )?;
     wait_for_session_exit(session, Duration::from_secs(45)).await
+}
+
+async fn cleanup_sandbox(sandbox: Sandbox, name: &str) {
+    sandbox.stop_and_wait().await.expect("stop sandbox");
+    Sandbox::remove(name).await.expect("remove sandbox");
+}
+
+async fn finish_guest_listener(listener: &mut microsandbox::ExecHandle) {
+    if tokio::time::timeout(Duration::from_secs(2), listener.wait())
+        .await
+        .is_err()
+    {
+        let _ = listener.kill().await;
+    }
+}
+
+fn write_test_key(path: &std::path::Path) -> String {
+    let mut rng = russh::keys::key::safe_rng();
+    let key = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("generate SSH key");
+    let encoded = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("encode SSH private key");
+    std::fs::write(path, encoded.as_bytes()).expect("write SSH private key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("set SSH private key permissions");
+    }
+    format!(
+        "ssh-ed25519 {} msb-forward-test",
+        key.public_key().public_key_base64()
+    )
+}
+
+fn make_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
+    std::fs::create_dir_all(&path).expect("create temp dir");
+    path
+}
+
+fn reserve_local_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
+    listener.local_addr().expect("local addr").port()
+}
+
+fn spawn_ssh_forward(sandbox_name: &str, key_path: &std::path::Path, local_port: u16) -> Child {
+    let proxy = format!(
+        "{} ssh serve {} --stdio",
+        shell_quote(env!("CARGO_BIN_EXE_msb")),
+        shell_quote(sandbox_name)
+    );
+    Command::new("ssh")
+        .args([
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            &format!("ProxyCommand={proxy}"),
+            "-i",
+            &key_path.to_string_lossy(),
+            "-N",
+            "-L",
+            &format!("127.0.0.1:{local_port}:127.0.0.1:18080"),
+            "root@msb-direct-tcpip",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn OpenSSH forwarding client")
+}
+
+async fn read_forwarded_bytes(local_port: u16, timeout: Duration) -> Result<Vec<u8>, String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        match TcpStream::connect(("127.0.0.1", local_port)) {
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|e| format!("set read timeout: {e}"))?;
+                let mut data = Vec::new();
+                match stream.read_to_end(&mut data) {
+                    Ok(_) if !data.is_empty() => return Ok(data),
+                    Ok(_) => {}
+                    Err(e) => return Err(format!("read forwarded TCP stream: {e}")),
+                }
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    Err(format!(
+        "timed out waiting for forwarded bytes on 127.0.0.1:{local_port}"
+    ))
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 async fn wait_for_pane(session: &str, needle: &str, timeout: Duration) -> Result<(), String> {

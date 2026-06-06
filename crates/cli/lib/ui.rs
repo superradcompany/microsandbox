@@ -348,7 +348,7 @@ pub fn detail_kv(key: &str, value: &str) {
 
 /// Print an indented key-value pair in detail views.
 pub fn detail_kv_indent(key: &str, value: &str) {
-    println!("  {:<14}{value}", style(format!("{key}:")).cyan());
+    println!("  {:<14}{value}", style(format!("{key}:")).dim());
 }
 
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.
@@ -385,6 +385,16 @@ pub fn parse_env(s: &str) -> Result<(String, String), String> {
             Ok(val) => Ok((s.to_string(), val)),
             Err(_) => Err(format!("environment variable '{s}' not set")),
         }
+    }
+}
+
+/// Parse a `KEY=VALUE` label argument. Unlike [`parse_env`], a missing `=` does
+/// not trigger a host-environment lookup — a bare `KEY` is a valueless marker
+/// label (empty value), matching Docker's label semantics.
+pub fn parse_label(s: &str) -> (String, String) {
+    match s.find('=') {
+        Some(eq_pos) => (s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()),
+        None => (s.to_string(), String::new()),
     }
 }
 

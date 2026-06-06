@@ -65,7 +65,7 @@ pub fn generate_domain_cert(
     let key_pair: rcgen::KeyPair = rcgen::KeyPair::generate().map_err(DomainCertError::KeyPair)?;
 
     let cert_der = params
-        .signed_by(&key_pair, &ca.cert, &ca.key_pair)
+        .signed_by(&key_pair, &ca.issuer)
         .map_err(DomainCertError::Sign)?;
 
     let chain = vec![

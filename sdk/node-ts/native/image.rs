@@ -1,5 +1,5 @@
 use microsandbox::image as msb_image;
-use microsandbox::image::{ImageDetail, ImageHandle};
+use microsandbox::image::{ImageDetail, ImageHandle, ImagePruneReport};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -66,6 +66,17 @@ pub struct ImageInfo {
     pub size_bytes: Option<f64>,
     pub created_at: Option<f64>,
     pub last_used_at: Option<f64>,
+}
+
+/// Summary of artifacts removed by `imagePrune`.
+#[napi(object)]
+pub struct ImagePruneReportJs {
+    pub image_refs_removed: u32,
+    pub manifests_removed: u32,
+    pub layers_removed: u32,
+    pub fsmeta_removed: u32,
+    pub vmdk_removed: u32,
+    pub bytes_reclaimed: Option<f64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -153,16 +164,13 @@ pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> 
         .map_err(to_napi_error)
 }
 
-/// Garbage-collect orphaned layers. Returns the number reclaimed.
-#[napi(js_name = "imageGcLayers")]
-pub async fn image_gc_layers() -> Result<u32> {
-    msb_image::Image::gc_layers().await.map_err(to_napi_error)
-}
-
-/// Garbage-collect everything reclaimable. Returns the number reclaimed.
-#[napi(js_name = "imageGc")]
-pub async fn image_gc() -> Result<u32> {
-    msb_image::Image::gc().await.map_err(to_napi_error)
+/// Remove cached image data that is not used by any sandbox or indexed snapshot.
+#[napi(js_name = "imagePrune")]
+pub async fn image_prune() -> Result<ImagePruneReportJs> {
+    msb_image::Image::prune()
+        .await
+        .map(image_prune_report_to_js)
+        .map_err(to_napi_error)
 }
 
 fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
@@ -213,5 +221,16 @@ fn image_detail_to_js(d: ImageDetail) -> ImageDetailJs {
         last_used_at: opt_datetime_to_ms(&h.last_used_at()),
         config,
         layers,
+    }
+}
+
+fn image_prune_report_to_js(report: ImagePruneReport) -> ImagePruneReportJs {
+    ImagePruneReportJs {
+        image_refs_removed: report.image_refs_removed,
+        manifests_removed: report.manifests_removed,
+        layers_removed: report.layers_removed,
+        fsmeta_removed: report.fsmeta_removed,
+        vmdk_removed: report.vmdk_removed,
+        bytes_reclaimed: report.bytes_reclaimed.map(|n| n as f64),
     }
 }

@@ -2,7 +2,8 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    HostPermissions, MountOptions, Sandbox, SandboxConfig, StatVirtualization, VolumeMount,
+    HostPermissions, MountOptions, Sandbox, SandboxConfig, SecurityProfile, StatVirtualization,
+    VolumeMount,
 };
 
 use crate::ui;
@@ -31,12 +32,17 @@ fn mount_policy_suffix(sv: StatVirtualization, hp: HostPermissions) -> String {
 
 /// Render mount access and execution flags for `msb inspect` output.
 fn mount_flags_suffix(options: MountOptions) -> String {
-    let access = if options.readonly { "ro" } else { "rw" };
+    let mut flags = vec![if options.readonly { "ro" } else { "rw" }];
     if options.noexec {
-        format!(" ({access},noexec)")
-    } else {
-        format!(" ({access})")
+        flags.push("noexec");
     }
+    if options.nosuid {
+        flags.push("nosuid");
+    }
+    if options.nodev {
+        flags.push("nodev");
+    }
+    format!(" ({})", flags.join(","))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,6 +111,11 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         ui::detail_header("Resources");
         ui::detail_kv_indent("CPUs", &config.cpus.to_string());
         ui::detail_kv_indent("Memory", &format!("{} MiB", config.memory_mib));
+        let security = match config.security_profile {
+            SecurityProfile::Default => "default",
+            SecurityProfile::Restricted => "restricted",
+        };
+        ui::detail_kv("Security", security);
 
         if let Some(ref workdir) = config.workdir {
             ui::detail_kv("Workdir", workdir);
@@ -116,6 +127,15 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         if !config.env.is_empty() {
             ui::detail_header("Environment");
             for (k, v) in &config.env {
+                println!("  {k}={v}");
+            }
+        }
+
+        if !config.labels.is_empty() {
+            ui::detail_header("Labels");
+            let mut labels: Vec<_> = config.labels.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in labels {
                 println!("  {k}={v}");
             }
         }

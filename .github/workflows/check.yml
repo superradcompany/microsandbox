@@ -30,8 +30,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
           filters: |
@@ -47,13 +47,13 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           submodules: true
 
       - name: Cache kernel.c
         id: cache-kernel
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: vendor/libkrunfw/kernel.c
           key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -69,7 +69,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
@@ -83,13 +83,13 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
@@ -104,7 +104,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
           path: build/agentd
@@ -140,15 +140,15 @@ jobs:
             libkrunfw_file: libkrunfw.5.dylib
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
@@ -169,7 +169,7 @@ jobs:
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
         if: matrix.os == 'darwin'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: agentd-aarch64-linux-musl
           path: build/
@@ -177,7 +177,7 @@ jobs:
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
         id: cache-libkrunfw
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: build/libkrunfw*
           key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -196,7 +196,7 @@ jobs:
 
       - name: Download kernel.c (macOS)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/
@@ -244,7 +244,7 @@ jobs:
         run: cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }} -- -D warnings
 
       # -- Checks (Node SDK) --
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
 
@@ -253,7 +253,7 @@ jobs:
         run: npm ci && npm run build
 
       # -- Checks (Python SDK) --
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -293,7 +293,7 @@ jobs:
         run: uv build --wheel
 
       # -- Checks (Go SDK) --
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -337,14 +337,14 @@ jobs:
       # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
         if: matrix.target == 'linux-x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Upload Node SDK artifacts
         if: matrix.target == 'linux-x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-sdk-linux-x86_64
           path: |
@@ -389,10 +389,13 @@ jobs:
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Clean runner disk
+        run: scripts/ci/clean-runner-disk.sh
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -402,6 +405,10 @@ jobs:
           chmod +x build/msb
           scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
+
+      - name: Disk usage
+        if: always()
+        run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
@@ -413,25 +420,30 @@ jobs:
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
       - name: Clean workspace
-        run: rm -rf "${{ github.workspace }}"/{build}
+        run: |
+          rm -rf "${{ github.workspace }}"/{build}
+          rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Clean runner disk
+        run: scripts/ci/clean-runner-disk.sh
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2
         with:
           tool: cargo-nextest
 
       # -- Download pre-built artifacts --
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -468,7 +480,11 @@ jobs:
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 4
+          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
+
+      - name: Disk usage
+        if: always()
+        run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
@@ -494,18 +510,34 @@ jobs:
           rm -rf "${{ github.workspace }}"/{sdk,build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/setup-node@v4
+      - name: Clean runner disk
+        run: |
+          set -euo pipefail
+          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
+          rm -rf "${GITHUB_WORKSPACE}"/{sdk,build,target}
+          rm -rf ~/.microsandbox
+          sudo find /tmp -mindepth 1 -maxdepth 1 -type d \
+            \( -name 'msb-*' -o -name 'TestSandbox*' -o -name 'go-build*' \) \
+            -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+          sudo find /tmp -mindepth 1 -maxdepth 1 -type d \
+            \( -name 'codex-*' -o -name 'microsandbox-*' -o -name 'libkrun-*' \) \
+            -mmin +360 -exec rm -rf {} + 2>/dev/null || true
+          find "${RUNNER_WORKSPACE}" -mindepth 1 -maxdepth 1 -type d \
+            -name 'microsandbox*' -mmin +360 -exec rm -rf {} + 2>/dev/null || true
+          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: node-sdk-linux-x86_64
           path: sdk/node-ts/
@@ -553,9 +585,9 @@ jobs:
       - name: Run SDK tests (Node)
         working-directory: sdk/node-ts
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
-        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
         run: |
-          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          MSB_HOME=$(mktemp -d -p /tmp msb-node-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           npm test
@@ -565,17 +597,23 @@ jobs:
       - name: Install unzip
         run: sudo apt-get update && sudo apt-get install -y unzip
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Run SDK tests (Bun)
         working-directory: sdk/node-ts
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
-        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
         run: |
-          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          MSB_HOME=$(mktemp -d -p /tmp msb-node-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           bunx --bun vitest run
+
+      - name: Disk usage
+        if: always()
+        run: |
+          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
+          du -xhd1 /tmp 2>/dev/null | sort -h | tail -30 || true
 
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
@@ -595,21 +633,24 @@ jobs:
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Clean runner disk
+        run: scripts/ci/clean-runner-disk.sh
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -639,10 +680,14 @@ jobs:
           MSB_PATH: ${{ github.workspace }}/build/msb
           LD_LIBRARY_PATH: ${{ github.workspace }}/build:${{ github.workspace }}/sdk/python/microsandbox/_bundled/lib
         run: |
-          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          MSB_HOME=$(mktemp -d -p /tmp msb-python-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           uv run pytest integration
+
+      - name: Disk usage
+        if: always()
+        run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
@@ -662,9 +707,12 @@ jobs:
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@v5
+      - name: Clean runner disk
+        run: scripts/ci/clean-runner-disk.sh
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -673,7 +721,7 @@ jobs:
 
       # -- Download pre-built artifacts (msb + libkrunfw + cdylib all in build/) --
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
           path: build/
@@ -700,14 +748,18 @@ jobs:
           # reasoning: avoid running against a stale bundled binary).
           MSB_PATH: ${{ github.workspace }}/build/msb
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
-        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
         run: |
-          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          MSB_HOME=$(mktemp -d -p /tmp msb-go-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 20m ./integration/...
+
+      - name: Disk usage
+        if: always()
+        run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that always reports, regardless of

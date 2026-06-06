@@ -65,7 +65,7 @@ func TestSandboxRemovePersisted(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-rmpersist-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestOwnsLifecycleAfterDetachOrConnect(t *testing.T) {
 	name := "go-sdk-ownsconn-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithDetached(),
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestWithReplace(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-replace-" + t.Name()
 
-	first, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	first, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("first CreateSandbox: %v", err)
 	}
@@ -167,13 +167,13 @@ func TestWithReplace(t *testing.T) {
 	})
 
 	// Without replace, the second create should fail.
-	if _, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19")); err == nil {
+	if _, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage)); err == nil {
 		t.Error("expected error creating duplicate sandbox without WithReplace")
 	}
 
 	// With replace, it should succeed.
 	second, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithReplace(),
 	)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestWithUser(t *testing.T) {
 	name := "go-sdk-user-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithUser("nobody"),
 	)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestWithHostname(t *testing.T) {
 	name := "go-sdk-hostname-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithHostname("go-sdk-test-host"),
 	)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestWithWorkdir(t *testing.T) {
 	name := "go-sdk-workdir-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithWorkdir("/var/log"),
 	)
 	if err != nil {
@@ -284,7 +284,7 @@ func TestWithEnvVisibleInsideSandbox(t *testing.T) {
 	name := "go-sdk-env-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithEnv(map[string]string{
 			"FOO_INTEGRATION": "bar-marker-123",
 			"BAZ_INTEGRATION": "qux-marker-456",
@@ -315,7 +315,7 @@ func TestSandboxHandleListsRichMetadata(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-handle-rich-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestSandboxHandleStopKill(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-handle-stop-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}

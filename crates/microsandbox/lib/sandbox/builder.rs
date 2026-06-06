@@ -1,25 +1,26 @@
 //! Fluent builder for [`SandboxConfig`].
 
+#[cfg(feature = "net")]
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
 use microsandbox_network::config::{PortProtocol, PublishedPort};
-#[cfg(feature = "net")]
-use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
-        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
+        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, SecurityProfile,
+        VolumeMount,
     },
 };
 use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
-use std::time::Duration;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,6 +29,7 @@ use std::time::Duration;
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
     config: SandboxConfig,
+    detached: bool,
     build_error: Option<crate::MicrosandboxError>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
@@ -77,6 +79,7 @@ impl SandboxBuilder {
                 name: name.into(),
                 ..Default::default()
             },
+            detached: false,
             build_error: None,
             pending_snapshot: None,
         }
@@ -185,6 +188,14 @@ impl SandboxBuilder {
     /// Disable runtime logs for this sandbox, even if a global default exists.
     pub fn quiet_logs(mut self) -> Self {
         self.config.log_level = None;
+        self
+    }
+
+    /// Configure whether the sandbox process is created in detached/background mode.
+    ///
+    /// Detached sandboxes survive the creating process. Defaults to `false`.
+    pub fn detached(mut self, detached: bool) -> Self {
+        self.detached = detached;
         self
     }
 
@@ -549,7 +560,16 @@ impl SandboxBuilder {
     /// Can be called multiple times. Per-command env vars (on exec/shell)
     /// are merged on top.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.config.env.push((key.into(), value.into()));
+        let key = key.into();
+        if key.starts_with("MSB_") {
+            if self.build_error.is_none() {
+                self.build_error = Some(crate::MicrosandboxError::InvalidConfig(format!(
+                    "environment variable {key:?} uses the reserved MSB_ prefix"
+                )));
+            }
+            return self;
+        }
+        self.config.env.push((key, value.into()));
         self
     }
 
@@ -559,7 +579,27 @@ impl SandboxBuilder {
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (k, v) in vars {
-            self.config.env.push((k.into(), v.into()));
+            self = self.env(k, v);
+        }
+        self
+    }
+
+    /// Attach a label (`key`/`value`) to the sandbox for attribution. Labels
+    /// are surfaced as attributes on the sandbox's metrics, letting backends
+    /// build per-user or per-tenant views. Can be called multiple times; the
+    /// last value for a given key wins.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.labels.insert(key.into(), value.into());
+        self
+    }
+
+    /// Attach multiple labels at once. See [`label`](Self::label).
+    pub fn labels(
+        mut self,
+        labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        for (k, v) in labels {
+            self.config.labels.insert(k.into(), v.into());
         }
         self
     }
@@ -617,6 +657,12 @@ impl SandboxBuilder {
     /// Inactivity is detected via agentd heartbeat. Omit to disable (default).
     pub fn idle_timeout(mut self, secs: u64) -> Self {
         self.config.policy.idle_timeout_secs = Some(secs);
+        self
+    }
+
+    /// Set the in-guest security profile.
+    pub fn security(mut self, profile: SecurityProfile) -> Self {
+        self.config.security_profile = profile;
         self
     }
 
@@ -746,14 +792,13 @@ impl SandboxBuilder {
 
     /// Create the sandbox. Boots the VM with agentd ready.
     pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
+        let mode = if self.detached {
+            crate::runtime::SpawnMode::Detached
+        } else {
+            crate::runtime::SpawnMode::Attached
+        };
         let config = self.build().await?;
-        super::Sandbox::create(config).await
-    }
-
-    /// Create the sandbox for detached/background use.
-    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
-        let config = self.build().await?;
-        super::Sandbox::create_detached(config).await
+        super::Sandbox::create_with_mode(config, mode, None).await
     }
 
     /// Create the sandbox with pull progress reporting.
@@ -772,36 +817,15 @@ impl SandboxBuilder {
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
+        let mode = if self.detached {
+            crate::runtime::SpawnMode::Detached
+        } else {
+            crate::runtime::SpawnMode::Attached
+        };
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
             let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Attached,
-                Some(sender),
-            )
-            .await
-        });
-        Ok((handle, task))
-    }
-
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
-    pub fn create_detached_with_pull_progress(
-        self,
-    ) -> crate::MicrosandboxResult<(
-        PullProgressHandle,
-        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
-    )> {
-        let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(async move {
-            let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Detached,
-                Some(sender),
-            )
-            .await
+            super::Sandbox::create_with_mode(config, mode, Some(sender)).await
         });
         Ok((handle, task))
     }
@@ -820,6 +844,18 @@ impl SandboxBuilder {
             ));
         }
         super::validate_sandbox_name_for_runtime(&self.config.name)?;
+
+        if self.config.cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cpus must be greater than 0".into(),
+            ));
+        }
+
+        if self.config.memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "memory must be greater than 0".into(),
+            ));
+        }
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
@@ -862,6 +898,7 @@ impl SandboxBuilder {
         }
 
         super::types::validate_volume_mounts(&self.config.mounts)?;
+        super::validate_env(&self.config.env)?;
 
         if let Some(spec) = &self.config.init {
             super::init::validate(spec)?;
@@ -911,6 +948,7 @@ impl From<SandboxConfig> for SandboxBuilder {
     fn from(config: SandboxConfig) -> Self {
         Self {
             config,
+            detached: false,
             build_error: None,
             pending_snapshot: None,
         }
@@ -970,6 +1008,36 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_cpus() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(0)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: cpus must be greater than 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_memory() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(0u32)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: memory must be greater than 0"
         );
     }
 
@@ -1257,6 +1325,18 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("env_var must not contain NUL"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_reserved_msb_env_key() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .env("MSB_SECURITY_PROFILE", "default")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("uses the reserved MSB_ prefix"));
     }
 
     //----------------------------------------------------------------------------------------------

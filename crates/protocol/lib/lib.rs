@@ -1,5 +1,9 @@
 //! `microsandbox-protocol` defines the shared protocol types used for communication
 //! between the host and the guest agent over CBOR-over-virtio-serial.
+//!
+//! For how the protocol is versioned and evolved while staying backward compatible
+//! across independently-upgraded hosts and live sandboxes, see `VERSIONING.md` in
+//! this crate.
 
 #![warn(missing_docs)]
 
@@ -69,12 +73,25 @@ pub const AGENT_RELAY_ID_RANGE_STEP: u32 = u32::MAX / AGENT_RELAY_MAX_CLIENTS;
 // Constants: Guest Init Environment Variables
 //--------------------------------------------------------------------------------------------------
 
+/// Environment variable carrying the sandbox in-guest security profile.
+///
+/// Values:
+/// - `default` — preserve normal guest-root semantics. Exec sessions do not
+///   set `no_new_privs` and keep `CAP_SYS_ADMIN`.
+/// - `restricted` — set `no_new_privs` and drop `CAP_SYS_ADMIN` before user
+///   exec sessions. Agentd also forces `nosuid,nodev` on user mounts.
+///
+/// Example:
+/// - `MSB_SECURITY_PROFILE=restricted`
+pub const ENV_SECURITY_PROFILE: &str = "MSB_SECURITY_PROFILE";
+
 /// Environment variable carrying tmpfs mount specs for guest init.
 ///
 /// - `path` — guest mount path (required, always the first element)
 /// - `size=N` — size limit in MiB (optional)
 /// - `noexec` — mount with noexec flag (optional)
-/// - `nosuid` — accepted as an explicit assertion; tmpfs mounts always use nosuid
+/// - `nosuid` — mount with nosuid flag (optional)
+/// - `nodev` — mount with nodev flag (optional)
 /// - `ro` — mount read-only (optional)
 /// - `rw` — explicit writable default (optional)
 /// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
@@ -149,7 +166,8 @@ pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 /// - `guest_path` — mount point inside the guest (required)
 /// - `ro` / `rw` — access mode option (optional)
 /// - `noexec` — disable direct execution from the mount (optional)
-/// - `nosuid` — accepted as an explicit assertion; directory mounts always use nosuid
+/// - `nosuid` — mount with nosuid flag (optional)
+/// - `nodev` — mount with nodev flag (optional)
 ///
 /// Entries are separated by `;`.
 ///
@@ -174,7 +192,8 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// - `guest_path` — final file path inside the guest (required)
 /// - `ro` / `rw` — access mode option (optional)
 /// - `noexec` — disable direct execution from the mount (optional)
-/// - `nosuid` — accepted as an explicit assertion; file mounts always use nosuid
+/// - `nosuid` — mount with nosuid flag (optional)
+/// - `nodev` — mount with nodev flag (optional)
 ///
 /// Entries are separated by `;`.
 ///
@@ -200,7 +219,8 @@ pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 ///   agentd probes `/proc/filesystems` to find a type that mounts cleanly.
 /// - `ro` / `rw` — access mode option (optional).
 /// - `noexec` — disable direct execution from the mount (optional).
-/// - `nosuid` — accepted as an explicit assertion; disk-image mounts always use nosuid.
+/// - `nosuid` — mount with nosuid flag (optional).
+/// - `nodev` — mount with nodev flag (optional).
 ///
 /// Entries are separated by `;`. Options are comma-separated flags or
 /// key-value pairs in the final option block.
@@ -362,5 +382,6 @@ pub mod exec;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;
+pub mod tcp;
 
 pub use error::*;

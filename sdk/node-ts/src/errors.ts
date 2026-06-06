@@ -20,7 +20,7 @@ export type MicrosandboxErrorCode =
   | "image"
   | "patchFailed"
   | "metricsDisabled"
-  | "pre05SandboxRestartRequired"
+  | "unsupportedOperation"
   | "custom";
 
 export class MicrosandboxError extends Error {
@@ -162,11 +162,9 @@ export class MetricsDisabledError extends MicrosandboxError {
   }
 }
 
-// TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-// compatibility for versions before 0.5 is no longer supported.
-export class Pre05SandboxRestartRequiredError extends MicrosandboxError {
+export class UnsupportedOperationError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
-    super("pre05SandboxRestartRequired", message, options);
+    super("unsupportedOperation", message, options);
   }
 }
 

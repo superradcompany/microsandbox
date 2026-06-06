@@ -89,6 +89,7 @@ export type {
   ImageConfigDetail,
   ImageDetail,
   ImageLayerDetail,
+  ImagePruneReport,
 } from "./image.js";
 
 // Logs
@@ -144,7 +145,6 @@ function wrapMethodWithErrorMap(cls: any, method: string) {
 
 wrapMethodWithErrorMap(napi.MountBuilder, "build");
 wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
-wrapMethodWithErrorMap(napi.SandboxBuilder, "createDetached");
 wrapMethodWithErrorMap(napi.PatchBuilder, "build");
 wrapMethodWithErrorMap(napi.DnsBuilder, "build");
 wrapMethodWithErrorMap(napi.SecretBuilder, "build");
@@ -374,7 +374,7 @@ export {
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
-  Pre05SandboxRestartRequiredError,
+  UnsupportedOperationError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";

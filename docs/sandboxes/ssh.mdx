@@ -4,7 +4,7 @@ description: Connect to sandboxes through SSH protocol sessions
 icon: "computer"
 ---
 
-SSH gives a sandbox a familiar interface without putting an SSH daemon inside the guest. microsandbox speaks SSH on the host side, then forwards shells, remote commands, and SFTP file operations into the sandbox.
+SSH gives a sandbox a familiar interface without putting an SSH daemon inside the guest. microsandbox speaks SSH on the host side, then forwards shells, remote commands, SFTP file operations, and local TCP forwarding into the sandbox.
 
 Use it when you want existing SSH tools to work with a sandbox, or when you want SDK code to use SSH semantics while still going through microsandbox.
 
@@ -201,6 +201,17 @@ msb ssh serve devbox --host 127.0.0.1 --port 2223
 <Note>
   Binding to `0.0.0.0` exposes the SSH listener beyond the local machine. Keep the default loopback bind unless you intentionally want remote clients to connect.
 </Note>
+
+### Port forwarding
+
+OpenSSH local (`-L`) and dynamic (`-D`) forwarding work through the listener:
+
+```bash
+ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
+ssh -p 2222 -D 1080 root@127.0.0.1
+```
+
+Forwarded TCP connections are opened from inside the sandbox, so destination reachability follows the sandbox's network policy, and `127.0.0.1` refers to the sandbox's loopback interface rather than the host's. Reverse forwarding (`-R`) and stream-local forwarding are not supported.
 
 ### ProxyCommand
 

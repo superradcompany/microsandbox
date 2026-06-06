@@ -37,8 +37,8 @@ pub(crate) async fn setup_sandbox(
 }
 
 /// Policy that denies all outbound traffic to `resolver` (e.g.
-/// `"8.8.8.8"`) so `dig @<resolver>` exercises the forwarder's REFUSED
-/// path for a policy-denied `@target` resolver.
+/// `"8.8.8.8"`) so `dig @<resolver>` exercises the forwarder's
+/// policy-denied `@target` path (synthesized NXDOMAIN).
 pub(crate) fn deny_resolver(resolver: &str) -> Result<NetworkPolicy, Box<dyn std::error::Error>> {
     let ip: Ipv4Addr = resolver.parse()?;
     Ok(NetworkPolicy {

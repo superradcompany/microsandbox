@@ -351,7 +351,7 @@ export type JsMetricsStream = MetricsStream
  * Fluent builder for a sandbox volume mount.
  *
  * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
- * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`,
+ * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
  * `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
  * Validation is deferred to the terminal `.build()` call.
  */
@@ -376,6 +376,10 @@ export declare class MountBuilder {
   readonly(): this
   /** Prevent direct execution from the mount. */
   noexec(): this
+  /** Ignore setuid and setgid privilege elevation from files on the mount. */
+  nosuid(): this
+  /** Ignore device files on the mount. */
+  nodev(): this
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
@@ -753,6 +757,11 @@ export declare class Sandbox {
   /** List all sandboxes. */
   static list(): Promise<Array<SandboxInfo>>
   /**
+   * List sandboxes filtered to those carrying all of the filter's labels
+   * (AND-matched).
+   */
+  static listWith(filter: SandboxListFilter): Promise<Array<SandboxInfo>>
+  /**
    * Remove a stopped sandbox from the database.
    *
    * Sandbox names are limited to 128 UTF-8 bytes.
@@ -877,6 +886,8 @@ export declare class SandboxBuilder {
   logLevel(level: string): this
   /** Suppress sandbox logs. */
   quietLogs(): this
+  /** Create the sandbox in detached/background mode when enabled. */
+  detached(detached: boolean): this
   /** Override the metrics sampling interval in milliseconds; pass `0` to disable. */
   metricsSampleIntervalMs(ms: number): this
   /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */
@@ -885,6 +896,8 @@ export declare class SandboxBuilder {
   workdir(path: string): this
   /** Shell binary used by `Sandbox.shell(...)`. */
   shell(shell: string): this
+  /** In-guest security profile (`"default"` or `"restricted"`). */
+  security(profile: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /**
@@ -954,6 +967,10 @@ export declare class SandboxBuilder {
   env(key: string, value: string): this
   /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
+  /** Attach a single label for metrics attribution. */
+  label(key: string, value: string): this
+  /** Attach labels from an object for metrics attribution. */
+  labels(labels: Record<string, string>): this
   /** Set a hard rlimit (soft = hard). */
   rlimit(resource: string, limit: number): this
   /** Set a separate soft and hard rlimit. */
@@ -984,7 +1001,7 @@ export declare class SandboxBuilder {
    */
   build(): Promise<string>
   /**
-   * Create and start the sandbox in attached mode.
+   * Create and start the sandbox.
    *
    * # Safety
    * `&mut self` async is required because we drain `inner`
@@ -992,14 +1009,6 @@ export declare class SandboxBuilder {
    * regardless. JS callers see `create(): Promise<Sandbox>`.
    */
   create(): Promise<JsSandbox>
-  /**
-   * Create and start the sandbox in detached mode (survives the
-   * parent process).
-   *
-   * # Safety
-   * Same justification as `create`.
-   */
-  createDetached(): Promise<JsSandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
@@ -1011,13 +1020,6 @@ export declare class SandboxBuilder {
    * Same justification as `create`.
    */
   createWithPullProgress(): Promise<JsPullProgressCreate>
-  /**
-   * Detached variant of `createWithPullProgress`.
-   *
-   * # Safety
-   * Same justification as `create`.
-   */
-  createDetachedWithPullProgress(): Promise<JsPullProgressCreate>
 }
 export type JsSandboxBuilder = SandboxBuilder
 
@@ -1544,12 +1546,6 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
-/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
-export declare function imageGc(): Promise<number>
-
-/** Garbage-collect orphaned layers. Returns the number reclaimed. */
-export declare function imageGcLayers(): Promise<number>
-
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1580,6 +1576,19 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
+
+/** Summary of artifacts removed by `imagePrune`. */
+export interface ImagePruneReportJs {
+  imageRefsRemoved: number
+  manifestsRemoved: number
+  layersRemoved: number
+  fsmetaRemoved: number
+  vmdkRemoved: number
+  bytesReclaimed?: number
+}
+
+/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
+export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a
@@ -1826,6 +1835,14 @@ export interface SandboxInfo {
   updatedAt?: number
 }
 
+/**
+ * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
+ * (AND-matched). Omit or leave empty to match every sandbox.
+ */
+export interface SandboxListFilter {
+  labels?: Record<string, string>
+}
+
 /** Point-in-time resource metrics for a sandbox. */
 export interface SandboxMetrics {
   cpuPercent: number
@@ -2015,6 +2032,8 @@ export interface VolumeMount {
   guest: string
   readonly: boolean
   noexec: boolean
+  nosuid: boolean
+  nodev: boolean
   host?: string
   name?: string
   sizeMib?: number
