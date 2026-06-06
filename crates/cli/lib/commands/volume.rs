@@ -1,7 +1,7 @@
 //! `msb volume` command — manage named volumes.
 
 use clap::{Args, Subcommand};
-use microsandbox::volume::Volume;
+use microsandbox::volume::{Volume, VolumeKind};
 
 use crate::ui;
 
@@ -39,9 +39,17 @@ pub enum VolumeCommands {
 #[derive(Debug, Args)]
 pub struct VolumeCreateArgs {
     /// Name for the new volume.
-    pub name: String,
+    pub positional_name: Option<String>,
 
-    /// Maximum size for the volume (e.g. 10G, 512M).
+    /// Name for the new volume.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Volume kind.
+    #[arg(long, value_name = "KIND", value_parser = ["dir", "disk"], default_value = "dir")]
+    pub kind: String,
+
+    /// Disk capacity for disk volumes (e.g. 10G, 512M).
     #[arg(long)]
     pub size: Option<String>,
 
@@ -96,17 +104,34 @@ pub async fn run(args: VolumeArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: VolumeCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Volume::builder(&args.name);
+    let name = resolve_create_volume_name(&args)?;
+    let mut builder = Volume::builder(name);
+    let kind = parse_volume_kind(&args.kind)?;
 
-    if let Some(ref size) = args.size {
-        let mib = crate::ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
-        builder = builder.quota(mib);
+    match kind {
+        VolumeKind::Directory => {
+            builder = builder.directory();
+            if args.size.is_some() {
+                anyhow::bail!(
+                    "--size is only supported with --kind disk until directory quotas are enforced"
+                );
+            }
+        }
+        VolumeKind::Disk => {
+            builder = builder.disk();
+            let size = args
+                .size
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--size is required with --kind disk"))?;
+            let mib = crate::ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
+            builder = builder.size(mib);
+        }
     }
 
     builder.create().await?;
 
     if !args.quiet {
-        println!("{}", args.name);
+        println!("{name}");
     }
 
     Ok(())
@@ -121,8 +146,12 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
             .map(|v| {
                 serde_json::json!({
                     "name": v.name(),
+                    "kind": v.kind().as_str(),
                     "quota_mib": v.quota_mib(),
                     "used_bytes": v.used_bytes(),
+                    "capacity_bytes": v.capacity_bytes(),
+                    "disk_format": v.disk_format(),
+                    "disk_fstype": v.disk_fstype(),
                     "created_at": v.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 })
             })
@@ -143,20 +172,31 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["NAME", "QUOTA", "CREATED"]);
+    let mut table = ui::Table::new(&["NAME", "KIND", "SIZE", "CREATED"]);
 
     for v in &volumes {
-        let quota = v
-            .quota_mib()
-            .map(format_mib)
-            .unwrap_or_else(|| "-".to_string());
+        let size = match v.kind() {
+            VolumeKind::Directory => v
+                .quota_mib()
+                .map(format_mib)
+                .unwrap_or_else(|| "-".to_string()),
+            VolumeKind::Disk => v
+                .capacity_bytes()
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string()),
+        };
         let created = v
             .created_at()
             .as_ref()
             .map(ui::format_datetime)
             .unwrap_or_else(|| "-".to_string());
 
-        table.add_row(vec![v.name().to_string(), quota, created]);
+        table.add_row(vec![
+            v.name().to_string(),
+            v.kind().as_str().to_string(),
+            size,
+            created,
+        ]);
     }
 
     table.print();
@@ -166,10 +206,6 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
 async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
     let handle = Volume::get(&args.name).await?;
 
-    let quota = handle
-        .quota_mib()
-        .map(format_mib)
-        .unwrap_or_else(|| "unlimited".to_string());
     let created = handle
         .created_at()
         .as_ref()
@@ -191,9 +227,29 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
     let path = volumes_dir.join(handle.name());
 
     ui::detail_kv("Name", handle.name());
-    ui::detail_kv("Quota", &quota);
+    ui::detail_kv("Kind", handle.kind().as_str());
+    match handle.kind() {
+        VolumeKind::Directory => {
+            let quota = handle
+                .quota_mib()
+                .map(format_mib)
+                .unwrap_or_else(|| "unlimited".to_string());
+            ui::detail_kv("Quota", &quota);
+            ui::detail_kv("Path", &path.display().to_string());
+        }
+        VolumeKind::Disk => {
+            ui::detail_kv("Format", handle.disk_format().unwrap_or("raw"));
+            ui::detail_kv("Filesystem", handle.disk_fstype().unwrap_or("ext4"));
+            let capacity = handle
+                .capacity_bytes()
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string());
+            ui::detail_kv("Capacity", &capacity);
+            let disk_path = handle.disk_path().unwrap_or_else(|| path.join("disk.raw"));
+            ui::detail_kv("Path", &disk_path.display().to_string());
+        }
+    }
     ui::detail_kv("Created", &created);
-    ui::detail_kv("Path", &path.display().to_string());
     ui::detail_kv("Labels", &labels_str);
 
     Ok(())
@@ -240,5 +296,30 @@ fn format_mib(mib: u32) -> String {
         format!("{} GiB", mib / 1024)
     } else {
         format!("{mib} MiB")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let mib = bytes / (1024 * 1024);
+    format_mib(mib as u32)
+}
+
+fn parse_volume_kind(kind: &str) -> anyhow::Result<VolumeKind> {
+    match kind {
+        "dir" => Ok(VolumeKind::Directory),
+        "disk" => Ok(VolumeKind::Disk),
+        _ => anyhow::bail!("unknown volume kind: {kind}"),
+    }
+}
+
+fn resolve_create_volume_name(args: &VolumeCreateArgs) -> anyhow::Result<&str> {
+    match (args.positional_name.as_deref(), args.name.as_deref()) {
+        (Some(positional), Some(flag)) if positional != flag => {
+            anyhow::bail!(
+                "volume name specified twice with different values: {positional} and {flag}"
+            )
+        }
+        (Some(name), _) | (_, Some(name)) => Ok(name),
+        (None, None) => anyhow::bail!("volume create requires a name"),
     }
 }

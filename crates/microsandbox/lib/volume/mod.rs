@@ -6,12 +6,16 @@
 pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 
-use std::path::PathBuf;
+use std::{fs::File, os::fd::AsRawFd, path::PathBuf};
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use microsandbox_image::ext4::{self, Ext4FormatOptions};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::{
-    MicrosandboxError, MicrosandboxResult, db::entity::volume as volume_entity, size::Mebibytes,
+    MicrosandboxError, MicrosandboxResult,
+    db::entity::{sandbox as sandbox_entity, volume as volume_entity},
+    sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
+    size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -22,6 +26,10 @@ use crate::{
 pub struct Volume {
     name: String,
     path: PathBuf,
+    kind: VolumeKind,
+    capacity_bytes: Option<u64>,
+    disk_format: Option<String>,
+    disk_fstype: Option<String>,
 }
 
 /// Configuration for creating a volume.
@@ -30,11 +38,27 @@ pub struct VolumeConfig {
     /// Volume name.
     pub name: String,
 
+    /// Storage kind.
+    pub kind: VolumeKind,
+
     /// Size quota in MiB (None = unlimited).
     pub quota_mib: Option<u32>,
 
+    /// Disk capacity in MiB. Required for disk volumes.
+    pub capacity_mib: Option<u32>,
+
     /// Labels for organization (JSON-serialized in DB).
     pub labels: Vec<(String, String)>,
+}
+
+/// Storage kind for a named volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeKind {
+    /// Directory-backed named volume mounted through virtiofs.
+    Directory,
+
+    /// Raw ext4 disk-image named volume mounted through virtio-blk.
+    Disk,
 }
 
 /// A lightweight handle to a volume from the database.
@@ -45,8 +69,12 @@ pub struct VolumeConfig {
 pub struct VolumeHandle {
     db_id: i32,
     name: String,
+    kind: VolumeKind,
     quota_mib: Option<u32>,
     used_bytes: u64,
+    capacity_bytes: Option<u64>,
+    disk_format: Option<String>,
+    disk_fstype: Option<String>,
     labels: Vec<(String, String)>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -77,8 +105,12 @@ impl VolumeHandle {
         Self {
             db_id: model.id,
             name: model.name,
+            kind: VolumeKind::from_db_value(&model.kind),
             quota_mib: model.quota_mib.map(|v| v.max(0) as u32),
             used_bytes: model.size_bytes.unwrap_or(0).max(0) as u64,
+            capacity_bytes: model.capacity_bytes.map(|v| v.max(0) as u64),
+            disk_format: model.disk_format,
+            disk_fstype: model.disk_fstype,
             labels,
             created_at: model.created_at.map(|dt| dt.and_utc()),
         }
@@ -90,6 +122,11 @@ impl VolumeHandle {
         &self.name
     }
 
+    /// Storage kind for this volume.
+    pub fn kind(&self) -> VolumeKind {
+        self.kind
+    }
+
     /// Maximum storage in MiB, or `None` if unlimited.
     pub fn quota_mib(&self) -> Option<u32> {
         self.quota_mib
@@ -99,6 +136,31 @@ impl VolumeHandle {
     /// call [`Volume::get`] again for a fresh reading.
     pub fn used_bytes(&self) -> u64 {
         self.used_bytes
+    }
+
+    /// Disk capacity in bytes for disk volumes.
+    pub fn capacity_bytes(&self) -> Option<u64> {
+        self.capacity_bytes
+    }
+
+    /// Disk image format for disk volumes. V1 always creates `raw`.
+    pub fn disk_format(&self) -> Option<&str> {
+        self.disk_format.as_deref()
+    }
+
+    /// Inner disk filesystem for disk volumes. V1 always creates `ext4`.
+    pub fn disk_fstype(&self) -> Option<&str> {
+        self.disk_fstype.as_deref()
+    }
+
+    /// Host path to the managed raw disk image for disk volumes.
+    pub fn disk_path(&self) -> Option<PathBuf> {
+        (self.kind == VolumeKind::Disk).then(|| {
+            crate::config::config()
+                .volumes_dir()
+                .join(&self.name)
+                .join("disk.raw")
+        })
     }
 
     /// Key-value labels for organizing and filtering volumes.
@@ -123,7 +185,10 @@ impl VolumeHandle {
     /// Deletes the DB record first, then the directory. An orphaned directory
     /// is easier to detect and clean up than an orphaned DB record.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
+        let _name_lock = lock_volume_name(&self.name)?;
+        let _disk_lock = lock_disk_volume_for_remove(self)?;
         let pools = crate::db::init_global().await?;
+        ensure_volume_not_referenced_by_active_sandbox(pools.read(), &self.name).await?;
 
         // Delete the DB record first.
         volume_entity::Entity::delete_by_id(self.db_id)
@@ -155,8 +220,16 @@ impl Volume {
     /// Fails with [`MicrosandboxError::VolumeAlreadyExists`] if a volume
     /// with the same name already exists.
     pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
-        tracing::debug!(name = %config.name, quota_mib = ?config.quota_mib, "Volume::create");
+        tracing::debug!(
+            name = %config.name,
+            kind = config.kind.as_str(),
+            quota_mib = ?config.quota_mib,
+            capacity_mib = ?config.capacity_mib,
+            "Volume::create"
+        );
         validate_volume_name(&config.name)?;
+        validate_volume_config(&config)?;
+        let _name_lock = lock_volume_name(&config.name)?;
 
         let pools = crate::db::init_global().await?;
 
@@ -169,6 +242,20 @@ impl Volume {
             return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
         }
 
+        let volumes_dir = crate::config::config().volumes_dir();
+        tokio::fs::create_dir_all(&volumes_dir).await?;
+        let path = volumes_dir.join(&config.name);
+        if path.exists() {
+            return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
+        }
+
+        let temp = tempfile::Builder::new()
+            .prefix(&format!(".{}.", config.name))
+            .tempdir_in(&volumes_dir)?;
+        provision_volume_path(&config, temp.path()).await?;
+        tokio::fs::rename(temp.path(), &path).await?;
+        let _ = temp.keep();
+
         // Serialize labels.
         let labels_json = if config.labels.is_empty() {
             None
@@ -179,35 +266,36 @@ impl Volume {
         // Insert DB record first — orphaned directories are easier to clean
         // up than orphaned DB records.
         let now = chrono::Utc::now().naive_utc();
+        let capacity_bytes = config.capacity_mib.map(|mib| i64::from(mib) * 1024 * 1024);
         let model = volume_entity::ActiveModel {
             name: Set(config.name.clone()),
+            kind: Set(config.kind.as_str().to_string()),
             quota_mib: Set(config.quota_mib.map(|v| v as i32)),
             size_bytes: Set(None),
+            capacity_bytes: Set(capacity_bytes),
+            disk_format: Set((config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
+            disk_fstype: Set((config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
             labels: Set(labels_json),
             created_at: Set(Some(now)),
             updated_at: Set(Some(now)),
             ..Default::default()
         };
 
-        volume_entity::Entity::insert(model)
+        if let Err(e) = volume_entity::Entity::insert(model)
             .exec(pools.write())
-            .await?;
-
-        // Create the volume directory. If this fails, clean up the DB record.
-        let volumes_dir = crate::config::config().volumes_dir();
-        let path = volumes_dir.join(&config.name);
-
-        if let Err(e) = tokio::fs::create_dir_all(&path).await {
-            let _ = volume_entity::Entity::delete_many()
-                .filter(volume_entity::Column::Name.eq(&config.name))
-                .exec(pools.write())
-                .await;
+            .await
+        {
+            let _ = tokio::fs::remove_dir_all(&path).await;
             return Err(e.into());
         }
 
         Ok(Self {
             name: config.name,
             path,
+            kind: config.kind,
+            capacity_bytes: capacity_bytes.map(|v| v as u64),
+            disk_format: (config.kind == VolumeKind::Disk).then(|| "raw".to_string()),
+            disk_fstype: (config.kind == VolumeKind::Disk).then(|| "ext4".to_string()),
         })
     }
 
@@ -255,10 +343,35 @@ impl Volume {
         &self.name
     }
 
+    /// Storage kind for this volume.
+    pub fn kind(&self) -> VolumeKind {
+        self.kind
+    }
+
     /// Host-side directory where this volume's data is stored
     /// (under `~/.microsandbox/volumes/<name>/`).
     pub fn path(&self) -> &std::path::Path {
         &self.path
+    }
+
+    /// Disk capacity in bytes for disk volumes.
+    pub fn capacity_bytes(&self) -> Option<u64> {
+        self.capacity_bytes
+    }
+
+    /// Disk image format for disk volumes. V1 always creates `raw`.
+    pub fn disk_format(&self) -> Option<&str> {
+        self.disk_format.as_deref()
+    }
+
+    /// Inner disk filesystem for disk volumes. V1 always creates `ext4`.
+    pub fn disk_fstype(&self) -> Option<&str> {
+        self.disk_fstype.as_deref()
+    }
+
+    /// Host path to the managed raw disk image for disk volumes.
+    pub fn disk_path(&self) -> Option<PathBuf> {
+        (self.kind == VolumeKind::Disk).then(|| self.path.join("disk.raw"))
     }
 
     /// Operate on the volume's host-side directory (read, write, list files)
@@ -279,10 +392,24 @@ impl VolumeBuilder {
         Self {
             config: VolumeConfig {
                 name: name.into(),
+                kind: VolumeKind::Directory,
                 quota_mib: None,
+                capacity_mib: None,
                 labels: Vec::new(),
             },
         }
+    }
+
+    /// Create a directory-backed named volume.
+    pub fn directory(mut self) -> Self {
+        self.config.kind = VolumeKind::Directory;
+        self
+    }
+
+    /// Create a raw ext4 disk-image named volume.
+    pub fn disk(mut self) -> Self {
+        self.config.kind = VolumeKind::Disk;
+        self
     }
 
     /// Limit the volume's storage capacity. Accepts bare `u32` (MiB) or a
@@ -296,6 +423,12 @@ impl VolumeBuilder {
     /// Omit to allow unlimited growth (default).
     pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
         self.config.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Set disk volume capacity. Required for disk volumes.
+    pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.config.capacity_mib = Some(size.into().as_u32());
         self
     }
 
@@ -328,8 +461,182 @@ impl From<VolumeConfig> for VolumeBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: VolumeKind
+//--------------------------------------------------------------------------------------------------
+
+impl VolumeKind {
+    /// Database string for this volume kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Directory => "dir",
+            Self::Disk => "disk",
+        }
+    }
+
+    fn from_db_value(value: &str) -> Self {
+        match value {
+            "disk" => Self::Disk,
+            _ => Self::Directory,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+async fn provision_volume_path(
+    config: &VolumeConfig,
+    path: &std::path::Path,
+) -> MicrosandboxResult<()> {
+    tokio::fs::create_dir_all(path).await?;
+
+    match config.kind {
+        VolumeKind::Directory => Ok(()),
+        VolumeKind::Disk => {
+            let capacity_mib = config.capacity_mib.ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "disk named volumes require .size(...) / --size".into(),
+                )
+            })?;
+            let disk_path = path.join("disk.raw");
+            let options = Ext4FormatOptions {
+                size_bytes: u64::from(capacity_mib) * 1024 * 1024,
+                ..Default::default()
+            };
+            tokio::task::spawn_blocking(move || ext4::format_ext4(&disk_path, &options))
+                .await
+                .map_err(|e| MicrosandboxError::Custom(format!("ext4 format task failed: {e}")))?
+                .map_err(|e| {
+                    MicrosandboxError::Custom(format!("failed to create disk.raw: {e}"))
+                })?;
+            Ok(())
+        }
+    }
+}
+
+fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
+    match config.kind {
+        VolumeKind::Directory => {
+            if config.capacity_mib.is_some() {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "directory named volumes do not support .size(...) / --size in v1".into(),
+                ));
+            }
+            Ok(())
+        }
+        VolumeKind::Disk => {
+            if config.capacity_mib.is_none() {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "disk named volumes require .size(...) / --size".into(),
+                ));
+            }
+            if config.quota_mib.is_some() {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "disk named volumes do not support .quota(...)".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn lock_volume_name(name: &str) -> MicrosandboxResult<File> {
+    let volumes_dir = crate::config::config().volumes_dir();
+    std::fs::create_dir_all(&volumes_dir)?;
+    let locks_dir = volumes_dir.join(".locks");
+    std::fs::create_dir_all(&locks_dir)?;
+    let path = locks_dir.join(format!("{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(file)
+}
+
+fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Option<File>> {
+    if handle.kind() != VolumeKind::Disk {
+        return Ok(None);
+    }
+
+    let Some(path) = handle.disk_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| {
+            MicrosandboxError::InvalidConfig(format!(
+                "open disk named volume {} for removal: {e}",
+                handle.name()
+            ))
+        })?;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "volume {:?} is currently attached by a running sandbox",
+                handle.name()
+            )));
+        }
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "lock disk named volume {} for removal: {err}",
+            handle.name()
+        )));
+    }
+
+    Ok(Some(file))
+}
+
+async fn ensure_volume_not_referenced_by_active_sandbox<C>(
+    db: &C,
+    name: &str,
+) -> MicrosandboxResult<()>
+where
+    C: ConnectionTrait,
+{
+    let sandboxes = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Status.is_in([
+            SandboxStatus::Running,
+            SandboxStatus::Draining,
+            SandboxStatus::Paused,
+        ]))
+        .all(db)
+        .await?;
+
+    for sandbox in sandboxes {
+        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
+        if config.mounts.iter().any(|mount| {
+            matches!(
+                mount,
+                VolumeMount::Named {
+                    name: mounted_name,
+                    ..
+                } if mounted_name == name
+            )
+        }) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "volume {name:?} is attached to active sandbox {:?}",
+                sandbox.name
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// Validate that a volume name is safe for use as a directory name.
 ///

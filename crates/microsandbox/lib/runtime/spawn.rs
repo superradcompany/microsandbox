@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt::Write,
+    fs::File,
     os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
@@ -42,6 +43,7 @@ use crate::{
         DiskImageFormat, HostPermissions, MountOptions, Rlimit, RootfsSource, SandboxConfig,
         StatVirtualization, VolumeMount,
     },
+    volume::{Volume, VolumeKind},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -61,6 +63,23 @@ const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
     pid: u32,
+}
+
+/// Resolved storage metadata for a named volume mount.
+#[derive(Clone, Debug)]
+struct ResolvedNamedVolume {
+    kind: VolumeKind,
+    path: PathBuf,
+    format: Option<DiskImageFormat>,
+    fstype: Option<String>,
+}
+
+/// Requested host-side advisory lock for a disk image backing file.
+struct DiskLockRequest {
+    path: PathBuf,
+    readonly: bool,
+    label: String,
+    volume_name: Option<String>,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -145,6 +164,8 @@ pub async fn spawn_sandbox(
     // exposing adjacent files on the host. Done BEFORE the metrics
     // reservation so that a staging failure does not leak a slot.
     let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
+    let named_volumes = resolve_named_volumes(config).await?;
+    let disk_locks = lock_disk_mounts(config, &named_volumes)?;
 
     // Reserve a metrics slot before spawning. Only do this when metrics are
     // enabled so disabled sandboxes don't pay for an entry. Failures here are
@@ -183,6 +204,7 @@ pub async fn spawn_sandbox(
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
+        &named_volumes,
         metrics_reservation.as_ref(),
         parent_watchdog
             .as_ref()
@@ -317,6 +339,7 @@ pub async fn spawn_sandbox(
         config.name.clone(),
         child,
         file_mounts_staging,
+        disk_locks,
         parent_watchdog.map(|pipe| pipe.write_fd),
     );
 
@@ -710,6 +733,217 @@ async fn stage_file_mounts(
     Ok((staged, Some(tempdir)))
 }
 
+async fn resolve_named_volumes(
+    config: &SandboxConfig,
+) -> MicrosandboxResult<HashMap<String, ResolvedNamedVolume>> {
+    let mut resolved: HashMap<String, ResolvedNamedVolume> = HashMap::new();
+
+    for mount in &config.mounts {
+        let VolumeMount::Named {
+            name,
+            stat_virtualization,
+            host_permissions,
+            ..
+        } = mount
+        else {
+            continue;
+        };
+
+        if let Some(volume) = resolved.get(name) {
+            if volume.kind == VolumeKind::Disk {
+                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+            }
+            continue;
+        }
+
+        let handle = Volume::get(name).await?;
+        let volume = match handle.kind() {
+            VolumeKind::Directory => ResolvedNamedVolume {
+                kind: VolumeKind::Directory,
+                path: config::config().volumes_dir().join(name),
+                format: None,
+                fstype: None,
+            },
+            VolumeKind::Disk => {
+                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+
+                let format = handle
+                    .disk_format()
+                    .unwrap_or("raw")
+                    .parse::<DiskImageFormat>()
+                    .map_err(|e| {
+                        MicrosandboxError::InvalidConfig(format!(
+                            "invalid disk format for named volume {name:?}: {e}"
+                        ))
+                    })?;
+                let path = handle.disk_path().ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "disk named volume {name:?} has no disk path"
+                    ))
+                })?;
+
+                ResolvedNamedVolume {
+                    kind: VolumeKind::Disk,
+                    path,
+                    format: Some(format),
+                    fstype: handle.disk_fstype().map(str::to_string),
+                }
+            }
+        };
+
+        resolved.insert(name.clone(), volume);
+    }
+
+    Ok(resolved)
+}
+
+fn lock_disk_mounts(
+    config: &SandboxConfig,
+    named_volumes: &HashMap<String, ResolvedNamedVolume>,
+) -> MicrosandboxResult<Vec<File>> {
+    let mut locks = Vec::new();
+    let mut requests = Vec::new();
+
+    if let RootfsSource::DiskImage { path, .. } = &config.image {
+        requests.push(DiskLockRequest {
+            path: path.clone(),
+            readonly: false,
+            label: format!("disk image rootfs {}", path.display()),
+            volume_name: None,
+        });
+    }
+
+    for mount in &config.mounts {
+        match mount {
+            VolumeMount::DiskImage { host, options, .. } => {
+                requests.push(DiskLockRequest {
+                    path: host.clone(),
+                    readonly: options.readonly,
+                    label: format!("disk image {}", host.display()),
+                    volume_name: None,
+                });
+            }
+            VolumeMount::Named { name, options, .. } => {
+                if let Some(ResolvedNamedVolume {
+                    kind: VolumeKind::Disk,
+                    path,
+                    ..
+                }) = named_volumes.get(name)
+                {
+                    requests.push(DiskLockRequest {
+                        path: path.clone(),
+                        readonly: options.readonly,
+                        label: format!("named disk volume {name:?}"),
+                        volume_name: Some(name.clone()),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = HashMap::new();
+    for request in requests {
+        let canonical = std::fs::canonicalize(&request.path).map_err(|e| {
+            MicrosandboxError::InvalidConfig(format!(
+                "disk image host path does not exist: {} ({e})",
+                request.path.display()
+            ))
+        })?;
+        if let Some(previous) = seen.insert(canonical.clone(), request.label.clone()) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "disk images cannot be attached more than once per sandbox: {} ({previous}; {})",
+                canonical.display(),
+                request.label
+            )));
+        }
+        locks.push(lock_disk_image(
+            &canonical,
+            request.readonly,
+            request.volume_name.as_deref(),
+        )?);
+    }
+
+    Ok(locks)
+}
+
+fn validate_named_disk_mount_options(
+    name: &str,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) -> MicrosandboxResult<()> {
+    if stat_virtualization != StatVirtualization::Strict {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "stat_virtualization is only valid for directory named volumes: {name}"
+        )));
+    }
+    if host_permissions != HostPermissions::Private {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "host_permissions is only valid for directory named volumes: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn lock_disk_image(
+    path: &Path,
+    readonly: bool,
+    volume_name: Option<&str>,
+) -> MicrosandboxResult<File> {
+    let file = if readonly {
+        std::fs::OpenOptions::new().read(true).open(path)
+    } else {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+    .map_err(|e| {
+        MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {e}", path.display()))
+    })?;
+
+    let operation = if readonly {
+        libc::LOCK_SH | libc::LOCK_NB
+    } else {
+        libc::LOCK_EX | libc::LOCK_NB
+    };
+
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        let err = std::io::Error::last_os_error();
+        let message = if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
+            match volume_name {
+                Some(name) => {
+                    format!("volume {name:?} is already attached with an incompatible disk mode")
+                }
+                None => format!(
+                    "disk image {:?} is already attached with an incompatible disk mode",
+                    path.display().to_string()
+                ),
+            }
+        } else {
+            format!("lock disk image {}: {err}", path.display())
+        };
+        return Err(MicrosandboxError::InvalidConfig(message));
+    }
+
+    clear_cloexec(file.as_raw_fd())?;
+
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn clear_cloexec(fd: i32) -> MicrosandboxResult<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let new_flags = flags & !libc::FD_CLOEXEC;
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, new_flags) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
 /// Push a `--mount tag:host_path[:opts]` arg pair.
 fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
@@ -930,6 +1164,7 @@ fn sandbox_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    named_volumes: &HashMap<String, ResolvedNamedVolume>,
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
 ) -> Vec<OsString> {
@@ -1090,18 +1325,43 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
-            } => {
-                let vol_path = config::config().volumes_dir().join(name);
-                push_dir_mount_arg(
-                    &mut args,
-                    guest,
-                    &vol_path.display(),
-                    *options,
-                    *stat_virtualization,
-                    *host_permissions,
-                );
-                push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
-            }
+            } => match named_volumes.get(name) {
+                Some(ResolvedNamedVolume {
+                    kind: VolumeKind::Disk,
+                    path,
+                    format: Some(format),
+                    fstype,
+                }) => {
+                    let id = guest_mount_tag(guest);
+                    push_disk_mount_arg(&mut args, &id, &path.display(), format, *options);
+                    push_disk_mounts_spec(
+                        &mut disk_mounts_val,
+                        &id,
+                        guest,
+                        fstype.as_deref(),
+                        *options,
+                    );
+                }
+                _ => {
+                    let vol_path;
+                    let path = match named_volumes.get(name) {
+                        Some(ResolvedNamedVolume { path, .. }) => path,
+                        None => {
+                            vol_path = config::config().volumes_dir().join(name);
+                            &vol_path
+                        }
+                    };
+                    push_dir_mount_arg(
+                        &mut args,
+                        guest,
+                        &path.display(),
+                        *options,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
+                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                }
+            },
             VolumeMount::Tmpfs {
                 guest,
                 size_mib,
@@ -1263,14 +1523,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        legacy_sandbox_agent_socket_path, resolve_sandbox_agent_socket_path,
-        sandbox_agent_socket_path, sandbox_agent_socket_path_candidates, sandbox_cli_args,
+        ResolvedNamedVolume, legacy_sandbox_agent_socket_path, lock_disk_mounts,
+        resolve_sandbox_agent_socket_path, sandbox_agent_socket_path,
+        sandbox_agent_socket_path_candidates, sandbox_cli_args,
     };
     use crate::{
         LogLevel,
         sandbox::{
             DiskImageFormat, Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig,
         },
+        volume::VolumeKind,
     };
 
     //----------------------------------------------------------------------------------------------
@@ -1287,6 +1549,7 @@ mod tests {
             Path::new("/tmp/runtime"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
             &HashMap::new(),
             None,
             None,
@@ -1346,6 +1609,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            &HashMap::new(),
             None,
             None,
         )
@@ -1573,6 +1837,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            &HashMap::new(),
             None,
             Some(microsandbox_runtime::vm::PARENT_WATCH_FD),
         )
@@ -1605,6 +1870,7 @@ mod tests {
             Path::new("/tmp/runtime"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
             &HashMap::new(),
             None,
             None,
@@ -1738,6 +2004,7 @@ mod tests {
             Path::new("/tmp/runtime"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
             &HashMap::new(),
             Some(&reservation),
             None,
@@ -2122,6 +2389,83 @@ mod tests {
             |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:{}:raw:ro", host.display())
         ));
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed:ro,noexec")));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_disk_volume() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/var/lib/docker", |m| m.named("docker-data"))
+            .build()
+            .await
+            .unwrap();
+
+        let mut named_volumes = HashMap::new();
+        named_volumes.insert(
+            "docker-data".to_string(),
+            ResolvedNamedVolume {
+                kind: VolumeKind::Disk,
+                path: PathBuf::from("/tmp/docker-data/disk.raw"),
+                format: Some(DiskImageFormat::Raw),
+                fstype: Some("ext4".to_string()),
+            },
+        );
+
+        let rendered = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            &named_volumes,
+            None,
+            None,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        let tag = super::guest_mount_tag("/var/lib/docker");
+        let expected_disk_arg = format!("{tag}:/tmp/docker-data/disk.raw:raw");
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
+            "missing named disk arg in {rendered:?}"
+        );
+        assert!(rendered.contains(&format!(
+            "MSB_DISK_MOUNTS={tag}:/var/lib/docker:fstype=ext4"
+        )));
+    }
+
+    #[test]
+    fn test_lock_disk_mounts_rejects_rootfs_and_mount_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("root.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let config = SandboxConfig {
+            image: RootfsSource::DiskImage {
+                path: disk.clone(),
+                format: DiskImageFormat::Raw,
+                fstype: Some("ext4".to_string()),
+            },
+            mounts: vec![crate::sandbox::VolumeMount::DiskImage {
+                host: disk,
+                guest: "/data".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: Some("ext4".to_string()),
+                options: Default::default(),
+            }],
+            ..Default::default()
+        };
+
+        let err = lock_disk_mounts(&config, &HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("more than once per sandbox"));
     }
 
     #[tokio::test]

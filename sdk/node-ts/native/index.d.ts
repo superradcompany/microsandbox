@@ -1363,8 +1363,14 @@ export type JsVolume = Volume
 /** Fluent builder for a named persistent volume. */
 export declare class VolumeBuilder {
   constructor(name: string)
+  /** Create a directory-backed named volume. */
+  directory(): this
+  /** Create a raw ext4 disk-backed named volume. */
+  disk(): this
   /** Limit the volume's storage capacity (MiB). Omit for unlimited. */
   quota(mib: number): this
+  /** Set disk volume capacity in MiB. */
+  size(mib: number): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
   /** Snapshot the accumulated configuration. */
@@ -1418,8 +1424,12 @@ export type JsVolumeFsWriteSink = VolumeFsWriteSink
 
 export declare class VolumeHandle {
   get name(): string
+  get kind(): string
   get quotaMib(): number | null
   get usedBytes(): number
+  get capacityBytes(): number | null
+  get diskFormat(): string | null
+  get diskFstype(): string | null
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
@@ -2009,15 +2019,21 @@ export interface TlsConfig {
 /** Built volume configuration produced by `VolumeBuilder.build()`. */
 export interface VolumeConfig {
   name: string
+  kind: string
   quotaMib?: number
+  capacityMib?: number
   labels: Record<string, string>
 }
 
 /** Volume handle info from the database. */
 export interface VolumeInfo {
   name: string
+  kind: string
   quotaMib?: number
   usedBytes: number
+  capacityBytes?: number
+  diskFormat?: string
+  diskFstype?: string
   labels: Record<string, string>
   createdAt?: number
 }

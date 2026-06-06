@@ -17,7 +17,7 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 fn builder(name: impl Into<String>) -> VolumeBuilder
 ```
 
-Create a builder for a new named volume. Call `.quota()` to set a storage limit, then `.create()` to finalize.
+Create a builder for a new named volume. Directory-backed volumes are the default. Call `.disk().size(...)` to create a disk-backed volume.
 
 **Parameters**
 
@@ -29,7 +29,7 @@ Create a builder for a new named volume. Call `.quota()` to set a storage limit,
 
 | Type | Description |
 |------|-------------|
-| [`VolumeBuilder`](#volumebuilder) | Builder with `.quota()` and `.create()` |
+| [`VolumeBuilder`](#volumebuilder) | Builder with `.directory()`, `.disk()`, `.size()`, `.quota()`, and `.create()` |
 
 ---
 
@@ -115,13 +115,43 @@ Create the volume on disk.
 fn quota(self, mib: u64) -> Self
 ```
 
-Set the maximum storage size for this volume. The guest cannot write beyond this limit.
+Set the recorded quota metadata for a directory-backed volume.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | mib | `u64` | Quota in MiB |
+
+---
+
+#### directory()
+
+```rust
+fn directory(self) -> Self
+```
+
+Create a directory-backed named volume. This is the default.
+
+---
+
+#### disk()
+
+```rust
+fn disk(self) -> Self
+```
+
+Create a raw ext4 disk-backed named volume.
+
+---
+
+#### size()
+
+```rust
+fn size(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set disk volume capacity. Required after `.disk()`.
 
 ---
 
@@ -249,4 +279,8 @@ Handle for interacting with a named volume from the host side.
 |-------------------|------|-------------|
 | fs() | `VolumeFsHandle` | Host-side filesystem access - read and write files without a running sandbox |
 | name() | `&str` | Volume name |
+| kind() | `VolumeKind` | Volume kind: `Directory` or `Disk` |
+| capacity_bytes() | `Option<u64>` | Disk capacity in bytes |
+| disk_format() | `Option<&str>` | Disk image format |
+| disk_fstype() | `Option<&str>` | Disk filesystem type |
 | remove() | `()` | Delete this volume from disk |

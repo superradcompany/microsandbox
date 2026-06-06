@@ -3,6 +3,7 @@
 //! [`ProcessHandle`] holds the PID of the sandbox process and provides
 //! methods for lifecycle management (signals, wait).
 
+use std::fs::File;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
 
@@ -40,6 +41,10 @@ pub struct ProcessHandle {
     /// Ephemeral staging directory for file mounts. Dropped when the
     /// process handle is dropped, which auto-removes all staged files.
     _file_mounts_staging: Option<TempDir>,
+
+    /// Open disk-image lock files. Kept for the process lifetime so disk
+    /// images cannot be attached with incompatible write modes.
+    _disk_locks: Vec<File>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +58,7 @@ impl ProcessHandle {
         sandbox_name: String,
         child: Child,
         file_mounts_staging: Option<TempDir>,
+        disk_locks: Vec<File>,
         parent_watchdog: Option<OwnedFd>,
     ) -> Self {
         Self {
@@ -61,6 +67,7 @@ impl ProcessHandle {
             child,
             detached: false,
             _file_mounts_staging: file_mounts_staging,
+            _disk_locks: disk_locks,
             parent_watchdog,
         }
     }

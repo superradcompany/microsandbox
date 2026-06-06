@@ -3498,6 +3498,8 @@ func (s *Sandbox) FsWriteStream(ctx context.Context, path string) (*FsWriteStrea
 // VolumeCreateOptions is the JSON payload accepted by msb_volume_create.
 type VolumeCreateOptions struct {
 	QuotaMiB uint32            `json:"quota_mib,omitempty"`
+	Kind     string            `json:"kind,omitempty"`
+	SizeMiB  uint32            `json:"size_mib,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`
 }
 
@@ -3530,8 +3532,12 @@ func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 	var raw struct {
 		Name          string            `json:"name"`
 		Path          string            `json:"path"`
+		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
 		UsedBytes     uint64            `json:"used_bytes"`
+		CapacityBytes *uint64           `json:"capacity_bytes"`
+		DiskFormat    *string           `json:"disk_format"`
+		DiskFstype    *string           `json:"disk_fstype"`
 		Labels        map[string]string `json:"labels"`
 		CreatedAtUnix *int64            `json:"created_at_unix"`
 	}
@@ -3541,8 +3547,12 @@ func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 	return &VolumeHandleInfo{
 		Name:          raw.Name,
 		Path:          raw.Path,
+		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
 		UsedBytes:     raw.UsedBytes,
+		CapacityBytes: raw.CapacityBytes,
+		DiskFormat:    raw.DiskFormat,
+		DiskFstype:    raw.DiskFstype,
 		Labels:        raw.Labels,
 		CreatedAtUnix: raw.CreatedAtUnix,
 	}, nil
@@ -3613,8 +3623,12 @@ func Version() (string, error) {
 type VolumeHandleInfo struct {
 	Name          string            `json:"name"`
 	Path          string            `json:"path"`
+	Kind          string            `json:"kind"`
 	QuotaMiB      *uint32           `json:"quota_mib"`
 	UsedBytes     uint64            `json:"used_bytes"`
+	CapacityBytes *uint64           `json:"capacity_bytes"`
+	DiskFormat    *string           `json:"disk_format"`
+	DiskFstype    *string           `json:"disk_fstype"`
 	Labels        map[string]string `json:"labels"`
 	CreatedAtUnix *int64            `json:"created_at_unix"`
 }
@@ -3635,8 +3649,12 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 	var raw struct {
 		Name          string            `json:"name"`
 		Path          string            `json:"path"`
+		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
 		UsedBytes     uint64            `json:"used_bytes"`
+		CapacityBytes *uint64           `json:"capacity_bytes"`
+		DiskFormat    *string           `json:"disk_format"`
+		DiskFstype    *string           `json:"disk_fstype"`
 		Labels        map[string]string `json:"labels"`
 		CreatedAtUnix *int64            `json:"created_at_unix"`
 	}
@@ -3646,8 +3664,12 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 	return &VolumeHandleInfo{
 		Name:          raw.Name,
 		Path:          raw.Path,
+		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
 		UsedBytes:     raw.UsedBytes,
+		CapacityBytes: raw.CapacityBytes,
+		DiskFormat:    raw.DiskFormat,
+		DiskFstype:    raw.DiskFstype,
 		Labels:        raw.Labels,
 		CreatedAtUnix: raw.CreatedAtUnix,
 	}, nil

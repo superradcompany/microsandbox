@@ -31,15 +31,42 @@ pub struct PyVolumeHandle {
 impl PyVolume {
     /// Create a new named volume.
     #[staticmethod]
-    #[pyo3(signature = (name, *, quota_mib=None, labels=None))]
+    #[pyo3(signature = (name, *, kind=None, size_mib=None, quota_mib=None, labels=None))]
     fn create<'py>(
         py: Python<'py>,
         name: String,
+        kind: Option<String>,
+        size_mib: Option<u32>,
         quota_mib: Option<u32>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = microsandbox::Volume::builder(&name);
+            let kind = kind.unwrap_or_else(|| "dir".to_string());
+            match kind.as_str() {
+                "dir" => {
+                    builder = builder.directory();
+                    if size_mib.is_some() {
+                        return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                            "size_mib is only supported with kind='disk' until directory quotas are enforced".into(),
+                        )));
+                    }
+                }
+                "disk" => {
+                    builder = builder.disk();
+                    let size_mib = size_mib.ok_or_else(|| {
+                        to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                            "size_mib is required with kind='disk'".into(),
+                        ))
+                    })?;
+                    builder = builder.size(size_mib);
+                }
+                other => {
+                    return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                        format!("unknown volume kind: {other}"),
+                    )));
+                }
+            }
             if let Some(quota) = quota_mib {
                 builder = builder.quota(quota);
             }
@@ -224,8 +251,28 @@ impl PyVolumeHandle {
     }
 
     #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind().as_str()
+    }
+
+    #[getter]
     fn used_bytes(&self) -> u64 {
         self.inner.used_bytes()
+    }
+
+    #[getter]
+    fn capacity_bytes(&self) -> Option<u64> {
+        self.inner.capacity_bytes()
+    }
+
+    #[getter]
+    fn disk_format(&self) -> Option<&str> {
+        self.inner.disk_format()
+    }
+
+    #[getter]
+    fn disk_fstype(&self) -> Option<&str> {
+        self.inner.disk_fstype()
     }
 
     #[getter]
