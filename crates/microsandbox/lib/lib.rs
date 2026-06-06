@@ -49,4 +49,4 @@ pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
     SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
-pub use volume::Volume;
+pub use volume::{Volume, VolumeKind};

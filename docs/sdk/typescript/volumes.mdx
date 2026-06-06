@@ -13,8 +13,12 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 import { Volume } from "microsandbox";
 
 const data = await Volume.builder("my-data")
-  .quota(100)
   .label("env", "prod")
+  .create();
+
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
   .create();
 ```
 
@@ -28,7 +32,7 @@ const data = await Volume.builder("my-data")
 static builder(name: string): VolumeBuilder
 ```
 
-Begin building a named volume. Configure with `.quota(...)` and `.label(...)`, then call `.create()`.
+Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` to create a disk-backed volume.
 
 **Parameters**
 
@@ -205,7 +209,10 @@ type DiskImageFormat = "qcow2" | "raw" | "vmdk";
 
 | Method | Description |
 |--------|-------------|
-| `quota(mib)` | Maximum storage size in MiB |
+| `directory()` | Create a directory-backed volume |
+| `disk()` | Create a raw ext4 disk-backed volume |
+| `size(mib)` | Disk capacity in MiB; required after `disk()` |
+| `quota(mib)` | Recorded quota metadata for directory volumes |
 | `label(key, value)` | Add a metadata label |
 | `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
 | `create()` | Build and create the volume; returns a [`Volume`](#volume) |
@@ -217,7 +224,9 @@ Frozen configuration produced by `VolumeBuilder.build()`.
 | Field | Type | Description |
 |-------|------|-------------|
 | name | `string` | Volume name |
+| kind | `"dir" \| "disk"` | Volume kind |
 | quotaMib | `number \| null` | Maximum storage size in MiB |
+| capacityMib | `number \| null` | Disk capacity in MiB |
 | labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
 
 ### VolumeHandle
@@ -225,8 +234,12 @@ Frozen configuration produced by `VolumeBuilder.build()`.
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `string` | Volume name |
+| kind | `string` | Volume kind |
 | quotaMib | `number \| null` | Storage quota |
 | usedBytes | `number` | Current disk usage in bytes |
+| capacityBytes | `number \| null` | Disk capacity in bytes |
+| diskFormat | `string \| null` | Disk image format |
+| diskFstype | `string \| null` | Inner disk filesystem |
 | labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
 | createdAt | `Date \| null` | Creation timestamp |
 | fs() | [`VolumeFs`](#volumefs) | Host-side filesystem on this volume (live handles only) |

@@ -19,6 +19,8 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 async def Volume.create(
     name: str,
     *,
+    kind: str = "dir",
+    size_mib: int | None = None,
     quota_mib: int | None = None,
     labels: dict[str, str] | None = None,
 ) -> Volume
@@ -31,7 +33,9 @@ Create a new named volume.
 | Name | Type | Description |
 |------|------|-------------|
 | name | `str` | Volume name (required) |
-| quota_mib | `int \| None` | Maximum storage size in MiB |
+| kind | `str` | Volume kind: `"dir"` or `"disk"` |
+| size_mib | `int \| None` | Disk capacity in MiB; required with `kind="disk"` |
+| quota_mib | `int \| None` | Recorded quota metadata for directory volumes |
 | labels | `dict[str, str] \| None` | Metadata labels |
 
 **Returns**
@@ -254,8 +258,12 @@ Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `str` | Volume name |
+| kind | `str` | Volume kind: `dir` or `disk` |
 | quota_mib | `int \| None` | Storage quota in MiB |
 | used_bytes | `int` | Current disk usage in bytes |
+| capacity_bytes | `int \| None` | Disk capacity in bytes |
+| disk_format | `str \| None` | Disk image format |
+| disk_fstype | `str \| None` | Disk filesystem type |
 | labels | `dict[str, str]` | Metadata labels |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
 | fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |

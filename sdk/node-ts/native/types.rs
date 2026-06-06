@@ -202,8 +202,12 @@ pub struct SandboxInfo {
 #[napi(object)]
 pub struct VolumeInfo {
     pub name: String,
+    pub kind: String,
     pub quota_mib: Option<u32>,
     pub used_bytes: f64,
+    pub capacity_bytes: Option<f64>,
+    pub disk_format: Option<String>,
+    pub disk_fstype: Option<String>,
     pub labels: HashMap<String, String>,
     pub created_at: Option<f64>,
 }

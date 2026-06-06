@@ -3361,6 +3361,10 @@ pub unsafe extern "C" fn msb_fs_exists(
 struct VolumeCreateOpts {
     #[serde(default)]
     quota_mib: u32,
+    #[serde(default = "default_volume_kind")]
+    kind: String,
+    #[serde(default)]
+    size_mib: u32,
     /// Optional key-value labels.
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -3389,6 +3393,30 @@ pub unsafe extern "C" fn msb_volume_create(
         };
         Ok(Box::pin(async move {
             let mut b: VolumeBuilder = Volume::builder(&name);
+            match opts.kind.as_str() {
+                "" | "dir" => {
+                    b = b.directory();
+                    if opts.size_mib > 0 {
+                        return Err(FfiError::invalid_argument(
+                            "size_mib is only supported with kind='disk' until directory quotas are enforced",
+                        ));
+                    }
+                }
+                "disk" => {
+                    b = b.disk();
+                    if opts.size_mib == 0 {
+                        return Err(FfiError::invalid_argument(
+                            "size_mib is required with kind='disk'",
+                        ));
+                    }
+                    b = b.size(opts.size_mib);
+                }
+                other => {
+                    return Err(FfiError::invalid_argument(format!(
+                        "unknown volume kind: {other}"
+                    )));
+                }
+            }
             if opts.quota_mib > 0 {
                 b = b.quota(opts.quota_mib);
             }
@@ -3420,6 +3448,19 @@ fn volume_handle_json(vh: &VolumeHandle) -> String {
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".into());
+    let kind_json = serde_json::to_string(vh.kind().as_str()).unwrap_or_else(|_| "\"dir\"".into());
+    let capacity = match vh.capacity_bytes() {
+        Some(bytes) => format!("{bytes}"),
+        None => "null".to_string(),
+    };
+    let disk_format = match vh.disk_format() {
+        Some(format) => serde_json::to_string(format).unwrap_or_else(|_| "null".into()),
+        None => "null".to_string(),
+    };
+    let disk_fstype = match vh.disk_fstype() {
+        Some(fstype) => serde_json::to_string(fstype).unwrap_or_else(|_| "null".into()),
+        None => "null".to_string(),
+    };
     let path = microsandbox::config::config()
         .volumes_dir()
         .join(vh.name())
@@ -3428,12 +3469,20 @@ fn volume_handle_json(vh: &VolumeHandle) -> String {
     let name_json = serde_json::to_string(vh.name()).unwrap_or_else(|_| "\"\"".into());
     let path_json = serde_json::to_string(&path).unwrap_or_else(|_| "\"\"".into());
     format!(
-        r#"{{"name":{name},"path":{path},"quota_mib":{quota},"used_bytes":{used},"labels":{labels},"created_at_unix":{created}}}"#,
+        r#"{{"name":{name},"path":{path},"kind":{kind},"quota_mib":{quota},"used_bytes":{used},"capacity_bytes":{capacity},"disk_format":{disk_format},"disk_fstype":{disk_fstype},"labels":{labels},"created_at_unix":{created}}}"#,
         name = name_json,
         path = path_json,
+        kind = kind_json,
         used = vh.used_bytes(),
+        capacity = capacity,
+        disk_format = disk_format,
+        disk_fstype = disk_fstype,
         labels = labels_json,
     )
+}
+
+fn default_volume_kind() -> String {
+    "dir".to_string()
 }
 
 #[unsafe(no_mangle)]

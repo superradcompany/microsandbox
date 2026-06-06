@@ -18,13 +18,19 @@ This recipe gives you a complete, throwaway Docker environment inside a microsan
 
 Use the default security profile for this recipe. Docker-in-Docker needs normal guest-root mount privileges for containerd's bind and overlay mounts, so it does not work in the restricted profile.
 
-Storage needs one small workaround. The sandbox root is already an overlayfs mount, and Docker's default storage driver also wants overlayfs for container layers. Stacking the two produces overlay-on-overlay mount errors. The fix is to point Docker's data root at `/tmp`, which microsandbox already mounts as tmpfs.
+Storage needs one small workaround. The sandbox root is already an overlayfs mount, and Docker's default storage driver also wants overlayfs for container layers. Stacking the two produces overlay-on-overlay mount errors. The fix is to point Docker's data root at a disk-backed named volume.
 
-<Warning>
-  Docker's data lives on tmpfs in this recipe. Pulled images and created containers do not survive sandbox removal.
-</Warning>
+<Tip>
+  Docker's data lives on the `docker-data` volume in this recipe. Pulled images and created containers survive sandbox removal until you remove the volume.
+</Tip>
 
-## Step 1: Create the helper script
+## Step 1: Create the volume
+
+```bash
+msb volume create docker-data --kind disk --size 20G
+```
+
+## Step 2: Create the helper script
 
 Save this as `start-docker` in the directory you'll run `msb` from:
 
@@ -37,7 +43,7 @@ if docker info >/dev/null 2>&1; then
   exit 0
 fi
 
-dockerd --data-root=/tmp/docker >/tmp/dockerd.log 2>&1 &
+dockerd --data-root=/var/lib/docker >/tmp/dockerd.log 2>&1 &
 
 printf "Starting Docker"
 i=0
@@ -60,12 +66,12 @@ Make it executable:
 chmod +x start-docker
 ```
 
-## Step 2: Boot the sandbox
+## Step 3: Boot the sandbox
 
 ```bash
 msb run --name docker-demo --replace \
   --memory 2G \
-  --tmpfs /tmp:1G \
+  --mount-named docker-data:/var/lib/docker \
   --entrypoint sh \
   --script-path start-docker:./start-docker \
   docker:dind
@@ -73,7 +79,7 @@ msb run --name docker-demo --replace \
 
 `--entrypoint sh` replaces the image's default DinD entrypoint with an interactive shell. `--script-path` makes `start-docker` available inside the sandbox at `/.msb/scripts/start-docker`, which is already on `PATH`.
 
-## Step 3: Start the daemon
+## Step 4: Start the daemon
 
 From the sandbox shell, run the helper:
 
@@ -83,7 +89,7 @@ start-docker
 
 Once it prints `ready`, the daemon is running and the Docker client in the same shell is connected to it.
 
-## Step 4: Run something
+## Step 5: Run something
 
 Verify the daemon with hello-world:
 
@@ -114,11 +120,12 @@ docker run --rm -it alpine sh -lc 'apk add --no-cache cmatrix >/dev/null && cmat
 ```bash
 exit
 msb rm -f docker-demo
+msb volume rm docker-data
 ```
 
 ## Notes
 
-- **Tmpfs sizing.** `/tmp` is 1 GiB here. Increase `--tmpfs /tmp:N` if you plan to pull larger images.
-- **Named volumes don't fix this.** They are virtiofs-backed host directories, and Docker's overlay snapshotter can't use those for `upperdir` / `workdir`.
-- **Disk-image-backed volumes.** The SDKs can already mount host disk images as virtio-blk devices. Once the CLI has a first-class `msb volume` flow for disk images, Docker's data root can sit on a real block device and survive sandbox removal.
+- **Disk sizing.** `docker-data` is 20 GiB here. Increase `--size` if you plan to pull larger images.
+- **Directory volumes don't fix this.** They are virtiofs-backed host directories, and Docker's overlay snapshotter can't use those for `upperdir` / `workdir`.
+- **Tmpfs is still useful for scratch.** You can add `--tmpfs /tmp:N` for temporary build scratch, but Docker's data root should stay on the disk-backed volume.
 - **Not the same as [Sandbox in Docker](/recipes/docker/docker).** That recipe covers the opposite direction.

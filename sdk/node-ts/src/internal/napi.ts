@@ -329,8 +329,12 @@ export type NapiVolumeBuilderCtor = new (name: string) => NapiVolumeBuilder;
 // Same setters/terminal split as `NapiSandboxBuilder` — see comment
 // there for why.
 export interface NapiVolumeBuilderSetters {
+  directory(): this;
+  disk(): this;
   quota(mib: number): this;
+  size(mib: number): this;
   label(key: string, value: string): this;
+  build(): NapiVolumeConfig;
 }
 
 export interface NapiVolumeBuilder extends NapiVolumeBuilderSetters {
@@ -343,10 +347,22 @@ export interface NapiVolume {
   fs(): NapiVolumeFs;
 }
 
+export interface NapiVolumeConfig {
+  readonly name: string;
+  readonly kind: string;
+  readonly quotaMib?: number | null;
+  readonly capacityMib?: number | null;
+  readonly labels: Record<string, string>;
+}
+
 export interface NapiVolumeHandle {
   readonly name: string;
+  readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
+  readonly capacityBytes: number | null | undefined;
+  readonly diskFormat: string | null | undefined;
+  readonly diskFstype: string | null | undefined;
   readonly labels: Record<string, string>;
   readonly createdAt: number | null | undefined;
   fs(): NapiVolumeFs;
@@ -380,8 +396,12 @@ export interface NapiVolumeFsWriteSink {
 
 export interface NapiVolumeInfo {
   readonly name: string;
+  readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
+  readonly capacityBytes: number | null | undefined;
+  readonly diskFormat: string | null | undefined;
+  readonly diskFstype: string | null | undefined;
   readonly labels: Record<string, string>;
   readonly createdAt: number | null | undefined;
 }

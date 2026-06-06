@@ -2,7 +2,10 @@
 //!
 //! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -1024,8 +1027,16 @@ impl ImageBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) fn validate_volume_mounts(mounts: &[VolumeMount]) -> crate::MicrosandboxResult<()> {
+    let mut guests = HashSet::new();
+
     for mount in mounts {
         validate_volume_mount(mount)?;
+        let guest = mount.guest();
+        if !guests.insert(guest) {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "multiple volumes cannot mount the same guest path: {guest}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1586,6 +1597,27 @@ mod tests {
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
         assert!(err.to_string().contains("guest mount path"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_duplicate_guest_paths() {
+        let mounts = vec![
+            VolumeMount::Tmpfs {
+                guest: "/data".to_string(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Named {
+                name: "cache".to_string(),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+            },
+        ];
+
+        let err = validate_volume_mounts(&mounts).unwrap_err();
+        assert!(err.to_string().contains("same guest path"));
     }
 
     #[test]

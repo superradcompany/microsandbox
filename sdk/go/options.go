@@ -904,11 +904,34 @@ func WithMounts(mounts map[string]MountConfig) SandboxOption {
 // VolumeConfig holds configuration for a named volume.
 type VolumeConfig struct {
 	QuotaMiB uint32
+	Kind     VolumeKind
+	SizeMiB  uint32
 	Labels   map[string]string
 }
 
+// VolumeKind describes the storage backing for a named volume.
+type VolumeKind string
+
+const (
+	// VolumeKindDir creates a directory-backed named volume.
+	VolumeKindDir VolumeKind = "dir"
+
+	// VolumeKindDisk creates a raw ext4 disk-backed named volume.
+	VolumeKindDisk VolumeKind = "disk"
+)
+
 // VolumeOption is a functional option for CreateVolume.
 type VolumeOption func(*VolumeConfig)
+
+// WithVolumeKind selects the storage backing for a named volume.
+func WithVolumeKind(kind VolumeKind) VolumeOption {
+	return func(o *VolumeConfig) { o.Kind = kind }
+}
+
+// WithVolumeSize sets disk volume capacity in MiB.
+func WithVolumeSize(mebibytes uint32) VolumeOption {
+	return func(o *VolumeConfig) { o.SizeMiB = mebibytes }
+}
 
 // WithVolumeQuota sets the volume's quota in MiB. Zero means unlimited.
 func WithVolumeQuota(mebibytes uint32) VolumeOption {

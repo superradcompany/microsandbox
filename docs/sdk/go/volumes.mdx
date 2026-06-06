@@ -11,8 +11,12 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 
 ```go
 vol, err := m.CreateVolume(ctx, "my-data",
-    m.WithVolumeQuota(100),
     m.WithVolumeLabels(map[string]string{"env": "prod"}),
+)
+
+dockerData, err := m.CreateVolume(ctx, "docker-data",
+    m.WithVolumeKind(m.VolumeKindDisk),
+    m.WithVolumeSize(20 * 1024),
 )
 ```
 
@@ -103,7 +107,27 @@ Delete a volume by name. All sandboxes referencing the volume must be stopped.
 func WithVolumeQuota(mebibytes uint32) VolumeOption
 ```
 
-Set the volume's maximum storage size in MiB. Zero means unlimited.
+Set recorded quota metadata for directory volumes. Zero means unlimited.
+
+---
+
+#### WithVolumeKind()
+
+```go
+func WithVolumeKind(kind VolumeKind) VolumeOption
+```
+
+Select the volume kind. Valid values are `VolumeKindDir` and `VolumeKindDisk`.
+
+---
+
+#### WithVolumeSize()
+
+```go
+func WithVolumeSize(mebibytes uint32) VolumeOption
+```
+
+Set disk volume capacity in MiB. Required with `VolumeKindDisk`.
 
 ---
 
@@ -125,8 +149,12 @@ Metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#li
 |--------|---------|-------------|
 | `Name()` | `string` | Volume name |
 | `Path()` | `string` | Host filesystem path of the volume's data directory |
+| `Kind()` | `VolumeKind` | Volume kind: `VolumeKindDir` or `VolumeKindDisk` |
 | `QuotaMiB()` | `*uint32` | Quota in MiB, or `nil` if unlimited |
 | `UsedBytes()` | `uint64` | Current disk usage in bytes |
+| `CapacityBytes()` | `*uint64` | Disk capacity in bytes |
+| `DiskFormat()` | `*string` | Disk image format |
+| `DiskFstype()` | `*string` | Disk filesystem type |
 | `Labels()` | `map[string]string` | Metadata labels |
 | `CreatedAt()` | `time.Time` | Creation timestamp, zero value if unknown |
 | `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
@@ -402,7 +430,9 @@ The config struct populated by [`VolumeOption`](#volumeoption) functions. Most c
 
 | Field | Type | Description |
 |-------|------|-------------|
+| Kind | `VolumeKind` | Volume kind (`VolumeKindDir` by default) |
 | QuotaMiB | `uint32` | Maximum storage size in MiB (zero = unlimited) |
+| SizeMiB | `uint32` | Disk capacity in MiB for `VolumeKindDisk` |
 | Labels | `map[string]string` | Metadata labels |
 
 ### VolumeOption
