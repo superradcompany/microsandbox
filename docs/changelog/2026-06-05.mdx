@@ -99,7 +99,7 @@ See the [quickstart](/getting-started/quickstart).
 - The default exec profile no longer applies `no_new_privs` and the `CAP_SYS_ADMIN` drop, so `sudo` and Docker-in-Docker work again on the default profile. Use `--security restricted` to opt back into the previous hardening.
 - Sandbox builders now reject zero CPU and zero memory configurations at build time with a typed error, instead of failing later during runtime startup.
 - Read-only consumers like `msb-metrics` no longer pre-create an empty, schema-less `msb.db` when they start before the main daemon; the read pool opens with `create_if_missing(false)` and waits for the catalog owner to materialize the file.
-- Human-facing CLI timestamps (`msb list`, `msb ps`, image and snapshot listings) now render in the local system timezone. JSON output continues to emit RFC 3339 timestamps with an explicit UTC offset for machine consumers.
+- Human-facing CLI timestamps (`msb ls`, `msb ps`, image and snapshot listings) now render in the local system timezone. JSON output continues to emit RFC 3339 timestamps with an explicit UTC offset for machine consumers.
 - Sandboxes persisted by microsandbox 0.5.2 with the legacy `readonly` mount field now start successfully on 0.5.3 and later; missing mount option fields fall back to writable and executable defaults.
 - Idle-timeout restarts no longer race against stale heartbeat files from the previous boot; per-boot heartbeats are cleared before each start, and idle-timeout shutdowns now flow through agentd first so the guest can flush state before the host exit fallback runs.
 - Sandboxes with large environment-variable payloads now boot reliably against the released `msb_krun` 0.1.14 with the merged libkrunfw boot-argument limit fixes.
