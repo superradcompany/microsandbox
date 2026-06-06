@@ -36,21 +36,21 @@ chrono.workspace = true
 ciborium.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
-docker_credential = "1.3.2"
+docker_credential = "1.4.0"
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.5.4", path = "../db" }
-microsandbox-filesystem = { version = "0.5.4", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.5.4", path = "../image" }
-microsandbox-metrics = { version = "0.5.4", path = "../metrics" }
-microsandbox-migration = { version = "0.5.4", path = "../migration" }
-microsandbox-network = { version = "0.5.4", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.5.4", path = "../protocol" }
-microsandbox-runtime = { version = "0.5.4", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
-nix = { workspace = true, features = ["process", "signal"] }
+microsandbox-db.workspace = true
+microsandbox-filesystem.workspace = true
+microsandbox-image.workspace = true
+microsandbox-metrics.workspace = true
+microsandbox-migration.workspace = true
+microsandbox-network = { workspace = true, optional = true }
+microsandbox-protocol.workspace = true
+microsandbox-runtime.workspace = true
+microsandbox-utils.workspace = true
+nix = { workspace = true, features = ["process", "signal", "term"] }
 notify.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -71,16 +71,16 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { version = "0.5.4", path = "../utils" }
+microsandbox-utils.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
 ipnetwork.workspace = true
-microsandbox-network = { version = "0.5.4", path = "../network" }
+microsandbox-network.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
-test-utils = { path = "../test-utils" }
+test-utils.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-rustls.workspace = true
 
@@ -93,7 +93,7 @@ keyring = { version = "3.6.3", features = ["windows-native"], optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature
 # so libdbus is built from source and statically linked (avoids needing libdbus-1-dev at build time).
-dbus = { version = "0.9.10", features = ["vendored"], optional = true }
+dbus = { version = "0.9.11", features = ["vendored"], optional = true }
 keyring = { version = "3.6.3", features = [
     "crypto-rust",
     "linux-native-sync-persistent",

@@ -14,7 +14,7 @@
 //!   the operator-configured upstream.
 //! - Otherwise the guest explicitly chose a resolver via `@target`.
 //!   Consult the network egress policy: if the resolver IP is allowed,
-//!   forward there directly; if denied, return REFUSED.
+//!   forward there directly; if denied, synthesize NXDOMAIN.
 //!
 //! Block list and rebind protection apply to every query/response
 //! regardless of which path was taken — the host always sees the
@@ -113,11 +113,11 @@ pub(crate) struct DnsForwarder {
 }
 
 /// Outcome of upstream selection. The query may be forwarded through a
-/// [`Client`], synthesized as REFUSED (policy denied the resolver IP),
+/// [`Client`], synthesized as NXDOMAIN (policy denied the resolver IP),
 /// or synthesized as SERVFAIL (couldn't reach upstream).
 enum UpstreamChoice {
     Client(Client),
-    Refused,
+    PolicyDenied,
     ServFail,
 }
 
@@ -131,8 +131,8 @@ enum UpstreamDecision {
     /// Forward directly to this resolver IP over the matching transport.
     Direct(SocketAddr),
     /// Network policy denied egress to the chosen resolver — synthesize
-    /// REFUSED.
-    Refused,
+    /// an NXDOMAIN denial.
+    PolicyDenied,
 }
 
 impl DnsForwarder {
@@ -165,8 +165,13 @@ impl DnsForwarder {
         // default policies fail closed unless a rule allows the name or
         // the DNS protocol/port.
         if decide_dns_action(&self.network_policy, &domain, transport).is_deny() {
-            tracing::debug!(domain = %domain, "DNS query refused by network policy");
-            return build_status_response(&query_msg, ResponseCode::Refused);
+            tracing::debug!(domain = %domain, "DNS query denied by network policy");
+            // NXDOMAIN, not REFUSED: stub resolvers (e.g. glibc) don't
+            // fail-fast on REFUSED, so a denied lookup hangs the guest in a
+            // deny-by-default sandbox. NXDOMAIN is a synthetic negative that
+            // fails the lookup immediately — the convention DNS blockers
+            // (Pi-hole et al.) use for filtered names.
+            return build_status_response(&query_msg, ResponseCode::NXDomain);
         }
 
         // Locally synthesize answers for the host alias; MX / TXT / etc.
@@ -182,13 +187,13 @@ impl DnsForwarder {
         // network policy.
         let client = match self.select_upstream(original_dst, transport, sni).await {
             UpstreamChoice::Client(c) => c,
-            UpstreamChoice::Refused => {
+            UpstreamChoice::PolicyDenied => {
                 tracing::debug!(
                     domain = %domain,
                     ?original_dst,
                     "DNS resolver denied by network policy"
                 );
-                return build_status_response(&query_msg, ResponseCode::Refused);
+                return build_status_response(&query_msg, ResponseCode::NXDomain);
             }
             UpstreamChoice::ServFail => {
                 return build_status_response(&query_msg, ResponseCode::ServFail);
@@ -225,7 +230,7 @@ impl DnsForwarder {
                         domain = %domain,
                         "DNS rebind protection: response contains private IP"
                     );
-                    return build_status_response(&query_msg, ResponseCode::Refused);
+                    return build_status_response(&query_msg, ResponseCode::NXDomain);
                 }
             }
         }
@@ -289,7 +294,7 @@ impl DnsForwarder {
             transport,
         ) {
             UpstreamDecision::Configured => self.configured_client(transport).await,
-            UpstreamDecision::Refused => UpstreamChoice::Refused,
+            UpstreamDecision::PolicyDenied => UpstreamChoice::PolicyDenied,
             UpstreamDecision::Direct(addr) => {
                 match build_direct_client(addr, transport, sni, self.config.query_timeout).await {
                     Some(client) => UpstreamChoice::Client(client),
@@ -458,13 +463,13 @@ fn decide_upstream(
         .evaluate_egress(policy_dst, transport.policy_protocol(), shared)
         .is_deny()
     {
-        return UpstreamDecision::Refused;
+        return UpstreamDecision::PolicyDenied;
     }
     UpstreamDecision::Direct(policy_dst)
 }
 
 /// Evaluate a guest-issued DNS query against the network policy. Pure
-/// function — no I/O — so the refusal logic is testable without a real
+/// function — no I/O — so the denial logic is testable without a real
 /// upstream client. Names that don't parse as a [`DomainName`] take the
 /// nameless path, where only `Any` rules can match.
 fn decide_dns_action(policy: &NetworkPolicy, domain: &str, transport: Transport) -> Action {
@@ -482,9 +487,9 @@ fn decide_dns_action(policy: &NetworkPolicy, domain: &str, transport: Transport)
 }
 
 /// Build a status-only response (no answers, no authority) with the given
-/// RCODE. Used for locally-synthesized REFUSED (block list / policy) and
-/// SERVFAIL (upstream unreachable). The guest's transaction id, OPCODE
-/// and RD bit are echoed.
+/// RCODE. Used for locally-synthesized NXDOMAIN (block list / policy deny /
+/// rebind rejection) and SERVFAIL (upstream unreachable). The guest's
+/// transaction id, OPCODE and RD bit are echoed.
 fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> {
     let mut response = Message::response(query.id(), query.op_code());
     response.set_recursion_desired(query.recursion_desired());
@@ -628,6 +633,19 @@ mod tests {
         assert_eq!(msg.answers().len(), 0);
     }
 
+    /// Policy denials synthesize NXDOMAIN (not REFUSED) so stub resolvers
+    /// fail closed immediately instead of falling back to an unreachable
+    /// next nameserver under deny-by-default egress.
+    #[test]
+    fn build_status_response_nxdomain_variant() {
+        let query = make_query("example.com.", RecordType::A);
+        let bytes = build_status_response(&query, ResponseCode::NXDomain).expect("built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.response_code(), ResponseCode::NXDomain);
+        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.queries().len(), 1);
+    }
+
     #[test]
     fn build_truncated_response_sets_tc_and_keeps_question() {
         let query = make_query("example.com.", RecordType::TXT);
@@ -731,32 +749,33 @@ mod tests {
     }
 
     #[test]
-    fn decide_upstream_refused_when_policy_denies_resolver() {
+    fn decide_upstream_policy_denied_when_policy_denies_resolver() {
         // public_only policy denies private addresses — guest aiming at
-        // a private resolver should get REFUSED rather than silently
-        // hitting the configured upstream instead.
+        // a private resolver should be routed to the denial path (a
+        // synthesized NXDOMAIN) rather than silently hitting the configured
+        // upstream instead.
         let gw = gateway_set();
         let shared = SharedState::new(4);
         let policy = NetworkPolicy::public_only();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 53)));
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
-            UpstreamDecision::Refused
+            UpstreamDecision::PolicyDenied
         );
     }
 
     #[test]
-    fn decide_upstream_refused_when_policy_denies_all() {
+    fn decide_upstream_policy_denied_when_policy_denies_all() {
         // none() denies everything; only queries to the gateway can
-        // still reach the configured upstream. Direct queries get
-        // REFUSED.
+        // still reach the configured upstream. Direct queries are routed
+        // to the denial path (synthesized NXDOMAIN).
         let gw = gateway_set();
         let shared = SharedState::new(4);
         let policy = NetworkPolicy::none();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Tcp),
-            UpstreamDecision::Refused
+            UpstreamDecision::PolicyDenied
         );
         // But aiming at the gateway still works.
         let gw_dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
@@ -793,7 +812,7 @@ mod tests {
         );
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Tcp),
-            UpstreamDecision::Refused
+            UpstreamDecision::PolicyDenied
         );
     }
 
@@ -822,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn decide_upstream_dot_refused_when_policy_denies_853() {
+    fn decide_upstream_dot_policy_denied_when_policy_denies_853() {
         // A policy that denies TCP to 1.1.1.1 blocks DoT upstream
         // regardless of port, since DoT rides TCP.
         use crate::policy::{Action, Destination, Direction, Rule};
@@ -842,7 +861,7 @@ mod tests {
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Dot),
-            UpstreamDecision::Refused
+            UpstreamDecision::PolicyDenied
         );
     }
 
@@ -860,9 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn decide_dns_action_refuses_under_deny_by_default() {
+    fn decide_dns_action_denies_under_deny_by_default() {
         // Deny-by-default with no rule that grants the DNS transport must
-        // refuse the query — this is the regression the wider DNS-as-
+        // deny the query — this is the regression the wider DNS-as-
         // egress evaluation was added for.
         let policy = NetworkPolicy::none();
         assert_eq!(
@@ -959,14 +978,14 @@ mod tests {
             Action::Allow
         );
 
-        // Under deny-by-default, an unparseable name with no Any rule
-        // refuses.
+        // Under deny-by-default, an unparseable name with no Any rule is
+        // denied.
         let deny = NetworkPolicy::none();
         assert_eq!(decide_dns_action(&deny, "", Transport::Udp), Action::Deny);
     }
 
     #[test]
-    fn decide_dns_action_domain_rule_refuses_specific_name() {
+    fn decide_dns_action_domain_rule_denies_specific_name() {
         let policy = NetworkPolicy::allow_all()
             .deny_domain("evil.com")
             .expect("valid name");

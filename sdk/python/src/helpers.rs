@@ -1,4 +1,4 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder};
+use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
@@ -164,6 +164,18 @@ pub fn sandbox_builder_from_args(
     if let Some(shell) = extract_opt::<String>(kwargs, "shell")? {
         builder = builder.shell(shell);
     }
+    if let Some(security) = extract_opt::<String>(kwargs, "security")? {
+        let profile = match security.as_str() {
+            "default" => SecurityProfile::Default,
+            "restricted" => SecurityProfile::Restricted,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid security profile: {security}. Expected: default, restricted"
+                )));
+            }
+        };
+        builder = builder.security(profile);
+    }
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
     }
@@ -219,6 +231,16 @@ pub fn sandbox_builder_from_args(
             let key: String = k.extract()?;
             let val: String = v.extract()?;
             builder = builder.env(key, val);
+        }
+    }
+
+    // Labels.
+    if let Some(labels) = kwargs.get_item("labels")? {
+        let labels_dict: &Bound<'_, PyDict> = labels.downcast()?;
+        for (k, v) in labels_dict.iter() {
+            let key: String = k.extract()?;
+            let val: String = v.extract()?;
+            builder = builder.label(key, val);
         }
     }
 
@@ -425,6 +447,8 @@ fn apply_mount(
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
     let noexec = extract_opt::<bool>(mount, "noexec")?.unwrap_or(false);
+    let nosuid = extract_opt::<bool>(mount, "nosuid")?.unwrap_or(false);
+    let nodev = extract_opt::<bool>(mount, "nodev")?.unwrap_or(false);
     let stat_virt = extract_opt::<String>(mount, "stat_virtualization")?
         .map(parse_stat_virt)
         .transpose()?;
@@ -440,6 +464,12 @@ fn apply_mount(
             }
             if noexec {
                 m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
             }
             if let Some(p) = stat_virt {
                 m = m.stat_virtualization(p);
@@ -457,6 +487,12 @@ fn apply_mount(
             }
             if noexec {
                 m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
             }
             if let Some(p) = stat_virt {
                 m = m.stat_virtualization(p);
@@ -478,6 +514,12 @@ fn apply_mount(
             }
             if noexec {
                 m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
             }
             m
         }))
@@ -504,6 +546,12 @@ fn apply_mount(
             }
             if noexec {
                 m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
             }
             m
         }))

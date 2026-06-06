@@ -1,8 +1,9 @@
 //! Public types: batches, collections, exporter trait.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
+use async_trait::async_trait;
 
 pub use microsandbox_metrics::SandboxMetricSnapshot;
 
@@ -12,6 +13,11 @@ use crate::error::MetricsCollectorResult;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Per-sandbox labels resolved from the catalog: `sandbox_id` → that sandbox's
+/// ordered `(key, value)` pairs. Each entry is shared via `Arc` so cloning a
+/// collection (per exporter buffer) only bumps refcounts.
+pub type SandboxLabels = HashMap<i32, Arc<Vec<(String, String)>>>;
+
 /// One shared-memory metrics collection for all active sandboxes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricsCollection {
@@ -20,6 +26,11 @@ pub struct MetricsCollection {
 
     /// Active sandbox metrics snapshots.
     pub sandboxes: Vec<SandboxMetricSnapshot>,
+
+    /// Per-sandbox labels. Empty when label enrichment is disabled or a sandbox
+    /// has no labels; exporters look up entries by
+    /// `SandboxMetricSnapshot::sandbox_id`.
+    pub labels: SandboxLabels,
 }
 
 /// A buffered metrics export batch delivered to a registered exporter.
@@ -37,15 +48,13 @@ pub struct MetricsExportBatch {
 //--------------------------------------------------------------------------------------------------
 
 /// User-implemented metrics exporter.
+#[async_trait]
 pub trait MetricsExporter: Send + Sync + 'static {
     /// Export a buffered metrics batch.
-    fn export(
-        &self,
-        batch: Arc<MetricsExportBatch>,
-    ) -> BoxFuture<'static, MetricsCollectorResult<()>>;
+    async fn export(&self, batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()>;
 
     /// Shut down any exporter-owned resources.
-    fn shutdown(&self) -> BoxFuture<'static, MetricsCollectorResult<()>> {
-        Box::pin(async { Ok(()) })
+    async fn shutdown(&self) -> MetricsCollectorResult<()> {
+        Ok(())
     }
 }

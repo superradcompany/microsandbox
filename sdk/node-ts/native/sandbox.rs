@@ -124,6 +124,18 @@ impl Sandbox {
         Ok(handles.iter().map(sandbox_handle_to_info).collect())
     }
 
+    /// List sandboxes filtered to those carrying all of the filter's labels
+    /// (AND-matched).
+    #[napi]
+    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<SandboxInfo>> {
+        let labels = filter.labels.unwrap_or_default();
+        let filter = microsandbox::sandbox::SandboxFilter::new().labels(labels);
+        let handles = microsandbox::sandbox::Sandbox::list_with(filter)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+    }
+
     /// Remove a stopped sandbox from the database.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.

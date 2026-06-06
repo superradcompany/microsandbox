@@ -71,6 +71,12 @@
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 >
+> On macOS you can also install with Homebrew:
+>
+> ```sh
+> brew install superradcompany/tap/microsandbox
+> ```
+>
 > ```sh
 > msb run debian
 > ```

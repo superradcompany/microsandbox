@@ -164,6 +164,8 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | `fstype(fs)` | Inner filesystem type (e.g. `"ext4"`). Disk only; omit to autodetect. |
 | `readonly()` | Mount read-only; virtiofs-backed mounts also reject writes in the host filesystem server. |
 | `noexec()` | Prevent direct execution from the mount. Interpreters can still read scripts from it. |
+| `nosuid()` | Ignore setuid and setgid privilege elevation from files on the mount. |
+| `nodev()` | Ignore device files on the mount. |
 | `size(mib)` | Cap in MiB. Tmpfs only. |
 | `build()` | Internal — produce a `VolumeMount`. |
 
@@ -173,9 +175,9 @@ Discriminated union produced by `MountBuilder.build()`.
 
 ```typescript
 type VolumeMount =
-  | { kind: "bind"; host: string; guest: string; readonly: boolean; noexec: boolean }
-  | { kind: "named"; name: string; guest: string; readonly: boolean; noexec: boolean }
-  | { kind: "tmpfs"; guest: string; sizeMib: number | null; readonly: boolean; noexec: boolean }
+  | { kind: "bind"; host: string; guest: string; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
+  | { kind: "named"; name: string; guest: string; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
+  | { kind: "tmpfs"; guest: string; sizeMib: number | null; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
   | {
       kind: "disk";
       host: string;
@@ -184,6 +186,8 @@ type VolumeMount =
       fstype: string | null;
       readonly: boolean;
       noexec: boolean;
+      nosuid: boolean;
+      nodev: boolean;
     };
 ```
 

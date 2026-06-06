@@ -13,11 +13,12 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-microsandbox = { version = "0.5.4", path = "../../crates/microsandbox", features = ["ssh"] }
-microsandbox-network = { version = "0.5.4", path = "../../crates/network" }
+microsandbox = { workspace = true, default-features = true, features = ["ssh"] }
+microsandbox-network.workspace = true
 chrono = { workspace = true }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
 pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }

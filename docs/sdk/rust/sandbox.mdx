@@ -402,7 +402,7 @@ Builder for configuring a sandbox before creation. Obtained via [`Sandbox::build
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if [`from_snapshot`](#from_snapshot) was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) or [`create_detached`](#create_detached) instead — they call `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if [`from_snapshot`](#from_snapshot) was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) instead — it calls `build` internally.
 
 **Returns**
 
@@ -434,7 +434,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 async fn create(self) -> MicrosandboxResult<Sandbox>
 ```
 
-Boot the sandbox in attached mode. The sandbox stops when your process exits.
+Boot the sandbox. By default, the sandbox runs in attached mode and stops when your process exits. Use [`detached(true)`](#detached) to create it in detached mode instead.
 
 **Returns**
 
@@ -444,19 +444,33 @@ Boot the sandbox in attached mode. The sandbox stops when your process exits.
 
 ---
 
-#### create_detached()
+#### detached()
 
 ```rust
-async fn create_detached(self) -> MicrosandboxResult<Sandbox>
+fn detached(self, detached: bool) -> Self
 ```
 
-Boot the sandbox in detached mode. The sandbox survives after your process exits.
+Choose whether the sandbox process is created in detached mode. Defaults to `false`.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .detached(true)
+    .create()
+    .await?;
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| detached | `bool` | `true` to create in detached/background mode |
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
-| [`Sandbox`](#instance-methods) | Running sandbox |
+| `Self` | Builder |
 
 ---
 

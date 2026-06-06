@@ -16,6 +16,8 @@ This recipe gives you a complete, throwaway Docker environment inside a microsan
 
 `docker:dind` is a regular OCI image, so microsandbox can boot one inside a microVM. You boot the image into a shell, start `dockerd`, and from there every Docker command in that shell talks to the nested daemon rather than the host's.
 
+Use the default security profile for this recipe. Docker-in-Docker needs normal guest-root mount privileges for containerd's bind and overlay mounts, so it does not work in the restricted profile.
+
 Storage needs one small workaround. The sandbox root is already an overlayfs mount, and Docker's default storage driver also wants overlayfs for container layers. Stacking the two produces overlay-on-overlay mount errors. The fix is to point Docker's data root at `/tmp`, which microsandbox already mounts as tmpfs.
 
 <Warning>

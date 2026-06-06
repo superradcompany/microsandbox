@@ -13,6 +13,7 @@ import (
 //	microsandbox.Image.List(ctx)
 //	microsandbox.Image.Inspect(ctx, "python:3.12")
 //	microsandbox.Image.Remove(ctx, "old:tag", true)
+//	microsandbox.Image.Prune(ctx)
 var Image imageFactory
 
 type imageFactory struct{}
@@ -56,18 +57,13 @@ func (imageFactory) Remove(ctx context.Context, reference string, force bool) er
 	return wrapFFI(ffi.ImageRemove(ctx, reference, force))
 }
 
-// GCLayers garbage-collects orphaned layers (no manifest references) and
-// returns the count of layers reclaimed.
-func (imageFactory) GCLayers(ctx context.Context) (uint32, error) {
-	n, err := ffi.ImageGCLayers(ctx)
-	return n, wrapFFI(err)
-}
-
-// GC garbage-collects everything reclaimable in the image cache and
-// returns the count of records reclaimed.
-func (imageFactory) GC(ctx context.Context) (uint32, error) {
-	n, err := ffi.ImageGC(ctx)
-	return n, wrapFFI(err)
+// Prune removes cached image data that is not used by sandboxes.
+func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error) {
+	info, err := ffi.ImagePrune(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return imagePruneReportFromInfo(info), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +170,16 @@ type ImageLayer struct {
 	Position            int32
 }
 
+// ImagePruneReport summarizes artifacts removed by Image.Prune.
+type ImagePruneReport struct {
+	ImageRefsRemoved uint32
+	ManifestsRemoved uint32
+	LayersRemoved    uint32
+	FsmetaRemoved    uint32
+	VMDKRemoved      uint32
+	BytesReclaimed   *uint64
+}
+
 func imageDetailFromInfo(info *ffi.ImageDetailInfo) *ImageDetail {
 	d := &ImageDetail{ImageHandle: imageHandleFromInfo(&info.ImageHandleInfo)}
 	if info.Config != nil {
@@ -202,4 +208,15 @@ func imageDetailFromInfo(info *ffi.ImageDetailInfo) *ImageDetail {
 		}
 	}
 	return d
+}
+
+func imagePruneReportFromInfo(info *ffi.ImagePruneReportInfo) *ImagePruneReport {
+	return &ImagePruneReport{
+		ImageRefsRemoved: info.ImageRefsRemoved,
+		ManifestsRemoved: info.ManifestsRemoved,
+		LayersRemoved:    info.LayersRemoved,
+		FsmetaRemoved:    info.FsmetaRemoved,
+		VMDKRemoved:      info.VMDKRemoved,
+		BytesReclaimed:   info.BytesReclaimed,
+	}
 }

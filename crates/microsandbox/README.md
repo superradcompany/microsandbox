@@ -228,7 +228,8 @@ Sandboxes in detached mode survive the parent process:
 // Create and detach.
 let sandbox = Sandbox::builder("background")
     .image("python")
-    .create_detached()
+    .detached(true)
+    .create()
     .await?;
 
 // Later, from another process:

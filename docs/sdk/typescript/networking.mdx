@@ -954,7 +954,7 @@ Deny egress to all subdomains of these suffixes. Same enforcement layers as [`de
 denyDomains(...names: string[]): this
 ```
 
-Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy.
+Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (NXDOMAIN), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy.
 
 **Parameters**
 

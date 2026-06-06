@@ -138,6 +138,7 @@
                   "sdk/python/networking",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
+                  "sdk/python/images",
                   "sdk/python/agent-client"
                 ]
               },
@@ -215,7 +216,6 @@
       {
         "tab": "Changelog",
         "pages": [
-          "changelog/2026-05-29",
           "changelog/2026-05-22",
           "changelog/2026-05-15",
           "changelog/2026-05-01",

@@ -5,7 +5,7 @@
 //   - Image.Get    — lookup by reference
 //   - Image.Inspect — full detail (config + layers)
 //   - Image.Remove — delete by reference
-//   - Image.GCLayers / Image.GC — reclaim orphaned blobs
+//   - Image.Prune  — reclaim unused cached image data
 //
 // We boot a sandbox first to make sure at least one image is in the cache
 // for the listing demo to be useful.
@@ -108,17 +108,20 @@ func main() {
 			l.Position, shortHash(l.DiffID), shortHash(l.BlobDigest), size)
 	}
 
-	// 4. GC orphaned layers (no manifest references). Safe to call any
-	// time; returns the count of layers reclaimed.
-	removed, err := microsandbox.Image.GCLayers(ctx)
+	// 4. Prune images not used by sandboxes and any dangling artifacts.
+	report, err := microsandbox.Image.Prune(ctx)
 	if err != nil {
-		log.Fatalf("Image.GCLayers: %v", err)
+		log.Fatalf("Image.Prune: %v", err)
 	}
-	fmt.Printf("\nImage.GCLayers reclaimed %d orphaned layer(s)\n", removed)
+	fmt.Printf(
+		"\nImage.Prune removed %d image ref(s), %d manifest(s), %d layer(s)\n",
+		report.ImageRefsRemoved,
+		report.ManifestsRemoved,
+		report.LayersRemoved,
+	)
 
-	// We deliberately don't call Image.Remove on `targetImage` because the
-	// next sandbox creation would have to re-pull. The API is wired up
-	// symmetrically: `microsandbox.Image.Remove(ctx, "old:tag", true)`.
+	// Image.Remove is available when you want to delete a specific reference:
+	// `microsandbox.Image.Remove(ctx, "old:tag", true)`.
 	fmt.Println("\nOK — image-cache example passed")
 }
 

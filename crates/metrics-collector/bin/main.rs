@@ -11,14 +11,15 @@
 //! the `$MSB_HOME` directory (the shm registry is mode `0600`).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use microsandbox_metrics_collector::MetricsCollector;
 use microsandbox_metrics_collector::exporters::{
     OtelExporter, OtlpCompression, OtlpProtocol, StdoutExporter,
 };
+use microsandbox_metrics_collector::{CatalogLabelSource, MetricsCollector};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -138,9 +139,24 @@ struct CollectorOpts {
     export_timeout: Duration,
 
     /// `MSB_HOME` directory. Defaults to `$MSB_HOME` if set, otherwise
-    /// `~/.microsandbox`. Used to derive the shm registry name.
+    /// `~/.microsandbox`. Used to derive the shm registry name and locate the
+    /// catalog DB for labels.
     #[arg(long)]
     msb_home: Option<PathBuf>,
+
+    /// Do not attach per-sandbox labels to emitted metrics. Disables the
+    /// catalog lookup entirely. Use to cap series cardinality from
+    /// high-cardinality label keys (e.g. `user.id`).
+    #[arg(long)]
+    no_labels: bool,
+
+    /// Drop a label key from emitted metrics. Repeatable
+    /// (`--exclude-label-key user.id --exclude-label-key request.id`). The
+    /// label stays in the catalog and is still visible to `msb inspect`; it is
+    /// only withheld from metric attributes, so this trims series cardinality on
+    /// noisy keys without losing the metadata. Ignored when `--no-labels` is set.
+    #[arg(long = "exclude-label-key", value_name = "KEY")]
+    exclude_label_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -240,14 +256,16 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     }
     let exporter = exporter_builder.build().context("build OTel exporter")?;
 
-    let collector = MetricsCollector::builder(registry_name)
+    let mut builder = MetricsCollector::builder(registry_name)
         .collect_interval(args.collector.collect_interval)
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
-        .register(exporter)
-        .build()
-        .context("build metrics collector")?;
+        .register(exporter);
+    if let Some(source) = label_source(&args.collector)? {
+        builder = builder.enrich_labels(Arc::new(source));
+    }
+    let collector = builder.build().context("build metrics collector")?;
 
     let handle = collector.start().await.context("start metrics collector")?;
     info!("msb-metrics started; press Ctrl+C to shut down");
@@ -268,14 +286,16 @@ async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
     info!(registry = %registry_name, "starting msb-metrics stdout");
 
     let exporter = StdoutExporter::new();
-    let collector = MetricsCollector::builder(registry_name)
+    let mut builder = MetricsCollector::builder(registry_name)
         .collect_interval(args.collector.collect_interval)
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
-        .register(exporter)
-        .build()
-        .context("build metrics collector")?;
+        .register(exporter);
+    if let Some(source) = label_source(&args.collector)? {
+        builder = builder.enrich_labels(Arc::new(source));
+    }
+    let collector = builder.build().context("build metrics collector")?;
 
     let handle = collector.start().await.context("start metrics collector")?;
     info!("msb-metrics started; press Ctrl+C to shut down");
@@ -321,26 +341,54 @@ enum LogFormat {
     Json,
 }
 
-/// Derive the shm registry name from `--msb-home` (or env/default).
+/// Resolve the `MSB_HOME` directory from `--msb-home`, then `$MSB_HOME`, then
+/// the default `~/.microsandbox`.
+fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
+    match msb_home {
+        Some(p) => Ok(p.to_path_buf()),
+        None => match std::env::var_os("MSB_HOME") {
+            Some(p) => Ok(PathBuf::from(p)),
+            None => Ok(dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("could not resolve $HOME for default --msb-home"))?
+                .join(".microsandbox")),
+        },
+    }
+}
+
+/// Derive the shm registry name from the resolved `MSB_HOME`.
 ///
 /// Mirrors `microsandbox::config::Config::metrics_registry_shm_name`:
 /// `{METRICS_SHM_PREFIX}-{stable_hash(home)}-v1`.
 fn resolve_registry_name(msb_home: Option<&std::path::Path>) -> anyhow::Result<String> {
-    let home = match msb_home {
-        Some(p) => p.to_path_buf(),
-        None => match std::env::var_os("MSB_HOME") {
-            Some(p) => PathBuf::from(p),
-            None => dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("could not resolve $HOME for default --msb-home"))?
-                .join(".microsandbox"),
-        },
-    };
+    let home = resolve_msb_home(msb_home)?;
     let home_hash = microsandbox_utils::stable_hash_path(&home);
     Ok(format!(
         "{prefix}-{hash}-v1",
         prefix = microsandbox_utils::METRICS_SHM_PREFIX,
         hash = home_hash,
     ))
+}
+
+/// Path to the catalog DB (`$MSB_HOME/db/msb.db`) used for label lookups. The
+/// connection is opened lazily (and retried) by [`CatalogLabelSource`], so a
+/// catalog that does not exist yet is fine: enrichment switches on once it
+/// appears.
+fn label_db_path(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
+    Ok(resolve_msb_home(msb_home)?
+        .join(microsandbox_utils::DB_SUBDIR)
+        .join(microsandbox_utils::DB_FILENAME))
+}
+
+/// Build the catalog label source for `opts`, or `None` when `--no-labels`
+/// disables enrichment entirely. Applies the `--exclude-label-keys` denylist.
+fn label_source(opts: &CollectorOpts) -> anyhow::Result<Option<CatalogLabelSource>> {
+    if opts.no_labels {
+        return Ok(None);
+    }
+    let db_path = label_db_path(opts.msb_home.as_deref())?;
+    Ok(Some(CatalogLabelSource::new(db_path).with_excluded_keys(
+        opts.exclude_label_keys.iter().cloned(),
+    )))
 }
 
 /// Wait for SIGINT or SIGTERM (on Unix) / Ctrl+C (everywhere else).

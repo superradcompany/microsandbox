@@ -13,6 +13,13 @@ pub struct ExitStatus {
     pub success: bool,
 }
 
+/// Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
+/// (AND-matched). Omit or leave empty to match every sandbox.
+#[napi(object)]
+pub struct SandboxListFilter {
+    pub labels: Option<HashMap<String, String>>,
+}
+
 /// One captured log entry from `exec.log`.
 #[napi(object)]
 pub struct LogEntry {

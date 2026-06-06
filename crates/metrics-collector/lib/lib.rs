@@ -70,10 +70,10 @@ pub mod exporters;
 //--------------------------------------------------------------------------------------------------
 
 pub use core::{
-    DEFAULT_COLLECT_INTERVAL, DEFAULT_EXPORT_TIMEOUT, DEFAULT_FLUSH_INTERVAL,
-    DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollection, MetricsCollector, MetricsCollectorBuilder,
-    MetricsErrorPolicy, MetricsExportBatch, MetricsExporter, MetricsExporterConfig,
-    RunningCollector, SandboxMetricSnapshot,
+    CatalogLabelSource, DEFAULT_COLLECT_INTERVAL, DEFAULT_EXPORT_TIMEOUT, DEFAULT_FLUSH_INTERVAL,
+    DEFAULT_MAX_BUFFERED_COLLECTIONS, LabelSource, MetricsCollection, MetricsCollector,
+    MetricsCollectorBuilder, MetricsErrorPolicy, MetricsExportBatch, MetricsExporter,
+    MetricsExporterConfig, RunningCollector, SandboxLabels, SandboxMetricSnapshot,
 };
 pub use error::{MetricsCollectorError, MetricsCollectorResult};
 pub use microsandbox_metrics::SandboxMetrics;

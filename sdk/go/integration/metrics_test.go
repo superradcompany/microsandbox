@@ -87,7 +87,7 @@ func TestAllSandboxMetricsCoversMultipleSandboxes(t *testing.T) {
 	a := "go-sdk-allmetrics-a-" + t.Name()
 	b := "go-sdk-allmetrics-b-" + t.Name()
 
-	sbA, err := microsandbox.CreateSandbox(ctx, a, microsandbox.WithImage("alpine:3.19"))
+	sbA, err := microsandbox.CreateSandbox(ctx, a, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox a: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestAllSandboxMetricsCoversMultipleSandboxes(t *testing.T) {
 		_ = sbA.Close()
 	})
 
-	sbB, err := microsandbox.CreateSandbox(ctx, b, microsandbox.WithImage("alpine:3.19"))
+	sbB, err := microsandbox.CreateSandbox(ctx, b, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox b: %v", err)
 	}

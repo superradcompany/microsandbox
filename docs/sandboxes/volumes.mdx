@@ -8,7 +8,9 @@ Volumes give a sandbox direct filesystem access to host-side storage or in-memor
 
 microsandbox supports four types of mounts: bind mounts, named volumes, tmpfs, and disk-image volumes.
 
-Mounts are `nosuid` and `nodev` inside the guest by default. Add `readonly` / `ro` when the guest should not write, and add `noexec` when files on the mount should not be executed directly. User commands also run without mount-admin privilege, so `ro` and `noexec` cannot be undone with a guest remount. `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
+Mounts use normal Linux behavior by default: writable, executable, suid-enabled, and device-enabled. Add `readonly` / `ro` when the guest should not write, `noexec` when files on the mount should not be executed directly, `nosuid` when setuid/setgid bits should be ignored, and `nodev` when device files should be ignored. `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
+
+For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
 
 ## Bind mounts
 

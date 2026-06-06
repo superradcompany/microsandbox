@@ -112,6 +112,24 @@ Expanded form: `msb image rm`.
 | `-f`, `--force` | Remove even if the image is used by existing sandboxes |
 | `-q`, `--quiet` | Suppress output |
 
+## msb image prune
+
+Remove cached images that are not used by any sandbox, then clean up dangling image artifacts.
+
+```bash
+msb image prune
+msb image prune --yes
+msb image prune --format json
+```
+
+Prune never removes images used by existing sandboxes. Use `msb rmi --force` when you want to remove a specific image even though it is still referenced.
+
+| Flag | Description |
+|------|-------------|
+| `-y`, `--yes` | Skip the confirmation prompt |
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Suppress output |
+
 ## msb registry
 
 Manage registry authentication.
