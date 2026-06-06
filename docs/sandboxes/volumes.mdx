@@ -31,7 +31,7 @@ import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("dev")
     .image("python")
-    .volume("/app/src",  (m) => m.bind("./src").readonly().noexec())
+    .volume("/app/src", (m) => m.bind("./src").readonly().noexec())
     .volume("/app/data", (m) => m.bind("./data"))
     .create();
 ```
@@ -53,7 +53,7 @@ sb = await Sandbox.create(
 sb, err := m.CreateSandbox(ctx, "dev",
     m.WithImage("python"),
     m.WithMounts(map[string]m.MountConfig{
-        "/app/src":  m.Mount.Bind("./src", m.MountOptions{Readonly: true, Noexec: true}),
+        "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true, Noexec: true}),
         "/app/data": m.Mount.Bind("./data", m.MountOptions{}),
     }),
 )

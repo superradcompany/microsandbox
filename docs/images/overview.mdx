@@ -197,7 +197,7 @@ Images are cached in the global microsandbox home directory:
 | `~/.microsandbox/cache/vmdk/` | VMDK descriptors used to boot cached images |
 | `~/.microsandbox/db/` | Database tracking image metadata and digests |
 
-Layers are content-addressable and deduplicated. If `python` and `python` share a base layer, it's stored once.
+Layers are content-addressable and deduplicated. If `python` and `node` share a base layer, it's stored once.
 
 <Tip>
   Use `msb pull` from the CLI to pre-pull images before creating sandboxes. This avoids blocking on a download during `Sandbox.create`.
