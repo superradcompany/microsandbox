@@ -22,7 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::session::SessionOutput;
+use crate::session::{RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -795,7 +795,8 @@ async fn handle_read_stream(
                     );
                     return;
                 }
-                if tx.send((id, SessionOutput::Raw(buf.clone()))).is_err() {
+                let output = RawSessionOutput::new(buf.clone(), RawActivity::fs_bytes(n), None);
+                if tx.send((id, SessionOutput::Raw(output))).is_err() {
                     return;
                 }
             }
@@ -990,7 +991,12 @@ fn send_raw_response(
             let mut buf = Vec::new();
             match codec::encode_to_buf(&msg, &mut buf) {
                 Ok(()) => {
-                    let _ = tx.send((id, SessionOutput::Raw(buf)));
+                    let output = RawSessionOutput::new(
+                        buf,
+                        RawActivity::guest_message(),
+                        Some(RawSessionCompletion::FsRead),
+                    );
+                    let _ = tx.send((id, SessionOutput::Raw(output)));
                 }
                 Err(e) => {
                     eprintln!("failed to encode fs response frame for {id}: {e}");

@@ -28,7 +28,7 @@ use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::Serialize;
 
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
-use crate::heartbeat::{self, HeartbeatReader};
+use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
 use crate::relay::{self, AgentRelay};
@@ -44,6 +44,17 @@ const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
 const EXIT_REASON_MAX_DURATION: u8 = 2;
 const EXIT_REASON_SIGNAL: u8 = 3;
 const EXIT_REASON_PARENT_EXIT: u8 = 4;
+const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
+const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
+
+/// Host-observed stale heartbeat budget before agentd is considered unresponsive.
+const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Startup grace before a missing heartbeat is considered an agentd failure.
+const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(60);
+
+/// Short best-effort send budget once agentd is already considered unresponsive.
+const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
 pub const PARENT_WATCH_FD: i32 = 97;
@@ -450,6 +461,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let reason_tag = exit_reason_for_observer.load(std::sync::atomic::Ordering::SeqCst);
             let reason = match reason_tag {
                 EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
+                EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
+                EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
                 EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
                 EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
                 EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
@@ -629,8 +642,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // time in microsandbox-protocol.
     {
         let shutdown_exit_handle = exit_handle.clone();
+        let shutdown_reason = Arc::clone(&exit_reason);
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
+                shutdown_reason.store(
+                    EXIT_REASON_SHUTDOWN_REQUESTED,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
@@ -641,38 +659,89 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         });
     }
 
-    // Heartbeat/idle timeout monitor.
-    if let Some(idle_secs) = config.idle_timeout_secs {
-        let heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
-        let idle_exit_handle = exit_handle.clone();
-        let idle_reason = Arc::clone(&exit_reason);
-        let idle_shared = Arc::clone(&shared);
+    // Heartbeat health monitor. Idle reclamation is optional, but missing or stale
+    // heartbeat data means the in-guest agent is not healthy.
+    {
+        let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
+        let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
+        let heartbeat_exit_handle = exit_handle.clone();
+        let heartbeat_reason = Arc::clone(&exit_reason);
+        let heartbeat_shared = Arc::clone(&shared);
         tokio_rt.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                if heartbeat_reader.is_idle(idle_secs) {
-                    tracing::info!("sandbox idle for {idle_secs}s, requesting guest shutdown");
-                    idle_reason.store(
-                        EXIT_REASON_IDLE_TIMEOUT,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    match request_guest_shutdown(&idle_shared) {
-                        Ok(()) => {
-                            tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
-                            tracing::info!(
-                                "idle shutdown flush window elapsed, triggering host exit"
-                            );
+                let decision =
+                    heartbeat_reader.check(idle_timeout, STALE_HEARTBEAT_TIMEOUT, HEARTBEAT_BOOT_GRACE);
+
+                match decision {
+                    HeartbeatDecision::Idle(status) => {
+                        let idle_secs = idle_timeout.map(|timeout| timeout.as_secs()).unwrap_or(0);
+                        tracing::info!(
+                            idle_secs,
+                            heartbeat_seq = ?status.heartbeat_seq,
+                            activity_seq = ?status.activity_seq,
+                            idle_for = ?status.idle_for,
+                            active_exec_sessions = status.active_exec_sessions,
+                            active_fs_streams = status.active_fs_streams,
+                            active_tcp_streams = status.active_tcp_streams,
+                            "sandbox idle, requesting guest shutdown"
+                        );
+                        heartbeat_reason.store(
+                            EXIT_REASON_IDLE_TIMEOUT,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        match request_guest_shutdown(&heartbeat_shared) {
+                            Ok(()) => {
+                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                                tracing::info!(
+                                    "idle shutdown flush window elapsed, triggering host exit"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "idle shutdown request failed, triggering host exit"
+                                );
+                            }
                         }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "idle shutdown request failed, triggering host exit"
-                            );
-                        }
+                        heartbeat_exit_handle.trigger();
+                        break;
                     }
-                    idle_exit_handle.trigger();
-                    break;
+                    HeartbeatDecision::AgentUnresponsive(status) => {
+                        tracing::warn!(
+                            heartbeat_seq = ?status.heartbeat_seq,
+                            activity_seq = ?status.activity_seq,
+                            heartbeat_stale_for = ?status.heartbeat_stale_for,
+                            active_exec_sessions = status.active_exec_sessions,
+                            active_fs_streams = status.active_fs_streams,
+                            active_tcp_streams = status.active_tcp_streams,
+                            "agent heartbeat stale, triggering host exit"
+                        );
+                        heartbeat_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        match request_guest_shutdown_with_timeout(
+                            &heartbeat_shared,
+                            AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT,
+                        ) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "agent-unresponsive shutdown request sent, triggering host exit"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "agent-unresponsive shutdown request failed, triggering host exit"
+                                );
+                            }
+                        }
+                        heartbeat_exit_handle.trigger();
+                        break;
+                    }
+                    HeartbeatDecision::PendingBoot(_) | HeartbeatDecision::Active(_) => {}
                 }
             }
         });
@@ -1140,12 +1209,19 @@ async fn mark_run_failed(db: &DbWriteConnection, run_id: i32) -> RuntimeResult<(
 
 /// Request guest poweroff through agentd without requiring a client connection.
 fn request_guest_shutdown(shared: &ConsoleSharedState) -> RuntimeResult<()> {
+    request_guest_shutdown_with_timeout(shared, Duration::from_secs(60))
+}
+
+fn request_guest_shutdown_with_timeout(
+    shared: &ConsoleSharedState,
+    timeout: Duration,
+) -> RuntimeResult<()> {
     let msg = Message::with_payload(MessageType::Shutdown, 0, &())
         .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown: {e}")))?;
     let mut frame = Vec::new();
     codec::encode_to_buf(&msg, &mut frame)
         .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown frame: {e}")))?;
-    relay::push_guest_frame_blocking(shared, frame)
+    relay::push_guest_frame_until(shared, frame, timeout)
 }
 
 fn spawn_parent_watchdog(
@@ -1453,12 +1529,14 @@ mod tests {
         BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, PARENT_WATCH_DETACH,
         ParentWatchdogSignal, StatVirtualization, append_block_root_env,
         bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
-        read_parent_watchdog_signal, request_guest_shutdown, validate_disk_format,
+        read_parent_watchdog_signal, request_guest_shutdown, request_guest_shutdown_with_timeout,
+        validate_disk_format,
     };
 
     use microsandbox_protocol::{codec, message::MessageType};
     use std::io::Write;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn test_parse_mount_spec_minimal() {
@@ -1576,6 +1654,19 @@ mod tests {
         let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
         assert_eq!(msg.t, MessageType::Shutdown);
         assert_eq!(msg.id, 0);
+    }
+
+    #[test]
+    fn test_request_guest_shutdown_with_timeout_fails_when_ring_full() {
+        let shared = ConsoleSharedState::with_capacity(1);
+        shared.rx_ring.push(b"occupied".to_vec()).unwrap();
+
+        let err = request_guest_shutdown_with_timeout(&shared, Duration::ZERO).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("timed out sending frame to agentd")
+        );
     }
 
     #[test]
