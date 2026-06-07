@@ -254,6 +254,26 @@ pub struct SandboxConfig {
     /// during `create_with_mode`. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
+
+    /// Volumes to provision atomically alongside this sandbox.
+    ///
+    /// Each entry is registered in the same DB transaction that inserts
+    /// the sandbox row, so `Volume::list` cannot observe one of these
+    /// before the owning sandbox exists. Set by
+    /// [`SandboxBuilder::auto_volume`] and friends. The matching
+    /// [`VolumeMount::Named`] entries are appended to `mounts`.
+    #[serde(skip)]
+    pub(crate) auto_volumes: Vec<AutoVolumeIntent>,
+}
+
+/// Intent to atomically create a named volume alongside the sandbox.
+#[derive(Debug, Clone)]
+pub(crate) struct AutoVolumeIntent {
+    pub name: String,
+    pub kind: crate::volume::VolumeKind,
+    pub quota_mib: Option<u32>,
+    pub capacity_mib: Option<u32>,
+    pub labels: Vec<(String, String)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -460,6 +480,7 @@ impl Default for SandboxConfig {
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
+            auto_volumes: Vec::new(),
         }
     }
 }

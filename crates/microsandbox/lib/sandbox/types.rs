@@ -252,6 +252,7 @@ pub struct MountBuilder {
     disk_fstype: Option<String>,
     stat_virtualization: Option<StatVirtualization>,
     host_permissions: Option<HostPermissions>,
+    create_intent: Option<super::config::AutoVolumeIntent>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -355,6 +356,47 @@ pub enum Patch {
     },
 }
 
+/// Sub-builder for [`MountBuilder::create_named_with`].
+pub struct VolumeBuilder {
+    intent: super::config::AutoVolumeIntent,
+}
+
+impl VolumeBuilder {
+    pub(crate) fn new(name: String) -> Self {
+        Self {
+            intent: super::config::AutoVolumeIntent {
+                name,
+                kind: crate::volume::VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            },
+        }
+    }
+
+    /// Override the volume name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.intent.name = name.into();
+        self
+    }
+
+    /// Set a storage quota for the volume.
+    pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.intent.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Attach a label to the volume. Can be called multiple times.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.intent.labels.push((key.into(), value.into()));
+        self
+    }
+
+    pub(crate) fn build(self) -> super::config::AutoVolumeIntent {
+        self.intent
+    }
+}
+
 /// Builder for constructing a list of [`Patch`] operations.
 pub struct PatchBuilder {
     patches: Vec<Patch>,
@@ -376,6 +418,7 @@ impl MountBuilder {
             disk_fstype: None,
             stat_virtualization: None,
             host_permissions: None,
+            create_intent: None,
             error: None,
         }
     }
@@ -391,6 +434,39 @@ impl MountBuilder {
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.mount = MountKind::Named(name.into());
         self
+    }
+
+    /// Provision a fresh named volume atomically with the sandbox and
+    /// mount it. The volume row is inserted in the same DB transaction
+    /// as the sandbox row.
+    pub fn create_named(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.mount = MountKind::Named(name.clone());
+        self.create_intent = Some(super::config::AutoVolumeIntent {
+            name,
+            kind: crate::volume::VolumeKind::Directory,
+            quota_mib: None,
+            capacity_mib: None,
+            labels: Vec::new(),
+        });
+        self
+    }
+
+    /// Same as [`create_named`](Self::create_named) but with builder-driven
+    /// volume metadata (quota, labels, name override).
+    pub fn create_named_with(
+        mut self,
+        name: impl Into<String>,
+        f: impl FnOnce(VolumeBuilder) -> VolumeBuilder,
+    ) -> Self {
+        let intent = f(VolumeBuilder::new(name.into())).build();
+        self.mount = MountKind::Named(intent.name.clone());
+        self.create_intent = Some(intent);
+        self
+    }
+
+    pub(crate) fn take_create_intent(&mut self) -> Option<super::config::AutoVolumeIntent> {
+        self.create_intent.take()
     }
 
     /// Use tmpfs (memory-backed).

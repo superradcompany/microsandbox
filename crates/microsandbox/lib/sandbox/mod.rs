@@ -377,9 +377,27 @@ impl Sandbox {
         }
 
         // Insert the sandbox record and keep its stable database ID.
+        // Auto-volumes (from `SandboxBuilder::auto_volume`) are inserted
+        // in the same transaction so a concurrent `Volume::list` can't
+        // see them without the owning sandbox.
         let write_db = db.write();
         let sandbox_id = insert_sandbox_record(write_db, &config).await?;
         tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
+
+        // Materialise the on-disk directory for each auto-volume after
+        // the transaction commits. On failure, remove any directories
+        // we already created plus the sandbox row so the partial state
+        // doesn't leak.
+        if !config.auto_volumes.is_empty()
+            && let Err(e) = materialise_auto_volume_dirs(&config.auto_volumes).await
+        {
+            rollback_auto_volume_dirs(&config.auto_volumes).await;
+            let _ = remove_sandbox_row(write_db, sandbox_id).await;
+            for intent in &config.auto_volumes {
+                let _ = remove_volume_row(write_db, &intent.name).await;
+            }
+            return Err(e);
+        }
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry. Also
@@ -387,11 +405,18 @@ impl Sandbox {
         // exit observer cannot be relied upon if the child was SIGKILL'd
         // before activation, and `reconcile_sandbox_runtime_state` will not
         // run reaper cleanup for a Stopped sandbox.
+        // Move auto_volumes out so we can use them after the config
+        // is consumed by create_inner.
+        let auto_volumes = std::mem::take(&mut config.auto_volumes);
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
                 let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                 free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
+                rollback_auto_volume_dirs(&auto_volumes).await;
+                for intent in &auto_volumes {
+                    let _ = remove_volume_row(write_db, &intent.name).await;
+                }
                 return Err(e);
             }
         };
@@ -2286,9 +2311,13 @@ async fn insert_sandbox_record(
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
     let config_json = serde_json::to_string(config)?;
+    // `auto_volumes` is `#[serde(skip)]` so the cloned config carries
+    // no record of these intents — capture them before the move.
+    let auto_volumes = config.auto_volumes.clone();
 
     db.transaction(|txn| {
         let config_json = config_json.clone();
+        let auto_volumes = auto_volumes.clone();
         async move {
             let now = chrono::Utc::now().naive_utc();
             let model = sandbox_entity::ActiveModel {
@@ -2302,8 +2331,6 @@ async fn insert_sandbox_record(
             let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
             let sandbox_id = result.last_insert_id;
 
-            // Persist labels in the same transaction so the catalog record is
-            // all-or-nothing — a failed label write rolls back the sandbox row.
             let label_rows: Vec<sandbox_label_entity::ActiveModel> = config
                 .labels
                 .iter()
@@ -2319,7 +2346,67 @@ async fn insert_sandbox_record(
                     .await?;
             }
 
+            for intent in &auto_volumes {
+                let vol_config = crate::volume::VolumeConfig {
+                    name: intent.name.clone(),
+                    kind: intent.kind,
+                    quota_mib: intent.quota_mib,
+                    capacity_mib: intent.capacity_mib,
+                    labels: intent.labels.clone(),
+                };
+                crate::volume::Volume::create_in_transaction(&txn, &vol_config).await?;
+            }
+
             Ok((txn, sandbox_id))
+        }
+    })
+    .await
+}
+
+async fn materialise_auto_volume_dirs(
+    intents: &[crate::sandbox::config::AutoVolumeIntent],
+) -> MicrosandboxResult<()> {
+    for intent in intents {
+        let vol_config = crate::volume::VolumeConfig {
+            name: intent.name.clone(),
+            kind: intent.kind,
+            quota_mib: intent.quota_mib,
+            capacity_mib: intent.capacity_mib,
+            labels: intent.labels.clone(),
+        };
+        crate::volume::Volume::materialise_for(&vol_config).await?;
+    }
+    Ok(())
+}
+
+async fn rollback_auto_volume_dirs(intents: &[crate::sandbox::config::AutoVolumeIntent]) {
+    for intent in intents {
+        let path = crate::volume::Volume::path_for(&intent.name);
+        let _ = tokio::fs::remove_dir_all(&path).await;
+    }
+}
+
+async fn remove_sandbox_row(db: &DbWriteConnection, sandbox_id: i32) -> MicrosandboxResult<()> {
+    db.transaction(|txn| async move {
+        sandbox_entity::Entity::delete_by_id(sandbox_id)
+            .exec(&txn)
+            .await?;
+        Ok((txn, ()))
+    })
+    .await
+}
+
+async fn remove_volume_row(db: &DbWriteConnection, name: &str) -> MicrosandboxResult<()> {
+    use crate::db::entity::volume as volume_entity;
+    let name = name.to_string();
+    db.transaction(|txn| {
+        let name = name.clone();
+        async move {
+            volume_entity::Entity::delete_many()
+                .filter(volume_entity::Column::Name.eq(name))
+                .exec(&txn)
+                .await?;
+            Ok((txn, ()))
         }
     })
     .await
@@ -2914,6 +3001,99 @@ mod tests {
             by(&pools, &[("user.id", "alice"), ("user.id", "bob")])
                 .await
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_atomic_with_auto_volumes() {
+        use crate::db::entity::volume as volume_entity;
+        use crate::sandbox::config::AutoVolumeIntent;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = SandboxConfig {
+            name: "atomic-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.auto_volumes.push(AutoVolumeIntent {
+            name: "atomic-host-tmp".into(),
+            kind: crate::volume::VolumeKind::Directory,
+            quota_mib: None,
+            capacity_mib: None,
+            labels: vec![("owner".into(), "atomic-host".into())],
+        });
+
+        let _sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        // Both rows visible after the same transaction commits.
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq("atomic-host-tmp"))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(
+            vol.is_some(),
+            "auto-volume row must exist alongside sandbox"
+        );
+        let vol = vol.unwrap();
+        let labels: Vec<(String, String)> =
+            serde_json::from_str(vol.labels.as_deref().unwrap_or("[]")).unwrap();
+        assert!(labels.contains(&("owner".to_string(), "atomic-host".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_rolls_back_when_volume_name_collides() {
+        use crate::db::entity::volume as volume_entity;
+        use crate::sandbox::config::AutoVolumeIntent;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        // Pre-seed a volume that collides with the auto-volume name.
+        let now = chrono::Utc::now().naive_utc();
+        volume_entity::Entity::insert(volume_entity::ActiveModel {
+            name: Set("collision".into()),
+            kind: Set(crate::volume::VolumeKind::Directory.as_str().to_string()),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        let mut config = SandboxConfig {
+            name: "rollback-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.auto_volumes.push(AutoVolumeIntent {
+            name: "collision".into(),
+            kind: crate::volume::VolumeKind::Directory,
+            quota_mib: None,
+            capacity_mib: None,
+            labels: Vec::new(),
+        });
+
+        let result = insert_sandbox_record(pools.write(), &config).await;
+        assert!(
+            result.is_err(),
+            "duplicate volume name must fail the insert"
+        );
+
+        // Sandbox row must NOT exist — transaction rolled back.
+        let sb = super::sandbox_entity::Entity::find()
+            .filter(super::sandbox_entity::Column::Name.eq("rollback-host"))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(
+            sb.is_none(),
+            "transaction must roll back the sandbox row when volume insert fails"
         );
     }
 

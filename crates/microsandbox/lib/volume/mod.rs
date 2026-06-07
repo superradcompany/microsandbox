@@ -299,6 +299,79 @@ impl Volume {
         })
     }
 
+    /// Insert the volume DB record inside the caller's transaction.
+    ///
+    /// Lets `SandboxBuilder::auto_volume` create the volume and the
+    /// sandbox in one atomic write so a concurrent `Volume::list`
+    /// cannot observe the volume before the owning sandbox exists.
+    /// Returns [`MicrosandboxError::VolumeAlreadyExists`] if the name
+    /// is already in the table.
+    ///
+    /// The caller is responsible for creating the on-disk directory
+    /// after the transaction commits (or rolling back via
+    /// `Volume::remove` if the directory step fails).
+    pub(crate) async fn create_in_transaction<C: ConnectionTrait>(
+        txn: &C,
+        config: &VolumeConfig,
+    ) -> MicrosandboxResult<()> {
+        validate_volume_name(&config.name)?;
+        validate_volume_config(config)?;
+
+        let existing = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&config.name))
+            .one(txn)
+            .await?;
+        if existing.is_some() {
+            return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+        }
+
+        let labels_json = if config.labels.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&config.labels)?)
+        };
+        let now = chrono::Utc::now().naive_utc();
+        let capacity_bytes = config.capacity_mib.map(|mib| i64::from(mib) * 1024 * 1024);
+        let model = volume_entity::ActiveModel {
+            name: Set(config.name.clone()),
+            kind: Set(config.kind.as_str().to_string()),
+            quota_mib: Set(config.quota_mib.map(|v| v as i32)),
+            size_bytes: Set(None),
+            capacity_bytes: Set(capacity_bytes),
+            disk_format: Set((config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
+            disk_fstype: Set((config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
+            labels: Set(labels_json),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        };
+        volume_entity::Entity::insert(model).exec(txn).await?;
+        Ok(())
+    }
+
+    /// Resolve the on-disk path for a named volume.
+    pub(crate) fn path_for(name: &str) -> PathBuf {
+        crate::config::config().volumes_dir().join(name)
+    }
+
+    /// Provision the on-disk artifact for a volume registered via
+    /// [`create_in_transaction`].
+    pub(crate) async fn materialise_for(config: &VolumeConfig) -> MicrosandboxResult<()> {
+        let volumes_dir = crate::config::config().volumes_dir();
+        tokio::fs::create_dir_all(&volumes_dir).await?;
+        let path = volumes_dir.join(&config.name);
+        if path.exists() {
+            return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+        }
+        let temp = tempfile::Builder::new()
+            .prefix(&format!(".{}.", config.name))
+            .tempdir_in(&volumes_dir)?;
+        provision_volume_path(config, temp.path()).await?;
+        tokio::fs::rename(temp.path(), &path).await?;
+        let _ = temp.keep();
+        Ok(())
+    }
+
     /// Get a volume handle by name from the database.
     ///
     /// Returns a lightweight handle for metadata and management operations.

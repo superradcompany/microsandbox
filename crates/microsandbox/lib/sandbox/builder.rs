@@ -672,14 +672,28 @@ impl SandboxBuilder {
     /// .volume("/data", |m| m.bind("/host/data"))
     /// .volume("/config", |m| m.bind("/host/config").readonly())
     /// .volume("/cache", |m| m.named("my-cache"))
-    /// .volume("/tmp", |m| m.tmpfs().size(100))
+    /// .volume("/tmp", |m| m.create_named("my-sandbox-tmp"))
+    /// .volume("/scratch", |m| m
+    ///     .create_named_with("my-sandbox-scratch", |v| v.quota(1024).label("owner", "team"))
+    ///     .readonly())
+    /// .volume("/tmpfs", |m| m.tmpfs().size(100))
     /// ```
     pub fn volume(
         mut self,
         guest_path: impl Into<String>,
         f: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self {
-        match f(MountBuilder::new(guest_path)).build() {
+        let mut mb = f(MountBuilder::new(guest_path));
+        if let Some(intent) = mb.take_create_intent() {
+            if let Err(e) = crate::volume::validate_volume_name(&intent.name)
+                && self.build_error.is_none()
+            {
+                self.build_error = Some(e);
+                return self;
+            }
+            self.config.auto_volumes.push(intent);
+        }
+        match mb.build() {
             Ok(mount) => self.config.mounts.push(mount),
             Err(e) => {
                 if self.build_error.is_none() {
@@ -1452,5 +1466,68 @@ mod tests {
             err.to_string()
                 .contains("disk image host path does not exist")
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_named_registers_intent_and_mount() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/tmp", |m| m.create_named("sb-tmp"))
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes.len(), 1);
+        assert_eq!(config.auto_volumes[0].name, "sb-tmp");
+        assert_eq!(config.mounts.len(), 1);
+        match &config.mounts[0] {
+            super::VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "sb-tmp");
+                assert_eq!(guest, "/tmp");
+            }
+            _ => panic!("expected Named mount"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_named_with_carries_quota_and_labels() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/scratch", |m| {
+                m.create_named_with("sb-scratch", |v| v.quota(1024u32).label("owner", "my-team"))
+                    .readonly()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes[0].name, "sb-scratch");
+        assert_eq!(config.auto_volumes[0].quota_mib, Some(1024));
+        assert_eq!(
+            config.auto_volumes[0].labels,
+            vec![("owner".to_string(), "my-team".to_string())]
+        );
+        match &config.mounts[0] {
+            super::VolumeMount::Named { options, .. } => assert!(options.readonly),
+            _ => panic!("expected Named mount"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_named_with_name_override() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/tmp", |m| {
+                m.create_named_with("initial", |v| v.name("overridden"))
+            })
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes[0].name, "overridden");
+        match &config.mounts[0] {
+            super::VolumeMount::Named { name, .. } => assert_eq!(name, "overridden"),
+            _ => panic!("expected Named mount"),
+        }
     }
 }
