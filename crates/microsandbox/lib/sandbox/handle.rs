@@ -4,10 +4,7 @@ use sea_orm::EntityTrait;
 
 use std::sync::Arc;
 
-use crate::{
-    MicrosandboxResult, agent::AgentClient, db::entity::sandbox as sandbox_entity,
-    runtime::SpawnMode,
-};
+use crate::{MicrosandboxResult, db::entity::sandbox as sandbox_entity, runtime::SpawnMode};
 
 use super::{Sandbox, SandboxConfig, SandboxStatus};
 
@@ -189,7 +186,7 @@ impl SandboxHandle {
             )));
         }
 
-        let client = AgentClient::connect_sandbox_with_timeout(&self.name, timeout).await?;
+        let client = crate::agent::connect_sandbox_with_timeout(&self.name, timeout).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {

@@ -1455,10 +1455,7 @@ fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize
 }
 
 /// Background task that converts raw protocol messages into [`ExecEvent`]s.
-async fn event_mapper_task(
-    mut rx: mpsc::UnboundedReceiver<Message>,
-    tx: mpsc::UnboundedSender<ExecEvent>,
-) {
+async fn event_mapper_task(mut rx: mpsc::Receiver<Message>, tx: mpsc::UnboundedSender<ExecEvent>) {
     while let Some(msg) = rx.recv().await {
         let event = match msg.t {
             MessageType::ExecStarted => {

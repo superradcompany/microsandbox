@@ -14,7 +14,8 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, InitAck, InitResolved, Ready, RelayClientDisconnected, ResolvedUser,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected,
+    ResolvedUser,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -145,12 +146,42 @@ pub async fn run(
                                 ));
                             }
 
-                            // Try to parse complete messages.
-                            while let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
-                                .map_err(|e| AgentdError::ExecSession(format!("decode: {e}")))?
+                            // Try to parse complete frames. Recoverable
+                            // message-level failures are reported on the same
+                            // correlation ID with `core.error`; unrecoverable
+                            // frame-level failures still close the agent loop.
+                            while let Some(frame) = codec::try_decode_raw_from_buf(&mut serial_in_buf)
+                                .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
                             {
+                                let id = frame.id;
+                                let msg = match codec::raw_frame_to_message(frame) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        return Err(AgentdError::ExecSession(format!(
+                                            "decode message for id {id}: {e}"
+                                        )));
+                                    }
+                                };
+
                                 if message_refreshes_idle_timer(&msg.t) {
                                     last_activity = Utc::now();
+                                }
+
+                                if msg.flags != msg.t.flags() {
+                                    encode_core_error_if_supported(
+                                        &msg,
+                                        msg.id,
+                                        CoreErrorKind::InvalidFlags,
+                                        format!(
+                                            "invalid flags for {}: got {}, expected {}",
+                                            msg.t.as_str(),
+                                            msg.flags,
+                                            msg.t.flags()
+                                        ),
+                                        Some(msg.t.as_str().to_string()),
+                                        &mut serial_out_buf,
+                                    )?;
+                                    continue;
                                 }
 
                                 handle_message(
@@ -197,8 +228,11 @@ pub async fn run(
                         state.sessions.remove(&id);
                     }
                     SessionOutput::Raw(frame_bytes) => {
-                        remove_completed_fs_read(&frame_bytes, &mut state.read_sessions);
-                        remove_completed_tcp_session(&frame_bytes, &mut state.tcp_sessions);
+                        remove_completed_raw_sessions(
+                            &frame_bytes,
+                            &mut state.read_sessions,
+                            &mut state.tcp_sessions,
+                        );
                         // Pre-encoded frame — write directly to output buffer.
                         serial_out_buf.extend_from_slice(&frame_bytes);
                     }
@@ -271,9 +305,9 @@ async fn handle_message(
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::ExecRequest => {
-            let mut req: ExecRequest = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
+            let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
+                return Ok(());
+            };
             prepend_scripts_to_path(&mut req);
             match ExecSession::spawn(
                 msg.id,
@@ -321,9 +355,9 @@ async fn handle_message(
         }
 
         MessageType::ExecStdin => {
-            let stdin: ExecStdin = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode stdin: {e}")))?;
+            let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get_mut(&msg.id) {
                 if stdin.data.is_empty() {
                     // Empty data signals EOF — close stdin.
@@ -344,27 +378,27 @@ async fn handle_message(
         }
 
         MessageType::ExecResize => {
-            let resize: ExecResize = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode resize: {e}")))?;
+            let Some(resize) = decode_payload_or_core_error::<ExecResize>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.resize(resize.rows, resize.cols);
             }
         }
 
         MessageType::ExecSignal => {
-            let signal: ExecSignal = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode signal: {e}")))?;
+            let Some(signal) = decode_payload_or_core_error::<ExecSignal>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.send_signal(signal.signal);
             }
         }
 
         MessageType::FsRequest => {
-            let req: FsRequest = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode fs request: {e}")))?;
+            let Some(req) = decode_payload_or_core_error::<FsRequest>(&msg, out_buf)? else {
+                return Ok(());
+            };
             match fs::handle_fs_request(msg.id, req, &mut state.fs, out_buf, session_tx).await {
                 Ok(Some(FsStreamSession::Read(rs))) => {
                     state.read_sessions.insert(msg.id, rs);
@@ -380,9 +414,9 @@ async fn handle_message(
         }
 
         MessageType::FsData => {
-            let data: FsData = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode fs data: {e}")))?;
+            let Some(data) = decode_payload_or_core_error::<FsData>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.write_sessions.get_mut(&msg.id) {
                 match fs::handle_fs_data(msg.id, data, session, out_buf).await {
                     Ok(true) => {
@@ -410,9 +444,9 @@ async fn handle_message(
         }
 
         MessageType::TcpConnect => {
-            let req: TcpConnect = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp connect: {e}")))?;
+            let Some(req) = decode_payload_or_core_error::<TcpConnect>(&msg, out_buf)? else {
+                return Ok(());
+            };
             // The connect runs inside the session task; the agent loop never
             // blocks on it. Success or failure arrives later as a tcp frame.
             let session = TcpSession::open(msg.id, req, session_tx);
@@ -420,9 +454,9 @@ async fn handle_message(
         }
 
         MessageType::TcpData => {
-            let data: TcpData = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp data: {e}")))?;
+            let Some(data) = decode_payload_or_core_error::<TcpData>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.tcp_sessions.get(&msg.id) {
                 if let Err(e) = session.write_data(data.data).await {
                     state.tcp_sessions.remove(&msg.id);
@@ -434,9 +468,9 @@ async fn handle_message(
         }
 
         MessageType::TcpEof => {
-            let _: TcpEof = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp eof: {e}")))?;
+            let Some(_) = decode_payload_or_core_error::<TcpEof>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.tcp_sessions.get(&msg.id)
                 && let Err(e) = session.close_write().await
             {
@@ -446,18 +480,20 @@ async fn handle_message(
         }
 
         MessageType::TcpClose => {
-            let _: TcpClose = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp close: {e}")))?;
+            let Some(_) = decode_payload_or_core_error::<TcpClose>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.tcp_sessions.remove(&msg.id) {
                 session.close();
             }
         }
 
         MessageType::RelayClientDisconnected => {
-            let disconnected: RelayClientDisconnected = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode relay disconnect: {e}")))?;
+            let Some(disconnected) =
+                decode_payload_or_core_error::<RelayClientDisconnected>(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
             state
                 .fs
                 .close_owner_range(disconnected.id_start, disconnected.id_end_exclusive);
@@ -478,9 +514,9 @@ async fn handle_message(
         }
 
         MessageType::ClockSync => {
-            let sync: ClockSync = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode clock sync: {e}")))?;
+            let Some(sync) = decode_payload_or_core_error::<ClockSync>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Err(e) = clock::sync_realtime_unix_nanos(sync.unix_time_nanos) {
                 eprintln!("clock: failed to sync realtime clock: {e}");
             }
@@ -526,23 +562,31 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(t, MessageType::ClockSync)
 }
 
-fn remove_completed_fs_read(frame_bytes: &[u8], read_sessions: &mut HashMap<u32, FsReadSession>) {
-    let mut buf = frame_bytes.to_vec();
-    let Ok(Some(msg)) = codec::try_decode_from_buf(&mut buf) else {
+fn remove_completed_raw_sessions(
+    frame_bytes: &[u8],
+    read_sessions: &mut HashMap<u32, FsReadSession>,
+    tcp_sessions: &mut HashMap<u32, TcpSession>,
+) {
+    if frame_bytes
+        .get(4 + std::mem::size_of::<u32>())
+        .is_none_or(|flags| flags & microsandbox_protocol::message::FLAG_TERMINAL == 0)
+    {
         return;
     };
-    if msg.t == MessageType::FsResponse {
-        read_sessions.remove(&msg.id);
-    }
-}
 
-fn remove_completed_tcp_session(frame_bytes: &[u8], tcp_sessions: &mut HashMap<u32, TcpSession>) {
     let mut buf = frame_bytes.to_vec();
     let Ok(Some(msg)) = codec::try_decode_from_buf(&mut buf) else {
         return;
     };
-    if matches!(msg.t, MessageType::TcpClosed | MessageType::TcpFailed) {
-        tcp_sessions.remove(&msg.id);
+
+    match msg.t {
+        MessageType::FsResponse => {
+            read_sessions.remove(&msg.id);
+        }
+        MessageType::TcpClosed | MessageType::TcpFailed => {
+            tcp_sessions.remove(&msg.id);
+        }
+        _ => {}
     }
 }
 
@@ -586,6 +630,66 @@ fn encode_tcp_failed(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdRes
     codec::encode_to_buf(&reply, out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode tcp failed frame: {e}")))?;
     Ok(())
+}
+
+fn encode_core_error_if_supported(
+    source: &Message,
+    id: u32,
+    kind: CoreErrorKind,
+    message: String,
+    offending_type: Option<String>,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    if !MessageType::CoreError.is_available_at(source.v) {
+        return Err(AgentdError::ExecSession(format!(
+            "cannot send core.error to protocol generation {}",
+            source.v
+        )));
+    }
+
+    encode_core_error(id, kind, message, offending_type, out_buf)
+}
+
+fn encode_core_error(
+    id: u32,
+    kind: CoreErrorKind,
+    message: String,
+    offending_type: Option<String>,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    let reply = Message::with_payload(
+        MessageType::CoreError,
+        id,
+        &CoreError {
+            kind,
+            message,
+            offending_type,
+        },
+    )
+    .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|e| AgentdError::ExecSession(format!("encode core error frame: {e}")))?;
+    Ok(())
+}
+
+fn decode_payload_or_core_error<T>(msg: &Message, out_buf: &mut Vec<u8>) -> AgentdResult<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match msg.payload::<T>() {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) => {
+            encode_core_error_if_supported(
+                msg,
+                msg.id,
+                CoreErrorKind::InvalidPayload,
+                format!("decode payload for {}: {error}", msg.t.as_str()),
+                Some(msg.t.as_str().to_string()),
+                out_buf,
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// Build an `ExecStdinError` payload from a failed `write_stdin` result.
