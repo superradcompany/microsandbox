@@ -10,7 +10,7 @@ icon: "bolt"
 
 ## New features
 
-**Ship sandbox metrics to any OTLP backend**
+**OTLP sandbox metrics with labels**
 
 The new `msb-metrics` binary exports live per-sandbox CPU, memory, disk, and network gauges over OTLP to backends like Grafana Cloud, Prometheus, Datadog, Alloy, and the OpenTelemetry Collector.
 
@@ -48,7 +48,7 @@ msb image save alpine:3.20 --format oci --output alpine-oci.tar
 
 See the [image commands reference](/cli/image-commands).
 
-**Prune unused images**
+**Image prune**
 
 `msb image prune` deletes cached image data that no sandbox or indexed snapshot uses, then reports the reclaimed bytes. Rust, TypeScript, and Go gain `Image.prune()` / `Image.Prune(ctx)`, replacing `Image.gc()` and `Image.gcLayers()`.
 
@@ -82,7 +82,7 @@ brew install superradcompany/tap/microsandbox
 
 See the [quickstart](/getting-started/quickstart).
 
-**Sandboxes keep working across host upgrades**
+**Agent protocol versioning**
 
 Newer hosts can keep working with older live sandboxes by negotiating an agent protocol version at connect time. Unsupported calls fail individually with typed `UnsupportedOperation` errors, replacing `Pre05SandboxRestartRequired` across the Rust, Python, TypeScript, and Go SDKs.
 
