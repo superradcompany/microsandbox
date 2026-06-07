@@ -37,7 +37,6 @@
 - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
 - <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
-
 <br />
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/ffffff" alt="rocket-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/000000" alt="rocket"></a>&nbsp;&nbsp;Getting Started
@@ -47,23 +46,28 @@
 > ```sh
 > cargo add microsandbox                                   # 🦀 Rust
 > ```
+>
 > ```sh
 > uv add microsandbox                                      # 🐍 Python
 > ```
+>
 > ```sh
 > npm i microsandbox                                       # 🟦 TypeScript
 > ```
+>
 > ```sh
 > go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
-> Boot a  microVM in one command.
+> Boot a microVM in a single command:
 >
 > ```sh
 > npx microsandbox run debian
 > ```
+>
+> ##
 >
 > Or install the `msb` command globally:
 >
@@ -73,11 +77,32 @@
 >
 > The installer creates command links in `~/.local/bin/` and does not edit shell startup files.
 >
-> On macOS you can also install with Homebrew:
+> <details>
+> <summary><em>&nbsp;We also support other package managers  →</em></summary>
+>
+> ##
 >
 > ```sh
 > brew install superradcompany/tap/microsandbox
 > ```
+>
+> ```sh
+> npm i -g microsandbox
+> ```
+>
+> ```sh
+> uv tool install microsandbox
+> ```
+>
+> ```sh
+> cargo install microsandbox
+> ```
+>
+> </details>
+>
+> ##
+>
+> Then you can run `msb` directly:
 >
 > ```sh
 > msb run debian
@@ -158,7 +183,10 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   .memory(512)
 >   .create();
 >
-> const output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"]);
+> const output = await sandbox.exec("python", [
+>   "-c",
+>   "print('Hello from a microVM!')",
+> ]);
 >
 > console.log(output.stdout());
 > ```
@@ -207,7 +235,6 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > </details>
-
 
 > The first call to `create()` pulls the image if it isn't cached locally, so it may take longer depending on your connection. Subsequent runs reuse the cache.
 
@@ -274,7 +301,10 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > [!TIP]
 >
-> Run `msb --tree` to see all available commands and their options.
+> Run:<br />
+> · `msb --help` for quick help menu. <br />
+> · `msb --tree` for complete command hierarchy and descriptions. <br />
+> · `msb <command> --tree` for a specific command tree.
 
 <br />
 
