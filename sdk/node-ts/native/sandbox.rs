@@ -711,7 +711,10 @@ fn ms_to_datetime(ms: f64) -> Option<chrono::DateTime<chrono::Utc>> {
 pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: m.cpu_percent as f64,
+        vcpu_time_ns: m.vcpu_time_ns as f64,
         memory_bytes: m.memory_bytes as f64,
+        memory_available_bytes: m.memory_available_bytes.map(|bytes| bytes as f64),
+        memory_host_resident_bytes: m.memory_host_resident_bytes.map(|bytes| bytes as f64),
         memory_limit_bytes: m.memory_limit_bytes as f64,
         disk_read_bytes: m.disk_read_bytes as f64,
         disk_write_bytes: m.disk_write_bytes as f64,

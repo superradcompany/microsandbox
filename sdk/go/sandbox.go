@@ -316,14 +316,17 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	out := make(map[string]*Metrics, len(raw))
 	for name, m := range raw {
 		out[name] = &Metrics{
-			CPUPercent:       m.CPUPercent,
-			MemoryBytes:      m.MemoryBytes,
-			MemoryLimitBytes: m.MemoryLimitBytes,
-			DiskReadBytes:    m.DiskReadBytes,
-			DiskWriteBytes:   m.DiskWriteBytes,
-			NetRxBytes:       m.NetRxBytes,
-			NetTxBytes:       m.NetTxBytes,
-			Uptime:           m.Uptime,
+			CPUPercent:              m.CPUPercent,
+			VCPUTimeNs:              m.VCPUTimeNs,
+			MemoryBytes:             m.MemoryBytes,
+			MemoryAvailableBytes:    m.MemoryAvailableBytes,
+			MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+			MemoryLimitBytes:        m.MemoryLimitBytes,
+			DiskReadBytes:           m.DiskReadBytes,
+			DiskWriteBytes:          m.DiskWriteBytes,
+			NetRxBytes:              m.NetRxBytes,
+			NetTxBytes:              m.NetTxBytes,
+			Uptime:                  m.Uptime,
 		}
 	}
 	return out, nil
@@ -485,14 +488,17 @@ func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
 		return nil, wrapFFI(err)
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -672,14 +678,17 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
 		return nil, wrapFFI(err)
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -700,14 +709,17 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, nil
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -735,12 +747,15 @@ func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*M
 
 // Metrics is a snapshot of sandbox resource usage.
 type Metrics struct {
-	CPUPercent       float64
-	MemoryBytes      uint64
-	MemoryLimitBytes uint64
-	DiskReadBytes    uint64
-	DiskWriteBytes   uint64
-	NetRxBytes       uint64
-	NetTxBytes       uint64
-	Uptime           time.Duration
+	CPUPercent              float64
+	VCPUTimeNs              uint64
+	MemoryBytes             uint64
+	MemoryAvailableBytes    *uint64
+	MemoryHostResidentBytes *uint64
+	MemoryLimitBytes        uint64
+	DiskReadBytes           uint64
+	DiskWriteBytes          uint64
+	NetRxBytes              uint64
+	NetTxBytes              uint64
+	Uptime                  time.Duration
 }

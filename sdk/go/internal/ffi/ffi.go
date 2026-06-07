@@ -987,6 +987,8 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindPatchFailed            = "patch_failed"
+	KindMetricsDisabled        = "metrics_disabled"
+	KindMetricsUnavailable     = "metrics_unavailable"
 	KindUnsupportedOperation   = "unsupported_operation"
 	KindIO                     = "io"
 )
@@ -2744,15 +2746,18 @@ func (h *ExecStreamHandle) Close() error {
 
 // Metrics is the resource-usage snapshot reported by Rust.
 type Metrics struct {
-	CPUPercent       float64       `json:"cpu_percent"`
-	MemoryBytes      uint64        `json:"memory_bytes"`
-	MemoryLimitBytes uint64        `json:"memory_limit_bytes"`
-	DiskReadBytes    uint64        `json:"disk_read_bytes"`
-	DiskWriteBytes   uint64        `json:"disk_write_bytes"`
-	NetRxBytes       uint64        `json:"net_rx_bytes"`
-	NetTxBytes       uint64        `json:"net_tx_bytes"`
-	UptimeSecs       uint64        `json:"uptime_secs"`
-	Uptime           time.Duration `json:"-"`
+	CPUPercent              float64       `json:"cpu_percent"`
+	VCPUTimeNs              uint64        `json:"vcpu_time_ns"`
+	MemoryBytes             uint64        `json:"memory_bytes"`
+	MemoryAvailableBytes    *uint64       `json:"memory_available_bytes"`
+	MemoryHostResidentBytes *uint64       `json:"memory_host_resident_bytes"`
+	MemoryLimitBytes        uint64        `json:"memory_limit_bytes"`
+	DiskReadBytes           uint64        `json:"disk_read_bytes"`
+	DiskWriteBytes          uint64        `json:"disk_write_bytes"`
+	NetRxBytes              uint64        `json:"net_rx_bytes"`
+	NetTxBytes              uint64        `json:"net_tx_bytes"`
+	UptimeSecs              uint64        `json:"uptime_secs"`
+	Uptime                  time.Duration `json:"-"`
 }
 
 // Metrics fetches a resource-usage snapshot for this sandbox.
@@ -2819,15 +2824,18 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, err
 	}
 	var raw struct {
-		Done             bool    `json:"done"`
-		CPUPercent       float64 `json:"cpu_percent"`
-		MemoryBytes      uint64  `json:"memory_bytes"`
-		MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
-		DiskReadBytes    uint64  `json:"disk_read_bytes"`
-		DiskWriteBytes   uint64  `json:"disk_write_bytes"`
-		NetRxBytes       uint64  `json:"net_rx_bytes"`
-		NetTxBytes       uint64  `json:"net_tx_bytes"`
-		UptimeSecs       uint64  `json:"uptime_secs"`
+		Done                    bool    `json:"done"`
+		CPUPercent              float64 `json:"cpu_percent"`
+		VCPUTimeNs              uint64  `json:"vcpu_time_ns"`
+		MemoryBytes             uint64  `json:"memory_bytes"`
+		MemoryAvailableBytes    *uint64 `json:"memory_available_bytes"`
+		MemoryHostResidentBytes *uint64 `json:"memory_host_resident_bytes"`
+		MemoryLimitBytes        uint64  `json:"memory_limit_bytes"`
+		DiskReadBytes           uint64  `json:"disk_read_bytes"`
+		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
+		NetRxBytes              uint64  `json:"net_rx_bytes"`
+		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse metrics_recv: %w", err)
@@ -2836,15 +2844,18 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, nil
 	}
 	m := &Metrics{
-		CPUPercent:       raw.CPUPercent,
-		MemoryBytes:      raw.MemoryBytes,
-		MemoryLimitBytes: raw.MemoryLimitBytes,
-		DiskReadBytes:    raw.DiskReadBytes,
-		DiskWriteBytes:   raw.DiskWriteBytes,
-		NetRxBytes:       raw.NetRxBytes,
-		NetTxBytes:       raw.NetTxBytes,
-		UptimeSecs:       raw.UptimeSecs,
-		Uptime:           time.Duration(raw.UptimeSecs) * time.Second,
+		CPUPercent:              raw.CPUPercent,
+		VCPUTimeNs:              raw.VCPUTimeNs,
+		MemoryBytes:             raw.MemoryBytes,
+		MemoryAvailableBytes:    raw.MemoryAvailableBytes,
+		MemoryHostResidentBytes: raw.MemoryHostResidentBytes,
+		MemoryLimitBytes:        raw.MemoryLimitBytes,
+		DiskReadBytes:           raw.DiskReadBytes,
+		DiskWriteBytes:          raw.DiskWriteBytes,
+		NetRxBytes:              raw.NetRxBytes,
+		NetTxBytes:              raw.NetTxBytes,
+		UptimeSecs:              raw.UptimeSecs,
+		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}
 	return m, nil
 }
@@ -3407,28 +3418,34 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		return nil, err
 	}
 	var raw struct {
-		CPUPercent       float64 `json:"cpu_percent"`
-		MemoryBytes      uint64  `json:"memory_bytes"`
-		MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
-		DiskReadBytes    uint64  `json:"disk_read_bytes"`
-		DiskWriteBytes   uint64  `json:"disk_write_bytes"`
-		NetRxBytes       uint64  `json:"net_rx_bytes"`
-		NetTxBytes       uint64  `json:"net_tx_bytes"`
-		UptimeSecs       uint64  `json:"uptime_secs"`
+		CPUPercent              float64 `json:"cpu_percent"`
+		VCPUTimeNs              uint64  `json:"vcpu_time_ns"`
+		MemoryBytes             uint64  `json:"memory_bytes"`
+		MemoryAvailableBytes    *uint64 `json:"memory_available_bytes"`
+		MemoryHostResidentBytes *uint64 `json:"memory_host_resident_bytes"`
+		MemoryLimitBytes        uint64  `json:"memory_limit_bytes"`
+		DiskReadBytes           uint64  `json:"disk_read_bytes"`
+		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
+		NetRxBytes              uint64  `json:"net_rx_bytes"`
+		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse sandbox_handle_metrics: %w", err)
 	}
 	return &Metrics{
-		CPUPercent:       raw.CPUPercent,
-		MemoryBytes:      raw.MemoryBytes,
-		MemoryLimitBytes: raw.MemoryLimitBytes,
-		DiskReadBytes:    raw.DiskReadBytes,
-		DiskWriteBytes:   raw.DiskWriteBytes,
-		NetRxBytes:       raw.NetRxBytes,
-		NetTxBytes:       raw.NetTxBytes,
-		UptimeSecs:       raw.UptimeSecs,
-		Uptime:           time.Duration(raw.UptimeSecs) * time.Second,
+		CPUPercent:              raw.CPUPercent,
+		VCPUTimeNs:              raw.VCPUTimeNs,
+		MemoryBytes:             raw.MemoryBytes,
+		MemoryAvailableBytes:    raw.MemoryAvailableBytes,
+		MemoryHostResidentBytes: raw.MemoryHostResidentBytes,
+		MemoryLimitBytes:        raw.MemoryLimitBytes,
+		DiskReadBytes:           raw.DiskReadBytes,
+		DiskWriteBytes:          raw.DiskWriteBytes,
+		NetRxBytes:              raw.NetRxBytes,
+		NetTxBytes:              raw.NetTxBytes,
+		UptimeSecs:              raw.UptimeSecs,
+		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}, nil
 }
 

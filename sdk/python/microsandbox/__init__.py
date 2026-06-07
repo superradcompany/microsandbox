@@ -60,6 +60,7 @@ from microsandbox.errors import (
     InvalidConfigError,
     IoError,
     MetricsDisabledError,
+    MetricsUnavailableError,
     MicrosandboxError,
     NetworkPolicyError,
     PathNotFoundError,
@@ -272,6 +273,7 @@ __all__ = [
     "TlsError",
     "IoError",
     "MetricsDisabledError",
+    "MetricsUnavailableError",
     "UnsupportedOperationError",
     # Setup
     "install",

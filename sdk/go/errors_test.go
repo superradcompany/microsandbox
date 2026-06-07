@@ -24,6 +24,8 @@ func TestErrorKindString(t *testing.T) {
 		{ErrInvalidHandle, "InvalidHandle"},
 		{ErrBufferTooSmall, "BufferTooSmall"},
 		{ErrCancelled, "Cancelled"},
+		{ErrMetricsDisabled, "MetricsDisabled"},
+		{ErrMetricsUnavailable, "MetricsUnavailable"},
 		{ErrUnsupportedOperation, "UnsupportedOperation"},
 		{ErrInternal, "Internal"},
 		{ErrorKind(9999), "Unknown"},
@@ -140,6 +142,8 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindInvalidHandle, ErrInvalidHandle},
 		{ffi.KindBufferTooSmall, ErrBufferTooSmall},
 		{ffi.KindCancelled, ErrCancelled},
+		{ffi.KindMetricsDisabled, ErrMetricsDisabled},
+		{ffi.KindMetricsUnavailable, ErrMetricsUnavailable},
 		{ffi.KindUnsupportedOperation, ErrUnsupportedOperation},
 		{"unrecognized_tag", ErrInternal},
 	}

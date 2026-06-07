@@ -541,6 +541,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             }
         };
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
+    let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
 
     if let Some(parent_watchdog) = config.parent_watchdog
@@ -605,6 +606,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 config.sandbox_id,
                 pid,
                 interval_ms,
+                krun_metrics_handle,
                 network_metrics_handle
                     .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
             ));
@@ -767,8 +769,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Enter the VM (never returns).
     tracing::info!(sandbox = %config.sandbox_name, "entering VM");
-    vm.enter()
-        .map_err(|e| RuntimeError::Custom(format!("VM enter: {e}")))
+    match vm.enter() {
+        Ok(infallible) => Ok(infallible),
+        Err(e) => {
+            if let Some(writer) = metrics_writer {
+                let _ = writer.release(ReleaseMode::Free);
+            }
+            Err(RuntimeError::Custom(format!("VM enter: {e}")))
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -39,18 +39,23 @@
 //! |  0x24  _pad0            u32                                     |
 //! |  0x28  started_at_ms    AI64                                    |
 //! |  0x30  sampled_at_ms    AI64  0 until first sample              |
-//! |  0x38  memory_limit     AU64  bytes                             |
-//! |  0x40  cpu_percent_bits AU32  f32 bits                          |
-//! |  0x44  -- padding --                                            |
-//! |  0x48  memory_bytes     AU64                                    |
-//! |  0x50  disk_read_bytes  AU64                                    |
-//! |  0x58  disk_write_bytes AU64                                    |
-//! |  0x60  net_rx_bytes     AU64                                    |
-//! |  0x68  net_tx_bytes     AU64                                    |
-//! |  0x70  name_len         AU16                                    |
-//! |  0x72  _pad1            [AU8; 6]                                |
-//! |  0x78  name_bytes       [AU8; 128]                              |
-//! |  0xf8  _tail            [u8; 264]                               |
+//! |  0x38  sample_flags     AU32  validity/source bits              |
+//! |  0x3c  -- padding --                                            |
+//! |  0x40  memory_limit     AU64  bytes                             |
+//! |  0x48  vcpu_time_ns     AU64  cumulative guest vCPU time        |
+//! |  0x50  cpu_percent_bits AU32  f32 bits when CPU flag is set     |
+//! |  0x54  -- padding --                                            |
+//! |  0x58  memory_bytes     AU64  when memory-used flag is set      |
+//! |  0x60  memory_available AU64                                    |
+//! |  0x68  memory_host_rss  AU64                                    |
+//! |  0x70  disk_read_bytes  AU64                                    |
+//! |  0x78  disk_write_bytes AU64                                    |
+//! |  0x80  net_rx_bytes     AU64                                    |
+//! |  0x88  net_tx_bytes     AU64                                    |
+//! |  0x90  name_len         AU16                                    |
+//! |  0x92  _pad1            [AU8; 6]                                |
+//! |  0x98  name_bytes       [AU8; 128]                              |
+//! |  0x118 _tail            [u8; 232]                               |
 //! +-----------------------------------------------------------------+ 0x300
 //! | SLOT 1 ... SLOT capacity-1                                      |
 //! ~                                                                 ~
@@ -124,6 +129,19 @@ pub const SLOT_ACTIVE: u32 = 2;
 pub const SLOT_STALE: u32 = 3;
 
 //--------------------------------------------------------------------------------------------------
+// Constants: Sample flags
+//--------------------------------------------------------------------------------------------------
+
+/// Sample flag: `cpu_percent` and `vcpu_time_ns` contain valid guest values.
+pub const SAMPLE_FLAG_CPU: u32 = 1 << 0;
+/// Sample flag: `memory_bytes` contains a valid guest-used value.
+pub const SAMPLE_FLAG_MEMORY_USED: u32 = 1 << 1;
+/// Sample flag: `memory_available_bytes` contains a valid guest value.
+pub const SAMPLE_FLAG_MEMORY_AVAILABLE: u32 = 1 << 2;
+/// Sample flag: `memory_host_resident_bytes` contains a valid host diagnostic.
+pub const SAMPLE_FLAG_MEMORY_HOST_RESIDENT: u32 = 1 << 3;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -175,12 +193,21 @@ pub struct Slot {
     pub started_at_unix_ms: AtomicI64,
     /// Unix milliseconds at which the most recent sample was written.
     pub sampled_at_unix_ms: AtomicI64,
+    /// Validity/source flags for optional sample fields.
+    pub sample_flags: AtomicU32,
     /// Configured memory limit in bytes.
     pub memory_limit_bytes: AtomicU64,
-    /// Raw bits of an `f32` carrying CPU usage as a percentage.
+    /// Cumulative guest vCPU execution time across all vCPUs.
+    pub vcpu_time_ns: AtomicU64,
+    /// Raw bits of an `f32` carrying CPU usage as a percentage when
+    /// `SAMPLE_FLAG_CPU` is set.
     pub cpu_percent_bits: AtomicU32,
-    /// Resident memory in bytes.
+    /// Guest-used memory in bytes when `SAMPLE_FLAG_MEMORY_USED` is set.
     pub memory_bytes: AtomicU64,
+    /// Guest-available memory in bytes when `SAMPLE_FLAG_MEMORY_AVAILABLE` is set.
+    pub memory_available_bytes: AtomicU64,
+    /// Host-resident guest memory in bytes when `SAMPLE_FLAG_MEMORY_HOST_RESIDENT` is set.
+    pub memory_host_resident_bytes: AtomicU64,
     /// Cumulative disk bytes read.
     pub disk_read_bytes: AtomicU64,
     /// Cumulative disk bytes written.
@@ -203,11 +230,12 @@ pub struct Slot {
 // Layout accounting (with `#[repr(C)]` alignment), in offset order:
 //   state(4) + pad(4) + generation(8) + seq(8)                              =  24
 //   sandbox_id(4) + run_id(4) + pid(4) + _pad0(4)                           = +16  -> 40
-//   started_at(8) + sampled_at(8) + memory_limit_bytes(8)                   = +24  -> 64
-//   cpu_percent_bits(4) + pad(4) + memory_bytes(8)                          = +16  -> 80
-//   disk_read(8) + disk_write(8) + net_rx(8) + net_tx(8)                    = +32  -> 112
+//   started_at(8) + sampled_at(8)                                           = +16  -> 56
+//   sample_flags(4) + pad(4) + memory_limit_bytes(8) + vcpu_time_ns(8)      = +24  -> 80
+//   cpu_percent_bits(4) + pad(4) + memory fields(24)                        = +32  -> 112
+//   disk_read(8) + disk_write(8) + net_rx(8) + net_tx(8)                    = +32  -> 144
 //   name_len(2) + _pad1(6) + name_bytes(NAME_BYTES)                         = +8 + NAME_BYTES
-const SLOT_BASE_BYTES: usize = 120 + NAME_BYTES;
+const SLOT_BASE_BYTES: usize = 152 + NAME_BYTES;
 
 const SLOT_TAIL_PAD: usize = SLOT_SIZE - SLOT_BASE_BYTES;
 

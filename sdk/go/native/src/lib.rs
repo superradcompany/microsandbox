@@ -449,6 +449,8 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
+    pub const METRICS_DISABLED: &str = "metrics_disabled";
+    pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
@@ -507,6 +509,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
+            MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
+            MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
             MicrosandboxError::AgentClient(
                 microsandbox::AgentClientError::UnsupportedOperation { .. },
             ) => error_kind::UNSUPPORTED_OPERATION,
@@ -3175,8 +3179,24 @@ pub unsafe extern "C" fn msb_sandbox_exec(
 
 // ---------------------------------------------------------------------------
 // Sandbox — metrics
-// Output: {cpu_percent,memory_bytes,memory_limit_bytes,disk_*,net_*,uptime_secs}
+// Output: guest-focused CPU, memory, disk, network, and uptime counters.
 // ---------------------------------------------------------------------------
+
+fn metrics_json(m: &microsandbox::sandbox::SandboxMetrics) -> serde_json::Value {
+    serde_json::json!({
+        "cpu_percent": m.cpu_percent,
+        "vcpu_time_ns": m.vcpu_time_ns,
+        "memory_bytes": m.memory_bytes,
+        "memory_available_bytes": m.memory_available_bytes,
+        "memory_host_resident_bytes": m.memory_host_resident_bytes,
+        "memory_limit_bytes": m.memory_limit_bytes,
+        "disk_read_bytes": m.disk_read_bytes,
+        "disk_write_bytes": m.disk_write_bytes,
+        "net_rx_bytes": m.net_rx_bytes,
+        "net_tx_bytes": m.net_tx_bytes,
+        "uptime_secs": m.uptime.as_secs(),
+    })
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_metrics(
@@ -3189,17 +3209,7 @@ pub unsafe extern "C" fn msb_sandbox_metrics(
         let sb = get(handle)?;
         Ok(Box::pin(async move {
             let m = sb.metrics().await.map_err(FfiError::from)?;
-            Ok(serde_json::json!({
-                "cpu_percent": m.cpu_percent,
-                "memory_bytes": m.memory_bytes,
-                "memory_limit_bytes": m.memory_limit_bytes,
-                "disk_read_bytes": m.disk_read_bytes,
-                "disk_write_bytes": m.disk_write_bytes,
-                "net_rx_bytes": m.net_rx_bytes,
-                "net_tx_bytes": m.net_tx_bytes,
-                "uptime_secs": m.uptime.as_secs(),
-            })
-            .to_string())
+            Ok(metrics_json(&m).to_string())
         }))
     })
 }
@@ -3730,17 +3740,7 @@ pub unsafe extern "C" fn msb_metrics_recv(
                 item = recv.recv() => {
                     match item {
                         None => Ok(r#"{"done":true}"#.to_string()),
-                        Some(Ok(m)) => Ok(format!(
-                            r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{net_rx},"net_tx_bytes":{net_tx},"uptime_secs":{up}}}"#,
-                            cpu = m.cpu_percent,
-                            mem = m.memory_bytes,
-                            lim = m.memory_limit_bytes,
-                            dr = m.disk_read_bytes,
-                            dw = m.disk_write_bytes,
-                            net_rx = m.net_rx_bytes,
-                            net_tx = m.net_tx_bytes,
-                            up = m.uptime.as_secs(),
-                        )),
+                        Some(Ok(m)) => Ok(metrics_json(&m).to_string()),
                         Some(Err(e)) => Err(FfiError::from(e)),
                     }
                 }
@@ -4320,24 +4320,11 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
             let map = all_sandbox_metrics().await.map_err(FfiError::from)?;
-            let mut entries = String::new();
-            for (name, m) in &map {
-                if !entries.is_empty() {
-                    entries.push(',');
-                }
-                entries.push_str(&format!(
-                    r#""{name}":{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                    cpu = m.cpu_percent,
-                    mem = m.memory_bytes,
-                    lim = m.memory_limit_bytes,
-                    dr  = m.disk_read_bytes,
-                    dw  = m.disk_write_bytes,
-                    rx  = m.net_rx_bytes,
-                    tx  = m.net_tx_bytes,
-                    up  = m.uptime.as_secs(),
-                ));
-            }
-            Ok(format!(r#"{{"sandboxes":{{{entries}}}}}"#))
+            let sandboxes: HashMap<_, _> = map
+                .iter()
+                .map(|(name, metrics)| (name, metrics_json(metrics)))
+                .collect();
+            Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
         }))
     })
 }
@@ -4360,17 +4347,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_metrics(
         Ok(Box::pin(async move {
             let handle = Sandbox::get(&name_str).await.map_err(FfiError::from)?;
             let m = handle.metrics().await.map_err(FfiError::from)?;
-            Ok(format!(
-                r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                cpu = m.cpu_percent,
-                mem = m.memory_bytes,
-                lim = m.memory_limit_bytes,
-                dr = m.disk_read_bytes,
-                dw = m.disk_write_bytes,
-                rx = m.net_rx_bytes,
-                tx = m.net_tx_bytes,
-                up = m.uptime.as_secs(),
-            ))
+            Ok(metrics_json(&m).to_string())
         }))
     })
 }

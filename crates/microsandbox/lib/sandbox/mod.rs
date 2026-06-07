@@ -2294,7 +2294,7 @@ async fn stop_sandbox_for_replacement(
         }
     }
 
-    mark_sandbox_stopped_for_replacement(
+    mark_sandbox_stopped_after_signal(
         pools.write(),
         sandbox.id,
         run.as_ref().map(|model| model.id),
@@ -2321,11 +2321,13 @@ fn exit_status_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
-async fn mark_sandbox_stopped_for_replacement(
+pub(super) async fn mark_sandbox_stopped_after_signal(
     db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
+    free_metrics_slot_for(sandbox_id, run_id, microsandbox_metrics::ReleaseMode::Free);
+
     db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
 

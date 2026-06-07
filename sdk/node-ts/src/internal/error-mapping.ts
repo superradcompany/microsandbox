@@ -11,6 +11,7 @@ import {
   JsonError,
   LibkrunfwNotFoundError,
   MetricsDisabledError,
+  MetricsUnavailableError,
   MicrosandboxError,
   NixError,
   PatchFailedError,
@@ -50,6 +51,7 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["Image", (m, c) => new ImageError(m, { cause: c })],
   ["PatchFailed", (m, c) => new PatchFailedError(m, { cause: c })],
   ["MetricsDisabled", (m, c) => new MetricsDisabledError(m, { cause: c })],
+  ["MetricsUnavailable", (m, c) => new MetricsUnavailableError(m, { cause: c })],
   ["UnsupportedOperation", (m, c) => new UnsupportedOperationError(m, { cause: c })],
   ["Custom", (m, c) => new CustomError(m, { cause: c })],
 ]);

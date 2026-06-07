@@ -1858,7 +1858,10 @@ export interface SandboxListFilter {
 /** Point-in-time resource metrics for a sandbox. */
 export interface SandboxMetrics {
   cpuPercent: number
+  vcpuTimeNs: number
   memoryBytes: number
+  memoryAvailableBytes?: number
+  memoryHostResidentBytes?: number
   memoryLimitBytes: number
   diskReadBytes: number
   diskWriteBytes: number

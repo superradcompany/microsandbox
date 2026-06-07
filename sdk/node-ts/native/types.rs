@@ -172,7 +172,10 @@ pub struct FsMetadata {
 #[napi(object)]
 pub struct SandboxMetrics {
     pub cpu_percent: f64,
+    pub vcpu_time_ns: f64,
     pub memory_bytes: f64,
+    pub memory_available_bytes: Option<f64>,
+    pub memory_host_resident_bytes: Option<f64>,
     pub memory_limit_bytes: f64,
     pub disk_read_bytes: f64,
     pub disk_write_bytes: f64,

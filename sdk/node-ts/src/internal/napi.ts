@@ -656,7 +656,10 @@ export interface NapiFsMetadata {
 
 export interface NapiSandboxMetrics {
   readonly cpuPercent: number;
+  readonly vcpuTimeNs: number;
   readonly memoryBytes: number;
+  readonly memoryAvailableBytes?: number;
+  readonly memoryHostResidentBytes?: number;
   readonly memoryLimitBytes: number;
   readonly diskReadBytes: number;
   readonly diskWriteBytes: number;

@@ -365,6 +365,7 @@ export {
   JsonError,
   LibkrunfwNotFoundError,
   MetricsDisabledError,
+  MetricsUnavailableError,
   MicrosandboxError,
   NixError,
   PatchFailedError,

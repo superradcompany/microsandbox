@@ -355,7 +355,10 @@ class FsMetadata:
 
 class SandboxMetrics:
     cpu_percent: float
+    vcpu_time_ns: int
     memory_bytes: int
+    memory_available_bytes: int | None
+    memory_host_resident_bytes: int | None
     memory_limit_bytes: int
     disk_read_bytes: int
     disk_write_bytes: int

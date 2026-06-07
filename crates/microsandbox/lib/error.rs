@@ -154,6 +154,10 @@ pub enum MicrosandboxError {
     #[error("metrics disabled for sandbox: {0}")]
     MetricsDisabled(String),
 
+    /// Live metrics are enabled but no valid guest sample is available yet.
+    #[error("metrics unavailable for sandbox: {0}")]
+    MetricsUnavailable(String),
+
     /// A log stream fell behind enough that the file it was reading
     /// rotated out of the on-disk retention window. The stream
     /// yields this error and ends; restart from

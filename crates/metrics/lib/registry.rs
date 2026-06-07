@@ -15,8 +15,9 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use crate::layout::{
     DEFAULT_CAPACITY, HEADER_SIZE, HEADER_STATE_INITIALIZING, HEADER_STATE_READY,
-    HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SLOT_ACTIVE,
-    SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
+    HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SAMPLE_FLAG_CPU,
+    SAMPLE_FLAG_MEMORY_AVAILABLE, SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_USED,
+    SLOT_ACTIVE, SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
 };
 use crate::snapshot::LiveMetric;
 use crate::{MetricsError, MetricsResult};
@@ -72,10 +73,16 @@ pub enum ReleaseMode {
 pub struct SampleWrite {
     /// Wall-clock time the sample was captured.
     pub sampled_at: DateTime<Utc>,
-    /// CPU usage as a percentage across all host CPUs.
-    pub cpu_percent: f32,
-    /// Resident memory in bytes.
-    pub memory_bytes: u64,
+    /// Guest vCPU usage as a percentage when sourced by the VMM.
+    pub cpu_percent: Option<f32>,
+    /// Cumulative guest vCPU execution time across all vCPUs when sourced by the VMM.
+    pub vcpu_time_ns: Option<u64>,
+    /// Guest-used memory in bytes when sourced by the guest.
+    pub memory_bytes: Option<u64>,
+    /// Guest-available memory in bytes when reported by the guest.
+    pub memory_available_bytes: Option<u64>,
+    /// Host-resident guest memory in bytes for capacity diagnostics.
+    pub memory_host_resident_bytes: Option<u64>,
     /// Cumulative disk bytes read.
     pub disk_read_bytes: u64,
     /// Cumulative disk bytes written.
@@ -190,6 +197,10 @@ impl MetricsRegistry {
         let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
+        }
+        if let Err(err) = wait_for_size(fd, header_only_len) {
+            unsafe { libc::close(fd) };
+            return Err(err);
         }
         let ptr = unsafe {
             libc::mmap(
@@ -337,15 +348,13 @@ impl MetricsRegistry {
     ///
     /// The release does three things, in order:
     ///
-    /// 1. Wait briefly for any in-flight writer to finish its seqlock cycle.
+    /// 1. Bump the slot's generation so any writer that starts after release
+    ///    begins fails either its outer or inner generation check.
+    /// 2. Wait briefly for any already in-flight writer to finish its seqlock cycle.
     ///    If `seq` stays odd past the spin budget, the writer is presumed
     ///    dead (e.g. SIGKILL'd mid-write); force `seq` back to even so the
     ///    next `reserve` does not call `begin_write` on an odd `seq` —
     ///    that would corrupt the seqlock and make the slot unreadable.
-    /// 2. Bump the slot's generation. Any stranded writer that re-enters
-    ///    `write_sample` (or that already passed the outer generation
-    ///    check but has not yet committed) will see the new generation in
-    ///    its inner re-check and abort the cycle.
     /// 3. Publish the new state. Readers observing `Free`/`Stale` either
     ///    skip the slot or see a coherent terminal sample.
     pub fn release(&self, slot_idx: u32, generation: u64, mode: ReleaseMode) -> MetricsResult<()> {
@@ -358,16 +367,17 @@ impl MetricsRegistry {
             });
         }
 
-        quiesce_seq(slot);
-
         // Invalidate any writer that might still be holding `self.generation`
-        // — its inner re-check will now see a different value and bail.
+        // before we wait. A writer already inside the seqlock can finish; a
+        // writer starting after this store cannot enter a valid write cycle.
         let new_gen = self
             .header()
             .global_generation
             .fetch_add(1, Ordering::AcqRel)
             + 1;
         slot.generation.store(new_gen, Ordering::Release);
+
+        quiesce_seq(slot);
 
         let new_state = match mode {
             ReleaseMode::Stale => SLOT_STALE,
@@ -461,7 +471,7 @@ impl MetricsRegistry {
         for idx in 0..self.inner.capacity {
             let slot = self.slot(idx);
             let state = slot.state.load(Ordering::Acquire);
-            if state != SLOT_ACTIVE && state != SLOT_STALE && state != SLOT_RESERVED {
+            if state != SLOT_ACTIVE && state != SLOT_STALE {
                 continue;
             }
             let matches = match run_id {
@@ -531,9 +541,13 @@ impl MetricsRegistry {
             let pid = slot.pid.load(Ordering::Relaxed);
             let started_at_ms = slot.started_at_unix_ms.load(Ordering::Relaxed);
             let sampled_at_ms = slot.sampled_at_unix_ms.load(Ordering::Relaxed);
+            let sample_flags = slot.sample_flags.load(Ordering::Relaxed);
             let memory_limit = slot.memory_limit_bytes.load(Ordering::Relaxed);
+            let vcpu_time_ns = slot.vcpu_time_ns.load(Ordering::Relaxed);
             let cpu_bits = slot.cpu_percent_bits.load(Ordering::Relaxed);
             let memory = slot.memory_bytes.load(Ordering::Relaxed);
+            let memory_available = slot.memory_available_bytes.load(Ordering::Relaxed);
+            let memory_host_resident = slot.memory_host_resident_bytes.load(Ordering::Relaxed);
             let disk_r = slot.disk_read_bytes.load(Ordering::Relaxed);
             let disk_w = slot.disk_write_bytes.load(Ordering::Relaxed);
             let net_rx = slot.net_rx_bytes.load(Ordering::Relaxed);
@@ -560,6 +574,12 @@ impl MetricsRegistry {
                 return None;
             }
 
+            if !flag_set(sample_flags, SAMPLE_FLAG_CPU)
+                || !flag_set(sample_flags, SAMPLE_FLAG_MEMORY_USED)
+            {
+                return None;
+            }
+
             let timestamp = ms_to_datetime(sampled_at_ms);
             let started_at = ms_to_datetime(started_at_ms);
             let uptime = timestamp
@@ -575,7 +595,18 @@ impl MetricsRegistry {
                 timestamp,
                 uptime,
                 cpu_percent: f32::from_bits(cpu_bits),
+                vcpu_time_ns,
                 memory_bytes: memory,
+                memory_available_bytes: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_MEMORY_AVAILABLE,
+                    memory_available,
+                ),
+                memory_host_resident_bytes: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_MEMORY_HOST_RESIDENT,
+                    memory_host_resident,
+                ),
                 memory_limit_bytes: memory_limit,
                 disk_read_bytes: disk_r,
                 disk_write_bytes: disk_w,
@@ -621,10 +652,36 @@ impl MetricsSlotWriter {
 
         slot.sampled_at_unix_ms
             .store(sample.sampled_at.timestamp_millis(), Ordering::Relaxed);
-        slot.cpu_percent_bits
-            .store(sample.cpu_percent.to_bits(), Ordering::Relaxed);
+        let mut sample_flags = 0;
+        if sample.cpu_percent.is_some() && sample.vcpu_time_ns.is_some() {
+            sample_flags |= SAMPLE_FLAG_CPU;
+        }
+        if sample.memory_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_MEMORY_USED;
+        }
+        if sample.memory_available_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_MEMORY_AVAILABLE;
+        }
+        if sample.memory_host_resident_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_MEMORY_HOST_RESIDENT;
+        }
+        slot.sample_flags.store(sample_flags, Ordering::Relaxed);
+        slot.vcpu_time_ns
+            .store(sample.vcpu_time_ns.unwrap_or(0), Ordering::Relaxed);
+        slot.cpu_percent_bits.store(
+            sample.cpu_percent.unwrap_or(0.0).to_bits(),
+            Ordering::Relaxed,
+        );
         slot.memory_bytes
-            .store(sample.memory_bytes, Ordering::Relaxed);
+            .store(sample.memory_bytes.unwrap_or(0), Ordering::Relaxed);
+        slot.memory_available_bytes.store(
+            sample.memory_available_bytes.unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        slot.memory_host_resident_bytes.store(
+            sample.memory_host_resident_bytes.unwrap_or(0),
+            Ordering::Relaxed,
+        );
         slot.disk_read_bytes
             .store(sample.disk_read_bytes, Ordering::Relaxed);
         slot.disk_write_bytes
@@ -676,6 +733,76 @@ fn try_open_existing(
         return Err(err.into());
     }
 
+    if let Err(err) = wait_for_size(fd, HEADER_SIZE) {
+        unsafe { libc::close(fd) };
+        if matches!(err, MetricsError::Custom(_)) {
+            unsafe { libc::shm_unlink(name.as_ptr()) };
+            tracing::warn!(
+                shm = %name.to_string_lossy(),
+                "metrics registry was created but never sized; unlinked for recreate"
+            );
+            return Ok(None);
+        }
+        return Err(err);
+    }
+
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            HEADER_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let header_ref = unsafe { &*(ptr as *const Header) };
+    match wait_for_ready(header_ref) {
+        Ok(()) => {}
+        Err(WaitForReadyError::Stuck) => {
+            // The creator was killed mid-init. Unlink the dead segment so
+            // the caller can create a fresh one; return `None` to indicate
+            // "no usable registry exists".
+            unsafe {
+                libc::munmap(ptr, HEADER_SIZE);
+                libc::close(fd);
+                libc::shm_unlink(name.as_ptr());
+            }
+            tracing::warn!(
+                shm = %name.to_string_lossy(),
+                "metrics registry stuck in initialization; unlinked for recreate"
+            );
+            return Ok(None);
+        }
+        Err(WaitForReadyError::Invalid(state)) => {
+            unsafe {
+                libc::munmap(ptr, HEADER_SIZE);
+                libc::close(fd);
+            }
+            return Err(MetricsError::Custom(format!(
+                "invalid registry header state: {state}"
+            )));
+        }
+    }
+    if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
+        unsafe {
+            libc::munmap(ptr, HEADER_SIZE);
+            libc::close(fd);
+        }
+        return Err(e);
+    }
+    unsafe { libc::munmap(ptr, HEADER_SIZE) };
+
+    if let Err(err) = wait_for_size(fd, map_len) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -692,29 +819,6 @@ fn try_open_existing(
     }
 
     let header_ref = unsafe { &*(ptr as *const Header) };
-    match wait_for_ready(header_ref) {
-        Ok(()) => {}
-        Err(WaitForReadyError::Stuck) => {
-            // The creator was killed mid-init. Unlink the dead segment so
-            // the caller can create a fresh one; return `None` to indicate
-            // "no usable registry exists".
-            unsafe {
-                libc::munmap(ptr, map_len);
-                libc::shm_unlink(name.as_ptr());
-            }
-            tracing::warn!(
-                shm = %name.to_string_lossy(),
-                "metrics registry stuck in initialization; unlinked for recreate"
-            );
-            return Ok(None);
-        }
-        Err(WaitForReadyError::Invalid(state)) => {
-            unsafe { libc::munmap(ptr, map_len) };
-            return Err(MetricsError::Custom(format!(
-                "invalid registry header state: {state}"
-            )));
-        }
-    }
     if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
         unsafe { libc::munmap(ptr, map_len) };
         return Err(e);
@@ -729,6 +833,29 @@ fn try_open_existing(
     Ok(Some(MetricsRegistry {
         inner: Arc::new(inner),
     }))
+}
+
+fn wait_for_size(fd: libc::c_int, min_size: usize) -> MetricsResult<()> {
+    let deadline = Instant::now() + INIT_WAIT_TIMEOUT;
+    loop {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let stat = unsafe { stat.assume_init() };
+        let size = stat.st_size as i128;
+        let wanted = min_size as i128;
+        if size >= wanted {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MetricsError::Custom(format!(
+                "metrics registry size stayed below {min_size} bytes (size={})",
+                stat.st_size
+            )));
+        }
+        std::thread::sleep(INIT_POLL_INTERVAL);
+    }
 }
 
 fn create_and_init(
@@ -880,10 +1007,14 @@ fn write_reservation_fields(slot: &Slot, spec: &ReserveSlot<'_>, generation: u64
     slot.pid.store(0, Ordering::Relaxed);
     slot.started_at_unix_ms.store(0, Ordering::Relaxed);
     slot.sampled_at_unix_ms.store(0, Ordering::Relaxed);
+    slot.sample_flags.store(0, Ordering::Relaxed);
     slot.memory_limit_bytes
         .store(spec.memory_limit_bytes, Ordering::Relaxed);
+    slot.vcpu_time_ns.store(0, Ordering::Relaxed);
     slot.cpu_percent_bits.store(0, Ordering::Relaxed);
     slot.memory_bytes.store(0, Ordering::Relaxed);
+    slot.memory_available_bytes.store(0, Ordering::Relaxed);
+    slot.memory_host_resident_bytes.store(0, Ordering::Relaxed);
     slot.disk_read_bytes.store(0, Ordering::Relaxed);
     slot.disk_write_bytes.store(0, Ordering::Relaxed);
     slot.net_rx_bytes.store(0, Ordering::Relaxed);
@@ -910,11 +1041,23 @@ fn write_name(slot: &Slot, name: &str) {
 
 fn read_name(slot: &Slot) -> String {
     let len = (slot.name_len.load(Ordering::Relaxed) as usize).min(NAME_BYTES);
-    let mut bytes = Vec::with_capacity(len);
-    for i in 0..len {
-        bytes.push(slot.name_bytes[i].load(Ordering::Relaxed));
+    let mut bytes = [0u8; NAME_BYTES];
+    for (i, byte) in bytes.iter_mut().enumerate().take(len) {
+        *byte = slot.name_bytes[i].load(Ordering::Relaxed);
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8_lossy(&bytes[..len]).into_owned()
+}
+
+fn flag_value(flags: u32, flag: u32, value: u64) -> Option<u64> {
+    if flag_set(flags, flag) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn flag_set(flags: u32, flag: u32) -> bool {
+    flags & flag == flag
 }
 
 fn begin_write(slot: &Slot) -> u64 {
@@ -1038,8 +1181,11 @@ mod tests {
 
         let sample = SampleWrite {
             sampled_at: Utc::now(),
-            cpu_percent: 12.5,
-            memory_bytes: 1024 * 1024,
+            cpu_percent: Some(12.5),
+            vcpu_time_ns: Some(123_456),
+            memory_bytes: Some(1024 * 1024),
+            memory_available_bytes: Some(255 * 1024 * 1024),
+            memory_host_resident_bytes: Some(2 * 1024 * 1024),
             disk_read_bytes: 4096,
             disk_write_bytes: 8192,
             net_rx_bytes: 100,
@@ -1055,7 +1201,10 @@ mod tests {
         assert_eq!(item.pid, 4242);
         assert_eq!(item.name, "alpine");
         assert!((item.cpu_percent - 12.5).abs() < 1e-6);
+        assert_eq!(item.vcpu_time_ns, 123_456);
         assert_eq!(item.memory_bytes, 1024 * 1024);
+        assert_eq!(item.memory_available_bytes, Some(255 * 1024 * 1024));
+        assert_eq!(item.memory_host_resident_bytes, Some(2 * 1024 * 1024));
         assert_eq!(item.memory_limit_bytes, 256 * 1024 * 1024);
         assert_eq!(item.disk_read_bytes, 4096);
         assert_eq!(item.disk_write_bytes, 8192);
@@ -1121,8 +1270,11 @@ mod tests {
         writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 12.5,
-                memory_bytes: 1024 * 1024,
+                cpu_percent: Some(12.5),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(1024 * 1024),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 4096,
                 disk_write_bytes: 8192,
                 net_rx_bytes: 100,
@@ -1169,8 +1321,11 @@ mod tests {
                 counter = counter.wrapping_add(1);
                 let sample = SampleWrite {
                     sampled_at: Utc::now(),
-                    cpu_percent: (counter % 100) as f32,
-                    memory_bytes: counter,
+                    cpu_percent: Some((counter % 100) as f32),
+                    vcpu_time_ns: Some(counter),
+                    memory_bytes: Some(counter),
+                    memory_available_bytes: Some(counter),
+                    memory_host_resident_bytes: Some(counter),
                     disk_read_bytes: counter,
                     disk_write_bytes: counter,
                     net_rx_bytes: counter,
@@ -1194,6 +1349,8 @@ mod tests {
                 assert_eq!(item.memory_bytes, item.disk_write_bytes);
                 assert_eq!(item.memory_bytes, item.net_rx_bytes);
                 assert_eq!(item.memory_bytes, item.net_tx_bytes);
+                assert_eq!(item.memory_available_bytes, Some(item.memory_bytes));
+                assert_eq!(item.memory_host_resident_bytes, Some(item.memory_bytes));
                 successful_reads += 1;
             }
         }
@@ -1284,8 +1441,11 @@ mod tests {
         let err = writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 0.0,
-                memory_bytes: 0,
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(0),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1293,6 +1453,65 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, MetricsError::GenerationMismatch { .. }));
+        cleanup(&name);
+    }
+
+    #[test]
+    fn release_by_identity_does_not_clear_new_reservation() {
+        let name = unique_name("rid");
+        let reg = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 10,
+                pid: 100,
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        writer
+            .write_sample(SampleWrite {
+                sampled_at: Utc::now(),
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(1),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
+                disk_read_bytes: 0,
+                disk_write_bytes: 0,
+                net_rx_bytes: 0,
+                net_tx_bytes: 0,
+            })
+            .unwrap();
+        writer.release(ReleaseMode::Stale).unwrap();
+
+        let next = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            reg.release_by_identity(1, None, ReleaseMode::Free).unwrap(),
+            None
+        );
+
+        reg.activate_writer(ActivateSlot {
+            slot: next.slot,
+            generation: next.generation,
+            run_id: 11,
+            pid: 101,
+            started_at: Utc::now(),
+        })
+        .unwrap();
         cleanup(&name);
     }
 
@@ -1355,6 +1574,65 @@ mod tests {
     }
 
     #[test]
+    fn sample_without_required_guest_fields_is_not_visible() {
+        let name = unique_name("inv");
+        let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 1,
+                pid: 1,
+                started_at: Utc::now(),
+            })
+            .unwrap();
+
+        writer
+            .write_sample(SampleWrite {
+                sampled_at: Utc::now(),
+                cpu_percent: None,
+                vcpu_time_ns: None,
+                memory_bytes: None,
+                memory_available_bytes: Some(1),
+                memory_host_resident_bytes: Some(1),
+                disk_read_bytes: 1,
+                disk_write_bytes: 1,
+                net_rx_bytes: 1,
+                net_tx_bytes: 1,
+            })
+            .unwrap();
+
+        assert!(reg.snapshot().unwrap().is_empty());
+        assert!(reg.get_by_sandbox_id(1).unwrap().is_none());
+        assert!(reg.get_by_run_id(1).unwrap().is_none());
+
+        writer
+            .write_sample(SampleWrite {
+                sampled_at: Utc::now(),
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(0),
+                memory_available_bytes: Some(1),
+                memory_host_resident_bytes: Some(1),
+                disk_read_bytes: 1,
+                disk_write_bytes: 1,
+                net_rx_bytes: 1,
+                net_tx_bytes: 1,
+            })
+            .unwrap();
+
+        assert!(reg.get_by_run_id(1).unwrap().is_some());
+        cleanup(&name);
+    }
+
+    #[test]
     fn write_sample_inner_generation_recheck_rejects_stale_writer() {
         // Force a release+reserve race between the outer generation check
         // and the seqlock window: do the release+reserve manually, then call
@@ -1393,8 +1671,11 @@ mod tests {
         let err = writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 0.0,
-                memory_bytes: 999_999,
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(999_999),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1433,8 +1714,11 @@ mod tests {
         writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 0.0,
-                memory_bytes: 1,
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(1),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1474,8 +1758,11 @@ mod tests {
         let err = writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 0.0,
-                memory_bytes: 999,
+                cpu_percent: Some(0.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(999),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1506,8 +1793,11 @@ mod tests {
         writer2
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 1.0,
-                memory_bytes: 42,
+                cpu_percent: Some(1.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(42),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1548,8 +1838,11 @@ mod tests {
         writer
             .write_sample(SampleWrite {
                 sampled_at: Utc::now(),
-                cpu_percent: 1.0,
-                memory_bytes: 0,
+                cpu_percent: Some(1.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(0),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,

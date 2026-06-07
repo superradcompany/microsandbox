@@ -32,6 +32,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
             MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
+            MetricsUnavailable(_) => ("MetricsUnavailableError", err.to_string()),
             AgentClient(microsandbox::AgentClientError::UnsupportedOperation { .. }) => {
                 ("UnsupportedOperationError", err.to_string())
             }
