@@ -387,6 +387,24 @@ impl SecretsHandler {
         )
     }
 
+    /// Create a handler for a plain-HTTP (non-TLS) connection.
+    ///
+    /// Only substitutes secrets that have opted in with `require_tls_identity(false)`.
+    /// Host matching and DNS-cache binding are still enforced.
+    pub fn new_plain_http(
+        config: &SecretsConfig,
+        host: &str,
+        guest_ip: IpAddr,
+        shared: &SharedState,
+    ) -> Self {
+        Self::new_inner(
+            config,
+            host,
+            false,
+            Some(SecretHostIdentity { guest_ip, shared }),
+        )
+    }
+
     fn new_inner(
         config: &SecretsConfig,
         sni: &str,
@@ -3165,6 +3183,47 @@ mod tests {
             String::from_utf8(output.into_owned())
                 .unwrap()
                 .contains("$KEY")
+        );
+    }
+
+    #[test]
+    fn new_plain_http_blocks_require_tls_identity_secrets() {
+        // new_plain_http must NOT substitute require_tls_identity=true secrets
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let shared = SharedState::new(4);
+        let ip = Ipv4Addr::new(1, 2, 3, 4);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut handler =
+            SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        // require_tls_identity=true (default) — placeholder must NOT be substituted
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("$KEY")
+        );
+    }
+
+    #[test]
+    fn new_plain_http_substitutes_when_tls_identity_not_required() {
+        // new_plain_http MUST substitute secrets with require_tls_identity=false
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let shared = SharedState::new(4);
+        let ip = Ipv4Addr::new(1, 2, 3, 4);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut handler =
+            SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
         );
     }
 

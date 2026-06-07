@@ -3345,6 +3345,7 @@ dependencies = [
  "hickory-client",
  "hickory-proto",
  "httlib-hpack",
+ "httparse",
  "ipnetwork",
  "libc",
  "lru",

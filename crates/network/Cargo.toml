@@ -22,6 +22,7 @@ hickory-client = { workspace = true }
 # crypto provider, so no new dependency is introduced.
 hickory-proto = { workspace = true, features = ["tls-ring"] }
 httlib-hpack = { workspace = true }
+httparse = "1"
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
