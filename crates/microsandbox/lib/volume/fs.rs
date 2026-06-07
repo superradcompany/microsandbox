@@ -1,6 +1,6 @@
 //! Direct host-side filesystem operations on a named volume.
 //!
-//! Unlike [`SandboxFs`](crate::sandbox::fs::SandboxFs) which operates through the
+//! Unlike [`SandboxFsOps`](crate::sandbox::fs::SandboxFsOps) which operates through the
 //! agent protocol, [`VolumeFs`] operates directly on the host-side volume
 //! directory using `tokio::fs`.
 
@@ -261,7 +261,7 @@ impl VolumeFs<'_> {
         let canonical = if joined.exists() {
             joined
                 .canonicalize()
-                .map_err(|e| MicrosandboxError::SandboxFs(format!("resolve path: {e}")))?
+                .map_err(|e| MicrosandboxError::SandboxFsOps(format!("resolve path: {e}")))?
         } else {
             // Find the deepest existing ancestor.
             let mut ancestor = joined.as_path();
@@ -269,7 +269,7 @@ impl VolumeFs<'_> {
                 if let Some(parent) = ancestor.parent() {
                     if parent.exists() {
                         let canon_parent = parent.canonicalize().map_err(|e| {
-                            MicrosandboxError::SandboxFs(format!("resolve parent: {e}"))
+                            MicrosandboxError::SandboxFsOps(format!("resolve parent: {e}"))
                         })?;
                         // Reconstruct with remaining components.
                         let remainder = joined.strip_prefix(parent).unwrap_or(Path::new(""));
@@ -285,13 +285,13 @@ impl VolumeFs<'_> {
         // Ensure the root itself is canonicalized for comparison.
         let canon_root = if root.exists() {
             root.canonicalize()
-                .map_err(|e| MicrosandboxError::SandboxFs(format!("resolve root: {e}")))?
+                .map_err(|e| MicrosandboxError::SandboxFsOps(format!("resolve root: {e}")))?
         } else {
             root.to_path_buf()
         };
 
         if !canonical.starts_with(&canon_root) {
-            return Err(MicrosandboxError::SandboxFs(
+            return Err(MicrosandboxError::SandboxFsOps(
                 "path traversal outside volume root".into(),
             ));
         }

@@ -25,7 +25,7 @@ const IMAGE: &str = "mirror.gcr.io/library/alpine";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 async fn cleanup(name: &str) {
-    if let Ok(mut h) = Sandbox::get(name).await {
+    if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
         let _ = h.remove().await;
     }
@@ -115,7 +115,7 @@ async fn detach_disarms_parent_watchdog_for_attached_sandbox() {
     let connected = handle.connect().await.expect("connect after detach");
     assert_shell_ok(&connected, "echo detached-ok", "detached-ok").await;
 
-    let _ = connected.stop_and_wait().await;
+    let _ = connected.stop().await;
     cleanup(name).await;
 }
 
@@ -188,6 +188,6 @@ async fn parent_exit_stops_but_preserves_named_sandbox() {
     let restarted = handle.start().await.expect("restart stopped sandbox");
     assert_shell_ok(&restarted, "echo restarted-ok", "restarted-ok").await;
 
-    let _ = restarted.stop_and_wait().await;
+    let _ = restarted.stop().await;
     cleanup(name).await;
 }

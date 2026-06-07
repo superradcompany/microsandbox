@@ -11,8 +11,7 @@ import {
   type NapiSandboxConfig,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
-import { SandboxFs } from "./fs.js";
-import type { ExitStatus } from "./exit-status.js";
+import { SandboxFsOps } from "./fs.js";
 import {
   LogEntry,
   LogStream,
@@ -22,11 +21,11 @@ import {
   logReadOptionsToNapi,
   logStreamOptionsToNapi,
 } from "./logs.js";
-import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
+import { SandboxHandle, type SandboxStopResult } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
-import { SandboxSsh } from "./ssh.js";
+import { SandboxSshOps } from "./ssh.js";
 
 /**
  * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
@@ -175,8 +174,8 @@ export class Sandbox implements AsyncDisposable {
 
   /** List all known sandboxes. */
   static async list(): Promise<SandboxHandle[]> {
-    const infos = await withMappedErrors(() => napi.Sandbox.list());
-    return infos.map(sandboxInfoToHandle);
+    const handles = await withMappedErrors(() => napi.Sandbox.list());
+    return handles.map((handle) => new SandboxHandle(handle));
   }
 
   /**
@@ -186,8 +185,8 @@ export class Sandbox implements AsyncDisposable {
   static async listWith(filter: {
     labels?: Record<string, string>;
   }): Promise<SandboxHandle[]> {
-    const infos = await withMappedErrors(() => napi.Sandbox.listWith(filter));
-    return infos.map(sandboxInfoToHandle);
+    const handles = await withMappedErrors(() => napi.Sandbox.listWith(filter));
+    return handles.map((handle) => new SandboxHandle(handle));
   }
 
   /**
@@ -269,14 +268,14 @@ export class Sandbox implements AsyncDisposable {
 
   // -- filesystem ---------------------------------------------------------
 
-  fs(): SandboxFs {
-    return new SandboxFs(this.inner.fs());
+  fs(): SandboxFsOps {
+    return new SandboxFsOps(this.inner.fs());
   }
 
   // -- ssh ----------------------------------------------------------------
 
-  ssh(): SandboxSsh {
-    return new SandboxSsh(this.inner);
+  ssh(): SandboxSshOps {
+    return new SandboxSshOps(this.inner);
   }
 
   // -- config -------------------------------------------------------------
@@ -344,28 +343,38 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.stop());
   }
 
-  async stopAndWait(): Promise<ExitStatus> {
-    return await withMappedErrors(() => this.inner.stopAndWait());
+  async requestStop(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestStop());
+  }
+
+  async stopWithTimeout(timeoutMs: number): Promise<void> {
+    await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 
   async kill(): Promise<void> {
     await withMappedErrors(() => this.inner.kill());
   }
 
-  async drain(): Promise<void> {
-    await withMappedErrors(() => this.inner.drain());
+  async requestKill(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestKill());
   }
 
-  async wait(): Promise<ExitStatus> {
-    return await withMappedErrors(() => this.inner.wait());
+  async killWithTimeout(timeoutMs: number): Promise<void> {
+    await withMappedErrors(() => this.inner.killWithTimeout(timeoutMs));
+  }
+
+  async requestDrain(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestDrain());
+  }
+
+  async waitUntilStopped(): Promise<SandboxStopResult> {
+    return sandboxStopResultFromNapi(
+      await withMappedErrors(() => this.inner.waitUntilStopped()),
+    );
   }
 
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
-  }
-
-  async removePersisted(): Promise<void> {
-    await withMappedErrors(() => this.inner.removePersisted());
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
@@ -376,6 +385,24 @@ export class Sandbox implements AsyncDisposable {
       // best-effort dispose
     }
   }
+}
+
+function sandboxStopResultFromNapi(result: {
+  name: string;
+  status: string;
+  exitCode?: number | null;
+  signal?: number | null;
+  observedAt: number;
+  source?: string | null;
+}): SandboxStopResult {
+  return {
+    name: result.name,
+    status: result.status as SandboxStopResult["status"],
+    exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null,
+    observedAt: new Date(result.observedAt),
+    source: result.source ?? null,
+  };
 }
 
 const snakeToCamel = (k: string): string =>

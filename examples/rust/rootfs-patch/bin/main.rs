@@ -50,6 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = sandbox.shell("stat -c '%a' /app").await?;
     println!("/app permissions: {}", output.stdout()?.trim_end());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

@@ -4,7 +4,7 @@
 //   - Sandbox.Metrics(ctx)         — point-in-time snapshot for one sandbox.
 //   - Sandbox.MetricsStream(...)   — repeated snapshots at a fixed cadence.
 //   - AllSandboxMetrics(ctx)       — point-in-time snapshot for every
-//                                     running sandbox, keyed by name.
+//     running sandbox, keyed by name.
 //
 // The example boots two sandboxes so AllSandboxMetrics has more than one
 // entry to print.
@@ -100,7 +100,7 @@ func boot(ctx context.Context, suffix string) *microsandbox.Sandbox {
 func teardown(sb *microsandbox.Sandbox) {
 	stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 	defer c()
-	_, _ = sb.StopAndWait(stopCtx)
+	_ = sb.Stop(stopCtx)
 	_ = sb.Close()
 	_ = microsandbox.RemoveSandbox(context.Background(), sb.Name())
 }

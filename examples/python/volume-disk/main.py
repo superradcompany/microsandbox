@@ -34,7 +34,7 @@ async def main():
     back = await sb.shell("cat /data/created.txt")
     print(back.stdout_text)
 
-    await sb.stop_and_wait()
+    await sb.stop()
 
 
 asyncio.run(main())

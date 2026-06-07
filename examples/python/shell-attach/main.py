@@ -24,7 +24,7 @@ async def main():
     exit_code = await sb.attach_shell()
     print(f"Shell exited with code {exit_code}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

@@ -21,7 +21,6 @@ mod types;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    process::ExitStatus,
     sync::Arc,
 };
 
@@ -83,9 +82,11 @@ pub use config::{DEFAULT_REPLACE_TIMEOUT, SandboxConfig};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
-    FsWriteSink, SandboxFs,
+    FsWriteSink, SandboxFsOps,
 };
-pub use handle::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
+pub use handle::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle,
+};
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
@@ -98,9 +99,9 @@ pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
 #[cfg(feature = "ssh")]
 pub use ssh::{
-    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
-    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
-    SshStdioStream,
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
+    SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
+    SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
@@ -168,6 +169,28 @@ pub struct Sandbox {
     config: SandboxConfig,
     handle: Option<Arc<Mutex<ProcessHandle>>>,
     client: Arc<AgentClient>,
+}
+
+/// Result of observing a sandbox in a terminal non-running state.
+#[derive(Debug, Clone)]
+pub struct SandboxStopResult {
+    /// Sandbox name.
+    pub name: String,
+
+    /// Final observed sandbox status.
+    pub status: SandboxStatus,
+
+    /// Process exit code when available from an owned child process.
+    pub exit_code: Option<i32>,
+
+    /// Terminating signal when available from an owned child process.
+    pub signal: Option<i32>,
+
+    /// Time at which the stopped state was observed.
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+
+    /// Description of the observation source.
+    pub source: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -579,23 +602,6 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Remove this sandbox's persisted state after it has fully stopped.
-    pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
-        let pools = db::init_global().await?;
-
-        remove_dir_if_exists(
-            &crate::config::config()
-                .sandboxes_dir()
-                .join(&self.config.name),
-        )?;
-        free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
-        sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(pools.write())
-            .await?;
-
-        Ok(())
-    }
-
     /// Unique name identifying this sandbox.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
@@ -664,67 +670,144 @@ impl Sandbox {
 
     /// Read, write, and manage files inside the running sandbox.
     /// Operations go through the guest agent (agentd).
-    pub fn fs(&self) -> fs::SandboxFs {
-        fs::SandboxFs::new(&self.client)
+    pub fn fs(&self) -> fs::SandboxFsOps {
+        fs::SandboxFsOps::new(&self.client)
     }
 
-    /// Ask the sandbox to shut down gracefully.
-    ///
-    /// Returns as soon as the request is sent — does not wait for the
-    /// sandbox to actually exit. Use [`stop_and_wait`](Self::stop_and_wait)
-    /// to also block on exit.
-    pub async fn stop(&self) -> MicrosandboxResult<()> {
+    /// Request graceful shutdown and return once the request is sent.
+    pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.config.name, "stop: sending shutdown");
         // Shutdown carries no useful payload; agentd dispatches on `msg.t`.
         self.client.send(0, MessageType::Shutdown, &()).await?;
         Ok(())
     }
 
-    /// Stop the sandbox gracefully and wait for the process to exit.
-    ///
-    /// If this handle does not own the lifecycle (connected to an existing
-    /// sandbox), only the stop signal is sent — wait is skipped since we
-    /// don't have a process handle to wait on.
-    pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
-        let stop_result = self.stop().await;
-        if self.handle.is_none() {
-            stop_result?;
-            // No handle to wait on — return a synthetic success status.
-            return Ok(std::process::ExitStatus::default());
-        }
-        let wait_result = self.wait().await;
-        stop_result?;
-        wait_result
+    /// Stop the sandbox gracefully and wait until it is observed stopped.
+    pub async fn stop(&self) -> MicrosandboxResult<()> {
+        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
-    pub async fn kill(&self) -> MicrosandboxResult<()> {
+    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name())
+                .await?
+                .stop_with_timeout(timeout)
+                .await;
+        };
+
+        if timeout.is_zero() {
+            return self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await;
+        }
+
+        let _ = self.request_stop().await;
+        let mut escalated = false;
+        let status = {
+            let mut handle = handle.lock().await;
+            match tokio::time::timeout(timeout, handle.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    escalated = true;
+                    tracing::warn!(
+                        sandbox = %self.config.name,
+                        timeout_secs = timeout.as_secs(),
+                        "graceful stop exceeded timeout, escalating to SIGKILL"
+                    );
+                    handle.kill()?;
+                    match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, handle.wait()).await {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            return Err(MicrosandboxError::Runtime(format!(
+                                "timed out observing stopped state for sandbox '{}'",
+                                self.config.name
+                            )));
+                        }
+                    }
+                }
+            }
+        };
+
+        let final_status = if escalated {
+            SandboxStatus::Stopped
+        } else {
+            exit_status_to_sandbox_status(&status)
+        };
+        self.mark_observed_stopped(final_status).await
+    }
+
+    /// Request force termination and return once the request is sent.
+    pub async fn request_kill(&self) -> MicrosandboxResult<()> {
         match &self.handle {
             Some(h) => h.lock().await.kill(),
-            None => Err(MicrosandboxError::Runtime(
-                "cannot kill: not the lifecycle owner".into(),
-            )),
+            None => Sandbox::get(self.name()).await?.request_kill().await,
         }
     }
 
-    /// Trigger a graceful drain (SIGUSR1).
-    pub async fn drain(&self) -> MicrosandboxResult<()> {
+    /// Force-kill the sandbox and wait until it is observed stopped.
+    pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await
+    }
+
+    /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
+    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name())
+                .await?
+                .kill_with_timeout(timeout)
+                .await;
+        };
+
+        {
+            let mut handle = handle.lock().await;
+            handle.kill()?;
+            match tokio::time::timeout(timeout, handle.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(MicrosandboxError::Runtime(format!(
+                        "timed out observing stopped state for sandbox '{}'",
+                        self.config.name
+                    )));
+                }
+            }
+        };
+
+        self.mark_observed_stopped(SandboxStatus::Stopped).await
+    }
+
+    /// Request graceful drain and return once the request is sent.
+    pub async fn request_drain(&self) -> MicrosandboxResult<()> {
         match &self.handle {
             Some(h) => h.lock().await.drain(),
-            None => Err(MicrosandboxError::Runtime(
-                "cannot drain: not the lifecycle owner".into(),
-            )),
+            None => Sandbox::get(self.name()).await?.request_drain().await,
         }
     }
 
-    /// Wait for the sandbox process to exit.
-    pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
-        match &self.handle {
-            Some(h) => h.lock().await.wait().await,
-            None => Err(MicrosandboxError::Runtime(
-                "cannot wait: not the lifecycle owner".into(),
-            )),
-        }
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name()).await?.wait_until_stopped().await;
+        };
+
+        let status = {
+            let mut handle = handle.lock().await;
+            handle.wait().await?
+        };
+        let final_status = exit_status_to_sandbox_status(&status);
+        self.mark_observed_stopped(final_status).await?;
+
+        Ok(SandboxStopResult {
+            name: self.config.name.clone(),
+            status: final_status,
+            exit_code: status.code(),
+            signal: exit_status_signal(&status),
+            observed_at: chrono::Utc::now(),
+            source: Some("owned process handle".to_string()),
+        })
+    }
+
+    async fn mark_observed_stopped(&self, status: SandboxStatus) -> MicrosandboxResult<()> {
+        let db = db::init_global().await?.write();
+        update_sandbox_status(db, self.db_id, status).await
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -2192,6 +2275,25 @@ async fn stop_sandbox_for_replacement(
         run.as_ref().map(|model| model.id),
     )
     .await
+}
+
+fn exit_status_to_sandbox_status(status: &std::process::ExitStatus) -> SandboxStatus {
+    if status.success() {
+        SandboxStatus::Stopped
+    } else {
+        SandboxStatus::Crashed
+    }
+}
+
+#[cfg(unix)]
+fn exit_status_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_status_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 async fn mark_sandbox_stopped_for_replacement(

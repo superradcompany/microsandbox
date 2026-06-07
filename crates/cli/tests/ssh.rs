@@ -37,7 +37,7 @@ async fn msb_ssh_remote_command_uses_native_client() {
         .output()
         .expect("run msb ssh remote command");
 
-    sandbox.stop_and_wait().await.expect("stop sandbox");
+    sandbox.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 
     assert!(
@@ -85,7 +85,7 @@ async fn msb_ssh_interactive_session_works_under_tmux() {
         .await
         .expect("read interactive artifacts");
 
-    sandbox.stop_and_wait().await.expect("stop sandbox");
+    sandbox.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 
     if let Err(message) = result {
@@ -244,7 +244,7 @@ async fn run_tmux_cli_session(
 }
 
 async fn cleanup_sandbox(sandbox: Sandbox, name: &str) {
-    sandbox.stop_and_wait().await.expect("stop sandbox");
+    sandbox.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 }
 

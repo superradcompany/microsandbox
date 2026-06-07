@@ -96,7 +96,7 @@ pub enum MicrosandboxError {
 
     /// A filesystem operation failed inside the sandbox.
     #[error("sandbox fs error: {0}")]
-    SandboxFs(String),
+    SandboxFsOps(String),
 
     /// The requested image was not found.
     #[error("image not found: {0}")]

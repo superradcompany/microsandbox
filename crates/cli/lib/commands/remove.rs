@@ -44,7 +44,7 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
     for name in &names {
         if args.force {
             // Kill the sandbox first if it's running.
-            if let Ok(mut handle) = Sandbox::get(name).await {
+            if let Ok(handle) = Sandbox::get(name).await {
                 let _ = handle.kill().await;
             }
         }

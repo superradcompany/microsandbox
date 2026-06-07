@@ -42,7 +42,7 @@ async def main():
     )
     print(f"HTTPS (no-verify): {output.stdout_text.strip()}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     await Sandbox.remove("net-tls")
 
 

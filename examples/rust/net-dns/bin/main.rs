@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("cloudflare.com: {} address(es)", output.stdout()?.trim());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Sandbox::remove("net-dns").await?;
 
     Ok(())

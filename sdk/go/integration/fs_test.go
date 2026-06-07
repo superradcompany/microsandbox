@@ -173,7 +173,7 @@ func TestFsCopyFromHostAndCopyToHost(t *testing.T) {
 
 // TestFsReadAutoFallbackOnLargeFile is the regression test for the
 // 1-MiB-buffer ceiling. We seed a ~3 MiB file inside the guest and rely on
-// SandboxFs.Read to silently fall back to streaming.
+// SandboxFSOps.Read to silently fall back to streaming.
 func TestFsReadAutoFallbackOnLargeFile(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)

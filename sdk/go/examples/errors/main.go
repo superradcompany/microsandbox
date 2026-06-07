@@ -77,7 +77,7 @@ func main() {
 	// 5. ErrInvalidHandle — closing the same sandbox twice.
 	tmp := boot(ctx, "errors-handle")
 	stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
-	_, _ = tmp.StopAndWait(stopCtx)
+	_ = tmp.Stop(stopCtx)
 	c()
 	if err := tmp.Close(); err != nil {
 		log.Fatalf("first Close: %v", err)
@@ -129,7 +129,7 @@ func boot(ctx context.Context, suffix string) *microsandbox.Sandbox {
 func teardown(sb *microsandbox.Sandbox) {
 	stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 	defer c()
-	_, _ = sb.StopAndWait(stopCtx)
+	_ = sb.Stop(stopCtx)
 	_ = sb.Close()
 	_ = microsandbox.RemoveSandbox(context.Background(), sb.Name())
 }

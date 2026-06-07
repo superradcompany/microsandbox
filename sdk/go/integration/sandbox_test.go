@@ -1004,8 +1004,8 @@ func TestRemoveSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if _, err := sb.StopAndWait(ctx); err != nil {
-		t.Fatalf("StopAndWait: %v", err)
+	if err := sb.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 	if err := sb.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

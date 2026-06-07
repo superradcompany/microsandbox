@@ -498,7 +498,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
-            MicrosandboxError::SandboxFs(_) => error_kind::FILESYSTEM,
+            MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
             MicrosandboxError::SnapshotNotFound(_) => error_kind::SNAPSHOT_NOT_FOUND,
@@ -1999,6 +1999,7 @@ pub unsafe extern "C" fn msb_sandbox_start(
 pub unsafe extern "C" fn msb_sandbox_handle_stop(
     cancel_id: u64,
     name: *const c_char,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
@@ -2006,7 +2007,26 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
-            h.stop().await.map_err(FfiError::from)?;
+            h.stop_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_stop(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_stop().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2016,15 +2036,69 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
 pub unsafe extern "C" fn msb_sandbox_handle_kill(
     cancel_id: u64,
     name: *const c_char,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let mut h = Sandbox::get(&name).await.map_err(FfiError::from)?;
-            h.kill().await.map_err(FfiError::from)?;
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.kill_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_kill(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_kill().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_drain(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_drain().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_wait_until_stopped(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
+            Ok(sandbox_stop_result_json(&result))
         }))
     })
 }
@@ -2090,28 +2164,30 @@ pub unsafe extern "C" fn msb_sandbox_detach(
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox — stop (graceful) and stop_and_wait
+// Sandbox — lifecycle
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_stop(
     cancel_id: u64,
     handle: Handle,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.stop().await.map_err(FfiError::from)?;
+            sb.stop_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Stop and wait for full shutdown. Returns `{"exit_code": <int|null>}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_stop_and_wait(
+pub unsafe extern "C" fn msb_sandbox_request_stop(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2120,40 +2196,33 @@ pub unsafe extern "C" fn msb_sandbox_stop_and_wait(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let status = sb.stop_and_wait().await.map_err(FfiError::from)?;
-            let code = status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "null".into());
-            Ok(format!(r#"{{"exit_code":{code}}}"#))
+            sb.request_stop().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Kill the sandbox immediately (SIGKILL on the VM process).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_kill(
     cancel_id: u64,
     handle: Handle,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.kill().await.map_err(FfiError::from)?;
+            sb.kill_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-// ---------------------------------------------------------------------------
-// Sandbox — drain, wait, owns_lifecycle
-// ---------------------------------------------------------------------------
-
-/// Trigger graceful drain (SIGUSR1). Returns `{"ok":true}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_drain(
+pub unsafe extern "C" fn msb_sandbox_request_kill(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2162,15 +2231,14 @@ pub unsafe extern "C" fn msb_sandbox_drain(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.drain().await.map_err(FfiError::from)?;
+            sb.request_kill().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Wait for the sandbox process to exit. Returns `{"exit_code": <int|null>}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_wait(
+pub unsafe extern "C" fn msb_sandbox_request_drain(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2179,15 +2247,31 @@ pub unsafe extern "C" fn msb_sandbox_wait(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let status = sb.wait().await.map_err(FfiError::from)?;
-            let code = status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "null".into());
-            Ok(format!(r#"{{"exit_code":{code}}}"#))
+            sb.request_drain().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_wait_until_stopped(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.wait_until_stopped().await.map_err(FfiError::from)?;
+            Ok(sandbox_stop_result_json(&result))
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox — owns_lifecycle
+// ---------------------------------------------------------------------------
 
 /// Reports whether this handle owns the sandbox lifecycle (synchronous).
 /// Returns `{"owns":true}` or `{"owns":false}`.
@@ -2265,6 +2349,32 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         name = name_json,
         status = sandbox_status_str(h.status()),
         config = cfg_json,
+    )
+}
+
+fn sandbox_stop_result_json(result: &microsandbox::sandbox::SandboxStopResult) -> String {
+    let name_json = serde_json::to_string(&result.name).unwrap_or_else(|_| "\"\"".into());
+    let source_json = result
+        .source
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .unwrap_or(None)
+        .unwrap_or_else(|| "null".to_string());
+    let exit_code = result
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let signal = result
+        .signal
+        .map(|signal| signal.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        r#"{{"name":{name},"status":"{status}","exit_code":{exit_code},"signal":{signal},"observed_at_unix":{observed_at},"source":{source}}}"#,
+        name = name_json,
+        status = sandbox_status_str(result.status),
+        observed_at = result.observed_at.timestamp(),
+        source = source_json,
     )
 }
 
@@ -2496,7 +2606,7 @@ pub unsafe extern "C" fn msb_sandbox_ssh_connect(
         Ok(Box::pin(async move {
             let client = sb
                 .ssh()
-                .connect_with(|builder| {
+                .open_client_with(|builder| {
                     let mut builder = builder;
                     if let Some(user) = opts.user {
                         builder = builder.user(user);
@@ -2536,7 +2646,7 @@ pub unsafe extern "C" fn msb_sandbox_ssh_server(
         Ok(Box::pin(async move {
             let server = sb
                 .ssh()
-                .server_with(|builder| {
+                .prepare_server_with(|builder| {
                     let mut builder = builder;
                     if let Some(path) = opts.host_key_path {
                         builder = builder.host_key_path(path);
@@ -2584,7 +2694,7 @@ pub unsafe extern "C" fn msb_ssh_server_close(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
+pub unsafe extern "C" fn msb_ssh_server_serve_connection(
     cancel_id: u64,
     server_handle: Handle,
     buf: *mut c_uchar,
@@ -2601,7 +2711,7 @@ pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
                     .clone()
             };
             server
-                .serve(SshStdioStream::new())
+                .serve_connection(SshStdioStream::new())
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
@@ -4261,31 +4371,6 @@ pub unsafe extern "C" fn msb_sandbox_handle_metrics(
                 tx = m.net_tx_bytes,
                 up = m.uptime.as_secs(),
             ))
-        }))
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Sandbox.removePersisted
-// ---------------------------------------------------------------------------
-
-/// Remove the sandbox's persisted filesystem + database state.
-/// The sandbox must be stopped. Consumes the live handle.
-/// Returns `{"ok":true}`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_remove_persisted(
-    cancel_id: u64,
-    handle: Handle,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let sb = remove(handle)?.ok_or_else(|| FfiError::invalid_handle(handle))?;
-        let owned = std::sync::Arc::try_unwrap(sb)
-            .map_err(|_| FfiError::internal("sandbox handle still referenced"))?;
-        Ok(Box::pin(async move {
-            owned.remove_persisted().await.map_err(FfiError::from)?;
-            Ok(r#"{"ok":true}"#.to_string())
         }))
     })
 }

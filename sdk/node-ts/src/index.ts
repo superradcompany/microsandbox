@@ -33,7 +33,7 @@ export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
-export { SandboxSsh, SftpClient, SshClient, SshServer } from "./ssh.js";
+export { SandboxSshOps, SftpClient, SshClient, SshServer } from "./ssh.js";
 export type {
   SshAttachOptions,
   SshClientOptions,
@@ -43,7 +43,7 @@ export type {
 } from "./ssh.js";
 
 // Filesystem
-export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
+export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
 export { Volume } from "./volume.js";
@@ -370,7 +370,7 @@ export {
   PatchFailedError,
   ProtocolError,
   RuntimeError,
-  SandboxFsError,
+  SandboxFsOpsError,
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,

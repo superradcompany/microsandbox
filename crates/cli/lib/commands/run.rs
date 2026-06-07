@@ -200,11 +200,11 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
-            if let Err(e) = sandbox.stop_and_wait().await {
+            if let Err(e) = sandbox.stop().await {
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
             if !is_named {
-                let _ = sandbox.remove_persisted().await;
+                let _ = Sandbox::remove(sandbox.name()).await;
             }
             return Ok(());
         }
@@ -213,13 +213,13 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await;
 
     // Cleanup always runs, even on exec/attach/IO errors.
-    if let Err(e) = sandbox.stop_and_wait().await {
+    if let Err(e) = sandbox.stop().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }
 
     // Remove unnamed (ephemeral) sandboxes.
     if !is_named {
-        let _ = sandbox.remove_persisted().await;
+        let _ = Sandbox::remove(sandbox.name()).await;
     }
 
     handle_exit(result?)

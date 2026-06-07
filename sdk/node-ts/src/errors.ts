@@ -12,7 +12,7 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "terminal"
-  | "sandboxFs"
+  | "sandboxFsOps"
   | "imageNotFound"
   | "imageInUse"
   | "volumeNotFound"
@@ -114,9 +114,9 @@ export class TerminalError extends MicrosandboxError {
   }
 }
 
-export class SandboxFsError extends MicrosandboxError {
+export class SandboxFsOpsError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
-    super("sandboxFs", message, options);
+    super("sandboxFsOps", message, options);
   }
 }
 

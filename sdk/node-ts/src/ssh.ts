@@ -39,7 +39,7 @@ export interface SshServerOptions {
   readonly sftp?: boolean;
 }
 
-export class SandboxSsh {
+export class SandboxSshOps {
   /** @internal */
   private readonly inner: NapiSandbox;
 
@@ -48,14 +48,14 @@ export class SandboxSsh {
     this.inner = inner;
   }
 
-  async connect(opts?: SshClientOptions): Promise<SshClient> {
+  async openClient(opts?: SshClientOptions): Promise<SshClient> {
     const raw = await withMappedErrors(() =>
       this.inner.sshConnect(sshClientOptionsToNapi(opts)),
     );
     return new SshClient(raw);
   }
 
-  async server(opts?: SshServerOptions): Promise<SshServer> {
+  async prepareServer(opts?: SshServerOptions): Promise<SshServer> {
     const raw = await withMappedErrors(() =>
       this.inner.sshServer(sshServerOptionsToNapi(opts)),
     );
@@ -154,8 +154,8 @@ export class SshServer {
     this.inner = inner;
   }
 
-  async serveStdio(): Promise<void> {
-    await withMappedErrors(() => this.inner.serveStdio());
+  async serveConnection(): Promise<void> {
+    await withMappedErrors(() => this.inner.serveConnection());
   }
 
   async close(): Promise<void> {

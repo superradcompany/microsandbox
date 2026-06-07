@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyDict, PyList};
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::metrics::convert_metrics;
-use crate::sandbox::PySandbox;
+use crate::sandbox::{PySandbox, PySandboxStopResult, optional_duration};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -59,6 +60,27 @@ impl PySandboxHandle {
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
         Ok(guard.config_json().to_string())
+    }
+
+    /// Parsed sandbox configuration.
+    fn config(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(guard.config_json()).map_err(|e| to_py_err(e.into()))?;
+        json_value_to_py(py, value)
+    }
+
+    /// Return a fresh handle for the same sandbox.
+    fn refresh<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let refreshed = guard.refresh().await.map_err(to_py_err)?;
+            Ok(PySandboxHandle::from_rust(refreshed))
+        })
     }
 
     /// Creation timestamp as ms since epoch.
@@ -171,91 +193,91 @@ impl PySandboxHandle {
         })
     }
 
-    /// Connect to an already-running sandbox (no lifecycle ownership).
-    ///
-    /// Returns a typed error if the sandbox doesn't respond within ten
-    /// seconds. Use [`connect_with_timeout`](Self::connect_with_timeout)
-    /// to override.
-    fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// Connect to an already-running sandbox.
+    #[pyo3(signature = (timeout = None))]
+    fn connect<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let timeout = optional_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            let sb = guard.connect().await.map_err(to_py_err)?;
+            let sb = match timeout {
+                Some(timeout) => guard
+                    .connect_with_timeout(timeout)
+                    .await
+                    .map_err(to_py_err)?,
+                None => guard.connect().await.map_err(to_py_err)?,
+            };
             Ok(PySandbox::from_rust(sb))
         })
     }
 
-    /// Connect with an explicit timeout in seconds.
-    ///
-    /// If the sandbox doesn't respond within `timeout` seconds, the
-    /// call returns a typed error instead of blocking.
-    fn connect_with_timeout<'py>(
-        &self,
-        py: Python<'py>,
-        timeout: f64,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        if timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "timeout must be non-negative",
-            ));
-        }
+    /// Stop the sandbox gracefully and wait until stopped.
+    #[pyo3(signature = (timeout = None))]
+    fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let timeout = std::time::Duration::from_secs_f64(timeout);
+        let timeout = optional_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            let sb = guard
-                .connect_with_timeout(timeout)
-                .await
-                .map_err(to_py_err)?;
-            Ok(PySandbox::from_rust(sb))
-        })
-    }
-
-    /// Stop the sandbox gracefully.
-    ///
-    /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost across
-    /// a later restart. Waits up to ten seconds for a clean exit; if
-    /// the sandbox is still running after that, it is force-killed. Use
-    /// [`stop_with_timeout`](Self::stop_with_timeout) to override the
-    /// budget.
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            guard.stop().await.map_err(to_py_err)?;
+            match timeout {
+                Some(timeout) => guard.stop_with_timeout(timeout).await.map_err(to_py_err)?,
+                None => guard.stop().await.map_err(to_py_err)?,
+            }
             Ok(())
         })
     }
 
-    /// Stop gracefully with an explicit timeout in seconds.
-    ///
-    /// If the sandbox is still running after `timeout` seconds, it is
-    /// force-killed. `timeout=0` force-kills immediately. The call
-    /// returns successfully either way — it does not surface a timeout
-    /// error.
-    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
-        if timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "timeout must be non-negative",
-            ));
-        }
+    /// Request graceful shutdown without waiting.
+    fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let timeout = std::time::Duration::from_secs_f64(timeout);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            guard.stop_with_timeout(timeout).await.map_err(to_py_err)?;
+            guard.request_stop().await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
     /// Kill the sandbox (SIGKILL).
-    fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (timeout = None))]
+    fn kill<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let timeout = optional_duration(timeout)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            match timeout {
+                Some(timeout) => guard.kill_with_timeout(timeout).await.map_err(to_py_err)?,
+                None => guard.kill().await.map_err(to_py_err)?,
+            }
+            Ok(())
+        })
+    }
+
+    /// Request force termination without waiting.
+    fn request_kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = inner.lock().await;
-            guard.kill().await.map_err(to_py_err)?;
+            let guard = inner.lock().await;
+            guard.request_kill().await.map_err(to_py_err)?;
             Ok(())
+        })
+    }
+
+    /// Request drain without waiting.
+    fn request_drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard.request_drain().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    fn wait_until_stopped<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard.wait_until_stopped().await.map_err(to_py_err)?;
+            Ok(PySandboxStopResult::from_rust(result))
         })
     }
 
@@ -293,5 +315,42 @@ impl PySandboxHandle {
             let snap = guard.snapshot_to(path).await.map_err(to_py_err)?;
             Ok(crate::snapshot::PySnapshot::from_rust(snap))
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    match value {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(value) => Ok(PyBool::new(py, value).to_owned().unbind().into()),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(value.into_pyobject(py)?.unbind().into())
+            } else if let Some(value) = value.as_u64() {
+                Ok(value.into_pyobject(py)?.unbind().into())
+            } else if let Some(value) = value.as_f64() {
+                Ok(value.into_pyobject(py)?.unbind().into())
+            } else {
+                Ok(py.None())
+            }
+        }
+        serde_json::Value::String(value) => Ok(value.into_pyobject(py)?.unbind().into()),
+        serde_json::Value::Array(values) => {
+            let values = values
+                .into_iter()
+                .map(|value| json_value_to_py(py, value))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(py, values)?.unbind().into())
+        }
+        serde_json::Value::Object(values) => {
+            let dict = PyDict::new(py);
+            for (key, value) in values {
+                dict.set_item(key, json_value_to_py(py, value)?)?;
+            }
+            Ok(dict.unbind().into())
+        }
     }
 }
