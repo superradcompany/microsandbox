@@ -1395,17 +1395,18 @@ mod tests {
     #[test]
     fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
         let cfg = GlobalConfig {
-            registries: RegistriesConfig {
-                auth: HashMap::from([(
-                    "ghcr.io".to_string(),
-                    RegistryAuthEntry {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
                         username: "user".to_string(),
                         store: Some(RegistryCredentialStore::Keyring),
                         password_env: None,
                         secret_name: None,
-                    },
-                )]),
-            },
+                    }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 

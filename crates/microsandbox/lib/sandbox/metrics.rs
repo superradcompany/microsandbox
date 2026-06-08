@@ -1,7 +1,8 @@
 //! Sandbox metrics APIs backed by the shared-memory live registry.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::num::NonZero;
+use std::time::{Duration, Instant};
 
 use futures::stream;
 use microsandbox_db::DbReadConnection;
@@ -12,6 +13,15 @@ use crate::db::entity::{run as run_entity, sandbox as sandbox_entity};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::{Sandbox, SandboxConfig, SandboxStatus};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const FIRST_METRICS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FIRST_METRICS_MIN_WAIT: Duration = Duration::from_millis(500);
+const FIRST_METRICS_MAX_WAIT: Duration = Duration::from_secs(10);
+const FIRST_METRICS_INTERVAL_MULTIPLIER: u32 = 3;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -184,8 +194,18 @@ pub(super) async fn metrics_for_sandbox(
     // Run-id lookup only. Falling back to sandbox-id would surface a Stale
     // slot from a prior run, since it carries the same sandbox_id — readers
     // would observe prior-run counters attributed to the current run.
-    let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? else {
-        return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+    let deadline = Instant::now() + first_metrics_wait_timeout(config.effective_metrics_interval());
+    let live = loop {
+        if let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? {
+            break live;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        tokio::time::sleep(FIRST_METRICS_POLL_INTERVAL.min(remaining)).await;
     };
 
     Ok(to_sandbox_metrics(&live, Some(config)))
@@ -268,4 +288,46 @@ fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
 
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
     u64::from(config.memory_mib) * 1024 * 1024
+}
+
+fn first_metrics_wait_timeout(interval: Option<NonZero<u64>>) -> Duration {
+    let Some(interval) = interval else {
+        return Duration::ZERO;
+    };
+
+    Duration::from_millis(interval.get())
+        .saturating_mul(FIRST_METRICS_INTERVAL_MULTIPLIER)
+        .clamp(FIRST_METRICS_MIN_WAIT, FIRST_METRICS_MAX_WAIT)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_metrics_wait_timeout_scales_with_sample_interval() {
+        let interval = NonZero::new(1_000).unwrap();
+
+        assert_eq!(
+            first_metrics_wait_timeout(Some(interval)),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn first_metrics_wait_timeout_is_bounded() {
+        assert_eq!(
+            first_metrics_wait_timeout(Some(NonZero::new(1).unwrap())),
+            FIRST_METRICS_MIN_WAIT
+        );
+        assert_eq!(
+            first_metrics_wait_timeout(Some(NonZero::new(60_000).unwrap())),
+            FIRST_METRICS_MAX_WAIT
+        );
+        assert_eq!(first_metrics_wait_timeout(None), Duration::ZERO);
+    }
 }
