@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from typing import Any
 
 from microsandbox.types import ImageSource, LogReadSource, LogSource, MountConfig, Rlimit, Stdin
@@ -58,7 +58,8 @@ class Sandbox:
     ) -> PullSession: ...
 
     async def name(self) -> str: ...
-    async def owns_lifecycle(self) -> bool: ...
+    @property
+    def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
     def fs(self) -> SandboxFsOps: ...
 

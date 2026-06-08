@@ -33,6 +33,44 @@ func mustField(t *testing.T, m map[string]any, key string) any {
 	return v
 }
 
+func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"image": {
+			"Oci": {
+				"reference": "mirror.gcr.io/library/alpine",
+				"upper_size_mib": 4096
+			}
+		},
+		"cpus": 1,
+		"memory_mib": 512,
+		"workdir": "/",
+		"labels": {"suite": "sdk"},
+		"scripts": {"hello": "echo hi"}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.Name != "go-sdk-example-main" {
+		t.Fatalf("Name = %q", cfg.Name)
+	}
+	if cfg.Image != "mirror.gcr.io/library/alpine" {
+		t.Fatalf("Image = %q", cfg.Image)
+	}
+	if cfg.OCIUpperSizeMiB != 4096 || !cfg.ociUpperSizeSet {
+		t.Fatalf("OCI upper = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
+	}
+	if cfg.CPUs != 1 || cfg.MemoryMiB != 512 || cfg.Workdir != "/" {
+		t.Fatalf("scalar config mismatch: %#v", cfg)
+	}
+	if cfg.Labels["suite"] != "sdk" || cfg.Scripts["hello"] != "echo hi" {
+		t.Fatalf("map config mismatch: labels=%v scripts=%v", cfg.Labels, cfg.Scripts)
+	}
+}
+
 func TestFFIWireShape_WithImage(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"))
 	if v := mustField(t, got, "image"); v != "python:3.12" {
