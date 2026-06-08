@@ -61,6 +61,7 @@ struct MetricsStreamState {
     db: Option<DbReadConnection>,
     run_id: Option<i32>,
     registry: Option<MetricsRegistry>,
+    seen_sample: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -107,6 +108,7 @@ impl Sandbox {
             db: None,
             run_id: None,
             registry: None,
+            seen_sample: false,
         };
 
         stream::unfold(state, move |mut state| {
@@ -240,11 +242,28 @@ async fn metrics_stream_tick(
         .registry
         .as_ref()
         .expect("stream metrics registry initialized");
-    let Some(live) = registry.get_by_run_id(run_id).map_err(metrics_error)? else {
-        state.run_id = None;
-        state.registry = None;
-        return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+    let deadline = Instant::now() + first_metrics_wait_timeout(config.effective_metrics_interval());
+    let live = loop {
+        if let Some(live) = registry.get_by_run_id(run_id).map_err(metrics_error)? {
+            break live;
+        }
+
+        if state.seen_sample {
+            state.run_id = None;
+            state.registry = None;
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            state.run_id = None;
+            state.registry = None;
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        tokio::time::sleep(FIRST_METRICS_POLL_INTERVAL.min(remaining)).await;
     };
+    state.seen_sample = true;
 
     Ok(to_sandbox_metrics(&live, Some(config)))
 }

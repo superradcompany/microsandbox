@@ -39,13 +39,13 @@
 //! |  0x24  _pad0            u32                                     |
 //! |  0x28  started_at_ms    AI64                                    |
 //! |  0x30  sampled_at_ms    AI64  0 until first sample              |
-//! |  0x38  sample_flags     AU32  validity/source bits              |
+//! |  0x38  sample_flags     AU32  source bits for optional fields    |
 //! |  0x3c  -- padding --                                            |
 //! |  0x40  memory_limit     AU64  bytes                             |
 //! |  0x48  vcpu_time_ns     AU64  cumulative guest vCPU time        |
-//! |  0x50  cpu_percent_bits AU32  f32 bits when CPU flag is set     |
+//! |  0x50  cpu_percent_bits AU32  f32 bits, 0 until CPU rate exists  |
 //! |  0x54  -- padding --                                            |
-//! |  0x58  memory_bytes     AU64  when memory-used flag is set      |
+//! |  0x58  memory_bytes     AU64  0 until guest-used memory exists   |
 //! |  0x60  memory_available AU64                                    |
 //! |  0x68  memory_host_rss  AU64                                    |
 //! |  0x70  disk_read_bytes  AU64                                    |
@@ -132,9 +132,9 @@ pub const SLOT_STALE: u32 = 3;
 // Constants: Sample flags
 //--------------------------------------------------------------------------------------------------
 
-/// Sample flag: `cpu_percent` and `vcpu_time_ns` contain valid guest values.
+/// Sample flag: `cpu_percent` and `vcpu_time_ns` contain guest-sourced values.
 pub const SAMPLE_FLAG_CPU: u32 = 1 << 0;
-/// Sample flag: `memory_bytes` contains a valid guest-used value.
+/// Sample flag: `memory_bytes` contains a guest-sourced used-memory value.
 pub const SAMPLE_FLAG_MEMORY_USED: u32 = 1 << 1;
 /// Sample flag: `memory_available_bytes` contains a valid guest value.
 pub const SAMPLE_FLAG_MEMORY_AVAILABLE: u32 = 1 << 2;

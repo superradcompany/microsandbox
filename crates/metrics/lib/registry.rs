@@ -574,12 +574,6 @@ impl MetricsRegistry {
                 return None;
             }
 
-            if !flag_set(sample_flags, SAMPLE_FLAG_CPU)
-                || !flag_set(sample_flags, SAMPLE_FLAG_MEMORY_USED)
-            {
-                return None;
-            }
-
             let timestamp = ms_to_datetime(sampled_at_ms);
             let started_at = ms_to_datetime(started_at_ms);
             let uptime = timestamp
@@ -1574,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_without_required_guest_fields_is_not_visible() {
+    fn sample_without_guest_source_flags_uses_default_values() {
         let name = unique_name("inv");
         let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
         let res = reg
@@ -1609,9 +1603,17 @@ mod tests {
             })
             .unwrap();
 
-        assert!(reg.snapshot().unwrap().is_empty());
-        assert!(reg.get_by_sandbox_id(1).unwrap().is_none());
-        assert!(reg.get_by_run_id(1).unwrap().is_none());
+        let live = reg.get_by_run_id(1).unwrap().unwrap();
+        assert_eq!(live.cpu_percent, 0.0);
+        assert_eq!(live.vcpu_time_ns, 0);
+        assert_eq!(live.memory_bytes, 0);
+        assert_eq!(live.memory_available_bytes, Some(1));
+        assert_eq!(live.memory_host_resident_bytes, Some(1));
+        assert_eq!(live.disk_read_bytes, 1);
+        assert_eq!(live.disk_write_bytes, 1);
+        assert_eq!(live.net_rx_bytes, 1);
+        assert_eq!(live.net_tx_bytes, 1);
+        assert!(reg.get_by_sandbox_id(1).unwrap().is_some());
 
         writer
             .write_sample(SampleWrite {
