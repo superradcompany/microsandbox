@@ -71,6 +71,8 @@
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 >
+> The installer creates command links in `~/.local/bin/` and does not edit shell startup files.
+>
 > On macOS you can also install with Homebrew:
 >
 > ```sh
