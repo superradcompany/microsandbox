@@ -138,6 +138,13 @@ struct CollectorOpts {
     #[arg(long, value_parser = humantime::parse_duration, default_value = "30s")]
     export_timeout: Duration,
 
+    /// Stop emitting a sandbox once its most recent sample is older than this.
+    /// Guards against a stopped sandbox whose shm slot was never released (the
+    /// runtime was killed before releasing it) being re-exported forever with a
+    /// frozen value. `0s` disables. Accepts `30s`, `1m`, etc.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "30s")]
+    max_sample_age: Duration,
+
     /// `MSB_HOME` directory. Defaults to `$MSB_HOME` if set, otherwise
     /// `~/.microsandbox`. Used to derive the shm registry name and locate the
     /// catalog DB for labels.
@@ -261,6 +268,7 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
+        .max_sample_age(Some(args.collector.max_sample_age))
         .register(exporter);
     if let Some(source) = label_source(&args.collector)? {
         builder = builder.enrich_labels(Arc::new(source));
@@ -291,6 +299,7 @@ async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
+        .max_sample_age(Some(args.collector.max_sample_age))
         .register(exporter);
     if let Some(source) = label_source(&args.collector)? {
         builder = builder.enrich_labels(Arc::new(source));

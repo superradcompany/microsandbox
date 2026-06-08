@@ -6,7 +6,7 @@ use crate::error::{MetricsCollectorError, MetricsCollectorResult};
 
 use super::driver::{CollectorConfig, MetricsCollector, MetricsErrorPolicy};
 use super::label_source::LabelSource;
-use super::reader::{CollectFn, enrich_with_labels, registry_collect_fn};
+use super::reader::{CollectFn, enrich_with_labels, filter_stale_samples, registry_collect_fn};
 use super::types::MetricsExporter;
 
 //--------------------------------------------------------------------------------------------------
@@ -21,6 +21,13 @@ pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Default per-exporter collection buffer limit.
 pub const DEFAULT_MAX_BUFFERED_COLLECTIONS: usize = 60;
+
+/// Default max age of a sandbox's most recent sample before the collector stops
+/// emitting it. A running sandbox samples ~1/s; a quiet slot is a stopped
+/// sandbox whose shm slot was never released, which would otherwise be
+/// re-exported with a frozen value forever (microsandbox#941). Generous enough
+/// that a brief sampler stall on a live sandbox does not drop it.
+pub const DEFAULT_MAX_SAMPLE_AGE: Duration = Duration::from_secs(30);
 
 /// Default per-exporter timeout for a single export call.
 pub const DEFAULT_EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +63,7 @@ pub struct MetricsExporterConfig {
 /// Builder for [`MetricsCollector`].
 pub struct MetricsCollectorBuilder {
     collect_interval: Duration,
+    max_sample_age: Option<Duration>,
     default_collector_config: MetricsExporterConfig,
     collectors: Vec<Registered>,
     collect_fn: CollectFn,
@@ -121,6 +129,7 @@ impl MetricsCollectorBuilder {
     pub(crate) fn new(registry_name: String) -> Self {
         Self {
             collect_interval: DEFAULT_COLLECT_INTERVAL,
+            max_sample_age: Some(DEFAULT_MAX_SAMPLE_AGE),
             default_collector_config: MetricsExporterConfig::default(),
             collectors: Vec::new(),
             collect_fn: registry_collect_fn(registry_name),
@@ -130,6 +139,16 @@ impl MetricsCollectorBuilder {
     /// Set the collector-wide interval between shared-memory metrics reads.
     pub fn collect_interval(mut self, interval: Duration) -> Self {
         self.collect_interval = interval;
+        self
+    }
+
+    /// Stop emitting a sandbox once its most recent sample is older than
+    /// `max_age`. Guards against a stopped sandbox whose shm slot was never
+    /// released being re-exported forever with a frozen value
+    /// (microsandbox#941). `None` (or a zero duration) disables the filter.
+    /// Defaults to 30s (`DEFAULT_MAX_SAMPLE_AGE`).
+    pub fn max_sample_age(mut self, max_age: Option<Duration>) -> Self {
+        self.max_sample_age = max_age;
         self
     }
 
@@ -242,9 +261,16 @@ impl MetricsCollectorBuilder {
             }
         }
 
+        // Apply the staleness filter outermost so stopped-but-unreleased slots
+        // are dropped before export (microsandbox#941). Zero/None disables it.
+        let collect_fn = match self.max_sample_age {
+            Some(max_age) if !max_age.is_zero() => filter_stale_samples(self.collect_fn, max_age),
+            _ => self.collect_fn,
+        };
+
         Ok(MetricsCollector::from_config(CollectorConfig {
             collect_interval: self.collect_interval,
-            collect_fn: self.collect_fn,
+            collect_fn,
             collectors,
         }))
     }
