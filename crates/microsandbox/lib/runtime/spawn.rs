@@ -1171,7 +1171,8 @@ fn sandbox_cli_args(
     let mut args = vec![OsString::from("sandbox")];
 
     if let Some(log_level) = config.log_level {
-        args.push(OsString::from(log_level.as_cli_flag()));
+        args.push(OsString::from("--log-level"));
+        args.push(OsString::from(log_level.to_string()));
     }
 
     args.push(OsString::from("--name"));
@@ -1781,7 +1782,10 @@ mod tests {
 
         let args = render_args(&config);
 
-        assert!(args.iter().any(|arg| arg == "--debug"));
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--log-level" && window[1] == "debug")
+        );
     }
 
     #[tokio::test]
@@ -1794,12 +1798,7 @@ mod tests {
 
         let args = render_args(&config);
 
-        assert!(!args.iter().any(|arg| {
-            matches!(
-                arg.as_str(),
-                "--error" | "--warn" | "--info" | "--debug" | "--trace"
-            )
-        }));
+        assert!(!args.iter().any(|arg| arg == "--log-level"));
     }
 
     #[tokio::test]
