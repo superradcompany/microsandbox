@@ -11,6 +11,7 @@ use microsandbox_cli::{
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
 };
+use microsandbox_runtime::logging::LogLevel;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -266,12 +267,12 @@ fn main() {
         // no explicit level is set so lifecycle events and VMM diagnostics
         // are captured in runtime.log for post-mortem debugging.
         Commands::Sandbox(args) => {
-            let sandbox_level = log_level.or(Some(microsandbox_runtime::logging::LogLevel::Info));
+            let sandbox_level = args.log_level.or(Some(LogLevel::Info));
             // The sandbox subprocess's stderr is redirected into
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            sandbox_cmd::run(*args, log_level); // returns `!`
+            sandbox_cmd::run(*args); // returns `!`
         }
         command => {
             // CLI commands write tracing to the user's terminal.

@@ -41,6 +41,10 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub log_dir: PathBuf,
 
+    /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
+    #[arg(long = "log-level", value_name = "LOG_LEVEL")]
+    pub log_level: Option<LogLevel>,
+
     /// Runtime directory (scripts, heartbeat).
     #[arg(long)]
     pub runtime_dir: PathBuf,
@@ -162,7 +166,7 @@ pub struct SandboxArgs {
 //--------------------------------------------------------------------------------------------------
 
 /// Run the sandbox process. This function **never returns**.
-pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
+pub fn run(args: SandboxArgs) -> ! {
     let parent_watchdog = match args
         .parent_watch_fd
         .map(parent_watchdog_from_fd)
@@ -225,7 +229,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
     let config = Config {
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
-        log_level,
+        log_level: args.log_level,
         sandbox_db_path: args.sandbox_db_path,
         sandbox_db_connect_timeout_secs: args.sandbox_db_connect_timeout_secs,
         log_dir: args.log_dir,
