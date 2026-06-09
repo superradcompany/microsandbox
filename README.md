@@ -87,8 +87,6 @@ It uses standard OCI images, starts from your SDK or CLI, and needs no daemon or
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 >
-> The installer creates command links in `~/.local/bin/` and does not edit shell startup files.
->
 > <details>
 > <summary><em>&nbsp;We also support other package managers  →</em></summary>
 >
