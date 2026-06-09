@@ -365,16 +365,11 @@ fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBu
 }
 
 /// Derive the shm registry name from the resolved `MSB_HOME`.
-///
-/// Mirrors `microsandbox::config::Config::metrics_registry_shm_name`:
-/// `{METRICS_SHM_PREFIX}-{stable_hash(home)}-v1`.
 fn resolve_registry_name(msb_home: Option<&std::path::Path>) -> anyhow::Result<String> {
     let home = resolve_msb_home(msb_home)?;
-    let home_hash = microsandbox_utils::stable_hash_path(&home);
-    Ok(format!(
-        "{prefix}-{hash}-v1",
-        prefix = microsandbox_utils::METRICS_SHM_PREFIX,
-        hash = home_hash,
+    Ok(microsandbox_utils::metrics_registry_shm_name(
+        &home,
+        microsandbox_metrics::REGISTRY_ABI_VERSION,
     ))
 }
 
@@ -432,4 +427,27 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
         return Err(format!("empty key in {s:?}"));
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_registry_name_follows_abi_version() {
+        let home = std::path::Path::new("/tmp/msb-metrics-home");
+
+        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 2);
+        assert_eq!(
+            resolve_registry_name(Some(home)).unwrap(),
+            microsandbox_utils::metrics_registry_shm_name(
+                home,
+                microsandbox_metrics::REGISTRY_ABI_VERSION,
+            )
+        );
+    }
 }

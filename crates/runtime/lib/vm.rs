@@ -334,10 +334,12 @@ pub fn enter(config: Config) -> ! {
     // Capture log_dir before moving config into run() — we need it after
     // a failure to write boot-error.json, regardless of how far run() got.
     let log_dir = config.log_dir.clone();
+    let metrics_slot = config.metrics_slot.clone();
     let result = run(config);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
+            release_reserved_metrics_slot(metrics_slot.as_ref());
             // Write the structured boot-error record so the parent CLI
             // can surface a real cause inline. Best-effort: any failure
             // to write falls back to the existing eprintln path, which
@@ -433,7 +435,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         && config.metrics_slot.is_some()
         && config.metrics_sample_interval_ms.is_some()
     {
-        release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+        release_reserved_metrics_slot(config.metrics_slot.as_ref());
     }
 
     // Build the VM with an exit observer for DB cleanup and socket removal.
@@ -535,7 +537,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 if let Some(writer) = metrics_writer.clone() {
                     let _ = writer.release(ReleaseMode::Free);
                 } else {
-                    release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+                    release_reserved_metrics_slot(config.metrics_slot.as_ref());
                 }
                 return Err(e);
             }
@@ -557,7 +559,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         if let Some(writer) = metrics_writer.clone() {
             let _ = writer.release(ReleaseMode::Free);
         } else {
-            release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+            release_reserved_metrics_slot(config.metrics_slot.as_ref());
         }
         let _ = std::fs::remove_file(&config.agent_sock_path);
         return Err(e);
@@ -1089,12 +1091,11 @@ fn activate_metrics_writer(
     }
 }
 
-/// Best-effort release of a metrics slot. Used when activation has not yet
-/// happened (e.g. build_vm failure) and the slot would otherwise leak.
-fn release_metrics_slot(handoff: Option<&MetricsSlotHandoff>, mode: ReleaseMode) {
+/// Best-effort release of a metrics slot that has not been activated yet.
+fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
     let Some(handoff) = handoff else { return };
     if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
-        let _ = reg.release(handoff.slot, handoff.generation, mode);
+        let _ = reg.release_reserved(handoff.slot, handoff.generation);
     }
 }
 

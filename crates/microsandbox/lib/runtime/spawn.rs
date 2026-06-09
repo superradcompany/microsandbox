@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
-use microsandbox_metrics::{MetricsRegistry, ReleaseMode, ReserveSlot, SlotReservation};
+use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
@@ -38,7 +38,7 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult, config,
-    runtime::handle::ProcessHandle,
+    runtime::handle::{MetricsReservationCleanup, ProcessHandle},
     sandbox::{
         DiskImageFormat, HostPermissions, MountOptions, Rlimit, RootfsSource, SandboxConfig,
         StatVirtualization, VolumeMount,
@@ -181,11 +181,7 @@ pub async fn spawn_sandbox(
         SpawnMode::Attached => match create_parent_watchdog_pipe() {
             Ok(pipe) => Some(pipe),
             Err(err) => {
-                release_metrics_reservation(
-                    config,
-                    metrics_reservation.as_ref(),
-                    ReleaseMode::Free,
-                );
+                release_metrics_reservation(config, metrics_reservation.as_ref());
                 return Err(err);
             }
         },
@@ -261,7 +257,7 @@ pub async fn spawn_sandbox(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(e.into());
         }
     };
@@ -269,7 +265,7 @@ pub async fn spawn_sandbox(
     let _pid = match child.id() {
         Some(pid) => pid,
         None => {
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(MicrosandboxError::Runtime(
                 "sandbox process exited immediately".into(),
             ));
@@ -281,7 +277,7 @@ pub async fn spawn_sandbox(
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(MicrosandboxError::Runtime(
                 "failed to capture sandbox stdout".into(),
             ));
@@ -299,12 +295,12 @@ pub async fn spawn_sandbox(
         Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(err.into());
         }
         Err(_) => {
             terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
@@ -315,7 +311,7 @@ pub async fn spawn_sandbox(
         Ok(info) => info,
         Err(_) => {
             let status = terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            release_metrics_reservation(config, metrics_reservation.as_ref());
             tracing::debug!(
                 raw_line = ?line,
                 exit_status = ?status,
@@ -341,6 +337,13 @@ pub async fn spawn_sandbox(
         file_mounts_staging,
         disk_locks,
         parent_watchdog.map(|pipe| pipe.write_fd),
+        metrics_reservation.as_ref().map(|reservation| {
+            MetricsReservationCleanup::new(
+                reservation.shm_name.clone(),
+                reservation.slot,
+                reservation.generation,
+            )
+        }),
     );
 
     Ok((handle, agent_sock_path))
@@ -537,11 +540,7 @@ fn unix_socket_path_capacity() -> usize {
 }
 
 /// Best-effort release of a reservation when spawn cannot continue.
-fn release_metrics_reservation(
-    config: &SandboxConfig,
-    reservation: Option<&MetricsReservation>,
-    mode: ReleaseMode,
-) {
+fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&MetricsReservation>) {
     let Some(reservation) = reservation else {
         return;
     };
@@ -552,7 +551,7 @@ fn release_metrics_reservation(
             return;
         }
     };
-    if let Err(err) = registry.release(reservation.slot, reservation.generation, mode) {
+    if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
         tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
     }
 }
@@ -1989,7 +1988,7 @@ mod tests {
             .unwrap();
 
         let reservation = super::MetricsReservation {
-            shm_name: "/msb-met-deadbeef-v1".to_string(),
+            shm_name: "/msb-met-deadbeef-v2".to_string(),
             slot: 17,
             generation: 99,
         };
@@ -2015,7 +2014,7 @@ mod tests {
         assert!(
             rendered
                 .windows(2)
-                .any(|p| p == ["--metrics-shm-name", "/msb-met-deadbeef-v1"]),
+                .any(|p| p == ["--metrics-shm-name", "/msb-met-deadbeef-v2"]),
             "missing --metrics-shm-name in {rendered:?}"
         );
         assert!(
