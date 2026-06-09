@@ -1424,6 +1424,8 @@ type RegistryAuthOptions struct {
 type MountSpec struct {
 	Bind               string `json:"bind,omitempty"`
 	Named              string `json:"named,omitempty"`
+	NamedMode          string `json:"named_mode,omitempty"`
+	NamedKind          string `json:"named_kind,omitempty"`
 	Tmpfs              bool   `json:"tmpfs,omitempty"`
 	Disk               string `json:"disk,omitempty"`
 	Format             string `json:"format,omitempty"`
@@ -1433,6 +1435,7 @@ type MountSpec struct {
 	Nosuid             bool   `json:"nosuid,omitempty"`
 	Nodev              bool   `json:"nodev,omitempty"`
 	SizeMiB            uint32 `json:"size_mib,omitempty"`
+	QuotaMiB           uint32 `json:"quota_mib,omitempty"`
 	StatVirtualization string `json:"stat_virtualization,omitempty"`
 	HostPermissions    string `json:"host_permissions,omitempty"`
 }

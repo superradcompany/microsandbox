@@ -1325,6 +1325,7 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
+                create: _,
             } => match named_volumes.get(name) {
                 Some(ResolvedNamedVolume {
                     kind: VolumeKind::Disk,

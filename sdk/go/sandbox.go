@@ -105,6 +105,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
+				NamedMode:          m.NamedMode,
+				NamedKind:          m.NamedKind,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
 				Format:             m.Format,
@@ -114,6 +116,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				Nosuid:             m.Nosuid,
 				Nodev:              m.Nodev,
 				SizeMiB:            m.SizeMiB,
+				QuotaMiB:           m.QuotaMiB,
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
 			}

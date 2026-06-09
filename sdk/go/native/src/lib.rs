@@ -1029,6 +1029,8 @@ struct SnapshotExportOpts {
 struct MountSpec {
     bind: Option<String>,
     named: Option<String>,
+    named_mode: Option<String>,
+    named_kind: Option<String>,
     #[serde(default)]
     tmpfs: bool,
     /// Mount a host disk image (.img/.qcow2/etc.).
@@ -1046,6 +1048,7 @@ struct MountSpec {
     #[serde(default)]
     nodev: bool,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
     stat_virtualization: Option<String>,
@@ -1620,6 +1623,11 @@ fn apply_volume(
 
     let bind = m.bind.clone();
     let named = m.named.clone();
+    let named_mode = m
+        .named_mode
+        .clone()
+        .unwrap_or_else(|| "existing".to_string());
+    let named_kind = m.named_kind.clone().unwrap_or_else(|| "dir".to_string());
     let tmpfs = m.tmpfs;
     let disk = m.disk.clone();
     let fstype = m.fstype.clone();
@@ -1628,6 +1636,18 @@ fn apply_volume(
     let nosuid = m.nosuid;
     let nodev = m.nodev;
     let size_mib = m.size_mib;
+    let quota_mib = m.quota_mib;
+
+    if !matches!(named_mode.as_str(), "existing" | "create" | "ensure-exists") {
+        return Err(FfiError::invalid_argument(format!(
+            "invalid named_mode {named_mode:?} (expected existing|create|ensure-exists)"
+        )));
+    }
+    if !matches!(named_kind.as_str(), "dir" | "directory" | "disk") {
+        return Err(FfiError::invalid_argument(format!(
+            "invalid named_kind {named_kind:?} (expected dir|disk)"
+        )));
+    }
 
     let kinds_set: u8 =
         bind.is_some() as u8 + named.is_some() as u8 + tmpfs as u8 + disk.is_some() as u8;
@@ -1641,7 +1661,26 @@ fn apply_volume(
         let mut mb = if let Some(ref host) = bind {
             mb.bind(host)
         } else if let Some(ref name) = named {
-            mb.named(name)
+            mb.named_with(name, |mut named| {
+                named = match named_mode.as_str() {
+                    "existing" => named.existing(),
+                    "create" => named.create(),
+                    "ensure-exists" => named.ensure_exists(),
+                    _ => unreachable!("validated named volume mode"),
+                };
+                named = match named_kind.as_str() {
+                    "dir" | "directory" => named.directory(),
+                    "disk" => named.disk(),
+                    _ => unreachable!("validated named volume kind"),
+                };
+                if let Some(size_mib) = size_mib {
+                    named = named.size(size_mib);
+                }
+                if let Some(quota_mib) = quota_mib {
+                    named = named.quota(quota_mib);
+                }
+                named
+            })
         } else if tmpfs {
             mb.tmpfs()
         } else if let Some(ref host) = disk {
@@ -1667,7 +1706,7 @@ fn apply_volume(
         if nodev {
             mb = mb.nodev();
         }
-        if let Some(siz) = size_mib {
+        if tmpfs && let Some(siz) = size_mib {
             mb = mb.size(siz);
         }
         if let Some(p) = stat_virt {

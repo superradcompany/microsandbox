@@ -55,6 +55,7 @@ use crate::{
         },
     },
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
+    volume::VolumeProvision,
 };
 
 use self::attach::AttachOptions;
@@ -70,6 +71,15 @@ use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 /// metrics slot, so SDK names can be copied into live metrics without
 /// truncation.
 pub const MAX_SANDBOX_NAME_BYTES: usize = microsandbox_metrics::SLOT_NAME_BYTES;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct InsertedSandboxRecord {
+    sandbox_id: i32,
+    inserted_named_volume_creates: Vec<types::NamedVolumeCreate>,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -105,13 +115,9 @@ pub use ssh::{
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, Patch, PatchBuilder, RootfsSource, SecurityProfile, StatVirtualization,
-    VolumeMount,
+    MountOptions, NamedVolumeBuilder, NamedVolumeMode, Patch, PatchBuilder, RootfsSource,
+    SecurityProfile, StatVirtualization, VolumeMount,
 };
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
 
 /// Transient registry overrides from the SDK, merged with global config at pull time.
 pub(crate) struct RegistryOverrides {
@@ -400,25 +406,37 @@ impl Sandbox {
         }
 
         // Insert the sandbox record and keep its stable database ID.
-        // Auto-volumes (from `SandboxBuilder::auto_volume`) are inserted
-        // in the same transaction so a concurrent `Volume::list` can't
-        // see them without the owning sandbox.
+        // Sandbox-created named volumes are inserted in the same transaction
+        // so a concurrent `Volume::list` can't observe one before the owning
+        // sandbox exists.
         let write_db = db.write();
-        let sandbox_id = insert_sandbox_record(write_db, &config).await?;
+        let named_volume_creates = named_volume_creates(&config);
+        let _named_volume_locks = lock_named_volume_create_names(&named_volume_creates)?;
+        let inserted_record = insert_sandbox_record_with_named_volumes(write_db, &config).await?;
+        let sandbox_id = inserted_record.sandbox_id;
+        let inserted_named_volume_creates = inserted_record.inserted_named_volume_creates;
         tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
 
-        // Materialise the on-disk directory for each auto-volume after
-        // the transaction commits. On failure, remove any directories
-        // we already created plus the sandbox row so the partial state
-        // doesn't leak.
-        if !config.auto_volumes.is_empty()
-            && let Err(e) = materialise_auto_volume_dirs(&config.auto_volumes).await
+        // Materialise the on-disk directory for each sandbox-created volume after
+        // the transaction commits. On failure, remove only directories
+        // this create attempt actually materialised plus the DB rows so
+        // unrelated orphaned host data is never deleted.
+        let mut materialised_named_volumes = Vec::new();
+        if !inserted_named_volume_creates.is_empty()
+            && let Err(e) = materialise_named_volume_dirs(
+                &inserted_named_volume_creates,
+                &mut materialised_named_volumes,
+            )
+            .await
         {
-            rollback_auto_volume_dirs(&config.auto_volumes).await;
-            let _ = remove_sandbox_row(write_db, sandbox_id).await;
-            for intent in &config.auto_volumes {
-                let _ = remove_volume_row(write_db, &intent.name).await;
-            }
+            cleanup_named_volume_create_failure(
+                write_db,
+                sandbox_id,
+                &inserted_named_volume_creates,
+                &materialised_named_volumes,
+                true,
+            )
+            .await;
             return Err(e);
         }
 
@@ -428,17 +446,22 @@ impl Sandbox {
         // exit observer cannot be relied upon if the child was SIGKILL'd
         // before activation, and `reconcile_sandbox_runtime_state` will not
         // run reaper cleanup for a Stopped sandbox.
-        // Move auto_volumes out so we can use them after the config
-        // is consumed by create_inner.
-        let auto_volumes = std::mem::take(&mut config.auto_volumes);
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
-                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                 free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
-                rollback_auto_volume_dirs(&auto_volumes).await;
-                for intent in &auto_volumes {
-                    let _ = remove_volume_row(write_db, &intent.name).await;
+                if inserted_named_volume_creates.is_empty() {
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                } else {
+                    cleanup_named_volume_create_failure(
+                        write_db,
+                        sandbox_id,
+                        &inserted_named_volume_creates,
+                        &materialised_named_volumes,
+                        true,
+                    )
+                    .await;
                 }
                 return Err(e);
             }
@@ -450,8 +473,19 @@ impl Sandbox {
         ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
         {
             let _ = sandbox.stop().await;
-            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
             free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
+            if inserted_named_volume_creates.is_empty() {
+                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+            } else {
+                cleanup_named_volume_create_failure(
+                    write_db,
+                    sandbox_id,
+                    &inserted_named_volume_creates,
+                    &materialised_named_volumes,
+                    true,
+                )
+                .await;
+            }
             return Err(err);
         }
 
@@ -461,26 +495,48 @@ impl Sandbox {
                 Ok(metadata) if metadata.kind == fs::FsEntryKind::Directory => {}
                 Ok(_) => {
                     let _ = sandbox.stop().await;
-                    let _ =
-                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                     free_metrics_slot_for(
                         sandbox_id,
                         None,
                         microsandbox_metrics::ReleaseMode::Free,
                     );
+                    if inserted_named_volume_creates.is_empty() {
+                        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped)
+                            .await;
+                    } else {
+                        cleanup_named_volume_create_failure(
+                            write_db,
+                            sandbox_id,
+                            &inserted_named_volume_creates,
+                            &materialised_named_volumes,
+                            true,
+                        )
+                        .await;
+                    }
                     return Err(MicrosandboxError::InvalidConfig(format!(
                         "workdir is not a directory in guest: {workdir}"
                     )));
                 }
                 Err(error) => {
                     let _ = sandbox.stop().await;
-                    let _ =
-                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                     free_metrics_slot_for(
                         sandbox_id,
                         None,
                         microsandbox_metrics::ReleaseMode::Free,
                     );
+                    if inserted_named_volume_creates.is_empty() {
+                        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped)
+                            .await;
+                    } else {
+                        cleanup_named_volume_create_failure(
+                            write_db,
+                            sandbox_id,
+                            &inserted_named_volume_creates,
+                            &materialised_named_volumes,
+                            true,
+                        )
+                        .await;
+                    }
                     return Err(MicrosandboxError::InvalidConfig(format!(
                         "workdir does not exist in guest: {workdir}: {error}"
                     )));
@@ -2410,18 +2466,26 @@ fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> Microsand
 }
 
 /// Insert the sandbox record in the database and return its ID.
+#[cfg(test)]
 async fn insert_sandbox_record(
     db: &DbWriteConnection,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
+    Ok(insert_sandbox_record_with_named_volumes(db, config)
+        .await?
+        .sandbox_id)
+}
+
+async fn insert_sandbox_record_with_named_volumes(
+    db: &DbWriteConnection,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<InsertedSandboxRecord> {
     let config_json = serde_json::to_string(config)?;
-    // `auto_volumes` is `#[serde(skip)]` so the cloned config carries
-    // no record of these intents — capture them before the move.
-    let auto_volumes = config.auto_volumes.clone();
+    let named_volume_creates = named_volume_creates(config);
 
     db.transaction(|txn| {
         let config_json = config_json.clone();
-        let auto_volumes = auto_volumes.clone();
+        let named_volume_creates = named_volume_creates.clone();
         async move {
             let now = chrono::Utc::now().naive_utc();
             let model = sandbox_entity::ActiveModel {
@@ -2450,44 +2514,99 @@ async fn insert_sandbox_record(
                     .await?;
             }
 
-            for intent in &auto_volumes {
+            let mut inserted_named_volume_creates = Vec::new();
+            for create in &named_volume_creates {
                 let vol_config = crate::volume::VolumeConfig {
-                    name: intent.name.clone(),
-                    kind: intent.kind,
-                    quota_mib: intent.quota_mib,
-                    capacity_mib: intent.capacity_mib,
-                    labels: intent.labels.clone(),
+                    name: create.name.clone(),
+                    kind: create.kind,
+                    quota_mib: create.quota_mib,
+                    capacity_mib: create.capacity_mib,
+                    labels: create.labels.clone(),
                 };
-                crate::volume::Volume::create_in_transaction(&txn, &vol_config).await?;
+                if matches!(
+                    crate::volume::Volume::provision_in_transaction(
+                        &txn,
+                        &vol_config,
+                        create.mode,
+                    )
+                    .await?,
+                    VolumeProvision::Inserted
+                ) {
+                    inserted_named_volume_creates.push(create.clone());
+                }
             }
 
-            Ok((txn, sandbox_id))
+            Ok((
+                txn,
+                InsertedSandboxRecord {
+                    sandbox_id,
+                    inserted_named_volume_creates,
+                },
+            ))
         }
     })
     .await
 }
 
-async fn materialise_auto_volume_dirs(
-    intents: &[crate::sandbox::config::AutoVolumeIntent],
+fn named_volume_creates(config: &SandboxConfig) -> Vec<types::NamedVolumeCreate> {
+    config
+        .mounts
+        .iter()
+        .filter_map(|mount| mount.named_create().cloned())
+        .collect()
+}
+
+fn lock_named_volume_create_names(
+    creates: &[types::NamedVolumeCreate],
+) -> MicrosandboxResult<Vec<std::fs::File>> {
+    let mut names: Vec<&str> = creates.iter().map(|create| create.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+
+    names
+        .into_iter()
+        .map(crate::volume::lock_volume_name)
+        .collect()
+}
+
+async fn materialise_named_volume_dirs(
+    creates: &[types::NamedVolumeCreate],
+    materialised: &mut Vec<String>,
 ) -> MicrosandboxResult<()> {
-    for intent in intents {
+    for create in creates {
         let vol_config = crate::volume::VolumeConfig {
-            name: intent.name.clone(),
-            kind: intent.kind,
-            quota_mib: intent.quota_mib,
-            capacity_mib: intent.capacity_mib,
-            labels: intent.labels.clone(),
+            name: create.name.clone(),
+            kind: create.kind,
+            quota_mib: create.quota_mib,
+            capacity_mib: create.capacity_mib,
+            labels: create.labels.clone(),
         };
         crate::volume::Volume::materialise_for(&vol_config).await?;
+        materialised.push(create.name.clone());
     }
     Ok(())
 }
 
-async fn rollback_auto_volume_dirs(intents: &[crate::sandbox::config::AutoVolumeIntent]) {
-    for intent in intents {
-        let path = crate::volume::Volume::path_for(&intent.name);
+async fn rollback_named_volume_dirs(names: &[String]) {
+    for name in names {
+        let path = crate::volume::Volume::path_for(name);
         let _ = tokio::fs::remove_dir_all(&path).await;
     }
+}
+
+async fn cleanup_named_volume_create_failure(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    creates: &[types::NamedVolumeCreate],
+    materialised: &[String],
+    remove_sandbox: bool,
+) {
+    rollback_named_volume_dirs(materialised).await;
+    if remove_sandbox {
+        let _ = remove_sandbox_row(db, sandbox_id).await;
+    }
+    let names: Vec<String> = creates.iter().map(|create| create.name.clone()).collect();
+    let _ = remove_volume_rows(db, &names).await;
 }
 
 async fn remove_sandbox_row(db: &DbWriteConnection, sandbox_id: i32) -> MicrosandboxResult<()> {
@@ -2500,14 +2619,19 @@ async fn remove_sandbox_row(db: &DbWriteConnection, sandbox_id: i32) -> Microsan
     .await
 }
 
-async fn remove_volume_row(db: &DbWriteConnection, name: &str) -> MicrosandboxResult<()> {
+async fn remove_volume_rows(db: &DbWriteConnection, names: &[String]) -> MicrosandboxResult<()> {
     use crate::db::entity::volume as volume_entity;
-    let name = name.to_string();
+
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    let names = names.to_vec();
     db.transaction(|txn| {
-        let name = name.clone();
+        let names = names.clone();
         async move {
             volume_entity::Entity::delete_many()
-                .filter(volume_entity::Column::Name.eq(name))
+                .filter(volume_entity::Column::Name.is_in(names))
                 .exec(&txn)
                 .await?;
             Ok((txn, ()))
@@ -2634,11 +2758,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter, SandboxStatus,
-        digest_pinned_reference, filter_sandbox_ids, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, validate_labels, validate_rootfs_source,
-        validate_sandbox_name_for_runtime,
+        HostPermissions, MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter,
+        SandboxStatus, StatVirtualization, VolumeMount, digest_pinned_reference,
+        filter_sandbox_ids, insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
+        reconcile_sandbox_runtime_state, remove_dir_if_exists, validate_labels,
+        validate_rootfs_source, validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2664,6 +2788,33 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("microsandbox-rootfs-{suffix}-{nanos}"))
+    }
+
+    fn unique_volume_name(prefix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{prefix}-{nanos}")
+    }
+
+    fn named_create_mount(name: impl Into<String>, guest: impl Into<String>) -> VolumeMount {
+        let name = name.into();
+        VolumeMount::Named {
+            create: Some(super::types::NamedVolumeCreate {
+                mode: super::types::NamedVolumeMode::Create,
+                name: name.clone(),
+                kind: crate::volume::VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            }),
+            name,
+            guest: guest.into(),
+            options: Default::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        }
     }
 
     fn dead_pid() -> i32 {
@@ -3109,9 +3260,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_sandbox_record_atomic_with_auto_volumes() {
+    async fn test_insert_sandbox_record_atomic_with_named_volume_creates() {
         use crate::db::entity::volume as volume_entity;
-        use crate::sandbox::config::AutoVolumeIntent;
 
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3122,13 +3272,15 @@ mod tests {
             image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
-        config.auto_volumes.push(AutoVolumeIntent {
-            name: "atomic-host-tmp".into(),
-            kind: crate::volume::VolumeKind::Directory,
-            quota_mib: None,
-            capacity_mib: None,
-            labels: vec![("owner".into(), "atomic-host".into())],
-        });
+        let mut mount = named_create_mount("atomic-host-tmp", "/tmp");
+        if let VolumeMount::Named {
+            create: Some(create),
+            ..
+        } = &mut mount
+        {
+            create.labels.push(("owner".into(), "atomic-host".into()));
+        }
+        config.mounts.push(mount);
 
         let _sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
@@ -3151,7 +3303,6 @@ mod tests {
     #[tokio::test]
     async fn test_insert_sandbox_record_rolls_back_when_volume_name_collides() {
         use crate::db::entity::volume as volume_entity;
-        use crate::sandbox::config::AutoVolumeIntent;
 
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3175,13 +3326,7 @@ mod tests {
             image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
-        config.auto_volumes.push(AutoVolumeIntent {
-            name: "collision".into(),
-            kind: crate::volume::VolumeKind::Directory,
-            quota_mib: None,
-            capacity_mib: None,
-            labels: Vec::new(),
-        });
+        config.mounts.push(named_create_mount("collision", "/tmp"));
 
         let result = insert_sandbox_record(pools.write(), &config).await;
         assert!(
@@ -3199,6 +3344,167 @@ mod tests {
             sb.is_none(),
             "transaction must roll back the sandbox row when volume insert fails"
         );
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_ensure_reuses_existing_named_volume() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let now = chrono::Utc::now().naive_utc();
+        volume_entity::Entity::insert(volume_entity::ActiveModel {
+            name: Set("existing-cache".into()),
+            kind: Set(crate::volume::VolumeKind::Directory.as_str().to_string()),
+            labels: Set(Some(
+                serde_json::to_string(&vec![("owner".to_string(), "tests".to_string())]).unwrap(),
+            )),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        let mut config = SandboxConfig {
+            name: "ensure-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        let mut mount = named_create_mount("existing-cache", "/cache");
+        if let VolumeMount::Named {
+            create: Some(create),
+            ..
+        } = &mut mount
+        {
+            create.mode = super::types::NamedVolumeMode::EnsureExists;
+        }
+        config.mounts.push(mount);
+
+        let record = super::insert_sandbox_record_with_named_volumes(pools.write(), &config)
+            .await
+            .unwrap();
+
+        assert!(record.inserted_named_volume_creates.is_empty());
+        let sb = super::sandbox_entity::Entity::find_by_id(record.sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_named_volume_create_cleanup_preserves_unmaterialised_orphan_dir() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let name = unique_volume_name("orphan-named-volume");
+        let path = crate::volume::Volume::path_for(&name);
+        let marker = path.join("marker");
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path).await.unwrap();
+        }
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        tokio::fs::write(&marker, b"keep").await.unwrap();
+
+        let mut config = SandboxConfig {
+            name: "orphan-cleanup-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.mounts.push(named_create_mount(name.clone(), "/tmp"));
+
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        let creates = super::named_volume_creates(&config);
+        let mut materialised = Vec::new();
+        let err = super::materialise_named_volume_dirs(&creates, &mut materialised)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+
+        super::cleanup_named_volume_create_failure(
+            pools.write(),
+            sandbox_id,
+            &creates,
+            &materialised,
+            true,
+        )
+        .await;
+
+        assert!(
+            marker.exists(),
+            "cleanup must not delete a directory it did not materialise"
+        );
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&name))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(vol.is_none());
+        let sb = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_none());
+
+        tokio::fs::remove_dir_all(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_named_volume_create_cleanup_removes_materialised_dirs_and_rows() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let name = unique_volume_name("materialised-named-volume");
+        let path = crate::volume::Volume::path_for(&name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path).await.unwrap();
+        }
+
+        let mut config = SandboxConfig {
+            name: "materialised-cleanup-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.mounts.push(named_create_mount(name.clone(), "/tmp"));
+
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        let creates = super::named_volume_creates(&config);
+        let mut materialised = Vec::new();
+        super::materialise_named_volume_dirs(&creates, &mut materialised)
+            .await
+            .unwrap();
+        assert_eq!(materialised, vec![name.clone()]);
+        assert!(path.exists());
+
+        super::cleanup_named_volume_create_failure(
+            pools.write(),
+            sandbox_id,
+            &creates,
+            &materialised,
+            true,
+        )
+        .await;
+
+        assert!(!path.exists());
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&name))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(vol.is_none());
+        let sb = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_none());
     }
 
     #[tokio::test]

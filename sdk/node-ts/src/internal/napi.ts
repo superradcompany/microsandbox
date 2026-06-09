@@ -937,6 +937,13 @@ export interface NapiBuiltNetworkPolicyDestination {
 export interface NapiMountBuilder {
   bind(host: string): this;
   named(name: string): this;
+  namedWith(
+    name: string,
+    mode?: "existing" | "create" | "ensure-exists",
+    kind?: "dir" | "directory" | "disk",
+    sizeMib?: number,
+    quotaMib?: number,
+  ): this;
   tmpfs(): this;
   disk(host: string): this;
   format(format: string): this;

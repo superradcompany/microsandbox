@@ -204,6 +204,11 @@ pub enum VolumeMount {
         name: String,
         /// Guest mount path.
         guest: String,
+        /// Creation metadata for sandbox-time named volume provisioning.
+        ///
+        /// This is transient and intentionally skipped when sandbox configs are
+        /// persisted; restarting a sandbox mounts the already-created volume.
+        create: Option<NamedVolumeCreate>,
         /// Guest mount behavior.
         options: MountOptions,
         /// Guest-visible stat virtualization policy.
@@ -252,14 +257,16 @@ pub struct MountBuilder {
     disk_fstype: Option<String>,
     stat_virtualization: Option<StatVirtualization>,
     host_permissions: Option<HostPermissions>,
-    create_intent: Option<super::config::AutoVolumeIntent>,
     error: Option<crate::MicrosandboxError>,
 }
 
 /// Internal kind for the mount builder.
 enum MountKind {
     Bind(PathBuf),
-    Named(String),
+    Named {
+        name: String,
+        create: Option<NamedVolumeCreate>,
+    },
     Tmpfs,
     Disk(PathBuf),
     Unset,
@@ -356,15 +363,40 @@ pub enum Patch {
     },
 }
 
-/// Sub-builder for [`MountBuilder::create_named_with`].
-pub struct VolumeBuilder {
-    intent: super::config::AutoVolumeIntent,
+/// Creation metadata for sandbox-time named volume provisioning.
+///
+/// Values are produced by [`MountBuilder::named_with`].
+#[derive(Debug, Clone)]
+pub struct NamedVolumeCreate {
+    pub(crate) mode: NamedVolumeMode,
+    pub(crate) name: String,
+    pub(crate) kind: crate::volume::VolumeKind,
+    pub(crate) quota_mib: Option<u32>,
+    pub(crate) capacity_mib: Option<u32>,
+    pub(crate) labels: Vec<(String, String)>,
 }
 
-impl VolumeBuilder {
+/// Sandbox-time behavior for a named volume mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedVolumeMode {
+    /// Require the named volume to already exist.
+    Existing,
+    /// Create the named volume and fail if it already exists.
+    Create,
+    /// Ensure the named volume exists, or reuse a compatible existing volume.
+    EnsureExists,
+}
+
+/// Sub-builder for [`MountBuilder::named_with`].
+pub struct NamedVolumeBuilder {
+    create: NamedVolumeCreate,
+}
+
+impl NamedVolumeBuilder {
     pub(crate) fn new(name: String) -> Self {
         Self {
-            intent: super::config::AutoVolumeIntent {
+            create: NamedVolumeCreate {
+                mode: NamedVolumeMode::Existing,
                 name,
                 kind: crate::volume::VolumeKind::Directory,
                 quota_mib: None,
@@ -374,26 +406,96 @@ impl VolumeBuilder {
         }
     }
 
+    /// Require the volume to already exist.
+    pub fn existing(mut self) -> Self {
+        self.create.mode = NamedVolumeMode::Existing;
+        self
+    }
+
+    /// Create the volume and fail if it already exists.
+    pub fn create(mut self) -> Self {
+        self.create.mode = NamedVolumeMode::Create;
+        self
+    }
+
+    /// Create the volume if it does not exist, or reuse a compatible existing volume.
+    pub fn ensure_exists(mut self) -> Self {
+        self.create.mode = NamedVolumeMode::EnsureExists;
+        self
+    }
+
     /// Override the volume name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.intent.name = name.into();
+        self.create.name = name.into();
+        self
+    }
+
+    /// Use directory-backed storage.
+    pub fn directory(mut self) -> Self {
+        self.create.kind = crate::volume::VolumeKind::Directory;
+        self.create.capacity_mib = None;
+        self
+    }
+
+    /// Use raw ext4 disk-image storage.
+    pub fn disk(mut self) -> Self {
+        self.create.kind = crate::volume::VolumeKind::Disk;
+        self.create.quota_mib = None;
         self
     }
 
     /// Set a storage quota for the volume.
     pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.intent.quota_mib = Some(size.into().as_u32());
+        self.create.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Set disk volume capacity.
+    pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.create.capacity_mib = Some(size.into().as_u32());
         self
     }
 
     /// Attach a label to the volume. Can be called multiple times.
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.intent.labels.push((key.into(), value.into()));
+        self.create.labels.push((key.into(), value.into()));
         self
     }
 
-    pub(crate) fn build(self) -> super::config::AutoVolumeIntent {
-        self.intent
+    pub(crate) fn build(self) -> NamedVolumeCreate {
+        self.create
+    }
+}
+
+impl NamedVolumeCreate {
+    /// Creation behavior for this named volume mount.
+    pub fn mode(&self) -> NamedVolumeMode {
+        self.mode
+    }
+
+    /// Volume name to create or ensure exists.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Storage kind to create or ensure exists.
+    pub fn kind(&self) -> crate::volume::VolumeKind {
+        self.kind
+    }
+
+    /// Directory quota in MiB, if configured.
+    pub fn quota_mib(&self) -> Option<u32> {
+        self.quota_mib
+    }
+
+    /// Disk capacity in MiB, if configured.
+    pub fn capacity_mib(&self) -> Option<u32> {
+        self.capacity_mib
+    }
+
+    /// Labels to attach to newly-created volumes.
+    pub fn labels(&self) -> &[(String, String)] {
+        &self.labels
     }
 }
 
@@ -418,7 +520,6 @@ impl MountBuilder {
             disk_fstype: None,
             stat_virtualization: None,
             host_permissions: None,
-            create_intent: None,
             error: None,
         }
     }
@@ -432,41 +533,25 @@ impl MountBuilder {
     /// Mount a named volume created via [`Volume::create`](crate::volume::Volume::create).
     /// The volume persists across sandbox restarts and can be shared between sandboxes.
     pub fn named(mut self, name: impl Into<String>) -> Self {
-        self.mount = MountKind::Named(name.into());
+        self.mount = MountKind::Named {
+            name: name.into(),
+            create: None,
+        };
         self
     }
 
-    /// Provision a fresh named volume atomically with the sandbox and
-    /// mount it. The volume row is inserted in the same DB transaction
-    /// as the sandbox row.
-    pub fn create_named(mut self, name: impl Into<String>) -> Self {
-        let name = name.into();
-        self.mount = MountKind::Named(name.clone());
-        self.create_intent = Some(super::config::AutoVolumeIntent {
-            name,
-            kind: crate::volume::VolumeKind::Directory,
-            quota_mib: None,
-            capacity_mib: None,
-            labels: Vec::new(),
-        });
-        self
-    }
-
-    /// Same as [`create_named`](Self::create_named) but with builder-driven
-    /// volume metadata (quota, labels, name override).
-    pub fn create_named_with(
+    /// Mount a named volume with explicit existence behavior.
+    pub fn named_with(
         mut self,
         name: impl Into<String>,
-        f: impl FnOnce(VolumeBuilder) -> VolumeBuilder,
+        f: impl FnOnce(NamedVolumeBuilder) -> NamedVolumeBuilder,
     ) -> Self {
-        let intent = f(VolumeBuilder::new(name.into())).build();
-        self.mount = MountKind::Named(intent.name.clone());
-        self.create_intent = Some(intent);
+        let name = name.into();
+        let create = f(NamedVolumeBuilder::new(name)).build();
+        let name = create.name.clone();
+        let create = (create.mode != NamedVolumeMode::Existing).then_some(create);
+        self.mount = MountKind::Named { name, create };
         self
-    }
-
-    pub(crate) fn take_create_intent(&mut self) -> Option<super::config::AutoVolumeIntent> {
-        self.create_intent.take()
     }
 
     /// Use tmpfs (memory-backed).
@@ -610,7 +695,7 @@ impl MountBuilder {
         // Reject options set on the wrong kind.
         let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
         let is_disk = matches!(self.mount, MountKind::Disk(_));
-        let is_virtiofs = matches!(self.mount, MountKind::Bind(_) | MountKind::Named(_));
+        let is_virtiofs = matches!(self.mount, MountKind::Bind(_) | MountKind::Named { .. });
         if self.size_mib.is_some() && !is_tmpfs {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".size() is only valid for tmpfs mounts".into(),
@@ -695,11 +780,12 @@ impl MountBuilder {
                     host_permissions,
                 }
             }
-            MountKind::Named(name) => {
+            MountKind::Named { name, create } => {
                 crate::volume::validate_volume_name(&name)?;
                 VolumeMount::Named {
                     name,
                     guest: self.guest,
+                    create,
                     options: self.options,
                     stat_virtualization,
                     host_permissions,
@@ -871,6 +957,13 @@ impl VolumeMount {
             | Self::Named { guest, .. }
             | Self::Tmpfs { guest, .. }
             | Self::DiskImage { guest, .. } => guest,
+        }
+    }
+
+    pub(crate) fn named_create(&self) -> Option<&NamedVolumeCreate> {
+        match self {
+            Self::Named { create, .. } => create.as_ref(),
+            _ => None,
         }
     }
 }
@@ -1326,6 +1419,7 @@ impl Serialize for VolumeMount {
             Self::Named {
                 name,
                 guest,
+                create: _,
                 options,
                 stat_virtualization,
                 host_permissions,
@@ -1457,6 +1551,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
             } => Self::Named {
                 name,
                 guest,
+                create: None,
                 options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
@@ -1509,6 +1604,7 @@ impl std::fmt::Debug for VolumeMount {
             Self::Named {
                 name,
                 guest,
+                create,
                 options,
                 stat_virtualization,
                 host_permissions,
@@ -1516,6 +1612,7 @@ impl std::fmt::Debug for VolumeMount {
                 .debug_struct("Named")
                 .field("name", name)
                 .field("guest", guest)
+                .field("create", create)
                 .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
@@ -1686,6 +1783,7 @@ mod tests {
             VolumeMount::Named {
                 name: "cache".to_string(),
                 guest: "/data".to_string(),
+                create: None,
                 options: MountOptions::default(),
                 stat_virtualization: StatVirtualization::Strict,
                 host_permissions: HostPermissions::Private,

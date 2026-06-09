@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use microsandbox::VolumeKind;
 use microsandbox::sandbox::{
     DiskImageFormat, MountBuilder, Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile,
 };
@@ -348,6 +349,8 @@ struct CliMountOptions {
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
+    named_kind: Option<VolumeKind>,
     fstype: Option<String>,
     format: Option<DiskImageFormat>,
 }
@@ -357,6 +360,8 @@ struct CliMountOptions {
 struct CliMountOptionSupport {
     policies: bool,
     size: bool,
+    quota: bool,
+    named_kind: bool,
     fstype: bool,
     format: bool,
 }
@@ -730,7 +735,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         m = if is_path {
             m.bind(&source)
         } else {
-            m.named(&source)
+            m.named_with(&source, |v| v.ensure_exists())
         };
         if options.readonly {
             m = m.readonly();
@@ -868,6 +873,9 @@ pub fn apply_explicit_named_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            size: true,
+            quota: true,
+            named_kind: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -877,12 +885,43 @@ pub fn apply_explicit_named_mount(
             parsed.source
         );
     }
+    if parsed.options.size_mib.is_some()
+        && !matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+    {
+        anyhow::bail!("mount-named option `size` requires kind=disk");
+    }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && parsed.options.size_mib.is_none()
+    {
+        anyhow::bail!("mount-named kind=disk requires size=...");
+    }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && parsed.options.quota_mib.is_some()
+    {
+        anyhow::bail!("mount-named kind=disk does not support quota=...");
+    }
 
     let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
     let options = parsed.options;
     Ok(builder.volume(guest, move |m| {
-        apply_common_mount_options(m.named(&source), options)
+        let mount = m.named_with(&source, |mut v| {
+            v = v.ensure_exists();
+            if let Some(kind) = options.named_kind {
+                v = match kind {
+                    VolumeKind::Directory => v.directory(),
+                    VolumeKind::Disk => v.disk(),
+                };
+            }
+            if let Some(size_mib) = options.size_mib {
+                v = v.size(size_mib);
+            }
+            if let Some(quota_mib) = options.quota_mib {
+                v = v.quota(quota_mib);
+            }
+            v
+        });
+        apply_common_mount_options(mount, options)
     }))
 }
 
@@ -966,6 +1005,8 @@ fn parse_cli_mount_options(
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_size = false;
+    let mut seen_quota = false;
+    let mut seen_named_kind = false;
     let mut seen_fstype = false;
     let mut seen_format = false;
 
@@ -1050,6 +1091,27 @@ fn parse_cli_mount_options(
                         parsed.size_mib =
                             Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
                     }
+                    "quota" if support.quota => {
+                        if seen_quota {
+                            anyhow::bail!("mount option `quota` specified more than once");
+                        }
+                        seen_quota = true;
+                        parsed.quota_mib =
+                            Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
+                    }
+                    "kind" if support.named_kind => {
+                        if seen_named_kind {
+                            anyhow::bail!("mount option `kind` specified more than once");
+                        }
+                        seen_named_kind = true;
+                        parsed.named_kind = Some(match value {
+                            "dir" | "directory" => VolumeKind::Directory,
+                            "disk" => VolumeKind::Disk,
+                            other => anyhow::bail!(
+                                "invalid named volume kind {other:?} (expected dir|disk)"
+                            ),
+                        });
+                    }
                     "fstype" if support.fstype => {
                         if seen_fstype {
                             anyhow::bail!("mount option `fstype` specified more than once");
@@ -1067,7 +1129,8 @@ fn parse_cli_mount_options(
                             anyhow::anyhow!("invalid disk image format {value:?}: {e}")
                         })?);
                     }
-                    "stat-virt" | "host-perms" | "size" | "fstype" | "format" => {
+                    "stat-virt" | "host-perms" | "size" | "quota" | "kind" | "fstype"
+                    | "format" => {
                         anyhow::bail!("mount option `{key}` is not valid here");
                     }
                     other => anyhow::bail!("unknown mount option {other:?}"),
@@ -2204,10 +2267,15 @@ mod tests {
             VolumeMount::Named {
                 name,
                 stat_virtualization,
+                create,
                 ..
             } => {
                 assert_eq!(name, "mycache");
                 assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert_eq!(
+                    create.as_ref().map(|create| create.mode()),
+                    Some(microsandbox::sandbox::NamedVolumeMode::EnsureExists)
+                );
             }
             other => panic!("expected Named, got {other:?}"),
         }
@@ -2292,11 +2360,37 @@ mod tests {
                 name,
                 guest,
                 stat_virtualization,
+                create,
                 ..
             } => {
                 assert_eq!(name, "cache");
                 assert_eq!(guest, "/data");
                 assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert_eq!(
+                    create.as_ref().map(|create| create.mode()),
+                    Some(microsandbox::sandbox::NamedVolumeMode::EnsureExists)
+                );
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_named_mount_disk_ensure_options() {
+        let mount = build_explicit(
+            "cache-disk:/data:kind=disk,size=2G",
+            apply_explicit_named_mount,
+        )
+        .await;
+        match mount {
+            VolumeMount::Named { create, .. } => {
+                let create = create.expect("mount-named should ensure the named volume");
+                assert_eq!(
+                    create.mode(),
+                    microsandbox::sandbox::NamedVolumeMode::EnsureExists
+                );
+                assert_eq!(create.kind(), VolumeKind::Disk);
+                assert_eq!(create.capacity_mib(), Some(2048));
             }
             other => panic!("expected Named, got {other:?}"),
         }

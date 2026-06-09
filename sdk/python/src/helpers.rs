@@ -480,8 +480,43 @@ fn apply_mount(
             m
         }))
     } else if let Some(vol_name) = extract_opt::<String>(mount, "named")? {
+        let named_mode =
+            extract_opt::<String>(mount, "named_mode")?.unwrap_or_else(|| "existing".to_string());
+        let named_kind =
+            extract_opt::<String>(mount, "named_kind")?.unwrap_or_else(|| "dir".to_string());
+        let size_mib = extract_opt::<u32>(mount, "size_mib")?;
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
+        if !matches!(named_mode.as_str(), "existing" | "create" | "ensure-exists") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid named volume mode: {named_mode}"
+            )));
+        }
+        if !matches!(named_kind.as_str(), "dir" | "directory" | "disk") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid named volume kind: {named_kind}"
+            )));
+        }
         Ok(builder.volume(&guest_path, |v| {
-            let mut m = v.named(&vol_name);
+            let mut m = v.named_with(&vol_name, |mut named| {
+                named = match named_mode.as_str() {
+                    "existing" => named.existing(),
+                    "create" => named.create(),
+                    "ensure-exists" => named.ensure_exists(),
+                    _ => unreachable!("validated named volume mode"),
+                };
+                named = match named_kind.as_str() {
+                    "dir" | "directory" => named.directory(),
+                    "disk" => named.disk(),
+                    _ => unreachable!("validated named volume kind"),
+                };
+                if let Some(size_mib) = size_mib {
+                    named = named.size(size_mib);
+                }
+                if let Some(quota_mib) = quota_mib {
+                    named = named.quota(quota_mib);
+                }
+                named
+            });
             if readonly {
                 m = m.readonly();
             }

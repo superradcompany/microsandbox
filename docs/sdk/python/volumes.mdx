@@ -154,6 +154,10 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 def Volume.named(
     name: str,
     *,
+    mode: str | None = None,
+    kind: str | None = None,
+    size_mib: int | None = None,
+    quota_mib: int | None = None,
     readonly: bool = False,
     noexec: bool = False,
     nosuid: bool = False,
@@ -161,13 +165,35 @@ def Volume.named(
 ) -> dict
 ```
 
-Mount a named volume. The volume must already exist (create it with [`Volume.create()`](#volumecreate)).
+Mount a named volume. By default, the volume must already exist (create it with [`Volume.create()`](#volumecreate)). Pass `mode="create"` to create the volume and fail if it already exists, or `mode="ensure-exists"` to create it if missing and reuse it if compatible.
+
+```python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={
+        "/cache": Volume.named("pip-cache", mode="ensure-exists"),
+        "/var/lib/docker": Volume.named(
+            "docker-data",
+            mode="ensure-exists",
+            kind="disk",
+            size_mib=20 * 1024,
+        ),
+    },
+)
+```
+
+The ensure-exists mode validates existing volume metadata. It errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | name | `str` | Volume name |
+| mode | `str \| None` | Named volume behavior: `"existing"` (default), `"create"`, or `"ensure-exists"` |
+| kind | `str \| None` | Storage kind for create or ensure-exists: `"dir"` (default) or `"disk"` |
+| size_mib | `int \| None` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
+| quota_mib | `int \| None` | Directory volume quota in MiB |
 | readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
 | noexec | `bool` | Prevent direct execution from the mount |
 | nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |

@@ -161,7 +161,8 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | Method | Description |
 |--------|-------------|
 | `bind(host)` | Mount a host directory into the guest. |
-| `named(name)` | Mount a named volume created via [`Volume.builder`](#volumebuilder). |
+| `named(name)` | Mount an existing named volume created via [`Volume.builder`](#volumebuilder). |
+| `namedWith(name, mode?, kind?, sizeMib?, quotaMib?)` | Mount a named volume with explicit behavior. `mode` is `"existing"`, `"create"`, or `"ensure-exists"`; `kind` is `"dir"` or `"disk"`. |
 | `tmpfs()` | Mount an in-memory filesystem. |
 | `disk(host)` | Mount a host disk image as a virtio-blk device. |
 | `format(fmt)` | Disk image format (`'qcow2' \| 'raw' \| 'vmdk'`). Defaults to the file extension. Disk only. |
@@ -172,6 +173,20 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | `nodev()` | Ignore device files on the mount. |
 | `size(mib)` | Cap in MiB. Tmpfs only. |
 | `build()` | Internal — produce a `VolumeMount`. |
+
+`named(name)` is existing-only. Use `namedWith` when sandbox creation should create or ensure the volume exists:
+
+```typescript
+await using sb = await Sandbox.builder("worker")
+  .image("python")
+  .volume("/cache", (m) => m.namedWith("pip-cache", "ensure-exists"))
+  .volume("/var/lib/docker", (m) =>
+    m.namedWith("docker-data", "ensure-exists", "disk", 20 * 1024)
+  )
+  .create();
+```
+
+`"create"` fails when the named volume already exists. `"ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
 
 ### VolumeMount
 

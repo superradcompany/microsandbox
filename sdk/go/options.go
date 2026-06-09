@@ -867,17 +867,20 @@ type MountConfig struct {
 	// to introspect; setting fields below directly is discouraged.
 	kind MountKind
 
-	Bind     string
-	Named    string
-	Tmpfs    bool
-	Disk     string
-	Format   string
-	Fstype   string
-	Readonly bool
-	Noexec   bool
-	Nosuid   bool
-	Nodev    bool
-	SizeMiB  uint32
+	Bind      string
+	Named     string
+	NamedMode string
+	NamedKind string
+	QuotaMiB  uint32
+	Tmpfs     bool
+	Disk      string
+	Format    string
+	Fstype    string
+	Readonly  bool
+	Noexec    bool
+	Nosuid    bool
+	Nodev     bool
+	SizeMiB   uint32
 
 	// StatVirtualization is the per-mount stat-virtualization policy. Only
 	// meaningful for Bind and Named mounts. Zero value preserves the
@@ -919,6 +922,14 @@ type MountOptions struct {
 	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+}
+
+// NamedVolumeOptions tunes sandbox-time named volume provisioning.
+type NamedVolumeOptions struct {
+	Mode     string // "existing", "create", or "ensure-exists"; empty means existing.
+	Kind     string // "dir" or "disk"; empty means dir.
+	SizeMiB  uint32
+	QuotaMiB uint32
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -973,6 +984,25 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 	return MountConfig{
 		kind:               MountKindNamed,
 		Named:              name,
+		Readonly:           opts.Readonly,
+		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
+}
+
+// NamedWith returns a MountConfig that mounts a named persistent volume with
+// explicit creation behavior.
+func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig {
+	return MountConfig{
+		kind:               MountKindNamed,
+		Named:              name,
+		NamedMode:          namedOpts.Mode,
+		NamedKind:          namedOpts.Kind,
+		SizeMiB:            namedOpts.SizeMiB,
+		QuotaMiB:           namedOpts.QuotaMiB,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
 		Nosuid:             opts.Nosuid,

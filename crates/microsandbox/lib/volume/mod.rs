@@ -14,7 +14,7 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     db::entity::{sandbox as sandbox_entity, volume as volume_entity},
-    sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
+    sandbox::{NamedVolumeMode, SandboxConfig, SandboxStatus, VolumeMount},
     size::Mebibytes,
 };
 
@@ -82,6 +82,15 @@ pub struct VolumeHandle {
 /// Builder for creating a volume.
 pub struct VolumeBuilder {
     config: VolumeConfig,
+}
+
+/// Result of provisioning a named volume record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VolumeProvision {
+    /// The volume record was inserted by this operation.
+    Inserted,
+    /// A compatible existing record was reused.
+    Existing,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -299,21 +308,22 @@ impl Volume {
         })
     }
 
-    /// Insert the volume DB record inside the caller's transaction.
+    /// Provision the volume DB record inside the caller's transaction.
     ///
-    /// Lets `SandboxBuilder::auto_volume` create the volume and the
-    /// sandbox in one atomic write so a concurrent `Volume::list`
-    /// cannot observe the volume before the owning sandbox exists.
+    /// Lets sandbox-time named volume creation insert the volume and sandbox
+    /// in one atomic write so a concurrent `Volume::list` cannot observe the
+    /// volume before the owning sandbox exists.
     /// Returns [`MicrosandboxError::VolumeAlreadyExists`] if the name
     /// is already in the table.
     ///
     /// The caller is responsible for creating the on-disk directory
     /// after the transaction commits (or rolling back via
     /// `Volume::remove` if the directory step fails).
-    pub(crate) async fn create_in_transaction<C: ConnectionTrait>(
+    pub(crate) async fn provision_in_transaction<C: ConnectionTrait>(
         txn: &C,
         config: &VolumeConfig,
-    ) -> MicrosandboxResult<()> {
+        mode: NamedVolumeMode,
+    ) -> MicrosandboxResult<VolumeProvision> {
         validate_volume_name(&config.name)?;
         validate_volume_config(config)?;
 
@@ -321,8 +331,21 @@ impl Volume {
             .filter(volume_entity::Column::Name.eq(&config.name))
             .one(txn)
             .await?;
-        if existing.is_some() {
-            return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+        if let Some(existing) = existing {
+            return match mode {
+                NamedVolumeMode::Create => {
+                    Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()))
+                }
+                NamedVolumeMode::EnsureExists => {
+                    validate_existing_volume_config(&existing, config)?;
+                    Ok(VolumeProvision::Existing)
+                }
+                NamedVolumeMode::Existing => Ok(VolumeProvision::Existing),
+            };
+        }
+
+        if mode == NamedVolumeMode::Existing {
+            return Err(MicrosandboxError::VolumeNotFound(config.name.clone()));
         }
 
         let labels_json = if config.labels.is_empty() {
@@ -346,7 +369,7 @@ impl Volume {
             ..Default::default()
         };
         volume_entity::Entity::insert(model).exec(txn).await?;
-        Ok(())
+        Ok(VolumeProvision::Inserted)
     }
 
     /// Resolve the on-disk path for a named volume.
@@ -355,7 +378,7 @@ impl Volume {
     }
 
     /// Provision the on-disk artifact for a volume registered via
-    /// [`create_in_transaction`].
+    /// [`provision_in_transaction`].
     pub(crate) async fn materialise_for(config: &VolumeConfig) -> MicrosandboxResult<()> {
         let volumes_dir = crate::config::config().volumes_dir();
         tokio::fs::create_dir_all(&volumes_dir).await?;
@@ -614,7 +637,55 @@ fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
     }
 }
 
-fn lock_volume_name(name: &str) -> MicrosandboxResult<File> {
+fn validate_existing_volume_config(
+    existing: &volume_entity::Model,
+    requested: &VolumeConfig,
+) -> MicrosandboxResult<()> {
+    let existing_kind = VolumeKind::from_db_value(&existing.kind);
+    if existing_kind != requested.kind {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "named volume {:?} already exists with kind {:?}, requested {:?}",
+            requested.name, existing_kind, requested.kind
+        )));
+    }
+
+    let requested_quota = requested.quota_mib.map(|value| value as i32);
+    if existing.quota_mib != requested_quota {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "named volume {:?} already exists with quota {:?}, requested {:?}",
+            requested.name, existing.quota_mib, requested_quota
+        )));
+    }
+
+    let requested_capacity = requested
+        .capacity_mib
+        .map(|value| i64::from(value) * 1024 * 1024);
+    if existing.capacity_bytes != requested_capacity {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "named volume {:?} already exists with capacity {:?}, requested {:?}",
+            requested.name, existing.capacity_bytes, requested_capacity
+        )));
+    }
+
+    if !requested.labels.is_empty() {
+        let existing_labels = existing
+            .labels
+            .as_deref()
+            .map(serde_json::from_str::<Vec<(String, String)>>)
+            .transpose()?
+            .unwrap_or_default();
+        if existing_labels != requested.labels {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "named volume {:?} already exists with different labels",
+                requested.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn lock_volume_name(name: &str) -> MicrosandboxResult<File> {
     let volumes_dir = crate::config::config().volumes_dir();
     std::fs::create_dir_all(&volumes_dir)?;
     let locks_dir = volumes_dir.join(".locks");

@@ -42,7 +42,7 @@ Common flags:
 | `-c`, `--cpus` | Virtual CPU limit |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
-| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`) |
+| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `-p`, `--port` | Publish a port, such as `8000:8000` or `0.0.0.0:8000:8000` |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
@@ -351,7 +351,7 @@ msb install --list                   # List installed commands
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app:ro,noexec`) |
-| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`) |
+| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `--security` | In-guest security profile (`default` or `restricted`) |
 | `-w`, `--workdir` | Working directory inside the sandbox |
 | `--shell` | Shell for interactive sessions |

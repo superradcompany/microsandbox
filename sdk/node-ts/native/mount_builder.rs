@@ -79,6 +79,54 @@ impl JsMountBuilder {
         self
     }
 
+    /// Mount a named volume with explicit existence behavior.
+    #[napi]
+    pub fn named_with(
+        &mut self,
+        name: String,
+        mode: Option<String>,
+        kind: Option<String>,
+        size_mib: Option<u32>,
+        quota_mib: Option<u32>,
+    ) -> napi::Result<&Self> {
+        let mode = mode.unwrap_or_else(|| "existing".to_string());
+        let kind = kind.unwrap_or_else(|| "dir".to_string());
+        if !matches!(mode.as_str(), "existing" | "create" | "ensure-exists") {
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                format!("invalid named volume mode {mode:?}"),
+            ));
+        }
+        if !matches!(kind.as_str(), "dir" | "directory" | "disk") {
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                format!("invalid named volume kind {kind:?}"),
+            ));
+        }
+        let prev = self.take_inner();
+        self.inner = Some(prev.named_with(name, |mut v| {
+            v = match mode.as_str() {
+                "existing" => v.existing(),
+                "create" => v.create(),
+                "ensure-exists" => v.ensure_exists(),
+                _ => unreachable!("validated named volume mode"),
+            };
+            v = match kind.as_str() {
+                "dir" | "directory" => v.directory(),
+                "disk" => v.disk(),
+                _ => unreachable!("validated named volume kind"),
+            };
+            if let Some(size_mib) = size_mib {
+                v = v.size(size_mib);
+            }
+            if let Some(quota_mib) = quota_mib {
+                v = v.quota(quota_mib);
+            }
+            v
+        }));
+        Ok(self)
+    }
+
     /// Mount an in-memory tmpfs at the guest path.
     #[napi]
     pub fn tmpfs(&mut self) -> &Self {
@@ -259,6 +307,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
         RustVolumeMount::Named {
             name,
             guest,
+            create: _,
             options,
             stat_virtualization,
             host_permissions,
