@@ -27,8 +27,6 @@
 
 **Microsandbox** runs **untrusted workloads** inside fast, local microVMs: AI agents, user code, plugins, CI jobs, dev environments, scrapers, and automation.
 
-Use standard OCI images from your SDK or CLI. No daemon. No remote service. Docker-like workflows, VM isolation, host-controlled networking, and secrets that stay on the host.
-
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
