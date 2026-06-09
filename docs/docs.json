@@ -236,7 +236,7 @@
   "appearance": {
     "default": "system"
   },
-  "description": "Every agent deserves its own machine",
+  "description": "Fast, local microVMs for untrusted workloads",
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

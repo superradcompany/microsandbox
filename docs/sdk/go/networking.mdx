@@ -65,7 +65,7 @@ Allow public + private (LAN) destinations; ingress allowed by default. Blocks lo
 Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction. `DefaultEgress` and `DefaultIngress` set the fall-through action.
 
 ```go
-sb, err := m.CreateSandbox(ctx, "agent",
+sb, err := m.CreateSandbox(ctx, "ci-runner",
     m.WithImage("python:3.12"),
     m.WithNetwork(&m.NetworkConfig{
         DefaultEgress:  m.PolicyActionDeny,
@@ -74,7 +74,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
             {
                 Action:      m.PolicyActionAllow,
                 Direction:   m.PolicyDirectionEgress,
-                Destination: "api.openai.com",
+                Destination: "api.example.com",
                 Protocol:    m.PolicyProtocolTCP,
                 Port:        "443",
             },
