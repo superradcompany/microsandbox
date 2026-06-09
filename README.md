@@ -12,7 +12,7 @@
 
 <br />
 
-<div align="center"><b>——&nbsp;&nbsp;&nbsp;fast, local microVMs for untrusted workloads&nbsp;&nbsp;&nbsp;——</b></div>
+<div align="center"><b>——&nbsp;&nbsp;&nbsp;easy, fast, local microVMs for untrusted workloads&nbsp;&nbsp;&nbsp;——</b></div>
 
 <br />
 <br />
