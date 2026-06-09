@@ -307,14 +307,14 @@ jobs:
             cp build/agentd artifacts/agentd-${{ matrix.arch }}
           fi
 
-          # Bundle: msb + libkrunfw + Go FFI cdylib
+          # Bundle: msb + libkrunfw
           if [ "${{ matrix.os }}" = "darwin" ]; then
             go_ffi_file=libmicrosandbox_go_ffi.dylib
           else
             go_ffi_file=libmicrosandbox_go_ffi.so
           fi
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
-            -C build msb ${{ matrix.libkrunfw_file }} $go_ffi_file
+            -C build msb ${{ matrix.libkrunfw_file }}
 
           # Standalone Go FFI cdylib named to match sdk/go/internal/bundle/
           # bundles/ so the go-sdk-tag job can drop it in directly.
