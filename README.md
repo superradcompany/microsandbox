@@ -25,29 +25,19 @@
 
 <br />
 
-**Microsandbox** runs **untrusted workloads** inside fast, local microVMs. Use it for AI agents, user-submitted code, plugins, dependency installs, CI jobs, dev environments, scrapers, and automation that should not inherit your host's full privileges.
+**Microsandbox** runs **untrusted workloads** inside fast, local microVMs: AI agents, user code, plugins, CI jobs, dev environments, scrapers, and automation.
 
-It uses standard OCI images, starts from your SDK or CLI, and needs no daemon or remote service. You get Docker-like workflows with a real VM isolation boundary, host-controlled networking, and secrets that stay on the host.
+Use standard OCI images from your SDK or CLI. No daemon. No remote service. Docker-like workflows, VM isolation, host-controlled networking, and secrets that stay on the host.
 
 ##
 
-- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Each sandbox is a microVM with its own Linux kernel, not just a host namespace.
+- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
 - <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times under 100 milliseconds.
-- <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **Docker-Like Inputs**: Run standard OCI images from Docker Hub, GHCR, ECR, GCR, or any registry.
-- <img height="14" src="https://octicons-col.vercel.app/plug/A770EF"> **SDK-Native**: Create and control sandboxes directly from Rust, TypeScript, Python, Go, or the CLI.
-- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Host-Controlled Networking**: Allow, deny, inspect, and publish traffic from outside the guest.
-- <img height="14" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets Stay on the Host**: The guest sees placeholders; real credentials are injected only at allowed destinations.
-- <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Persistent or Disposable**: Use ephemeral roots, bind mounts, named volumes, snapshots, logs, metrics, and detached mode.
-- <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Connect AI agents through [Agent Skills](https://github.com/superradcompany/skills) or the [MCP server](https://github.com/superradcompany/microsandbox-mcp) when they need their own sandboxed machine.
-
-#### <img height="14" src="https://octicons-col.vercel.app/package-dependencies/A770EF">&nbsp;&nbsp;Built For
-
-- **AI agents**: Give coding agents and tool-using assistants a dedicated machine for commands, files, package installs, and generated code.
-- **User code execution**: Run submitted scripts, notebooks, plugins, and extensions away from the host.
-- **CI/CD and builds**: Isolate test jobs, compilers, package managers, and build tools.
-- **Dev environments**: Create disposable Linux machines without touching your laptop or host Docker daemon.
-- **Scrapers and automation**: Allow internet access while blocking private networks and metadata services.
-- **Secure tool execution**: Run CLIs and dependencies that should not see host secrets or ambient credentials.
+- <img height="14" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
+- <img height="14" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Unexploitable secret keys that never enter the VM.
+- <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
+- <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
+- <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
 <br />
 
