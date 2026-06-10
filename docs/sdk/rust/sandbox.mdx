@@ -1156,7 +1156,7 @@ Tag indicating where a captured log entry came from.
 |-------|-------------|
 | `Stdout` | Captured from a session's stdout (pipe mode — streams stayed separated) |
 | `Stderr` | Captured from a session's stderr (pipe mode) |
-| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
+| `Output` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
 | `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
 
 ### PullPolicy
