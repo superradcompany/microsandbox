@@ -188,8 +188,8 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker/docker",
               "recipes/docker/docker-in-sandbox",
+              "recipes/docker/docker",
               "recipes/docker/local-images"
             ]
           },
