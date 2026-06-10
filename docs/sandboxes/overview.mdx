@@ -6,7 +6,7 @@ icon: "circle-info"
 
 A sandbox is a local microVM with its own Linux kernel, filesystem, and network stack. Your application or the `msb` CLI starts it as a child process, then talks to the guest agent to run commands, move files, and control lifecycle.
 
-The security boundary is hardware virtualization, not Linux namespaces. That makes sandboxes a good fit for running agent-generated code, untrusted tools, dependency installs, and other workloads that should not inherit the host process's full privileges.
+The security boundary is hardware virtualization, not Linux namespaces. That makes sandboxes a good fit for untrusted workloads: user-submitted code, AI agent actions, plugins, dependency installs, CI jobs, scrapers, and tools that should not inherit the host process's full privileges.
 
 ## Create a sandbox
 

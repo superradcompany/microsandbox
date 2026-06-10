@@ -5,7 +5,7 @@ description: Go SDK - Filesystem API reference
 
 See [Filesystem](/sandboxes/filesystem) for usage examples.
 
-## SandboxFs
+## SandboxFsOps
 
 Filesystem accessor for a running sandbox. Obtained via [`Sandbox.FS()`](/sdk/go/sandbox#fs). All operations go through the same host-guest channel as command execution — no SSH, no network involved. For bulk file operations, consider using a [volume](/sdk/go/volumes) instead.
 
@@ -23,7 +23,7 @@ content, err := fs.ReadString(ctx, "/tmp/config.json")
 #### Read()
 
 ```go
-func (fs *SandboxFs) Read(ctx context.Context, path string) ([]byte, error)
+func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error)
 ```
 
 Read the entire contents of a file as raw bytes.
@@ -48,7 +48,7 @@ The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after base64 in
 #### ReadString()
 
 ```go
-func (fs *SandboxFs) ReadString(ctx context.Context, path string) (string, error)
+func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error)
 ```
 
 Read the entire contents of a file and return as a string (UTF-8 reinterpretation of the bytes; no validation).
@@ -58,7 +58,7 @@ Read the entire contents of a file and return as a string (UTF-8 reinterpretatio
 #### Write()
 
 ```go
-func (fs *SandboxFs) Write(ctx context.Context, path string, data []byte) error
+func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error
 ```
 
 Write bytes to a file, creating it if it doesn't exist and truncating if it does.
@@ -68,7 +68,7 @@ Write bytes to a file, creating it if it doesn't exist and truncating if it does
 #### WriteString()
 
 ```go
-func (fs *SandboxFs) WriteString(ctx context.Context, path, content string) error
+func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error
 ```
 
 Write a UTF-8 string to a file.
@@ -78,7 +78,7 @@ Write a UTF-8 string to a file.
 #### List()
 
 ```go
-func (fs *SandboxFs) List(ctx context.Context, path string) ([]FsEntry, error)
+func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error)
 ```
 
 List the entries in a directory.
@@ -101,7 +101,7 @@ for _, e := range entries {
 #### Stat()
 
 ```go
-func (fs *SandboxFs) Stat(ctx context.Context, path string) (*FsStat, error)
+func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
 ```
 
 Get detailed metadata for a file or directory.
@@ -117,7 +117,7 @@ Get detailed metadata for a file or directory.
 #### Mkdir()
 
 ```go
-func (fs *SandboxFs) Mkdir(ctx context.Context, path string) error
+func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error
 ```
 
 Create a directory and all missing parents.
@@ -127,7 +127,7 @@ Create a directory and all missing parents.
 #### Remove()
 
 ```go
-func (fs *SandboxFs) Remove(ctx context.Context, path string) error
+func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error
 ```
 
 Remove a single file. Use [`RemoveDir`](#removedir) for directories.
@@ -137,7 +137,7 @@ Remove a single file. Use [`RemoveDir`](#removedir) for directories.
 #### RemoveDir()
 
 ```go
-func (fs *SandboxFs) RemoveDir(ctx context.Context, path string) error
+func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
 ```
 
 Remove a directory recursively.
@@ -147,7 +147,7 @@ Remove a directory recursively.
 #### Copy()
 
 ```go
-func (fs *SandboxFs) Copy(ctx context.Context, src, dst string) error
+func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
 ```
 
 Copy a file within the sandbox.
@@ -157,7 +157,7 @@ Copy a file within the sandbox.
 #### Rename()
 
 ```go
-func (fs *SandboxFs) Rename(ctx context.Context, src, dst string) error
+func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
 ```
 
 Rename or move a file or directory within the sandbox.
@@ -167,7 +167,7 @@ Rename or move a file or directory within the sandbox.
 #### Exists()
 
 ```go
-func (fs *SandboxFs) Exists(ctx context.Context, path string) (bool, error)
+func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error)
 ```
 
 Report whether a path exists inside the sandbox.
@@ -177,7 +177,7 @@ Report whether a path exists inside the sandbox.
 #### CopyFromHost()
 
 ```go
-func (fs *SandboxFs) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
+func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
 ```
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
@@ -187,7 +187,7 @@ Copy a file from the host machine into the sandbox. For transferring many files,
 #### CopyToHost()
 
 ```go
-func (fs *SandboxFs) CopyToHost(ctx context.Context, guestPath, hostPath string) error
+func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error
 ```
 
 Copy a file from the sandbox to the host machine.
@@ -197,7 +197,7 @@ Copy a file from the sandbox to the host machine.
 #### ReadStream()
 
 ```go
-func (fs *SandboxFs) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
+func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
 ```
 
 Open a streaming reader for a file. Data is transferred in chunks (~3 MiB each). Use this for files too large to fit in memory. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream).
@@ -230,7 +230,7 @@ _, err = rs.WriteTo(os.Stdout)
 #### WriteStream()
 
 ```go
-func (fs *SandboxFs) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
+func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
 ```
 
 Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the operation.

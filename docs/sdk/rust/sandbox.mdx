@@ -159,20 +159,20 @@ Release the handle without stopping the sandbox. The sandbox continues running a
 
 ---
 
-#### drain()
+#### request_drain()
 
 ```rust
-async fn drain(&self) -> MicrosandboxResult<()>
+async fn request_drain(&self) -> MicrosandboxResult<()>
 ```
 
-Start a graceful drain. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `Stopped` when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes.
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. Use [`wait_until_stopped()`](#wait_until_stopped) when the caller needs stopped-state observation.
 
 ---
 
 #### fs()
 
 ```rust
-fn fs(&self) -> SandboxFs<'_>
+fn fs(&self) -> SandboxFsOps<'_>
 ```
 
 Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/rust/filesystem) for API details.
@@ -181,7 +181,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 | Type | Description |
 |------|-------------|
-| [`SandboxFs`](/sdk/rust/filesystem) | Filesystem handle |
+| [`SandboxFsOps`](/sdk/rust/filesystem) | Filesystem handle |
 
 ---
 
@@ -191,12 +191,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 async fn kill(&self) -> MicrosandboxResult<()>
 ```
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful
-shutdown — use when the sandbox is unresponsive. Pending writes that
-the workload hasn't `fsync`'d may be lost, same durability semantics
-as a sudden power loss on a physical machine. Prefer
-[`stop()`](#stop) for graceful shutdown that gives the workload a
-chance to flush.
+Force-terminate the sandbox with SIGKILL and wait until stopped state is observed. No graceful shutdown — use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#stop) for graceful shutdown that gives the workload a chance to flush.
 
 ---
 
@@ -334,10 +329,10 @@ Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox
 
 ---
 
-#### remove_persisted()
+#### remove()
 
 ```rust
-async fn remove_persisted(self) -> MicrosandboxResult<()>
+async fn remove(self) -> MicrosandboxResult<()>
 ```
 
 Remove the sandbox and all its persisted state from disk.
@@ -350,43 +345,63 @@ Remove the sandbox and all its persisted state from disk.
 async fn stop(&self) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox. Lets the sandbox finish writing
-any pending data to disk before it exits, so files written inside
-the sandbox aren't lost across a later restart. Waits up to ten
-seconds for a clean exit; if the sandbox is still running after
-that, it is force-killed.
+Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds for a clean exit; if the sandbox is still running after that, it is force-killed.
 
 ---
 
-#### stop_and_wait()
+#### stop_with_timeout()
 
 ```rust
-async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
+async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 ```
 
-Stop the sandbox and wait for the exit status.
+Gracefully shut down the sandbox with an explicit observation timeout before force-kill escalation.
+
+---
+
+#### request_stop()
+
+```rust
+async fn request_stop(&self) -> MicrosandboxResult<()>
+```
+
+Request graceful shutdown and return once the request is sent.
+
+---
+
+#### request_kill()
+
+```rust
+async fn request_kill(&self) -> MicrosandboxResult<()>
+```
+
+Request force termination and return once the signal is sent.
+
+---
+
+#### kill_with_timeout()
+
+```rust
+async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
+```
+
+Force-terminate the sandbox and wait up to `timeout` for stopped-state observation.
+
+---
+
+#### wait_until_stopped()
+
+```rust
+async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult>
+```
+
+Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
-| [`ExitStatus`](/sdk/rust/execution#exitstatus) | Exit code and success flag |
-
----
-
-#### wait()
-
-```rust
-async fn wait(&self) -> MicrosandboxResult<ExitStatus>
-```
-
-Block until the sandbox exits on its own (without triggering a stop). Returns the exit status.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExitStatus`](/sdk/rust/execution#exitstatus) | Exit code and success flag |
+| [`SandboxStopResult`](#sandboxstopresult) | Terminal status and optional observed exit code |
 
 ---
 
@@ -541,12 +556,6 @@ fn idle_timeout(self, secs: u64) -> Self
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
 
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| secs | `u64` | Idle timeout in seconds |
-
 ---
 
 #### init()
@@ -607,6 +616,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `u64` | Idle timeout in seconds |
 
 ---
 
@@ -1207,17 +1222,32 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
 | connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
 | created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate immediately. Pending writes may be lost |
+| kill() | `Result<()>` | Force terminate and wait until stopped state is observed |
+| kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
+| refresh() | `Result<`[`SandboxHandle`](#sandboxhandle)`>` | Fetch a fresh handle snapshot from persisted state |
 | remove() | `Result<()>` | Delete sandbox and state |
+| request_drain() | `Result<()>` | Request graceful drain without waiting |
+| request_kill() | `Result<()>` | Request force termination without waiting |
+| request_stop() | `Result<()>` | Request graceful shutdown without waiting |
 | start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
 | status() | [`SandboxStatus`](#sandboxstatus) | Current status |
 | stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
 | stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
+| wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until the sandbox reaches terminal state |
+
+### SandboxStopResult
+
+Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until_stopped).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | [`SandboxStatus`](#sandboxstatus) | Terminal status that was observed |
+| exit_code | `Option<i32>` | Process exit code when it is available |
 
 ### SandboxMetrics
 

@@ -17,7 +17,7 @@ const custom = {
   defaultEgress: "deny",
   defaultIngress: "allow",
   rules: [
-    Rule.allowEgress(Destination.domain("api.openai.com")),
+    Rule.allowEgress(Destination.domain("api.example.com")),
     Rule.denyEgress(Destination.group("metadata")),
   ],
 };

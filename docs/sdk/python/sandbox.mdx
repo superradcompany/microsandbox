@@ -199,7 +199,7 @@ Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [
 
 ```python
 @property
-def fs(self) -> SandboxFs
+def fs(self) -> SandboxFsOps
 ```
 
 Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property -- use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
@@ -208,7 +208,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 | Type | Description |
 |------|-------------|
-| [`SandboxFs`](/sdk/python/filesystem) | Filesystem handle |
+| [`SandboxFsOps`](/sdk/python/filesystem) | Filesystem handle |
 
 ---
 
@@ -277,13 +277,13 @@ Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.
 
 ---
 
-#### drain()
+#### request_drain()
 
 ```python
-async def drain() -> None
+async def request_drain() -> None
 ```
 
-Start a graceful drain (SIGUSR1). Existing commands run to completion, new `exec` calls are rejected.
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. Use [`wait_until_stopped()`](#wait_until_stopped) when the caller needs stopped-state observation.
 
 ---
 
@@ -386,14 +386,10 @@ Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. Th
 #### kill()
 
 ```python
-async def kill() -> None
+async def kill(timeout: float | None = None) -> None
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful
-shutdown. Pending writes that the workload hasn't `fsync`'d may be
-lost — same durability semantics as a sudden power loss on a physical
-machine. Use [`stop()`](#stop) for graceful shutdown that gives the
-workload a chance to flush.
+Force-terminate the sandbox and wait until stopped state is observed. Pass `timeout` to control the observation timeout. No graceful shutdown. Pending writes that the workload hasn't `fsync`'d may be lost — same durability semantics as a sudden power loss on a physical machine. Use [`stop()`](#stop) for graceful shutdown that gives the workload a chance to flush.
 
 ---
 
@@ -507,10 +503,10 @@ dt = datetime.fromtimestamp(e.timestamp_ms / 1000, timezone.utc)
 
 ---
 
-#### remove_persisted()
+#### remove()
 
 ```python
-async def remove_persisted() -> None
+async def remove() -> None
 ```
 
 Remove the sandbox and all its persisted state from disk.
@@ -581,46 +577,46 @@ Shell command with streaming output.
 #### stop()
 
 ```python
-async def stop() -> None
+async def stop(timeout: float | None = None) -> None
 ```
 
-Gracefully shut down the sandbox. Lets the sandbox finish writing
-any pending data to disk before it exits, so files written inside
-the sandbox aren't lost across a later restart. Waits up to ten
-seconds for a clean exit; if the sandbox is still running after
-that, it is force-killed.
+Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
 
 ---
 
-#### stop_and_wait()
+#### request_stop()
 
 ```python
-async def stop_and_wait() -> tuple[int, bool]
+async def request_stop() -> None
 ```
 
-Stop the sandbox and wait for the exit status.
+Request graceful shutdown and return once the request is sent.
+
+---
+
+#### request_kill()
+
+```python
+async def request_kill() -> None
+```
+
+Request force termination and return once the signal is sent.
+
+---
+
+#### wait_until_stopped()
+
+```python
+async def wait_until_stopped() -> SandboxStopResult
+```
+
+Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
-| `tuple[int, bool]` | `(exit_code, success)` -- `success` is `True` if exit code is `0` |
-
----
-
-#### wait()
-
-```python
-async def wait() -> tuple[int, bool]
-```
-
-Block until the sandbox exits on its own.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `tuple[int, bool]` | `(exit_code, success)` -- `success` is `True` if exit code is `0` |
+| [`SandboxStopResult`](#sandboxstopresult) | Terminal status and optional observed exit code |
 
 ---
 
@@ -1011,15 +1007,26 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | config_json | `str` | Raw JSON configuration |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
 | updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox; returns an error if it doesn't respond within 10 seconds |
-| connect_with_timeout(timeout) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Same as `connect()` with an explicit timeout in seconds |
+| connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop() | `Awaitable[None]` | Gracefully shut down. Waits up to 10 seconds for pending writes to flush, then force-kills |
-| stop_with_timeout(timeout) | `Awaitable[None]` | Same as `stop()` with an explicit timeout in seconds; `0` force-kills immediately |
-| kill() | `Awaitable[None]` | Force terminate immediately. Pending writes may be lost |
+| stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
+| request_stop() | `Awaitable[None]` | Request graceful shutdown without waiting |
+| kill(timeout=None) | `Awaitable[None]` | Force terminate and wait until stopped state is observed |
+| request_kill() | `Awaitable[None]` | Request force termination without waiting |
+| request_drain() | `Awaitable[None]` | Request graceful drain without waiting |
+| wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
 | remove() | `Awaitable[None]` | Delete sandbox and state |
 | metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
 | logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
+
+### SandboxStopResult
+
+Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until_stopped).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | `str` | Terminal status that was observed |
+| exit_code | `int \| None` | Process exit code when it is available |
 
 ### SandboxMetrics
 

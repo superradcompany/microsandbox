@@ -177,20 +177,20 @@ Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.
 
 ---
 
-#### drain()
+#### requestDrain()
 
 ```typescript
-drain(): Promise<void>
+requestDrain(): Promise<void>
 ```
 
-Start a graceful drain. Existing commands run to completion, new `exec` calls are rejected.
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. Use [`waitUntilStopped()`](#waituntilstopped) when the caller needs stopped-state observation.
 
 ---
 
 #### fs()
 
 ```typescript
-fs(): SandboxFs
+fs(): SandboxFsOps
 ```
 
 Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem) for API details.
@@ -199,7 +199,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 | Type | Description |
 |------|-------------|
-| [`SandboxFs`](/sdk/typescript/filesystem) | Filesystem handle |
+| [`SandboxFsOps`](/sdk/typescript/filesystem) | Filesystem handle |
 
 ---
 
@@ -209,11 +209,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 kill(): Promise<void>
 ```
 
-Force-terminate the sandbox immediately. No graceful shutdown.
-Pending writes that the workload hasn't `fsync`'d may be lost — same
-durability semantics as a sudden power loss on a physical machine.
-Use [`stop()`](#stop) for graceful shutdown that gives the workload a
-chance to flush.
+Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown. Pending writes that the workload hasn't `fsync`'d may be lost — same durability semantics as a sudden power loss on a physical machine. Use [`stop()`](#stop) for graceful shutdown that gives the workload a chance to flush.
 
 ---
 
@@ -317,10 +313,10 @@ const recent = await handle.logs({
 
 ---
 
-#### removePersisted()
+#### remove()
 
 ```typescript
-removePersisted(): Promise<void>
+remove(): Promise<void>
 ```
 
 Remove the sandbox and all its persisted state from disk.
@@ -333,43 +329,63 @@ Remove the sandbox and all its persisted state from disk.
 stop(): Promise<void>
 ```
 
-Gracefully shut down the sandbox. Lets the sandbox finish writing
-any pending data to disk before it exits, so files written inside
-the sandbox aren't lost across a later restart. Waits up to ten
-seconds for a clean exit; if the sandbox is still running after
-that, it is force-killed.
+Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to 10_000 ms for a clean exit; if the sandbox is still running after that, it is force-killed.
 
 ---
 
-#### stopAndWait()
+#### stopWithTimeout()
 
 ```typescript
-stopAndWait(): Promise<ExitStatus>
+stopWithTimeout(timeoutMs: number): Promise<void>
 ```
 
-Stop the sandbox and wait for the exit status.
+Gracefully shut down the sandbox with an explicit observation timeout before force-kill escalation.
+
+---
+
+#### requestStop()
+
+```typescript
+requestStop(): Promise<void>
+```
+
+Request graceful shutdown and return once the request is sent.
+
+---
+
+#### requestKill()
+
+```typescript
+requestKill(): Promise<void>
+```
+
+Request force termination and return once the signal is sent.
+
+---
+
+#### killWithTimeout()
+
+```typescript
+killWithTimeout(timeoutMs: number): Promise<void>
+```
+
+Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observation.
+
+---
+
+#### waitUntilStopped()
+
+```typescript
+waitUntilStopped(): Promise<SandboxStopResult>
+```
+
+Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
-| [`ExitStatus`](/sdk/typescript/execution#exitstatus) | Exit code and success flag |
-
----
-
-#### wait()
-
-```typescript
-wait(): Promise<ExitStatus>
-```
-
-Block until the sandbox exits on its own.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExitStatus`](/sdk/typescript/execution#exitstatus) | Exit code and success flag |
+| [`SandboxStopResult`](#sandboxstopresult) | Terminal status and optional observed exit code |
 
 ---
 
@@ -767,8 +783,22 @@ Handles from `Sandbox.get(name)` are **live** — they expose lifecycle methods 
 | connectWithTimeout(timeoutMs) | `Promise<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout in milliseconds |
 | stop() | `Promise<void>` | Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then force-kills |
 | stopWithTimeout(timeoutMs) | `Promise<void>` | Same as `stop()` with an explicit timeout in milliseconds; `0` force-kills immediately |
-| kill() | `Promise<void>` | Force terminate immediately. Pending writes may be lost |
+| requestStop() | `Promise<void>` | Request graceful shutdown without waiting |
+| kill() | `Promise<void>` | Force terminate and wait until stopped state is observed |
+| killWithTimeout(timeoutMs) | `Promise<void>` | Same as `kill()` with an explicit observation timeout |
+| requestKill() | `Promise<void>` | Request force termination without waiting |
+| requestDrain() | `Promise<void>` | Request graceful drain without waiting |
+| waitUntilStopped() | `Promise<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until the sandbox reaches terminal state |
 | remove() | `Promise<void>` | Delete sandbox and state |
+
+### SandboxStopResult
+
+Observed terminal sandbox state returned by [`waitUntilStopped()`](#waituntilstopped).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | [`SandboxStatus`](#sandboxstatus) | Terminal status that was observed |
+| exitCode | `number \| null` | Process exit code when it is available |
 
 ### SandboxMetrics
 
