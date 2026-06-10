@@ -13,7 +13,7 @@ The command below boots the `docker:dind` image, starts Docker inside the sandbo
 ```sh
 msb run --name docker-demo --replace \
   --memory 2G \
-  --mount-named docker-data:/var/lib/docker \
+  --mount-named docker-data:/var/lib/docker:kind=disk,size=10G \
   --script start='dockerd >/tmp/dockerd.log 2>&1 &
   timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
     cat /tmp/dockerd.log
@@ -27,10 +27,10 @@ msb run --name docker-demo --replace \
 This command does three things:
 
 - Starts the `docker:dind` image in a sandbox named `docker-demo`.
-- Mounts a named volume called `docker-data` at `/var/lib/docker`, where Docker stores images, containers, and build cache.
+- Mounts a disk-backed named volume called `docker-data` at `/var/lib/docker`, where Docker stores images, containers, and build cache.
 - Runs the inline `start` script as the entrypoint. The script starts Docker, waits until it is ready, and then opens a shell.
 
-`--mount-named docker-data:/var/lib/docker` is idempotent. If `docker-data` does not exist, the CLI creates it before starting the sandbox. If it already exists with compatible settings, the same command reuses it, so pulled images and created containers can survive `msb rm docker-demo`.
+`--mount-named docker-data:/var/lib/docker:kind=disk,size=10G` is idempotent. If `docker-data` does not exist, the CLI creates it before starting the sandbox. If it already exists with compatible disk settings, the same command reuses it, so pulled images and created containers can survive `msb rm docker-demo`.
 
 ## Run a container
 
@@ -58,30 +58,9 @@ msb volume rm docker-data
 
 Remove `docker-data` only when you no longer need the images, containers, and build cache stored by the nested daemon.
 
-## Details and alternatives
+## Details
 
-Use the default security profile for this recipe. Docker-in-Docker needs normal guest-root mount privileges, so restricted sandboxes are not supported here.
-
-The named mount gives Docker its own storage at `/var/lib/docker`. That matters because the sandbox root filesystem is already overlay-backed, and Docker's default storage driver also uses overlay layers. Keeping Docker's data directory on a named mount avoids putting Docker's overlay storage directly on top of the sandbox root overlay.
-
-### VFS alternative
-
-If you want to avoid the named volume, you can ask Docker to use the `vfs` storage driver instead:
-
-```sh
-msb run --name docker-demo --replace \
-  --memory 2G \
-  --script start='dockerd --storage-driver=vfs >/tmp/dockerd.log 2>&1 &
-  timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
-    cat /tmp/dockerd.log
-    false
-  }
-  exec sh' \
-  --entrypoint start \
-  docker:dind
-```
-
-The tradeoff is performance and disk usage. `vfs` copies full filesystem trees instead of using overlay layers, so pulls and builds can be slower and use more space. Prefer the named-mount version for normal Docker-in-Docker work.
+The disk-backed named mount gives Docker its own ext4 filesystem at `/var/lib/docker`. That matters because the sandbox root filesystem is already overlay-backed, and Docker's default storage driver also uses overlay layers. Keeping Docker's data root on a dedicated disk-backed volume avoids putting Docker's overlay storage directly on top of the sandbox root overlay.
 
 ## Notes
 
