@@ -90,7 +90,7 @@ async fn dns_matrix_plain() {
         assert_scenario(&sb, scenario, cmd, *want).await;
     }
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -132,7 +132,7 @@ async fn dns_matrix_dot() {
         assert_scenario(&sb, scenario, cmd, *want).await;
     }
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 

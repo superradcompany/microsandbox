@@ -16,7 +16,7 @@ async def main():
     await baseline.shell("echo 'shipped via snapshot' > /root/marker.txt && sync")
 
     # Snapshots are stopped-only.
-    await baseline.stop_and_wait()
+    await baseline.stop()
 
     h = await Sandbox.get("snapshot-baseline")
     snap = await h.snapshot("snapshot-baseline-state")
@@ -33,7 +33,7 @@ async def main():
     output = await fork.shell("cat /root/marker.txt")
     print(f"fork sees: {output.stdout_text.strip()}")
 
-    await fork.stop_and_wait()
+    await fork.stop()
 
     await Sandbox.remove("snapshot-baseline")
     await Sandbox.remove("snapshot-fork")

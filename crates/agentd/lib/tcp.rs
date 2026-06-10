@@ -14,7 +14,7 @@ use microsandbox_protocol::codec;
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed};
 
-use crate::session::SessionOutput;
+use crate::session::{RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -150,6 +150,8 @@ async fn connect_and_relay(
                 &TcpFailed {
                     error: format!("connect {}:{}: {e}", req.host, req.port),
                 },
+                RawActivity::guest_message(),
+                Some(RawSessionCompletion::Tcp),
                 &tx,
             );
             return;
@@ -161,13 +163,22 @@ async fn connect_and_relay(
                 &TcpFailed {
                     error: format!("connect {}:{} timed out", req.host, req.port),
                 },
+                RawActivity::guest_message(),
+                Some(RawSessionCompletion::Tcp),
                 &tx,
             );
             return;
         }
     };
 
-    if !send_raw_tcp_message(id, MessageType::TcpConnected, &TcpConnected {}, &tx) {
+    if !send_raw_tcp_message(
+        id,
+        MessageType::TcpConnected,
+        &TcpConnected {},
+        RawActivity::guest_message(),
+        None,
+        &tx,
+    ) {
         return;
     }
 
@@ -191,16 +202,24 @@ async fn relay_tcp_session(
             read = stream.read(&mut read_buf), if !read_eof => {
                 match read {
                     Ok(0) => {
-                        send_raw_tcp_message(id, MessageType::TcpEof, &TcpEof {}, &tx);
+                        send_raw_tcp_message(
+                            id,
+                            MessageType::TcpEof,
+                            &TcpEof {},
+                            RawActivity::guest_message(),
+                            None,
+                            &tx,
+                        );
                         read_eof = true;
                     }
                     Ok(n) => {
+                        let data = read_buf[..n].to_vec();
                         if !send_raw_tcp_message(
                             id,
                             MessageType::TcpData,
-                            &TcpData {
-                                data: read_buf[..n].to_vec(),
-                            },
+                            &TcpData { data },
+                            RawActivity::tcp_bytes(n),
+                            None,
                             &tx,
                         ) {
                             break;
@@ -213,6 +232,8 @@ async fn relay_tcp_session(
                             &TcpFailed {
                                 error: format!("read TCP stream: {e}"),
                             },
+                            RawActivity::guest_message(),
+                            Some(RawSessionCompletion::Tcp),
                             &tx,
                         );
                         break;
@@ -229,6 +250,8 @@ async fn relay_tcp_session(
                                 &TcpFailed {
                                     error: format!("write TCP stream: {e}"),
                                 },
+                                RawActivity::guest_message(),
+                                Some(RawSessionCompletion::Tcp),
                                 &tx,
                             );
                             break;
@@ -242,6 +265,8 @@ async fn relay_tcp_session(
                                 &TcpFailed {
                                     error: format!("shutdown TCP stream: {e}"),
                                 },
+                                RawActivity::guest_message(),
+                                Some(RawSessionCompletion::Tcp),
                                 &tx,
                             );
                             break;
@@ -256,7 +281,14 @@ async fn relay_tcp_session(
     }
 
     if !terminal_sent {
-        send_raw_tcp_message(id, MessageType::TcpClosed, &TcpClosed {}, &tx);
+        send_raw_tcp_message(
+            id,
+            MessageType::TcpClosed,
+            &TcpClosed {},
+            RawActivity::guest_message(),
+            Some(RawSessionCompletion::Tcp),
+            &tx,
+        );
     }
 }
 
@@ -275,11 +307,18 @@ fn send_raw_tcp_message<T: serde::Serialize>(
     id: u32,
     t: MessageType,
     payload: &T,
+    activity: RawActivity,
+    completion: Option<RawSessionCompletion>,
     tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
 ) -> bool {
     let mut buf = Vec::new();
     match encode_tcp_message(id, t, payload, &mut buf) {
-        Ok(()) => tx.send((id, SessionOutput::Raw(buf))).is_ok(),
+        Ok(()) => tx
+            .send((
+                id,
+                SessionOutput::Raw(RawSessionOutput::new(buf, activity, completion)),
+            ))
+            .is_ok(),
         Err(e) => {
             eprintln!("failed to encode tcp message for {id}: {e}");
             false
@@ -419,9 +458,9 @@ mod tests {
 
     async fn recv_message(rx: &mut mpsc::UnboundedReceiver<(u32, SessionOutput)>) -> Message {
         let (_id, output) = rx.recv().await.unwrap();
-        let SessionOutput::Raw(mut bytes) = output else {
+        let SessionOutput::Raw(mut output) = output else {
             panic!("expected SessionOutput::Raw frame");
         };
-        decode_one_message(&mut bytes)
+        decode_one_message(&mut output.frame)
     }
 }

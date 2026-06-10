@@ -65,7 +65,7 @@ async fn tls_intercept_handshake() {
         wget.stderr().unwrap_or_default()
     );
 
-    sandbox.stop_and_wait().await.expect("failed to stop");
+    sandbox.stop().await.expect("failed to stop");
     Sandbox::remove(name).await.expect("failed to remove");
 }
 
@@ -103,6 +103,6 @@ async fn tls_bypass_domain_connects() {
         output.stderr().unwrap_or_default()
     );
 
-    sandbox.stop_and_wait().await.expect("failed to stop");
+    sandbox.stop().await.expect("failed to stop");
     Sandbox::remove(name).await.expect("failed to remove");
 }

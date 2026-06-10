@@ -141,10 +141,42 @@ pub enum SessionOutput {
     Exited(i32),
 
     /// Pre-encoded frame bytes to write directly to the serial output buffer.
-    ///
-    /// Used by filesystem streaming operations that encode their own
-    /// `FsData`/`FsResponse` messages.
-    Raw(Vec<u8>),
+    Raw(RawSessionOutput),
+}
+
+/// Pre-encoded session output plus the accounting metadata known by its producer.
+pub struct RawSessionOutput {
+    /// Encoded protocol frame bytes.
+    pub frame: Vec<u8>,
+
+    /// Activity represented by the frame.
+    pub activity: RawActivity,
+
+    /// Session table entry completed by the frame, if any.
+    pub completion: Option<RawSessionCompletion>,
+}
+
+/// Activity represented by a pre-encoded session frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RawActivity {
+    /// Whether this frame is a meaningful guest-to-host protocol message.
+    pub guest_message: bool,
+
+    /// Filesystem bytes moved by this frame.
+    pub fs_bytes: usize,
+
+    /// TCP bytes moved by this frame.
+    pub tcp_bytes: usize,
+}
+
+/// Session table entry completed by a pre-encoded session frame.
+#[derive(Debug, Clone, Copy)]
+pub enum RawSessionCompletion {
+    /// A filesystem read stream completed.
+    FsRead,
+
+    /// A TCP stream completed.
+    Tcp,
 }
 
 struct ResolvedUser {
@@ -188,6 +220,49 @@ struct CapUserData {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RawSessionOutput {
+    /// Creates pre-encoded output with activity metadata.
+    pub fn new(
+        frame: Vec<u8>,
+        activity: RawActivity,
+        completion: Option<RawSessionCompletion>,
+    ) -> Self {
+        Self {
+            frame,
+            activity,
+            completion,
+        }
+    }
+}
+
+impl RawActivity {
+    /// A guest-to-host frame with no byte counter.
+    pub fn guest_message() -> Self {
+        Self {
+            guest_message: true,
+            ..Self::default()
+        }
+    }
+
+    /// A guest-to-host filesystem data frame.
+    pub fn fs_bytes(len: usize) -> Self {
+        Self {
+            guest_message: true,
+            fs_bytes: len,
+            tcp_bytes: 0,
+        }
+    }
+
+    /// A guest-to-host TCP data frame.
+    pub fn tcp_bytes(len: usize) -> Self {
+        Self {
+            guest_message: true,
+            fs_bytes: 0,
+            tcp_bytes: len,
+        }
+    }
+}
 
 impl ExecSession {
     /// Spawns a new exec session.

@@ -84,7 +84,7 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    defer sb.StopAndWait(ctx)
+    defer sb.Stop(ctx)
 
     out, err := sb.Shell(ctx, "echo 'Hello from microsandbox!'")
     if err != nil {
@@ -503,7 +503,7 @@ sb, err := h.Connect(ctx)
 | `ExecOutput` | Captured stdout/stderr with exit status; inspect via `Stdout()`, `Stderr()`, `ExitCode()`, `Success()` |
 | `ExecHandle` | Streaming exec handle — `Recv`, `Collect`, `Wait`, `Kill`, `Signal`, `ID`, `TakeStdin` |
 | `ExecEvent` | Stream event with `Kind`, `PID`, `Data`, `ExitCode` fields |
-| `SandboxFs` | Guest filesystem operations — obtain via `sandbox.FS()` |
+| `SandboxFSOps` | Guest filesystem operations — obtain via `sandbox.FS()` |
 | `FsReadStream` | Streaming file read from guest — implements `io.WriterTo` |
 | `FsWriteStream` | Streaming file write to guest — implements `io.Writer` |
 | `MetricsStreamHandle` | Live metrics subscription — `Recv(ctx)`, `Close()` |
@@ -523,20 +523,21 @@ sb, err := h.Connect(ctx)
 | `Shell(ctx, cmd, ...opts)` | Run a shell command via `/bin/sh -c` |
 | `ExecStream(ctx, cmd, args)` | Streaming exec; returns `*ExecHandle` |
 | `ShellStream(ctx, cmd)` | Streaming shell; returns `*ExecHandle` |
-| `FS()` | Return a `*SandboxFs` for guest filesystem access |
+| `FS()` | Return a `*SandboxFSOps` for guest filesystem access |
 | `Metrics(ctx)` | Return current resource metrics |
 | `MetricsStream(ctx, interval)` | Live metrics subscription; returns `*MetricsStreamHandle` |
 | `Logs(ctx, opts)` | Read persisted sandbox logs |
 | `Attach(ctx, cmd, args...)` | Interactive PTY session; blocks until exit |
 | `AttachShell(ctx)` | Interactive PTY session in the default shell |
-| `Drain(ctx)` | Send graceful drain signal (SIGUSR1) |
-| `Wait(ctx)` | Block until sandbox exits; returns exit code |
+| `RequestDrain(ctx)` | Request graceful drain signal (SIGUSR1) |
+| `WaitUntilStopped(ctx)` | Block until the sandbox reaches terminal state |
 | `OwnsLifecycle()` | Whether this handle controls the VM process; returns `(bool, error)` |
 | `OwnsLifecycleOrFalse()` | Best-effort variant that swallows the error |
-| `RemovePersisted(ctx)` | Remove persisted state after the sandbox is stopped |
-| `Stop(ctx)` | Gracefully stop the sandbox (does not wait for VM exit) |
-| `StopAndWait(ctx)` | Stop the sandbox and wait for it to exit; returns the guest exit code |
-| `Kill(ctx)` | Terminate the sandbox immediately |
+| `RemoveSandbox(ctx, name)` | Remove persisted state after the sandbox is stopped |
+| `Stop(ctx)` | Gracefully stop the sandbox and wait until stopped state is observed |
+| `RequestStop(ctx)` | Request graceful shutdown without waiting |
+| `Kill(ctx)` | Force-kill the sandbox and wait until stopped state is observed |
+| `RequestKill(ctx)` | Request force termination without waiting |
 | `Detach(ctx)` | Release the local handle; detached sandbox keeps running |
 | `Close()` | Release the Rust-side handle; for detached sandboxes prefer `Detach` |
 

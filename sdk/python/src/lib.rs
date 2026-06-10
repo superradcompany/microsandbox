@@ -29,12 +29,13 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
+    m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
     m.add_class::<exec::PyExecSink>()?;
     m.add_class::<agent::PyAgentClient>()?;
-    m.add_class::<fs::PySandboxFs>()?;
+    m.add_class::<fs::PySandboxFsOps>()?;
     m.add_class::<fs::PyFsReadStream>()?;
     m.add_class::<fs::PyFsWriteSink>()?;
     m.add_class::<image::PyImage>()?;
@@ -53,7 +54,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<logs::PyLogStream>()?;
     m.add_class::<sandbox::PyPullSession>()?;
-    m.add_class::<ssh::PySandboxSsh>()?;
+    m.add_class::<ssh::PySandboxSshOps>()?;
     m.add_class::<ssh::PySshOutput>()?;
     m.add_class::<ssh::PySshClient>()?;
     m.add_class::<ssh::PySftpClient>()?;

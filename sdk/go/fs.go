@@ -8,9 +8,9 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// SandboxFs provides filesystem operations on a running sandbox. Obtain
+// SandboxFSOps provides filesystem operations on a running sandbox. Obtain
 // via Sandbox.FS.
-type SandboxFs struct {
+type SandboxFSOps struct {
 	sandbox *Sandbox
 }
 
@@ -37,7 +37,7 @@ type FsStat struct {
 // base64 inflation) the runtime returns BufferTooSmall on the single-shot
 // path; this method transparently falls back to ReadStream so callers get a
 // uniform Read-returns-bytes interface up to runtime memory limits.
-func (fs *SandboxFs) Read(ctx context.Context, path string) ([]byte, error) {
+func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error) {
 	data, err := fs.sandbox.inner.FsRead(ctx, path)
 	if err == nil {
 		return data, nil
@@ -65,7 +65,7 @@ func (fs *SandboxFs) Read(ctx context.Context, path string) ([]byte, error) {
 }
 
 // ReadString reads a file and returns its contents as a string.
-func (fs *SandboxFs) ReadString(ctx context.Context, path string) (string, error) {
+func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error) {
 	data, err := fs.Read(ctx, path)
 	if err != nil {
 		return "", err
@@ -74,17 +74,17 @@ func (fs *SandboxFs) ReadString(ctx context.Context, path string) (string, error
 }
 
 // Write writes data to a file in the sandbox, creating or truncating it.
-func (fs *SandboxFs) Write(ctx context.Context, path string, data []byte) error {
+func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error {
 	return wrapFFI(fs.sandbox.inner.FsWrite(ctx, path, data))
 }
 
 // WriteString writes a string to a file in the sandbox.
-func (fs *SandboxFs) WriteString(ctx context.Context, path, content string) error {
+func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error {
 	return fs.Write(ctx, path, []byte(content))
 }
 
 // List lists the entries in a directory in the sandbox.
-func (fs *SandboxFs) List(ctx context.Context, path string) ([]FsEntry, error) {
+func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error) {
 	raw, err := fs.sandbox.inner.FsList(ctx, path)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -97,7 +97,7 @@ func (fs *SandboxFs) List(ctx context.Context, path string) ([]FsEntry, error) {
 }
 
 // Stat returns metadata for a file or directory.
-func (fs *SandboxFs) Stat(ctx context.Context, path string) (*FsStat, error) {
+func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error) {
 	raw, err := fs.sandbox.inner.FsStat(ctx, path)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -112,42 +112,42 @@ func (fs *SandboxFs) Stat(ctx context.Context, path string) (*FsStat, error) {
 }
 
 // CopyFromHost copies a host file into the sandbox.
-func (fs *SandboxFs) CopyFromHost(ctx context.Context, hostPath, guestPath string) error {
+func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error {
 	return wrapFFI(fs.sandbox.inner.FsCopyFromHost(ctx, hostPath, guestPath))
 }
 
 // CopyToHost copies a sandbox file to the host.
-func (fs *SandboxFs) CopyToHost(ctx context.Context, guestPath, hostPath string) error {
+func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error {
 	return wrapFFI(fs.sandbox.inner.FsCopyToHost(ctx, guestPath, hostPath))
 }
 
 // Mkdir creates a directory (and any missing parents) inside the sandbox.
-func (fs *SandboxFs) Mkdir(ctx context.Context, path string) error {
+func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error {
 	return wrapFFI(fs.sandbox.inner.FsMkdir(ctx, path))
 }
 
 // Remove deletes a single file. Use RemoveDir for directories.
-func (fs *SandboxFs) Remove(ctx context.Context, path string) error {
+func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error {
 	return wrapFFI(fs.sandbox.inner.FsRemove(ctx, path))
 }
 
 // RemoveDir removes a directory recursively.
-func (fs *SandboxFs) RemoveDir(ctx context.Context, path string) error {
+func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error {
 	return wrapFFI(fs.sandbox.inner.FsRemoveDir(ctx, path))
 }
 
 // Copy copies a file within the sandbox.
-func (fs *SandboxFs) Copy(ctx context.Context, src, dst string) error {
+func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error {
 	return wrapFFI(fs.sandbox.inner.FsCopy(ctx, src, dst))
 }
 
 // Rename renames (or moves) a file or directory within the sandbox.
-func (fs *SandboxFs) Rename(ctx context.Context, src, dst string) error {
+func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error {
 	return wrapFFI(fs.sandbox.inner.FsRename(ctx, src, dst))
 }
 
 // Exists reports whether a file or directory exists at the given path.
-func (fs *SandboxFs) Exists(ctx context.Context, path string) (bool, error) {
+func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error) {
 	ok, err := fs.sandbox.inner.FsExists(ctx, path)
 	if err != nil {
 		return false, wrapFFI(err)
@@ -160,7 +160,7 @@ func (fs *SandboxFs) Exists(ctx context.Context, path string) (bool, error) {
 // ---------------------------------------------------------------------------
 
 // FsReadStream is an open streaming read from a guest file. Obtain via
-// SandboxFs.ReadStream. Must be closed with Close when done.
+// SandboxFSOps.ReadStream. Must be closed with Close when done.
 type FsReadStream struct {
 	inner *ffi.FsReadStreamHandle
 }
@@ -213,7 +213,7 @@ func (s *FsReadStream) Close() error {
 
 // ReadStream opens a streaming read from a guest file. The caller must close
 // the returned FsReadStream when done.
-func (fs *SandboxFs) ReadStream(ctx context.Context, path string) (*FsReadStream, error) {
+func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error) {
 	h, err := fs.sandbox.inner.FsReadStream(ctx, path)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -226,7 +226,7 @@ func (fs *SandboxFs) ReadStream(ctx context.Context, path string) (*FsReadStream
 // ---------------------------------------------------------------------------
 
 // FsWriteStream is an open streaming write to a guest file. Obtain via
-// SandboxFs.WriteStream. Must be closed with Close to finalise the write.
+// SandboxFSOps.WriteStream. Must be closed with Close to finalise the write.
 type FsWriteStream struct {
 	inner *ffi.FsWriteStreamHandle
 }
@@ -252,7 +252,7 @@ func (s *FsWriteStream) Close(ctx context.Context) error {
 
 // WriteStream opens a streaming write to a guest file. The caller must call
 // Close on the returned FsWriteStream to finalise the operation.
-func (fs *SandboxFs) WriteStream(ctx context.Context, path string) (*FsWriteStream, error) {
+func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error) {
 	h, err := fs.sandbox.inner.FsWriteStream(ctx, path)
 	if err != nil {
 		return nil, wrapFFI(err)

@@ -161,6 +161,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        ..
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);

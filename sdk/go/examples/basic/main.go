@@ -1,7 +1,7 @@
 // Basic end-to-end smoke test for the microsandbox Go SDK.
 //
 // Exercises: CreateSandbox, Exec (success + non-zero), Shell, FS read/write,
-// Metrics, StopAndWait, RemoveSandbox.
+// Metrics, Stop, RemoveSandbox.
 //
 // Build: from sdk/go, run
 //
@@ -42,8 +42,8 @@ func main() {
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 		defer c()
-		if _, err := sb.StopAndWait(stopCtx); err != nil {
-			log.Printf("StopAndWait: %v", err)
+		if err := sb.Stop(stopCtx); err != nil {
+			log.Printf("Stop: %v", err)
 		}
 		if err := sb.Close(); err != nil {
 			log.Printf("Close: %v", err)

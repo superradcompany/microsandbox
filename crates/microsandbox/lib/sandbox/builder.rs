@@ -672,7 +672,11 @@ impl SandboxBuilder {
     /// .volume("/data", |m| m.bind("/host/data"))
     /// .volume("/config", |m| m.bind("/host/config").readonly())
     /// .volume("/cache", |m| m.named("my-cache"))
-    /// .volume("/tmp", |m| m.tmpfs().size(100))
+    /// .volume("/tmp", |m| m.named_with("my-sandbox-tmp", |v| v.create()))
+    /// .volume("/scratch", |m| m
+    ///     .named_with("my-sandbox-scratch", |v| v.ensure_exists().quota(1024).label("owner", "team"))
+    ///     .readonly())
+    /// .volume("/tmpfs", |m| m.tmpfs().size(100))
     /// ```
     pub fn volume(
         mut self,
@@ -963,7 +967,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
-    use crate::sandbox::{MAX_SANDBOX_NAME_BYTES, RlimitResource};
+    use crate::sandbox::{MAX_SANDBOX_NAME_BYTES, NamedVolumeMode, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
     #[cfg(feature = "net")]
@@ -1452,5 +1456,99 @@ mod tests {
             err.to_string()
                 .contains("disk image host path does not exist")
         );
+    }
+
+    #[tokio::test]
+    async fn test_named_with_create_registers_create_metadata_on_mount() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/tmp", |m| m.named_with("sb-tmp", |v| v.create()))
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.mounts.len(), 1);
+        match &config.mounts[0] {
+            super::VolumeMount::Named {
+                name,
+                guest,
+                create,
+                ..
+            } => {
+                assert_eq!(name, "sb-tmp");
+                assert_eq!(guest, "/tmp");
+                let create = create.as_ref().unwrap();
+                assert_eq!(create.mode, NamedVolumeMode::Create);
+                assert_eq!(create.name, "sb-tmp");
+            }
+            _ => panic!("expected Named mount"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_named_with_ensure_exists_carries_quota_and_labels() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/scratch", |m| {
+                m.named_with("sb-scratch", |v| {
+                    v.ensure_exists().quota(1024u32).label("owner", "my-team")
+                })
+                .readonly()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match &config.mounts[0] {
+            super::VolumeMount::Named {
+                create, options, ..
+            } => {
+                let create = create.as_ref().unwrap();
+                assert_eq!(create.mode, NamedVolumeMode::EnsureExists);
+                assert_eq!(create.name, "sb-scratch");
+                assert_eq!(create.quota_mib, Some(1024));
+                assert_eq!(
+                    create.labels,
+                    vec![("owner".to_string(), "my-team".to_string())]
+                );
+                assert!(options.readonly);
+            }
+            _ => panic!("expected Named mount"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_named_with_name_override() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/tmp", |m| {
+                m.named_with("initial", |v| v.create().name("overridden"))
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match &config.mounts[0] {
+            super::VolumeMount::Named { name, create, .. } => {
+                assert_eq!(name, "overridden");
+                assert_eq!(create.as_ref().unwrap().name, "overridden");
+            }
+            _ => panic!("expected Named mount"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_named_with_metadata_is_cleared_when_mount_kind_changes() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .volume("/tmp", |m| m.named_with("stale", |v| v.create()).tmpfs())
+            .build()
+            .await
+            .unwrap();
+
+        match &config.mounts[0] {
+            super::VolumeMount::Tmpfs { guest, .. } => assert_eq!(guest, "/tmp"),
+            _ => panic!("expected Tmpfs mount"),
+        }
     }
 }

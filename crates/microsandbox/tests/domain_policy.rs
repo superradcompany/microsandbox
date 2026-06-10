@@ -248,7 +248,7 @@ async fn domain_policy_allows_whitelisted_https() {
         "HTTPS to example.com should be denied by default-action: got `{example}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -286,7 +286,7 @@ async fn domain_policy_deny_domain_denies_dns() {
         "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -324,7 +324,7 @@ async fn domain_policy_deny_domain_blocks_sni_direct_ip_without_dns_cache() {
         "direct-IP HTTPS with denied SNI {DENIED_HOST} should be blocked: got `{denied}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -369,7 +369,7 @@ async fn domain_policy_deny_suffix_denies_dns_apex_and_subdomain() {
     // and rapid back-to-back queries trip the runner's egress DNS
     // rate-limit.
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -427,7 +427,7 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
         "pypi.org should be denied even on shared Fastly IP: got `{denied}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -490,7 +490,7 @@ async fn domain_policy_sni_spoof_on_unrelated_ip_is_denied() {
         "SNI spoof on unrelated IP {spoof_ip} should be denied: got `{spoof_out}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -519,6 +519,6 @@ async fn domain_policy_suffix_allows_subdomain_https() {
         "example.com should not match .cloudflare.com suffix: got `{example}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }

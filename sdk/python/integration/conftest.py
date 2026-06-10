@@ -42,7 +42,7 @@ async def sandbox_factory() -> Any:
 
     for name, sandbox in reversed(sandboxes):
         with suppress(Exception):
-            await sandbox.stop_and_wait()
+            await sandbox.stop()
         await remove_sandbox(name)
 
 

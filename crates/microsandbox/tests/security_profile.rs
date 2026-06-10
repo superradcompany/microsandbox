@@ -34,7 +34,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     assert_no_new_privs(&default, "0").await;
     assert_cap_sys_admin(&default, true).await;
     assert_mount_tmpfs(&default, true).await;
-    default.stop_and_wait().await.expect("stop default");
+    default.stop().await.expect("stop default");
     let _ = Sandbox::remove(default_name).await;
 
     let restricted = Sandbox::builder(restricted_name)
@@ -57,7 +57,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     )
     .await;
     assert_mount_tmpfs(&restricted, false).await;
-    restricted.stop_and_wait().await.expect("stop restricted");
+    restricted.stop().await.expect("stop restricted");
     let _ = Sandbox::remove(restricted_name).await;
 }
 

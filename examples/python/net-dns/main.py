@@ -34,7 +34,7 @@ async def main():
     output = await sb.shell("nslookup cloudflare.com 2>&1 | grep -c Address || echo 0")
     print(f"cloudflare.com: {output.stdout_text.strip()} address(es)")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     await Sandbox.remove("net-dns")
 
 

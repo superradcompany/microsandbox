@@ -103,7 +103,7 @@ async fn spawn_sandbox(name: &str, policy: Option<NetworkPolicy>) -> Sandbox {
 
 /// Stop the sandbox and remove it.
 async fn teardown(sb: Sandbox, name: &str) {
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 

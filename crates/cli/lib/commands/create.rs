@@ -26,9 +26,18 @@ pub struct CreateArgs {
 //--------------------------------------------------------------------------------------------------
 
 /// Execute the `msb create` command.
-pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
+pub async fn run(
+    mut args: CreateArgs,
+    log_level: Option<microsandbox::LogLevel>,
+) -> anyhow::Result<()> {
     let is_named = args.sandbox.name.is_some();
     let name = args.sandbox.name.clone().unwrap_or_else(ui::generate_name);
+
+    if args.sandbox.log_level.is_none()
+        && let Some(log_level) = log_level
+    {
+        args.sandbox.log_level = Some(log_level.to_string());
+    }
 
     let builder = Sandbox::builder(&name).image(args.image.as_str());
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;

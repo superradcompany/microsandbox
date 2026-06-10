@@ -317,6 +317,9 @@ class MountConfig:
     kind: MountKind
     bind: str | None = None
     named: str | None = None
+    named_mode: Literal["existing", "create", "ensure-exists"] | None = None
+    named_kind: Literal["dir", "directory", "disk"] | None = None
+    quota_mib: int | None = None
     size_mib: int | None = None
     readonly: bool = False
     noexec: bool = False
@@ -346,6 +349,14 @@ class MountConfig:
             if self.named is None:
                 raise ValueError("MountConfig kind=NAMED requires named=...")
             d["named"] = self.named
+            if self.named_mode is not None:
+                d["named_mode"] = self.named_mode
+            if self.named_kind is not None:
+                d["named_kind"] = self.named_kind
+            if self.size_mib is not None:
+                d["size_mib"] = self.size_mib
+            if self.quota_mib is not None:
+                d["quota_mib"] = self.quota_mib
         elif self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
             if self.size_mib is not None:

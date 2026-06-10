@@ -42,8 +42,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("CreateSandbox: %v", err)
 	}
-	if _, err := sb.StopAndWait(ctx); err != nil {
-		log.Printf("StopAndWait: %v", err)
+	if err := sb.Stop(ctx); err != nil {
+		log.Printf("Stop: %v", err)
 	}
 	if err := sb.Close(); err != nil {
 		log.Printf("Close: %v", err)

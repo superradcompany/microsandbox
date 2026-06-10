@@ -20,9 +20,18 @@ sudo find /tmp -mindepth 1 -maxdepth 1 -type d \
   \( -name 'codex-*' -o -name 'microsandbox-*' -o -name 'libkrun-*' \) \
   -mmin +360 -exec rm -rf {} + 2>/dev/null || true
 
+# Prune stale sibling checkouts left by previous runs, but never the one the
+# current job runs from. $GITHUB_WORKSPACE lives directly under
+# $RUNNER_WORKSPACE and matches 'microsandbox*', and a git checkout that
+# doesn't add or remove top-level entries leaves the directory's own mtime
+# untouched, so the -mmin guard alone would let this find delete the live
+# working directory mid-job (the next step then fails with "No such file or
+# directory" on its working directory).
 if [[ -n "${RUNNER_WORKSPACE:-}" && -d "${RUNNER_WORKSPACE}" ]]; then
   find "${RUNNER_WORKSPACE}" -mindepth 1 -maxdepth 1 -type d \
-    -name 'microsandbox*' -mmin +360 -exec rm -rf {} + 2>/dev/null || true
+    -name 'microsandbox*' \
+    ! -path "${GITHUB_WORKSPACE:-/nonexistent}" \
+    -mmin +360 -exec rm -rf {} + 2>/dev/null || true
 fi
 
 echo "::group::runner disk after cleanup"

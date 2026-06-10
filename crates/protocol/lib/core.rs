@@ -46,6 +46,48 @@ pub struct ClockSync {
     pub unix_time_nanos: u64,
 }
 
+/// Payload for `core.error` messages.
+///
+/// Sent when a peer can identify a recoverable protocol error for a specific
+/// correlation ID. Unrecoverable frame-level errors, such as stream
+/// desynchronization or impossible frame lengths, should close the transport
+/// instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreError {
+    /// Machine-readable error kind.
+    pub kind: CoreErrorKind,
+
+    /// Human-readable diagnostic message.
+    pub message: String,
+
+    /// Wire message type involved in the error, when it could be determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offending_type: Option<String>,
+}
+
+/// Machine-readable `core.error` categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreErrorKind {
+    /// The protocol message envelope could not be decoded.
+    MalformedMessage,
+
+    /// The message type is unknown to the peer.
+    UnsupportedMessageType,
+
+    /// The message requires a newer protocol generation than the peer supports.
+    UnsupportedProtocolGeneration,
+
+    /// The frame flags do not match the message type.
+    InvalidFlags,
+
+    /// The message payload could not be decoded or failed validation.
+    InvalidPayload,
+
+    /// The message refers to an unknown, closed, or incompatible session.
+    InvalidSession,
+}
+
 /// Payload for `core.init.resolved` messages.
 ///
 /// Sent by agentd after the guest rootfs is ready to resolve init-time facts,

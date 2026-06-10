@@ -42,7 +42,7 @@ pub const DEFAULT_SSH_PORT: u16 = 2222;
 
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
-pub struct SandboxSsh {
+pub struct SandboxSshOps {
     sandbox: Sandbox,
 }
 
@@ -189,7 +189,7 @@ struct PtyInfo {
 }
 
 struct SftpServerSession {
-    fs: crate::sandbox::fs::SandboxFs,
+    fs: crate::sandbox::fs::SandboxFsOps,
     cwd: String,
     next_handle: u64,
     handles: HashMap<String, crate::sandbox::FsHandle>,
@@ -215,25 +215,25 @@ enum ExecCommand {
 
 impl Sandbox {
     /// Return the SSH namespace for this sandbox.
-    pub fn ssh(&self) -> SandboxSsh {
-        SandboxSsh {
+    pub fn ssh(&self) -> SandboxSshOps {
+        SandboxSshOps {
             sandbox: self.clone(),
         }
     }
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxSsh
+// Methods: SandboxSshOps
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxSsh {
+impl SandboxSshOps {
     /// Connect a native in-process SSH client to this sandbox.
-    pub async fn connect(&self) -> MicrosandboxResult<SshClient> {
-        self.connect_with(|opts| opts).await
+    pub async fn open_client(&self) -> MicrosandboxResult<SshClient> {
+        self.open_client_with(|opts| opts).await
     }
 
     /// Connect a native in-process SSH client with custom options.
-    pub async fn connect_with(
+    pub async fn open_client_with(
         &self,
         f: impl FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder,
     ) -> MicrosandboxResult<SshClient> {
@@ -251,7 +251,7 @@ impl SandboxSsh {
         let term = options.term.clone();
         let sftp = options.sftp;
         let server = self
-            .server_with(|opts| {
+            .prepare_server_with(|opts| {
                 opts.host_key(host_key)
                     .authorized_key(authorized_key)
                     .user(user.clone())
@@ -260,7 +260,7 @@ impl SandboxSsh {
             .await?;
 
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
-        let server_task = tokio::spawn(async move { server.serve(server_stream).await });
+        let server_task = tokio::spawn(async move { server.serve_connection(server_stream).await });
         let mut client = match russh::client::connect_stream(
             Arc::new(russh::client::Config::default()),
             client_stream,
@@ -308,12 +308,12 @@ impl SandboxSsh {
     }
 
     /// Prepare a reusable SSH server endpoint for this sandbox.
-    pub async fn server(&self) -> MicrosandboxResult<SshServer> {
-        self.server_with(|opts| opts).await
+    pub async fn prepare_server(&self) -> MicrosandboxResult<SshServer> {
+        self.prepare_server_with(|opts| opts).await
     }
 
     /// Prepare a reusable SSH server endpoint with custom options.
-    pub async fn server_with(
+    pub async fn prepare_server_with(
         &self,
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
@@ -772,7 +772,7 @@ impl SshServerOptionsBuilder {
 
 impl SshServer {
     /// Serve one SSH connection over an ordered duplex stream.
-    pub async fn serve<S>(&self, stream: S) -> MicrosandboxResult<()>
+    pub async fn serve_connection<S>(&self, stream: S) -> MicrosandboxResult<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -809,7 +809,7 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
-        let client = Arc::new(AgentClient::connect_sandbox(self.settings.sandbox.name()).await?);
+        let client = Arc::new(crate::agent::connect_sandbox(self.settings.sandbox.name()).await?);
         self.client = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -1158,7 +1158,7 @@ impl russh::server::Handler for SshSession {
             return Ok(());
         }
 
-        let fs = crate::sandbox::fs::SandboxFs::new(&client);
+        let fs = crate::sandbox::fs::SandboxFsOps::new(&client);
         let cwd = self
             .settings
             .sandbox
@@ -1734,7 +1734,7 @@ fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<S
 
 async fn relay_tcp_to_ssh(
     channel: ChannelId,
-    mut tcp_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
+    mut tcp_rx: tokio::sync::mpsc::Receiver<Message>,
     session: russh::server::Handle,
 ) {
     while let Some(msg) = tcp_rx.recv().await {

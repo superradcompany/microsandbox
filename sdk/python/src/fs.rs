@@ -11,8 +11,8 @@ use crate::error::to_py_err;
 
 /// Filesystem operations on a running sandbox.
 /// Holds a direct Arc<AgentClient> — no Sandbox mutex lock per operation.
-#[pyclass(name = "SandboxFs")]
-pub struct PySandboxFs {
+#[pyclass(name = "SandboxFsOps")]
+pub struct PySandboxFsOps {
     client: Arc<microsandbox::agent::AgentClient>,
 }
 
@@ -29,22 +29,22 @@ pub struct PyFsWriteSink {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxFs
+// Methods: SandboxFsOps
 //--------------------------------------------------------------------------------------------------
 
-impl PySandboxFs {
+impl PySandboxFsOps {
     pub fn from_client(client: Arc<microsandbox::agent::AgentClient>) -> Self {
         Self { client }
     }
 }
 
 #[pymethods]
-impl PySandboxFs {
+impl PySandboxFsOps {
     /// Read an entire file as bytes.
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
         })
@@ -54,7 +54,7 @@ impl PySandboxFs {
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
         })
@@ -64,7 +64,7 @@ impl PySandboxFs {
     fn read_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let stream = fs.read_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsReadStream {
                 inner: Arc::new(Mutex::new(stream)),
@@ -81,7 +81,7 @@ impl PySandboxFs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -91,7 +91,7 @@ impl PySandboxFs {
     fn write_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let sink = fs.write_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsWriteSink {
                 inner: Arc::new(Mutex::new(Some(sink))),
@@ -103,7 +103,7 @@ impl PySandboxFs {
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<PyFsEntry> = entries.into_iter().map(convert_fs_entry).collect();
             Ok(py_entries)
@@ -114,7 +114,7 @@ impl PySandboxFs {
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -124,7 +124,7 @@ impl PySandboxFs {
     fn remove<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -134,7 +134,7 @@ impl PySandboxFs {
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -144,7 +144,7 @@ impl PySandboxFs {
     fn copy<'py>(&self, py: Python<'py>, src: String, dst: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.copy(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -159,7 +159,7 @@ impl PySandboxFs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.rename(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -169,7 +169,7 @@ impl PySandboxFs {
     fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let meta = fs.stat(&path).await.map_err(to_py_err)?;
             Ok(convert_fs_metadata(&meta))
         })
@@ -179,7 +179,7 @@ impl PySandboxFs {
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
         })
@@ -194,7 +194,7 @@ impl PySandboxFs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.copy_from_host(&host_path, &guest_path)
                 .await
                 .map_err(to_py_err)?;
@@ -211,7 +211,7 @@ impl PySandboxFs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFsOps::new(&client);
             fs.copy_to_host(&guest_path, &host_path)
                 .await
                 .map_err(to_py_err)?;

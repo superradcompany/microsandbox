@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("Public HTTP: {}", output.stdout()?.trim());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
 
     let allow_all = NetworkPolicy::builder().default_allow().build()?;
     let sandbox = Sandbox::builder("net-policy-all")
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("Allow-all HTTP: {}", output.stdout()?.trim());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
 
     let custom = NetworkPolicy::builder()
         .default_deny()
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("Custom-policy HTTP: {}", output.stdout()?.trim());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
 
     Sandbox::remove("net-policy-public").await?;
     Sandbox::remove("net-policy-all").await?;

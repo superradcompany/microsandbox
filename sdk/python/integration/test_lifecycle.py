@@ -41,9 +41,9 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
             with suppress(Exception):
                 await connected.detach()
 
-        code, success = await sandbox.stop_and_wait()
-        assert isinstance(code, int)
-        assert isinstance(success, bool)
+        await sandbox.stop()
+        result = await handle.refresh()
+        assert result.status == "stopped"
 
         restarted = await Sandbox.start(name)
         try:
@@ -78,7 +78,7 @@ async def test_replace_rejects_duplicate_then_replaces(sandbox_name):
             await stop_and_remove_sandbox(name, second)
     finally:
         with suppress(Exception):
-            await first.stop_and_wait()
+            await first.stop()
         await remove_sandbox(name)
 
 

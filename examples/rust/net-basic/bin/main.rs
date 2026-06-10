@@ -23,6 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = sandbox.shell("ip addr show eth0").await?;
     println!("Interface:\n{}", output.stdout()?);
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

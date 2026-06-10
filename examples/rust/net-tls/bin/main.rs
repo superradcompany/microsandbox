@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("HTTPS (no-verify): {}", output.stdout()?.trim());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Sandbox::remove("net-tls").await?;
 
     Ok(())
