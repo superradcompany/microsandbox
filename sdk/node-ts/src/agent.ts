@@ -82,6 +82,21 @@ export class AgentClient {
   }
 
   /**
+   * Resolve a sandbox's agentd relay socket path without connecting.
+   *
+   * Returns the same path {@link connectSandbox} would dial, so callers can
+   * talk to agentd over a raw byte transport instead of this frame client.
+   * The sandbox need not be running. Names are limited to 128 UTF-8 bytes.
+   */
+  static socketPath(name: string): string {
+    try {
+      return napi.AgentClient.socketPath(name);
+    } catch (e) {
+      throw mapNapiError(e);
+    }
+  }
+
+  /**
    * Send one frame and await a single response frame.
    *
    * Use for request/response RPCs that produce exactly one terminal

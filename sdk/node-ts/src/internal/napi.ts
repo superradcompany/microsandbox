@@ -63,6 +63,7 @@ export interface NativeBindings {
 export interface NapiAgentClientStatic {
   connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
   connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  socketPath(name: string): string;
 }
 
 export interface AgentConnectOptions {

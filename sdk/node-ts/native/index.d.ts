@@ -17,6 +17,15 @@ export declare class AgentClient {
   /** Connect to an agentd relay socket by path. */
   static connect(path: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
   /**
+   * Resolve a sandbox's agentd relay socket path without connecting.
+   *
+   * Returns the same path `connectSandbox` would dial, so a caller can talk
+   * to agentd over a raw byte transport instead of this frame client. The
+   * sandbox need not be running. Sandbox names are limited to 128 UTF-8
+   * bytes.
+   */
+  static socketPath(name: string): string
+  /**
    * Send one frame and await a single response frame.
    *
    * Use for request/response RPCs that produce exactly one terminal

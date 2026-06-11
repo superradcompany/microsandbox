@@ -686,6 +686,20 @@ char *msb_agent_open_path(uint64_t cancel_id,
                           uint64_t timeout_ms,
                           Handle *out_handle);
 
+/**
+ * Resolve the host-side path of a sandbox's agentd relay socket by name.
+ *
+ * Synchronous; touches no Rust-side handle state and does not connect. Writes
+ * `{"path":"..."}` to `buf`. The Go SDK exposes this so a caller can dial
+ * agentd over a raw byte transport (e.g. a transparent relay) instead of the
+ * frame-protocol client returned by `msb_agent_open_*`.
+ *
+ * # Safety
+ * `name` must be a valid null-terminated C string; `buf`/`buf_len` follow the
+ * shared `run` output-buffer contract.
+ */
+char *msb_agent_socket_path(const char *name, unsigned char *buf, uintptr_t buf_len);
+
 char *msb_agent_request(uint64_t cancel_id,
                         Handle agent_handle,
                         unsigned char flags,
