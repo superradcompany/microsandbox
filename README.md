@@ -313,10 +313,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
 
-AI agents are a natural fit for microsandbox. They run tools, inspect files, install packages, call APIs, and execute generated code, often with more ambient access than they should have.
-
-microsandbox gives those actions a dedicated microVM instead of your host process. Agents can still work normally, but their filesystem, network, lifecycle, and secrets are controlled by the sandbox boundary.
-
 #### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
 
 > Teach any AI coding agent how to use microsandbox by installing the [Agent Skills](https://github.com/superradcompany/skills). Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and more.
