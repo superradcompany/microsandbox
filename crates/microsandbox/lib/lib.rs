@@ -43,7 +43,8 @@ pub use sandbox::ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use sandbox::{
-    ExecOutput, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig, validate_sandbox_name,
+    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig,
+    validate_sandbox_name,
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,

@@ -360,7 +360,8 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the guest hostname. Defaults to the sandbox name.
+    /// Set the guest hostname. Limited to 64 UTF-8 bytes (the Linux UTS
+    /// limit). Defaults to a sandbox-name-derived form when unset.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
         self.config.hostname = Some(hostname.into());
         self
@@ -849,6 +850,21 @@ impl SandboxBuilder {
         }
         super::validate_sandbox_name_for_runtime(&self.config.name)?;
 
+        if let Some(hostname) = &self.config.hostname {
+            if hostname.is_empty() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "hostname must not be empty".into(),
+                ));
+            }
+            let len = hostname.len();
+            if len > super::MAX_HOSTNAME_BYTES {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "hostname is too long: {len} bytes (max {})",
+                    super::MAX_HOSTNAME_BYTES
+                )));
+            }
+        }
+
         if self.config.cpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "cpus must be greater than 0".into(),
@@ -967,7 +983,9 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
-    use crate::sandbox::{MAX_SANDBOX_NAME_BYTES, NamedVolumeMode, RlimitResource};
+    use crate::sandbox::{
+        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NamedVolumeMode, RlimitResource,
+    };
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
     #[cfg(feature = "net")]
@@ -1012,6 +1030,49 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid config: sandbox name is too long: 129 bytes (max 128)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_accepts_64_byte_hostname() {
+        let hostname = "y".repeat(MAX_HOSTNAME_BYTES);
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .hostname(hostname.clone())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.hostname.as_deref(), Some(hostname.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_over_64_byte_hostname() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .hostname("y".repeat(MAX_HOSTNAME_BYTES + 1))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: hostname is too long: 65 bytes (max 64)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_empty_hostname() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .hostname("")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid config: hostname must not be empty"
         );
     }
 
