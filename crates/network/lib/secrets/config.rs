@@ -201,6 +201,21 @@ impl SecretsConfig {
         }
         Ok(())
     }
+
+    /// Whether any secret can be substituted over plain HTTP.
+    ///
+    /// True only when at least one secret has opted out of TLS identity
+    /// (`require_tls_identity == false`) and has an enabled injection scope.
+    /// Used to decide whether the plain-HTTP header peek is worth its latency.
+    pub(crate) fn has_plain_http_candidates(&self) -> bool {
+        self.secrets.iter().any(|secret| {
+            !secret.require_tls_identity
+                && (secret.injection.headers
+                    || secret.injection.basic_auth
+                    || secret.injection.query_params
+                    || secret.injection.body)
+        })
+    }
 }
 
 impl SecretEntry {

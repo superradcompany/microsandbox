@@ -137,7 +137,7 @@ async fn tcp_proxy_task(
     // For plain-HTTP connections with secrets, peek_for_sni bails on the first
     // non-TLS byte and may return before headers are complete. Keep reading until
     // \r\n\r\n so extract_http_host always sees a full header block.
-    if !is_tls && !secrets.secrets.is_empty() {
+    if !is_tls && secrets.has_plain_http_candidates() {
         initial_buf =
             peek_for_http_headers(initial_buf, &mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
     }
