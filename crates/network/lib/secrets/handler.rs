@@ -5,7 +5,8 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
@@ -75,6 +76,10 @@ pub struct SecretsHandler {
     ineligible_for_substitution: Vec<IneligibleSecret>,
     /// Whether this connection is TLS-intercepted (not bypass).
     tls_intercepted: bool,
+    /// TLS SNI this handler was created for.
+    sni: String,
+    /// Original guest destination for this connection.
+    guest_dst: Option<SocketAddr>,
     /// Longest raw or encoded placeholder representation. Sizes the
     /// sliding-window tail used for cross-write violation detection.
     max_detection_window_len: usize,
@@ -93,6 +98,8 @@ pub struct SecretsHandler {
     http_state: HttpState,
     /// SNI to require in HTTP/1 `Host` headers for DNS-pinned intercepted TLS.
     http_sni: Option<String>,
+    /// Current HTTP/1 request metadata while processing body continuations.
+    http1_request_summary: Option<RequestSummary>,
     /// Buffered HTTP bytes while waiting for complete headers or a complete
     /// body-rewriteable request.
     http_pending: Vec<u8>,
@@ -140,6 +147,7 @@ struct Http2State {
     header_block: Option<Http2HeaderBlock>,
     open_request_streams: HashSet<u32>,
     data_tails: HashMap<u32, Vec<u8>>,
+    request_summaries: HashMap<u32, RequestSummary>,
     decoder: HpackDecoder<'static>,
     encoder: HpackEncoder<'static>,
 }
@@ -220,8 +228,31 @@ struct EligibleSecret {
 
 /// A secret that did not pass substitution or passthrough host matching.
 struct IneligibleSecret {
+    env_var: String,
     placeholder: String,
     action: BlockingAction,
+}
+
+/// Details about a blocked secret placeholder.
+struct SecretViolationReport {
+    action: BlockingAction,
+    env_var: String,
+    placeholder: String,
+    protocol: RequestProtocol,
+    location: RequestLocation,
+    match_form: PlaceholderMatchForm,
+    method: Option<String>,
+    path: Option<String>,
+    host: Option<String>,
+    http2_stream_id: Option<u32>,
+}
+
+/// Minimal request metadata safe to include in violation logs.
+#[derive(Clone, Default)]
+struct RequestSummary {
+    method: Option<String>,
+    path: Option<String>,
+    host: Option<String>,
 }
 
 /// Blocking action to take when an ineligible placeholder is detected.
@@ -231,6 +262,32 @@ enum BlockingAction {
     #[default]
     BlockAndLog,
     BlockAndTerminate,
+}
+
+/// Request protocol where a violation was detected.
+#[derive(Debug, Clone, Copy)]
+enum RequestProtocol {
+    Http1,
+    Http2,
+}
+
+/// Request location where a placeholder matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestLocation {
+    Header,
+    Query,
+    BasicAuth,
+    Body,
+    Unknown,
+}
+
+/// Representation that matched the configured placeholder.
+#[derive(Debug, Clone, Copy)]
+enum PlaceholderMatchForm {
+    Raw,
+    PercentDecoded,
+    JsonUnescaped,
+    BasicAuthDecoded,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -344,6 +401,52 @@ impl BlockingAction {
     }
 }
 
+impl fmt::Display for BlockingAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Block => "block",
+            Self::BlockAndLog => "block-and-log",
+            Self::BlockAndTerminate => "block-and-terminate",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for RequestProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Http1 => "http/1.1",
+            Self::Http2 => "http/2",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for RequestLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Header => "header",
+            Self::Query => "query",
+            Self::BasicAuth => "authorization_basic",
+            Self::Body => "body",
+            Self::Unknown => "unknown",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for PlaceholderMatchForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Raw => "raw",
+            Self::PercentDecoded => "percent_decoded",
+            Self::JsonUnescaped => "json_unescaped",
+            Self::BasicAuthDecoded => "basic_auth_decoded",
+        };
+        f.write_str(value)
+    }
+}
+
 impl Default for Http2State {
     fn default() -> Self {
         Self {
@@ -352,6 +455,7 @@ impl Default for Http2State {
             header_block: None,
             open_request_streams: HashSet::new(),
             data_tails: HashMap::new(),
+            request_summaries: HashMap::new(),
             decoder: HpackDecoder::with_dynamic_size(4096),
             encoder: HpackEncoder::with_dynamic_size(4096),
         }
@@ -443,6 +547,7 @@ impl SecretsHandler {
 
             // Non-matching passthrough policies fall back to the default blocking action.
             ineligible_for_substitution.push(IneligibleSecret {
+                env_var: secret.env_var.clone(),
                 placeholder: secret.placeholder.clone(),
                 action: BlockingAction::from_violation_action(action).unwrap_or_default(),
             });
@@ -452,15 +557,24 @@ impl SecretsHandler {
             eligible_for_substitution,
             ineligible_for_substitution,
             tls_intercepted,
+            sni: sni.to_string(),
+            guest_dst: None,
             max_detection_window_len,
             max_body_placeholder_len,
             placeholder_limit_exceeded,
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
             http_sni: enforce_http_authority.then(|| sni.to_string()),
+            http1_request_summary: None,
             http_pending: Vec::new(),
             http2_state: None,
         }
+    }
+
+    /// Attach the original guest destination for structured violation logs.
+    pub fn with_guest_dst(mut self, guest_dst: SocketAddr) -> Self {
+        self.guest_dst = Some(guest_dst);
+        self
     }
 
     /// Substitute secrets in plaintext data (guest → server direction).
@@ -585,6 +699,7 @@ impl SecretsHandler {
         let mut body_substitution_allowed = false;
         let (body_bytes, spillover) = if boundary.is_some() {
             let header_text = String::from_utf8_lossy(header_bytes);
+            let request_summary = http1_request_summary(header_text.as_ref());
             if let Some(sni) = self.http_sni.as_deref()
                 && let Some(metadata) = parse_http_request_metadata(header_bytes)?
                 && !metadata
@@ -616,6 +731,7 @@ impl SecretsHandler {
                 && let HttpState::InBody { remaining } = &framing.state
             {
                 self.http_pending.extend_from_slice(data);
+                self.http1_request_summary = Some(request_summary);
                 self.http_state = HttpState::BufferingBody {
                     remaining: *remaining,
                 };
@@ -624,6 +740,11 @@ impl SecretsHandler {
 
             body_substitution_allowed = framing.body_substitution_allowed;
             self.http_state = framing.state;
+            self.http1_request_summary = if matches!(self.http_state, HttpState::InBody { .. }) {
+                Some(request_summary)
+            } else {
+                None
+            };
             after_headers.split_at(framing.body_in_request)
         } else {
             (after_headers, &[] as &[u8])
@@ -633,23 +754,11 @@ impl SecretsHandler {
         let this_request = &data[..header_bytes.len() + body_bytes.len()];
 
         // Check for disallowed placeholders before forwarding or substituting data.
-        if let Some(action) = self
-            .detect_blocking_action(this_request, String::from_utf8_lossy(header_bytes).as_ref())
-        {
-            match action {
-                BlockingAction::Block => return Err(action.into_violation_action()),
-                BlockingAction::BlockAndLog => {
-                    tracing::warn!("secret violation: placeholder detected for disallowed host");
-                    return Err(action.into_violation_action());
-                }
-                BlockingAction::BlockAndTerminate => {
-                    tracing::error!(
-                        "secret violation: placeholder detected for disallowed host - terminating"
-                    );
-                    return Err(action.into_violation_action());
-                }
-            }
-        }
+        self.apply_blocking_action(self.detect_blocking_action(
+            this_request,
+            String::from_utf8_lossy(header_bytes).as_ref(),
+            RequestLocation::Unknown,
+        ))?;
         self.update_tail(this_request);
 
         if self.eligible_for_substitution.is_empty() {
@@ -814,12 +923,18 @@ impl SecretsHandler {
         };
         let this_request = &parent[..header_bytes.len() + body_part.len()];
 
-        self.apply_blocking_action(self.detect_blocking_action(this_request, headers))?;
+        self.apply_blocking_action(self.detect_blocking_action(
+            this_request,
+            headers,
+            RequestLocation::Unknown,
+        ))?;
         self.update_tail(this_request);
 
         self.http_state = if body_end.is_some() {
+            self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
+            self.http1_request_summary = Some(http1_request_summary(headers));
             HttpState::InChunkedBody { state }
         };
 
@@ -853,12 +968,18 @@ impl SecretsHandler {
         };
         let this_request = &parent[..header_bytes.len() + body_part.len()];
 
-        self.apply_blocking_action(self.detect_blocking_action(this_request, headers))?;
+        self.apply_blocking_action(self.detect_blocking_action(
+            this_request,
+            headers,
+            RequestLocation::Unknown,
+        ))?;
         self.update_tail(this_request);
 
         self.http_state = if rewrite.body_end.is_some() {
+            self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
+            self.http1_request_summary = Some(http1_request_summary(headers));
             HttpState::InChunkedRewriteBody { state }
         };
 
@@ -910,27 +1031,20 @@ impl SecretsHandler {
             None => (data, &[] as &[u8]),
         };
 
-        if let Some(action) = self.detect_blocking_action(body_part, "") {
-            match action {
-                BlockingAction::Block => return Err(action.into_violation_action()),
-                BlockingAction::BlockAndLog => {
-                    tracing::warn!("secret violation: placeholder detected for disallowed host");
-                    return Err(action.into_violation_action());
-                }
-                BlockingAction::BlockAndTerminate => {
-                    tracing::error!(
-                        "secret violation: placeholder detected for disallowed host - terminating"
-                    );
-                    return Err(action.into_violation_action());
-                }
-            }
-        }
+        self.apply_blocking_action(self.detect_blocking_action(
+            body_part,
+            "",
+            RequestLocation::Body,
+        ))?;
         self.update_tail(body_part);
 
         // Advance framing state. If the body completes within this chunk,
         // the spillover below is the start of a fresh request.
         self.http_state = match body_end {
-            Some(_) => HttpState::AwaitingHeaders,
+            Some(_) => {
+                self.http1_request_summary = None;
+                HttpState::AwaitingHeaders
+            }
             None => HttpState::InBody {
                 remaining: remaining - body_part.len(),
             },
@@ -951,24 +1065,15 @@ impl SecretsHandler {
             None => (data, &[] as &[u8]),
         };
 
-        if let Some(action) = self.detect_blocking_action(body_part, "") {
-            match action {
-                BlockingAction::Block => return Err(action.into_violation_action()),
-                BlockingAction::BlockAndLog => {
-                    tracing::warn!("secret violation: placeholder detected for disallowed host");
-                    return Err(action.into_violation_action());
-                }
-                BlockingAction::BlockAndTerminate => {
-                    tracing::error!(
-                        "secret violation: placeholder detected for disallowed host - terminating"
-                    );
-                    return Err(action.into_violation_action());
-                }
-            }
-        }
+        self.apply_blocking_action(self.detect_blocking_action(
+            body_part,
+            "",
+            RequestLocation::Body,
+        ))?;
         self.update_tail(body_part);
 
         self.http_state = if body_end.is_some() {
+            self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
             HttpState::InChunkedBody { state }
@@ -990,10 +1095,15 @@ impl SecretsHandler {
             None => (data, &[] as &[u8]),
         };
 
-        self.apply_blocking_action(self.detect_blocking_action(body_part, ""))?;
+        self.apply_blocking_action(self.detect_blocking_action(
+            body_part,
+            "",
+            RequestLocation::Body,
+        ))?;
         self.update_tail(body_part);
 
         self.http_state = if rewrite.body_end.is_some() {
+            self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
             HttpState::InChunkedRewriteBody { state }
@@ -1012,6 +1122,7 @@ impl SecretsHandler {
     pub fn is_empty(&self) -> bool {
         self.http_sni.is_none()
             && self.http_pending.is_empty()
+            && self.http1_request_summary.is_none()
             && self.http2_state.is_none()
             && matches!(self.http_state, HttpState::AwaitingHeaders)
             && self.eligible_for_substitution.is_empty()
@@ -1120,6 +1231,9 @@ impl SecretsHandler {
                 &decoded_tail,
                 payload,
                 "",
+                RequestProtocol::Http1,
+                RequestLocation::Body,
+                None,
             ))?;
             update_tail_buffer(
                 &mut decoded_tail,
@@ -1149,6 +1263,9 @@ impl SecretsHandler {
                         &decoded_tail,
                         payload,
                         "",
+                        RequestProtocol::Http1,
+                        RequestLocation::Body,
+                        None,
                     ))?;
                     update_tail_buffer(
                         &mut decoded_tail,
@@ -1234,20 +1351,67 @@ impl SecretsHandler {
         })
     }
 
-    fn apply_blocking_action(&self, action: Option<BlockingAction>) -> Result<(), ViolationAction> {
-        match action {
-            Some(BlockingAction::Block) => Err(ViolationAction::Block),
-            Some(BlockingAction::BlockAndLog) => {
-                tracing::warn!("secret violation: placeholder detected for disallowed host");
-                Err(ViolationAction::BlockAndLog)
-            }
-            Some(BlockingAction::BlockAndTerminate) => {
-                tracing::error!(
-                    "secret violation: placeholder detected for disallowed host - terminating"
-                );
-                Err(ViolationAction::BlockAndTerminate)
-            }
-            None => Ok(()),
+    fn apply_blocking_action(
+        &self,
+        report: Option<SecretViolationReport>,
+    ) -> Result<(), ViolationAction> {
+        let Some(report) = report else {
+            return Ok(());
+        };
+        let action = report.action;
+        self.log_violation(&report);
+        Err(action.into_violation_action())
+    }
+
+    fn log_violation(&self, report: &SecretViolationReport) {
+        if matches!(report.action, BlockingAction::Block) {
+            return;
+        }
+
+        let host = report.host.as_deref().unwrap_or("");
+        let method = report.method.as_deref().unwrap_or("");
+        let path = report.path.as_deref().unwrap_or("");
+        let guest_dst = self
+            .guest_dst
+            .map(|dst| dst.to_string())
+            .unwrap_or_default();
+        let http2_stream_id = report
+            .http2_stream_id
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
+        match report.action {
+            BlockingAction::Block => {}
+            BlockingAction::BlockAndLog => tracing::warn!(
+                action = %report.action,
+                secret_env_var = %report.env_var,
+                placeholder = %report.placeholder,
+                protocol = %report.protocol,
+                sni = %self.sni,
+                host = %host,
+                method = %method,
+                path = %path,
+                location = %report.location,
+                match_form = %report.match_form,
+                guest_dst = %guest_dst,
+                http2_stream_id = %http2_stream_id,
+                "secret violation: placeholder detected for disallowed host"
+            ),
+            BlockingAction::BlockAndTerminate => tracing::error!(
+                action = %report.action,
+                secret_env_var = %report.env_var,
+                placeholder = %report.placeholder,
+                protocol = %report.protocol,
+                sni = %self.sni,
+                host = %host,
+                method = %method,
+                path = %path,
+                location = %report.location,
+                match_form = %report.match_form,
+                guest_dst = %guest_dst,
+                http2_stream_id = %http2_stream_id,
+                "secret violation: placeholder detected for disallowed host - terminating"
+            ),
         }
     }
 
@@ -1258,13 +1422,28 @@ impl SecretsHandler {
     /// cross-write detection), plus URL- and JSON-decoded variants for
     /// encoded-placeholder bypass attempts, plus base64-decoded Basic auth
     /// credentials.
-    fn detect_blocking_action(&self, data: &[u8], headers: &str) -> Option<BlockingAction> {
-        detect_blocking_action_with_tail(
+    fn detect_blocking_action(
+        &self,
+        data: &[u8],
+        headers: &str,
+        location_hint: RequestLocation,
+    ) -> Option<SecretViolationReport> {
+        let mut report = detect_blocking_action_with_tail(
             &self.ineligible_for_substitution,
             &self.prev_tail,
             data,
             headers,
-        )
+            RequestProtocol::Http1,
+            location_hint,
+            None,
+        );
+        if headers.is_empty()
+            && let Some(report) = &mut report
+            && let Some(summary) = &self.http1_request_summary
+        {
+            report.apply_request_summary(summary);
+        }
+        report
     }
 
     /// Update the sliding-window tail with the trailing bytes of `data`, so
@@ -1420,12 +1599,21 @@ impl Http2State {
             );
             return Err(ViolationAction::Block);
         }
-        handler.apply_blocking_action(detect_blocking_action_with_tail(
+        let mut report = detect_blocking_action_with_tail(
             &handler.ineligible_for_substitution,
             tail,
             data,
             "",
-        ))?;
+            RequestProtocol::Http2,
+            RequestLocation::Body,
+            Some(frame.stream_id),
+        );
+        if let Some(report) = &mut report
+            && let Some(summary) = self.request_summaries.get(&frame.stream_id)
+        {
+            report.apply_request_summary(summary);
+        }
+        handler.apply_blocking_action(report)?;
         update_tail_buffer(
             tail,
             data,
@@ -1434,6 +1622,7 @@ impl Http2State {
         if frame.flags & HTTP2_FLAG_END_STREAM != 0 {
             self.data_tails.remove(&frame.stream_id);
             self.open_request_streams.remove(&frame.stream_id);
+            self.request_summaries.remove(&frame.stream_id);
         }
         output.extend_from_slice(frame.raw);
         Ok(())
@@ -1462,11 +1651,15 @@ impl Http2State {
 
         let detection_bytes = http2_header_detection_bytes(&headers);
         let detection_text = String::from_utf8_lossy(&detection_bytes);
+        let request_summary = http2_request_summary(detection_text.as_ref());
         handler.apply_blocking_action(detect_blocking_action_with_tail(
             &handler.ineligible_for_substitution,
             &[],
             &detection_bytes,
             detection_text.as_ref(),
+            RequestProtocol::Http2,
+            RequestLocation::Header,
+            Some(block.stream_id),
         ))?;
 
         handler.substitute_http2_headers(&mut headers);
@@ -1475,6 +1668,10 @@ impl Http2State {
         if block.end_stream {
             self.data_tails.remove(&block.stream_id);
             self.open_request_streams.remove(&block.stream_id);
+            self.request_summaries.remove(&block.stream_id);
+        } else {
+            self.request_summaries
+                .insert(block.stream_id, request_summary);
         }
         Ok(())
     }
@@ -1761,14 +1958,72 @@ fn parse_http_request_metadata(
 }
 
 fn http_request_version(request_line: &str) -> Option<&str> {
+    split_http_request_line(request_line).map(|(_, _, version)| version)
+}
+
+fn split_http_request_line(request_line: &str) -> Option<(&str, &str, &str)> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?;
-    let _target = parts.next()?;
+    let target = parts.next()?;
     let version = parts.next()?;
     if parts.next().is_some() || !method.bytes().all(is_http_token_byte) {
         return None;
     }
-    Some(version)
+    Some((method, target, version))
+}
+
+fn redacted_request_path(target: &str) -> String {
+    let without_query = target.split_once('?').map_or(target, |(path, _)| path);
+    if let Some(scheme_end) = without_query.find("://") {
+        let after_scheme = &without_query[scheme_end + 3..];
+        if let Some(path_start) = after_scheme.find('/') {
+            return after_scheme[path_start..].to_string();
+        }
+        return "/".to_string();
+    }
+    without_query.to_string()
+}
+
+fn request_summary(headers: &str, protocol: RequestProtocol) -> RequestSummary {
+    match protocol {
+        RequestProtocol::Http1 => http1_request_summary(headers),
+        RequestProtocol::Http2 => http2_request_summary(headers),
+    }
+}
+
+fn http1_request_summary(headers: &str) -> RequestSummary {
+    let mut lines = headers.split("\r\n");
+    let Some(request_line) = lines.next() else {
+        return RequestSummary::default();
+    };
+    let Some((method, target, _version)) = split_http_request_line(request_line) else {
+        return RequestSummary::default();
+    };
+
+    let host = lines
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| name.eq_ignore_ascii_case("host").then(|| value.trim()));
+
+    RequestSummary {
+        method: Some(method.to_string()),
+        path: Some(redacted_request_path(target)),
+        host: host.map(ToOwned::to_owned),
+    }
+}
+
+fn http2_request_summary(headers: &str) -> RequestSummary {
+    let mut summary = RequestSummary::default();
+    for line in headers.split("\r\n").filter(|line| !line.is_empty()) {
+        if let Some(value) = line.strip_prefix(":method: ") {
+            summary.method = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix(":path: ") {
+            summary.path = Some(redacted_request_path(value));
+        } else if let Some(value) = line.strip_prefix(":authority: ") {
+            summary.host = Some(value.trim().to_string());
+        }
+    }
+    summary
 }
 
 fn looks_like_http_request_prefix(data: &[u8]) -> bool {
@@ -2253,7 +2508,10 @@ fn detect_blocking_action_with_tail(
     prev_tail: &[u8],
     data: &[u8],
     headers: &str,
-) -> Option<BlockingAction> {
+    protocol: RequestProtocol,
+    location_hint: RequestLocation,
+    http2_stream_id: Option<u32>,
+) -> Option<SecretViolationReport> {
     if ineligible_for_substitution.is_empty() {
         return None;
     }
@@ -2275,26 +2533,164 @@ fn detect_blocking_action_with_tail(
         .any(|window| window == b"\\u")
         .then(|| json_unescape(scan));
     let basic_auth_credentials = decoded_basic_auth_credentials(headers);
+    let request = request_summary(headers, protocol);
 
     let mut detected = None;
     for secret in ineligible_for_substitution {
-        let needle = secret.placeholder.as_bytes();
-        if contains_bytes(scan, needle)
-            || url_decoded
-                .as_deref()
-                .is_some_and(|decoded| contains_bytes(decoded, needle))
-            || json_decoded
-                .as_deref()
-                .is_some_and(|decoded| contains_bytes(decoded, needle))
-            || basic_auth_credentials
-                .iter()
-                .any(|decoded| decoded.contains(&secret.placeholder))
-        {
-            detected = Some(strictest_violation_action(detected, secret.action));
+        if let Some((location, match_form)) = detect_secret_match(
+            secret,
+            scan,
+            url_decoded.as_deref(),
+            json_decoded.as_deref(),
+            &basic_auth_credentials,
+            headers,
+            location_hint,
+        ) {
+            let report = SecretViolationReport {
+                action: secret.action,
+                env_var: secret.env_var.clone(),
+                placeholder: secret.placeholder.clone(),
+                protocol,
+                location,
+                match_form,
+                method: request.method.clone(),
+                path: request.path.clone(),
+                host: request.host.clone(),
+                http2_stream_id,
+            };
+            detected = Some(strictest_violation_report(detected, report));
         }
     }
 
     detected
+}
+
+fn detect_secret_match(
+    secret: &IneligibleSecret,
+    scan: &[u8],
+    url_decoded: Option<&[u8]>,
+    json_decoded: Option<&[u8]>,
+    basic_auth_credentials: &[String],
+    headers: &str,
+    location_hint: RequestLocation,
+) -> Option<(RequestLocation, PlaceholderMatchForm)> {
+    let needle = secret.placeholder.as_bytes();
+    if basic_auth_credentials
+        .iter()
+        .any(|decoded| decoded.contains(&secret.placeholder))
+    {
+        return Some((
+            RequestLocation::BasicAuth,
+            PlaceholderMatchForm::BasicAuthDecoded,
+        ));
+    }
+    if contains_bytes(scan, needle) {
+        return Some((
+            classify_match_location(scan, headers, &secret.placeholder, location_hint),
+            PlaceholderMatchForm::Raw,
+        ));
+    }
+    if let Some(decoded) = url_decoded
+        && contains_bytes(decoded, needle)
+    {
+        return Some((
+            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
+            PlaceholderMatchForm::PercentDecoded,
+        ));
+    }
+    if let Some(decoded) = json_decoded
+        && contains_bytes(decoded, needle)
+    {
+        return Some((
+            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
+            PlaceholderMatchForm::JsonUnescaped,
+        ));
+    }
+    None
+}
+
+fn classify_match_location(
+    scan: &[u8],
+    headers: &str,
+    placeholder: &str,
+    location_hint: RequestLocation,
+) -> RequestLocation {
+    if location_hint != RequestLocation::Unknown && headers.is_empty() {
+        return location_hint;
+    }
+    if !headers.is_empty() && headers.contains(placeholder) {
+        return classify_header_match_location(headers, placeholder);
+    }
+    if !headers.is_empty() && !contains_bytes(headers.as_bytes(), placeholder.as_bytes()) {
+        return RequestLocation::Body;
+    }
+    if location_hint != RequestLocation::Unknown {
+        return location_hint;
+    }
+    if contains_bytes(scan, placeholder.as_bytes()) {
+        return RequestLocation::Unknown;
+    }
+    RequestLocation::Unknown
+}
+
+fn classify_decoded_match_location(
+    headers: &str,
+    placeholder: &str,
+    location_hint: RequestLocation,
+) -> RequestLocation {
+    if location_hint != RequestLocation::Unknown && headers.is_empty() {
+        return location_hint;
+    }
+    if !headers.is_empty() {
+        let url_decoded_headers = headers
+            .as_bytes()
+            .contains(&b'%')
+            .then(|| percent_decode(headers.as_bytes()).collect::<Vec<u8>>());
+        if url_decoded_headers
+            .as_deref()
+            .is_some_and(|decoded| contains_bytes(decoded, placeholder.as_bytes()))
+        {
+            return classify_header_match_location(
+                String::from_utf8_lossy(url_decoded_headers.as_deref().unwrap()).as_ref(),
+                placeholder,
+            );
+        }
+
+        let json_decoded_headers = headers
+            .as_bytes()
+            .windows(2)
+            .any(|window| window == b"\\u")
+            .then(|| json_unescape(headers.as_bytes()));
+        if json_decoded_headers
+            .as_deref()
+            .is_some_and(|decoded| contains_bytes(decoded, placeholder.as_bytes()))
+        {
+            return classify_header_match_location(
+                String::from_utf8_lossy(json_decoded_headers.as_deref().unwrap()).as_ref(),
+                placeholder,
+            );
+        }
+
+        return RequestLocation::Body;
+    }
+    if location_hint != RequestLocation::Unknown {
+        return location_hint;
+    }
+    RequestLocation::Unknown
+}
+
+fn classify_header_match_location(headers: &str, placeholder: &str) -> RequestLocation {
+    let Some(request_line) = headers.split("\r\n").next() else {
+        return RequestLocation::Header;
+    };
+    if let Some((_method, target, _version)) = split_http_request_line(request_line)
+        && target
+            .split_once('?')
+            .is_some_and(|(_, query)| query.contains(placeholder))
+    {
+        return RequestLocation::Query;
+    }
+    RequestLocation::Header
 }
 
 fn update_tail_buffer(tail: &mut Vec<u8>, data: &[u8], tail_size: usize) {
@@ -2424,18 +2820,41 @@ fn parse_chunk_size(line: &[u8]) -> Result<usize, ViolationAction> {
 
 /// Returns the stricter of two blocking actions, where
 /// `BlockAndTerminate` > `BlockAndLog` > `Block`.
-fn strictest_violation_action(
-    current: Option<BlockingAction>,
-    candidate: BlockingAction,
-) -> BlockingAction {
-    match (current, candidate) {
-        (Some(BlockingAction::BlockAndTerminate), _) | (_, BlockingAction::BlockAndTerminate) => {
-            BlockingAction::BlockAndTerminate
+fn strictest_violation_report(
+    current: Option<SecretViolationReport>,
+    candidate: SecretViolationReport,
+) -> SecretViolationReport {
+    let Some(current) = current else {
+        return candidate;
+    };
+    if candidate.action.priority() > current.action.priority() {
+        candidate
+    } else {
+        current
+    }
+}
+
+impl BlockingAction {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Block => 0,
+            Self::BlockAndLog => 1,
+            Self::BlockAndTerminate => 2,
         }
-        (Some(BlockingAction::BlockAndLog), _) | (_, BlockingAction::BlockAndLog) => {
-            BlockingAction::BlockAndLog
+    }
+}
+
+impl SecretViolationReport {
+    fn apply_request_summary(&mut self, summary: &RequestSummary) {
+        if self.method.is_none() {
+            self.method = summary.method.clone();
         }
-        (Some(BlockingAction::Block), _) | (None, BlockingAction::Block) => BlockingAction::Block,
+        if self.path.is_none() {
+            self.path = summary.path.clone();
+        }
+        if self.host.is_none() {
+            self.host = summary.host.clone();
+        }
     }
 }
 
@@ -2634,6 +3053,74 @@ mod tests {
             .map(|(_, value)| value.as_slice())
             .expect("header present");
         String::from_utf8(value.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn violation_report_includes_secret_and_basic_auth_context() {
+        let secret = IneligibleSecret {
+            env_var: "OPENAI_API_KEY".into(),
+            placeholder: "$KEY".into(),
+            action: BlockingAction::BlockAndLog,
+        };
+        let encoded = BASE64.encode(b"user:$KEY");
+        let headers = format!(
+            "POST /v1/chat/completions?token=redacted HTTP/1.1\r\nHost: evil.example.com\r\nAuthorization: Basic {encoded}\r\n\r\n"
+        );
+
+        let report = detect_blocking_action_with_tail(
+            &[secret],
+            &[],
+            headers.as_bytes(),
+            &headers,
+            RequestProtocol::Http1,
+            RequestLocation::Unknown,
+            None,
+        )
+        .expect("violation report");
+
+        assert_eq!(report.action, BlockingAction::BlockAndLog);
+        assert_eq!(report.env_var, "OPENAI_API_KEY");
+        assert_eq!(report.placeholder, "$KEY");
+        assert_eq!(report.location, RequestLocation::BasicAuth);
+        assert!(matches!(
+            report.match_form,
+            PlaceholderMatchForm::BasicAuthDecoded
+        ));
+        assert_eq!(report.method.as_deref(), Some("POST"));
+        assert_eq!(report.path.as_deref(), Some("/v1/chat/completions"));
+        assert_eq!(report.host.as_deref(), Some("evil.example.com"));
+    }
+
+    #[test]
+    fn violation_report_classifies_percent_decoded_query_match() {
+        let secret = IneligibleSecret {
+            env_var: "SERVICE_TOKEN".into(),
+            placeholder: "abc/key".into(),
+            action: BlockingAction::BlockAndLog,
+        };
+        let headers =
+            "GET /leak?token=abc%2Fkey&other=redacted HTTP/1.1\r\nHost: evil.example.com\r\n\r\n";
+
+        let report = detect_blocking_action_with_tail(
+            &[secret],
+            &[],
+            headers.as_bytes(),
+            headers,
+            RequestProtocol::Http1,
+            RequestLocation::Unknown,
+            None,
+        )
+        .expect("violation report");
+
+        assert_eq!(report.env_var, "SERVICE_TOKEN");
+        assert_eq!(report.location, RequestLocation::Query);
+        assert!(matches!(
+            report.match_form,
+            PlaceholderMatchForm::PercentDecoded
+        ));
+        assert_eq!(report.method.as_deref(), Some("GET"));
+        assert_eq!(report.path.as_deref(), Some("/leak"));
+        assert_eq!(report.host.as_deref(), Some("evil.example.com"));
     }
 
     #[test]

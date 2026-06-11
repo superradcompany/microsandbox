@@ -211,7 +211,8 @@ async fn intercept_relay(
     upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut secrets_handler =
-        SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared);
+        SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared)
+            .with_guest_dst(guest_dst);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state
