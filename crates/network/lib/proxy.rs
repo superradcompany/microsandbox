@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::secrets::config::SecretsConfig;
+use crate::secrets::config::{SecretsConfig, ViolationAction};
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 use crate::tls::sni;
@@ -160,6 +160,9 @@ async fn tcp_proxy_task(
                 Ok(cow) => cow.into_owned(),
                 Err(action) => {
                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
+                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                        shared.trigger_termination();
+                    }
                     return Ok(());
                 }
             },
@@ -194,6 +197,9 @@ async fn tcp_proxy_task(
                                 Ok(cow) => cow.into_owned(),
                                 Err(action) => {
                                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
+                                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                                        shared.trigger_termination();
+                                    }
                                     break;
                                 }
                             },
