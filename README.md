@@ -60,7 +60,7 @@
 > go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
 > ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
 
 > Boot a microVM in a single command:
 >
