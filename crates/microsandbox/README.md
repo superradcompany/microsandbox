@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", output.stdout()?);
 
     // Stop the sandbox.
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }
 ```
@@ -130,7 +130,7 @@ let sandbox = Sandbox::builder("writer")
     .await?;
 
 sandbox.shell("echo 'hello' > /data/message.txt").await?;
-sandbox.stop_and_wait().await?;
+sandbox.stop().await?;
 
 // Mount the same volume in another sandbox (read-only).
 let reader = Sandbox::builder("reader")
@@ -281,7 +281,7 @@ Sandbox::builder("c").image_with(|img| img.disk("/path/to/disk.qcow2").fstype("e
 
 | Type         | Description                              |
 | ------------ | ---------------------------------------- |
-| `SandboxFs`  | Gateway for guest filesystem operations  |
+| `SandboxFsOps`  | Gateway for guest filesystem operations  |
 | `FsEntry`    | Directory entry (name, kind, size, mode) |
 | `FsMetadata` | File metadata (size, mode, timestamps)   |
 

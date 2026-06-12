@@ -211,14 +211,14 @@ impl JsSshServer {
 #[napi]
 impl JsSshServer {
     /// Serve one SSH transport over this process's stdin/stdout.
-    #[napi(js_name = "serveStdio")]
-    pub async fn serve_stdio(&self) -> Result<()> {
+    #[napi(js_name = "serveConnection")]
+    pub async fn serve_connection(&self) -> Result<()> {
         let server = {
             let guard = self.inner.lock().await;
             guard.as_ref().ok_or_else(consumed_error)?.clone()
         };
         server
-            .serve(microsandbox::sandbox::SshStdioStream::new())
+            .serve_connection(microsandbox::sandbox::SshStdioStream::new())
             .await
             .map_err(to_napi_error)
     }

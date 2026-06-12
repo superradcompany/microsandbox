@@ -21,7 +21,6 @@ mod types;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    process::ExitStatus,
     sync::Arc,
 };
 
@@ -56,6 +55,7 @@ use crate::{
         },
     },
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
+    volume::VolumeProvision,
 };
 
 use self::attach::AttachOptions;
@@ -73,6 +73,15 @@ use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 pub const MAX_SANDBOX_NAME_BYTES: usize = microsandbox_metrics::SLOT_NAME_BYTES;
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct InsertedSandboxRecord {
+    sandbox_id: i32,
+    inserted_named_volume_creates: Vec<types::NamedVolumeCreate>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
@@ -83,9 +92,11 @@ pub use config::{DEFAULT_REPLACE_TIMEOUT, SandboxConfig};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
-    FsWriteSink, SandboxFs,
+    FsWriteSink, SandboxFsOps,
 };
-pub use handle::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
+pub use handle::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle,
+};
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
@@ -98,19 +109,15 @@ pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
 #[cfg(feature = "ssh")]
 pub use ssh::{
-    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
-    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
-    SshStdioStream,
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
+    SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
+    SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, Patch, PatchBuilder, RootfsSource, SecurityProfile, StatVirtualization,
-    VolumeMount,
+    MountOptions, NamedVolumeBuilder, NamedVolumeMode, Patch, PatchBuilder, RootfsSource,
+    SecurityProfile, StatVirtualization, VolumeMount,
 };
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
 
 /// Transient registry overrides from the SDK, merged with global config at pull time.
 pub(crate) struct RegistryOverrides {
@@ -168,6 +175,28 @@ pub struct Sandbox {
     config: SandboxConfig,
     handle: Option<Arc<Mutex<ProcessHandle>>>,
     client: Arc<AgentClient>,
+}
+
+/// Result of observing a sandbox in a terminal non-running state.
+#[derive(Debug, Clone)]
+pub struct SandboxStopResult {
+    /// Sandbox name.
+    pub name: String,
+
+    /// Final observed sandbox status.
+    pub status: SandboxStatus,
+
+    /// Process exit code when available from an owned child process.
+    pub exit_code: Option<i32>,
+
+    /// Terminating signal when available from an owned child process.
+    pub signal: Option<i32>,
+
+    /// Time at which the stopped state was observed.
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+
+    /// Description of the observation source.
+    pub source: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -377,9 +406,39 @@ impl Sandbox {
         }
 
         // Insert the sandbox record and keep its stable database ID.
+        // Sandbox-created named volumes are inserted in the same transaction
+        // so a concurrent `Volume::list` can't observe one before the owning
+        // sandbox exists.
         let write_db = db.write();
-        let sandbox_id = insert_sandbox_record(write_db, &config).await?;
+        let named_volume_creates = named_volume_creates(&config);
+        let _named_volume_locks = lock_named_volume_create_names(&named_volume_creates)?;
+        let inserted_record = insert_sandbox_record_with_named_volumes(write_db, &config).await?;
+        let sandbox_id = inserted_record.sandbox_id;
+        let inserted_named_volume_creates = inserted_record.inserted_named_volume_creates;
         tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
+
+        // Materialise the on-disk directory for each sandbox-created volume after
+        // the transaction commits. On failure, remove only directories
+        // this create attempt actually materialised plus the DB rows so
+        // unrelated orphaned host data is never deleted.
+        let mut materialised_named_volumes = Vec::new();
+        if !inserted_named_volume_creates.is_empty()
+            && let Err(e) = materialise_named_volume_dirs(
+                &inserted_named_volume_creates,
+                &mut materialised_named_volumes,
+            )
+            .await
+        {
+            cleanup_named_volume_create_failure(
+                write_db,
+                sandbox_id,
+                &inserted_named_volume_creates,
+                &materialised_named_volumes,
+                true,
+            )
+            .await;
+            return Err(e);
+        }
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry. Also
@@ -390,8 +449,20 @@ impl Sandbox {
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
-                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                 free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
+                if inserted_named_volume_creates.is_empty() {
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                } else {
+                    cleanup_named_volume_create_failure(
+                        write_db,
+                        sandbox_id,
+                        &inserted_named_volume_creates,
+                        &materialised_named_volumes,
+                        true,
+                    )
+                    .await;
+                }
                 return Err(e);
             }
         };
@@ -402,8 +473,19 @@ impl Sandbox {
         ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
         {
             let _ = sandbox.stop().await;
-            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
             free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
+            if inserted_named_volume_creates.is_empty() {
+                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+            } else {
+                cleanup_named_volume_create_failure(
+                    write_db,
+                    sandbox_id,
+                    &inserted_named_volume_creates,
+                    &materialised_named_volumes,
+                    true,
+                )
+                .await;
+            }
             return Err(err);
         }
 
@@ -413,26 +495,48 @@ impl Sandbox {
                 Ok(metadata) if metadata.kind == fs::FsEntryKind::Directory => {}
                 Ok(_) => {
                     let _ = sandbox.stop().await;
-                    let _ =
-                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                     free_metrics_slot_for(
                         sandbox_id,
                         None,
                         microsandbox_metrics::ReleaseMode::Free,
                     );
+                    if inserted_named_volume_creates.is_empty() {
+                        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped)
+                            .await;
+                    } else {
+                        cleanup_named_volume_create_failure(
+                            write_db,
+                            sandbox_id,
+                            &inserted_named_volume_creates,
+                            &materialised_named_volumes,
+                            true,
+                        )
+                        .await;
+                    }
                     return Err(MicrosandboxError::InvalidConfig(format!(
                         "workdir is not a directory in guest: {workdir}"
                     )));
                 }
                 Err(error) => {
                     let _ = sandbox.stop().await;
-                    let _ =
-                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                     free_metrics_slot_for(
                         sandbox_id,
                         None,
                         microsandbox_metrics::ReleaseMode::Free,
                     );
+                    if inserted_named_volume_creates.is_empty() {
+                        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped)
+                            .await;
+                    } else {
+                        cleanup_named_volume_create_failure(
+                            write_db,
+                            sandbox_id,
+                            &inserted_named_volume_creates,
+                            &materialised_named_volumes,
+                            true,
+                        )
+                        .await;
+                    }
                     return Err(MicrosandboxError::InvalidConfig(format!(
                         "workdir does not exist in guest: {workdir}: {error}"
                     )));
@@ -579,23 +683,6 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Remove this sandbox's persisted state after it has fully stopped.
-    pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
-        let pools = db::init_global().await?;
-
-        remove_dir_if_exists(
-            &crate::config::config()
-                .sandboxes_dir()
-                .join(&self.config.name),
-        )?;
-        free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
-        sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(pools.write())
-            .await?;
-
-        Ok(())
-    }
-
     /// Unique name identifying this sandbox.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
@@ -664,67 +751,144 @@ impl Sandbox {
 
     /// Read, write, and manage files inside the running sandbox.
     /// Operations go through the guest agent (agentd).
-    pub fn fs(&self) -> fs::SandboxFs {
-        fs::SandboxFs::new(&self.client)
+    pub fn fs(&self) -> fs::SandboxFsOps {
+        fs::SandboxFsOps::new(&self.client)
     }
 
-    /// Ask the sandbox to shut down gracefully.
-    ///
-    /// Returns as soon as the request is sent — does not wait for the
-    /// sandbox to actually exit. Use [`stop_and_wait`](Self::stop_and_wait)
-    /// to also block on exit.
-    pub async fn stop(&self) -> MicrosandboxResult<()> {
+    /// Request graceful shutdown and return once the request is sent.
+    pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.config.name, "stop: sending shutdown");
         // Shutdown carries no useful payload; agentd dispatches on `msg.t`.
         self.client.send(0, MessageType::Shutdown, &()).await?;
         Ok(())
     }
 
-    /// Stop the sandbox gracefully and wait for the process to exit.
-    ///
-    /// If this handle does not own the lifecycle (connected to an existing
-    /// sandbox), only the stop signal is sent — wait is skipped since we
-    /// don't have a process handle to wait on.
-    pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
-        let stop_result = self.stop().await;
-        if self.handle.is_none() {
-            stop_result?;
-            // No handle to wait on — return a synthetic success status.
-            return Ok(std::process::ExitStatus::default());
-        }
-        let wait_result = self.wait().await;
-        stop_result?;
-        wait_result
+    /// Stop the sandbox gracefully and wait until it is observed stopped.
+    pub async fn stop(&self) -> MicrosandboxResult<()> {
+        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
-    pub async fn kill(&self) -> MicrosandboxResult<()> {
+    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name())
+                .await?
+                .stop_with_timeout(timeout)
+                .await;
+        };
+
+        if timeout.is_zero() {
+            return self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await;
+        }
+
+        let _ = self.request_stop().await;
+        let mut escalated = false;
+        let status = {
+            let mut handle = handle.lock().await;
+            match tokio::time::timeout(timeout, handle.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    escalated = true;
+                    tracing::warn!(
+                        sandbox = %self.config.name,
+                        timeout_secs = timeout.as_secs(),
+                        "graceful stop exceeded timeout, escalating to SIGKILL"
+                    );
+                    handle.kill()?;
+                    match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, handle.wait()).await {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            return Err(MicrosandboxError::Runtime(format!(
+                                "timed out observing stopped state for sandbox '{}'",
+                                self.config.name
+                            )));
+                        }
+                    }
+                }
+            }
+        };
+
+        let final_status = if escalated {
+            SandboxStatus::Stopped
+        } else {
+            exit_status_to_sandbox_status(&status)
+        };
+        self.mark_observed_stopped(final_status).await
+    }
+
+    /// Request force termination and return once the request is sent.
+    pub async fn request_kill(&self) -> MicrosandboxResult<()> {
         match &self.handle {
             Some(h) => h.lock().await.kill(),
-            None => Err(MicrosandboxError::Runtime(
-                "cannot kill: not the lifecycle owner".into(),
-            )),
+            None => Sandbox::get(self.name()).await?.request_kill().await,
         }
     }
 
-    /// Trigger a graceful drain (SIGUSR1).
-    pub async fn drain(&self) -> MicrosandboxResult<()> {
+    /// Force-kill the sandbox and wait until it is observed stopped.
+    pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await
+    }
+
+    /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
+    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name())
+                .await?
+                .kill_with_timeout(timeout)
+                .await;
+        };
+
+        {
+            let mut handle = handle.lock().await;
+            handle.kill()?;
+            match tokio::time::timeout(timeout, handle.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(MicrosandboxError::Runtime(format!(
+                        "timed out observing stopped state for sandbox '{}'",
+                        self.config.name
+                    )));
+                }
+            }
+        };
+
+        self.mark_observed_stopped(SandboxStatus::Stopped).await
+    }
+
+    /// Request graceful drain and return once the request is sent.
+    pub async fn request_drain(&self) -> MicrosandboxResult<()> {
         match &self.handle {
             Some(h) => h.lock().await.drain(),
-            None => Err(MicrosandboxError::Runtime(
-                "cannot drain: not the lifecycle owner".into(),
-            )),
+            None => Sandbox::get(self.name()).await?.request_drain().await,
         }
     }
 
-    /// Wait for the sandbox process to exit.
-    pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
-        match &self.handle {
-            Some(h) => h.lock().await.wait().await,
-            None => Err(MicrosandboxError::Runtime(
-                "cannot wait: not the lifecycle owner".into(),
-            )),
-        }
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        let Some(handle) = &self.handle else {
+            return Sandbox::get(self.name()).await?.wait_until_stopped().await;
+        };
+
+        let status = {
+            let mut handle = handle.lock().await;
+            handle.wait().await?
+        };
+        let final_status = exit_status_to_sandbox_status(&status);
+        self.mark_observed_stopped(final_status).await?;
+
+        Ok(SandboxStopResult {
+            name: self.config.name.clone(),
+            status: final_status,
+            exit_code: status.code(),
+            signal: exit_status_signal(&status),
+            observed_at: chrono::Utc::now(),
+            source: Some("owned process handle".to_string()),
+        })
+    }
+
+    async fn mark_observed_stopped(&self, status: SandboxStatus) -> MicrosandboxResult<()> {
+        let db = db::init_global().await?.write();
+        update_sandbox_status(db, self.db_id, status).await
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -2186,7 +2350,7 @@ async fn stop_sandbox_for_replacement(
         }
     }
 
-    mark_sandbox_stopped_for_replacement(
+    mark_sandbox_stopped_after_signal(
         pools.write(),
         sandbox.id,
         run.as_ref().map(|model| model.id),
@@ -2194,11 +2358,32 @@ async fn stop_sandbox_for_replacement(
     .await
 }
 
-async fn mark_sandbox_stopped_for_replacement(
+fn exit_status_to_sandbox_status(status: &std::process::ExitStatus) -> SandboxStatus {
+    if status.success() {
+        SandboxStatus::Stopped
+    } else {
+        SandboxStatus::Crashed
+    }
+}
+
+#[cfg(unix)]
+fn exit_status_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_status_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+pub(super) async fn mark_sandbox_stopped_after_signal(
     db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
+    free_metrics_slot_for(sandbox_id, run_id, microsandbox_metrics::ReleaseMode::Free);
+
     db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
 
@@ -2281,14 +2466,26 @@ fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> Microsand
 }
 
 /// Insert the sandbox record in the database and return its ID.
+#[cfg(test)]
 async fn insert_sandbox_record(
     db: &DbWriteConnection,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
+    Ok(insert_sandbox_record_with_named_volumes(db, config)
+        .await?
+        .sandbox_id)
+}
+
+async fn insert_sandbox_record_with_named_volumes(
+    db: &DbWriteConnection,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<InsertedSandboxRecord> {
     let config_json = serde_json::to_string(config)?;
+    let named_volume_creates = named_volume_creates(config);
 
     db.transaction(|txn| {
         let config_json = config_json.clone();
+        let named_volume_creates = named_volume_creates.clone();
         async move {
             let now = chrono::Utc::now().naive_utc();
             let model = sandbox_entity::ActiveModel {
@@ -2302,8 +2499,6 @@ async fn insert_sandbox_record(
             let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
             let sandbox_id = result.last_insert_id;
 
-            // Persist labels in the same transaction so the catalog record is
-            // all-or-nothing — a failed label write rolls back the sandbox row.
             let label_rows: Vec<sandbox_label_entity::ActiveModel> = config
                 .labels
                 .iter()
@@ -2319,7 +2514,127 @@ async fn insert_sandbox_record(
                     .await?;
             }
 
-            Ok((txn, sandbox_id))
+            let mut inserted_named_volume_creates = Vec::new();
+            for create in &named_volume_creates {
+                let vol_config = crate::volume::VolumeConfig {
+                    name: create.name.clone(),
+                    kind: create.kind,
+                    quota_mib: create.quota_mib,
+                    capacity_mib: create.capacity_mib,
+                    labels: create.labels.clone(),
+                };
+                if matches!(
+                    crate::volume::Volume::provision_in_transaction(
+                        &txn,
+                        &vol_config,
+                        create.mode,
+                    )
+                    .await?,
+                    VolumeProvision::Inserted
+                ) {
+                    inserted_named_volume_creates.push(create.clone());
+                }
+            }
+
+            Ok((
+                txn,
+                InsertedSandboxRecord {
+                    sandbox_id,
+                    inserted_named_volume_creates,
+                },
+            ))
+        }
+    })
+    .await
+}
+
+fn named_volume_creates(config: &SandboxConfig) -> Vec<types::NamedVolumeCreate> {
+    config
+        .mounts
+        .iter()
+        .filter_map(|mount| mount.named_create().cloned())
+        .collect()
+}
+
+fn lock_named_volume_create_names(
+    creates: &[types::NamedVolumeCreate],
+) -> MicrosandboxResult<Vec<std::fs::File>> {
+    let mut names: Vec<&str> = creates.iter().map(|create| create.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+
+    names
+        .into_iter()
+        .map(crate::volume::lock_volume_name)
+        .collect()
+}
+
+async fn materialise_named_volume_dirs(
+    creates: &[types::NamedVolumeCreate],
+    materialised: &mut Vec<String>,
+) -> MicrosandboxResult<()> {
+    for create in creates {
+        let vol_config = crate::volume::VolumeConfig {
+            name: create.name.clone(),
+            kind: create.kind,
+            quota_mib: create.quota_mib,
+            capacity_mib: create.capacity_mib,
+            labels: create.labels.clone(),
+        };
+        crate::volume::Volume::materialise_for(&vol_config).await?;
+        materialised.push(create.name.clone());
+    }
+    Ok(())
+}
+
+async fn rollback_named_volume_dirs(names: &[String]) {
+    for name in names {
+        let path = crate::volume::Volume::path_for(name);
+        let _ = tokio::fs::remove_dir_all(&path).await;
+    }
+}
+
+async fn cleanup_named_volume_create_failure(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    creates: &[types::NamedVolumeCreate],
+    materialised: &[String],
+    remove_sandbox: bool,
+) {
+    rollback_named_volume_dirs(materialised).await;
+    if remove_sandbox {
+        let _ = remove_sandbox_row(db, sandbox_id).await;
+    }
+    let names: Vec<String> = creates.iter().map(|create| create.name.clone()).collect();
+    let _ = remove_volume_rows(db, &names).await;
+}
+
+async fn remove_sandbox_row(db: &DbWriteConnection, sandbox_id: i32) -> MicrosandboxResult<()> {
+    db.transaction(|txn| async move {
+        sandbox_entity::Entity::delete_by_id(sandbox_id)
+            .exec(&txn)
+            .await?;
+        Ok((txn, ()))
+    })
+    .await
+}
+
+async fn remove_volume_rows(db: &DbWriteConnection, names: &[String]) -> MicrosandboxResult<()> {
+    use crate::db::entity::volume as volume_entity;
+
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    let names = names.to_vec();
+    db.transaction(|txn| {
+        let names = names.clone();
+        async move {
+            volume_entity::Entity::delete_many()
+                .filter(volume_entity::Column::Name.is_in(names))
+                .exec(&txn)
+                .await?;
+            Ok((txn, ()))
         }
     })
     .await
@@ -2443,11 +2758,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter, SandboxStatus,
-        digest_pinned_reference, filter_sandbox_ids, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, validate_labels, validate_rootfs_source,
-        validate_sandbox_name_for_runtime,
+        HostPermissions, MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter,
+        SandboxStatus, StatVirtualization, VolumeMount, digest_pinned_reference,
+        filter_sandbox_ids, insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
+        reconcile_sandbox_runtime_state, remove_dir_if_exists, validate_labels,
+        validate_rootfs_source, validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2473,6 +2788,33 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("microsandbox-rootfs-{suffix}-{nanos}"))
+    }
+
+    fn unique_volume_name(prefix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{prefix}-{nanos}")
+    }
+
+    fn named_create_mount(name: impl Into<String>, guest: impl Into<String>) -> VolumeMount {
+        let name = name.into();
+        VolumeMount::Named {
+            create: Some(super::types::NamedVolumeCreate {
+                mode: super::types::NamedVolumeMode::Create,
+                name: name.clone(),
+                kind: crate::volume::VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            }),
+            name,
+            guest: guest.into(),
+            options: Default::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        }
     }
 
     fn dead_pid() -> i32 {
@@ -2915,6 +3257,254 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_atomic_with_named_volume_creates() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = SandboxConfig {
+            name: "atomic-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        let mut mount = named_create_mount("atomic-host-tmp", "/tmp");
+        if let VolumeMount::Named {
+            create: Some(create),
+            ..
+        } = &mut mount
+        {
+            create.labels.push(("owner".into(), "atomic-host".into()));
+        }
+        config.mounts.push(mount);
+
+        let _sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        // Both rows visible after the same transaction commits.
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq("atomic-host-tmp"))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(
+            vol.is_some(),
+            "auto-volume row must exist alongside sandbox"
+        );
+        let vol = vol.unwrap();
+        let labels: Vec<(String, String)> =
+            serde_json::from_str(vol.labels.as_deref().unwrap_or("[]")).unwrap();
+        assert!(labels.contains(&("owner".to_string(), "atomic-host".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_rolls_back_when_volume_name_collides() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        // Pre-seed a volume that collides with the auto-volume name.
+        let now = chrono::Utc::now().naive_utc();
+        volume_entity::Entity::insert(volume_entity::ActiveModel {
+            name: Set("collision".into()),
+            kind: Set(crate::volume::VolumeKind::Directory.as_str().to_string()),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        let mut config = SandboxConfig {
+            name: "rollback-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.mounts.push(named_create_mount("collision", "/tmp"));
+
+        let result = insert_sandbox_record(pools.write(), &config).await;
+        assert!(
+            result.is_err(),
+            "duplicate volume name must fail the insert"
+        );
+
+        // Sandbox row must NOT exist — transaction rolled back.
+        let sb = super::sandbox_entity::Entity::find()
+            .filter(super::sandbox_entity::Column::Name.eq("rollback-host"))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(
+            sb.is_none(),
+            "transaction must roll back the sandbox row when volume insert fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_ensure_reuses_existing_named_volume() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let now = chrono::Utc::now().naive_utc();
+        volume_entity::Entity::insert(volume_entity::ActiveModel {
+            name: Set("existing-cache".into()),
+            kind: Set(crate::volume::VolumeKind::Directory.as_str().to_string()),
+            labels: Set(Some(
+                serde_json::to_string(&vec![("owner".to_string(), "tests".to_string())]).unwrap(),
+            )),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        let mut config = SandboxConfig {
+            name: "ensure-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        let mut mount = named_create_mount("existing-cache", "/cache");
+        if let VolumeMount::Named {
+            create: Some(create),
+            ..
+        } = &mut mount
+        {
+            create.mode = super::types::NamedVolumeMode::EnsureExists;
+        }
+        config.mounts.push(mount);
+
+        let record = super::insert_sandbox_record_with_named_volumes(pools.write(), &config)
+            .await
+            .unwrap();
+
+        assert!(record.inserted_named_volume_creates.is_empty());
+        let sb = super::sandbox_entity::Entity::find_by_id(record.sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_named_volume_create_cleanup_preserves_unmaterialised_orphan_dir() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let name = unique_volume_name("orphan-named-volume");
+        let path = crate::volume::Volume::path_for(&name);
+        let marker = path.join("marker");
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path).await.unwrap();
+        }
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        tokio::fs::write(&marker, b"keep").await.unwrap();
+
+        let mut config = SandboxConfig {
+            name: "orphan-cleanup-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.mounts.push(named_create_mount(name.clone(), "/tmp"));
+
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        let creates = super::named_volume_creates(&config);
+        let mut materialised = Vec::new();
+        let err = super::materialise_named_volume_dirs(&creates, &mut materialised)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+
+        super::cleanup_named_volume_create_failure(
+            pools.write(),
+            sandbox_id,
+            &creates,
+            &materialised,
+            true,
+        )
+        .await;
+
+        assert!(
+            marker.exists(),
+            "cleanup must not delete a directory it did not materialise"
+        );
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&name))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(vol.is_none());
+        let sb = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_none());
+
+        tokio::fs::remove_dir_all(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_named_volume_create_cleanup_removes_materialised_dirs_and_rows() {
+        use crate::db::entity::volume as volume_entity;
+
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let name = unique_volume_name("materialised-named-volume");
+        let path = crate::volume::Volume::path_for(&name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path).await.unwrap();
+        }
+
+        let mut config = SandboxConfig {
+            name: "materialised-cleanup-host".into(),
+            image: RootfsSource::oci("docker.io/library/alpine"),
+            ..Default::default()
+        };
+        config.mounts.push(named_create_mount(name.clone(), "/tmp"));
+
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        let creates = super::named_volume_creates(&config);
+        let mut materialised = Vec::new();
+        super::materialise_named_volume_dirs(&creates, &mut materialised)
+            .await
+            .unwrap();
+        assert_eq!(materialised, vec![name.clone()]);
+        assert!(path.exists());
+
+        super::cleanup_named_volume_create_failure(
+            pools.write(),
+            sandbox_id,
+            &creates,
+            &materialised,
+            true,
+        )
+        .await;
+
+        assert!(!path.exists());
+        let vol = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(&name))
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(vol.is_none());
+        let sb = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap();
+        assert!(sb.is_none());
     }
 
     #[tokio::test]

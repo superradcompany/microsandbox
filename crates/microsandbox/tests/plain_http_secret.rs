@@ -111,7 +111,7 @@ impl Drop for HostHttp {
 async fn teardown(sb: Sandbox, name: &str) {
     // Best-effort: a dropped proxy connection can break the agent pipe, so a
     // stop error here is cleanup noise, not a test failure.
-    let _ = sb.stop_and_wait().await;
+    let _ = sb.stop().await;
     let _ = Sandbox::remove(name).await;
 }
 

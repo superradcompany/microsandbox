@@ -325,7 +325,44 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
 func (mountFactory) Named(name string, opts MountOptions) MountConfig
 ```
 
-Mount a named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+Mount an existing named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+
+---
+
+#### Mount.NamedWith()
+
+```go
+func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
+```
+
+Mount a named persistent volume with explicit sandbox-time existence behavior. `NamedVolumeOptions.Mode` accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `NamedVolumeOptions.Kind` accepts `"dir"` (default) or `"disk"`.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/cache": m.Mount.NamedWith("pip-cache", m.MountOptions{}, m.NamedVolumeOptions{
+            Mode: "ensure-exists",
+        }),
+        "/var/lib/docker": m.Mount.NamedWith("docker-data", m.MountOptions{}, m.NamedVolumeOptions{
+            Mode:    "ensure-exists",
+            Kind:    "disk",
+            SizeMiB: 20 * 1024,
+        }),
+    }),
+)
+```
+
+`Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
+
+**NamedVolumeOptions**
+
+| Field | Description |
+|-------|-------------|
+| `Mode` | `"existing"`, `"create"`, or `"ensure-exists"`; empty means `"existing"` |
+| `Kind` | `"dir"` or `"disk"`; empty means `"dir"` |
+| `SizeMiB` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
+| `QuotaMiB` | Directory volume quota in MiB |
 
 ---
 

@@ -361,18 +361,18 @@ impl GlobalConfig {
     pub fn metrics_registry_name_path(&self) -> PathBuf {
         self.run_dir()
             .join(microsandbox_utils::METRICS_RUN_SUBDIR)
-            .join(microsandbox_utils::METRICS_REGISTRY_NAME_FILENAME)
+            .join(microsandbox_utils::metrics_registry_name_filename(
+                microsandbox_metrics::REGISTRY_ABI_VERSION,
+            ))
     }
 
     /// Deterministic POSIX shared-memory object name for the live metrics
     /// registry. Hashes the resolved home directory so concurrent
     /// `MSB_HOME`-isolated environments do not collide.
     pub fn metrics_registry_shm_name(&self) -> String {
-        let home_hash = microsandbox_utils::stable_hash_path(&self.home());
-        format!(
-            "{}-{}-v1",
-            microsandbox_utils::METRICS_SHM_PREFIX,
-            home_hash
+        microsandbox_utils::metrics_registry_shm_name(
+            &self.home(),
+            microsandbox_metrics::REGISTRY_ABI_VERSION,
         )
     }
 
@@ -1155,6 +1155,36 @@ mod tests {
     }
 
     #[test]
+    fn test_metrics_registry_names_follow_abi_version() {
+        let cfg = GlobalConfig {
+            home: Some(PathBuf::from("/tmp/msb-home-cascade")),
+            ..Default::default()
+        };
+
+        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 2);
+        assert_eq!(
+            cfg.metrics_registry_shm_name(),
+            microsandbox_utils::metrics_registry_shm_name(
+                &cfg.home(),
+                microsandbox_metrics::REGISTRY_ABI_VERSION,
+            )
+        );
+        assert!(cfg.metrics_registry_shm_name().ends_with("-v2"));
+        let registry_name_path = cfg.metrics_registry_name_path();
+        assert_eq!(
+            registry_name_path.file_name().and_then(|s| s.to_str()),
+            Some("registry-v2.name")
+        );
+        assert_eq!(
+            registry_name_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some(microsandbox_utils::METRICS_RUN_SUBDIR)
+        );
+    }
+
+    #[test]
     fn test_deserialize_disable_metrics_sample_default_false() {
         let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.sandbox_defaults.disable_metrics_sample);
@@ -1395,17 +1425,18 @@ mod tests {
     #[test]
     fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
         let cfg = GlobalConfig {
-            registries: RegistriesConfig {
-                auth: HashMap::from([(
-                    "ghcr.io".to_string(),
-                    RegistryAuthEntry {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
                         username: "user".to_string(),
                         store: Some(RegistryCredentialStore::Keyring),
                         password_env: None,
                         secret_name: None,
-                    },
-                )]),
-            },
+                    }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 

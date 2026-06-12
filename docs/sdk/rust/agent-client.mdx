@@ -58,6 +58,16 @@ Resolve a sandbox name to its relay socket path and connect to it. Sandbox names
 
 ---
 
+#### AgentClient::socket_path()
+
+```rust
+fn AgentClient::socket_path(name: &str) -> MicrosandboxResult<PathBuf>
+```
+
+Resolve a sandbox's relay socket path **without connecting**. Returns the same path `connect_sandbox` would dial, so you can talk to `agentd` over a raw byte transport (e.g. a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running.
+
+---
+
 #### request()
 
 ```rust

@@ -18,7 +18,7 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 |------|--------|---------|
 | `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
 | `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
@@ -89,6 +89,10 @@ msb create alpine --name config-reader \
 Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
 Named volumes can be directory-backed or disk-backed. Directory volumes mount through virtiofs. Disk volumes are raw ext4 disk images managed by microsandbox and mount through virtio-blk.
+
+CLI named mounts are idempotent. `-v name:/path` and `--mount-named name:/path` create a directory-backed named volume if it does not already exist, then mount it. If the volume already exists, microsandbox reuses it when the requested storage settings are compatible and errors when they are not. Use `--mount-named name:/path:kind=disk,size=20G` to create or reuse a disk-backed named volume from the mount flag itself.
+
+SDK `named(...)` mount helpers are existing-only. They fail if the named volume does not already exist. Use each SDK's explicit named-volume mode API when you want sandbox creation to create or ensure the volume.
 
 ### Create a volume
 
@@ -196,6 +200,13 @@ msb create python --name worker \
 ```
 
 </CodeGroup>
+
+The CLI command above creates `pip-cache` as a directory-backed named volume if it is missing. To create or reuse a disk-backed named volume while mounting it:
+
+```bash
+msb create docker:dind --name docker-demo \
+  --mount-named docker-data:/var/lib/docker:kind=disk,size=20G
+```
 
 ### Sharing and host-side access
 

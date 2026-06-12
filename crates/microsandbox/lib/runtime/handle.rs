@@ -14,6 +14,8 @@ use nix::{
 use tempfile::TempDir;
 use tokio::process::Child;
 
+use microsandbox_metrics::MetricsRegistry;
+
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -38,6 +40,10 @@ pub struct ProcessHandle {
     /// lets the child detect when the owner process disappears.
     parent_watchdog: Option<OwnedFd>,
 
+    /// Best-effort cleanup token for a metrics slot that may still be in
+    /// `Reserved` if the runtime exits before activation.
+    metrics_reservation: Option<MetricsReservationCleanup>,
+
     /// Ephemeral staging directory for file mounts. Dropped when the
     /// process handle is dropped, which auto-removes all staged files.
     _file_mounts_staging: Option<TempDir>,
@@ -45,6 +51,14 @@ pub struct ProcessHandle {
     /// Open disk-image lock files. Kept for the process lifetime so disk
     /// images cannot be attached with incompatible write modes.
     _disk_locks: Vec<File>,
+}
+
+/// Token used to release a metrics reservation that never reached Active.
+#[derive(Clone, Debug)]
+pub(crate) struct MetricsReservationCleanup {
+    shm_name: String,
+    slot: u32,
+    generation: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -60,6 +74,7 @@ impl ProcessHandle {
         file_mounts_staging: Option<TempDir>,
         disk_locks: Vec<File>,
         parent_watchdog: Option<OwnedFd>,
+        metrics_reservation: Option<MetricsReservationCleanup>,
     ) -> Self {
         Self {
             pid,
@@ -69,6 +84,7 @@ impl ProcessHandle {
             _file_mounts_staging: file_mounts_staging,
             _disk_locks: disk_locks,
             parent_watchdog,
+            metrics_reservation,
         }
     }
 
@@ -104,6 +120,7 @@ impl ProcessHandle {
         tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
         let status = self.child.wait().await?;
         tracing::debug!(pid = self.pid, ?status, "process exited");
+        self.cleanup_metrics_reservation();
         Ok(status)
     }
 
@@ -136,6 +153,46 @@ impl ProcessHandle {
             let _ = td.keep();
         }
     }
+
+    fn cleanup_metrics_reservation(&mut self) {
+        let Some(metrics_reservation) = self.metrics_reservation.take() else {
+            return;
+        };
+        metrics_reservation.release_reserved(&self.sandbox_name);
+    }
+}
+
+impl MetricsReservationCleanup {
+    /// Create a cleanup token for a reserved metrics slot.
+    pub(crate) fn new(shm_name: String, slot: u32, generation: u64) -> Self {
+        Self {
+            shm_name,
+            slot,
+            generation,
+        }
+    }
+
+    fn release_reserved(&self, sandbox_name: &str) {
+        let registry = match MetricsRegistry::open(&self.shm_name) {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    sandbox = %sandbox_name,
+                    "metrics reservation cleanup: failed to open registry"
+                );
+                return;
+            }
+        };
+        if let Err(err) = registry.release_reserved(self.slot, self.generation) {
+            tracing::debug!(
+                error = %err,
+                sandbox = %sandbox_name,
+                slot = self.slot,
+                "metrics reservation cleanup: failed to release reserved slot"
+            );
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -147,6 +204,8 @@ impl Drop for ProcessHandle {
         if self.detached {
             return;
         }
+
+        self.cleanup_metrics_reservation();
 
         // Attached sandboxes are coupled to the owner through the parent
         // watchdog pipe. Dropping the last writer is enough to trigger guest

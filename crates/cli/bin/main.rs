@@ -266,12 +266,17 @@ fn main() {
         // no explicit level is set so lifecycle events and VMM diagnostics
         // are captured in runtime.log for post-mortem debugging.
         Commands::Sandbox(args) => {
-            let sandbox_level = log_level.or(Some(microsandbox_runtime::logging::LogLevel::Info));
+            let mut args = *args;
+            let sandbox_level = args
+                .log_level
+                .or(log_level)
+                .or(Some(microsandbox_runtime::logging::LogLevel::Info));
+            args.log_level = sandbox_level;
             // The sandbox subprocess's stderr is redirected into
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            sandbox_cmd::run(*args, log_level); // returns `!`
+            sandbox_cmd::run(args); // returns `!`
         }
         command => {
             // CLI commands write tracing to the user's terminal.
@@ -537,7 +542,7 @@ fn extract_quoted_token_str(s: &str) -> Option<String> {
 
 fn run_async_command_anyhow(
     command: Commands,
-    _log_level: Option<microsandbox::LogLevel>,
+    log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
     // Pull and create can overlap network I/O, decompression, and progress UI.
     // Use a small-but-not-tiny worker pool so foreground UI tasks still get
@@ -559,8 +564,8 @@ fn run_async_command_anyhow(
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
 
-            Commands::Run(args) => run::run(args).await,
-            Commands::Create(args) => create::run(args).await,
+            Commands::Run(args) => run::run(args, log_level).await,
+            Commands::Create(args) => create::run(args, log_level).await,
             Commands::Start(args) => start::run(args).await,
             Commands::Stop(args) => stop::run(args).await,
             Commands::List(args) => list::run(args).await,

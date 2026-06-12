@@ -27,7 +27,7 @@ const MARKER_PATH: &str = "/root/test-marker";
 const MARKER_VALUE: &str = "hello-705";
 
 async fn cleanup(name: &str) {
-    if let Ok(mut h) = Sandbox::get(name).await {
+    if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
         let _ = h.remove().await;
     }
@@ -85,7 +85,7 @@ async fn graceful_stop_flushes_writes_to_rootfs() {
         .expect("exec: read marker");
     let stdout = read.stdout().unwrap_or_default();
 
-    let _ = restarted.stop_and_wait().await;
+    let _ = restarted.stop().await;
     cleanup(name).await;
 
     assert!(

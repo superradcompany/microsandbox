@@ -49,7 +49,7 @@ async fn logs_captures_exec_stdout_from_running_sandbox() {
         .await
         .expect("read logs");
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     let matched: Vec<_> = entries.iter().filter(|e| contains(e, marker)).collect();
@@ -120,7 +120,7 @@ async fn log_stream_follow_catches_live_writes() {
     .await
     .expect("marker arrived within timeout");
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     assert_eq!(found.source, LogSource::Stdout);
@@ -179,7 +179,7 @@ async fn log_stream_resume_from_cursor_excludes_replayed_entries() {
         .await
         .expect("drain resumed stream");
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     let saw_a = resumed.iter().any(|e| contains(e, marker_a));

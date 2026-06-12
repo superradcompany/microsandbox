@@ -449,6 +449,8 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
+    pub const METRICS_DISABLED: &str = "metrics_disabled";
+    pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
@@ -498,7 +500,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
-            MicrosandboxError::SandboxFs(_) => error_kind::FILESYSTEM,
+            MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
             MicrosandboxError::SnapshotNotFound(_) => error_kind::SNAPSHOT_NOT_FOUND,
@@ -507,6 +509,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
+            MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
+            MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
             MicrosandboxError::AgentClient(
                 microsandbox::AgentClientError::UnsupportedOperation { .. },
             ) => error_kind::UNSUPPORTED_OPERATION,
@@ -1025,6 +1029,8 @@ struct SnapshotExportOpts {
 struct MountSpec {
     bind: Option<String>,
     named: Option<String>,
+    named_mode: Option<String>,
+    named_kind: Option<String>,
     #[serde(default)]
     tmpfs: bool,
     /// Mount a host disk image (.img/.qcow2/etc.).
@@ -1042,6 +1048,7 @@ struct MountSpec {
     #[serde(default)]
     nodev: bool,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
     stat_virtualization: Option<String>,
@@ -1616,6 +1623,11 @@ fn apply_volume(
 
     let bind = m.bind.clone();
     let named = m.named.clone();
+    let named_mode = m
+        .named_mode
+        .clone()
+        .unwrap_or_else(|| "existing".to_string());
+    let named_kind = m.named_kind.clone().unwrap_or_else(|| "dir".to_string());
     let tmpfs = m.tmpfs;
     let disk = m.disk.clone();
     let fstype = m.fstype.clone();
@@ -1624,6 +1636,18 @@ fn apply_volume(
     let nosuid = m.nosuid;
     let nodev = m.nodev;
     let size_mib = m.size_mib;
+    let quota_mib = m.quota_mib;
+
+    if !matches!(named_mode.as_str(), "existing" | "create" | "ensure-exists") {
+        return Err(FfiError::invalid_argument(format!(
+            "invalid named_mode {named_mode:?} (expected existing|create|ensure-exists)"
+        )));
+    }
+    if !matches!(named_kind.as_str(), "dir" | "directory" | "disk") {
+        return Err(FfiError::invalid_argument(format!(
+            "invalid named_kind {named_kind:?} (expected dir|disk)"
+        )));
+    }
 
     let kinds_set: u8 =
         bind.is_some() as u8 + named.is_some() as u8 + tmpfs as u8 + disk.is_some() as u8;
@@ -1637,7 +1661,26 @@ fn apply_volume(
         let mut mb = if let Some(ref host) = bind {
             mb.bind(host)
         } else if let Some(ref name) = named {
-            mb.named(name)
+            mb.named_with(name, |mut named| {
+                named = match named_mode.as_str() {
+                    "existing" => named.existing(),
+                    "create" => named.create(),
+                    "ensure-exists" => named.ensure_exists(),
+                    _ => unreachable!("validated named volume mode"),
+                };
+                named = match named_kind.as_str() {
+                    "dir" | "directory" => named.directory(),
+                    "disk" => named.disk(),
+                    _ => unreachable!("validated named volume kind"),
+                };
+                if let Some(size_mib) = size_mib {
+                    named = named.size(size_mib);
+                }
+                if let Some(quota_mib) = quota_mib {
+                    named = named.quota(quota_mib);
+                }
+                named
+            })
         } else if tmpfs {
             mb.tmpfs()
         } else if let Some(ref host) = disk {
@@ -1663,7 +1706,7 @@ fn apply_volume(
         if nodev {
             mb = mb.nodev();
         }
-        if let Some(siz) = size_mib {
+        if tmpfs && let Some(siz) = size_mib {
             mb = mb.size(siz);
         }
         if let Some(p) = stat_virt {
@@ -1999,6 +2042,7 @@ pub unsafe extern "C" fn msb_sandbox_start(
 pub unsafe extern "C" fn msb_sandbox_handle_stop(
     cancel_id: u64,
     name: *const c_char,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
@@ -2006,7 +2050,26 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
-            h.stop().await.map_err(FfiError::from)?;
+            h.stop_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_stop(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_stop().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2016,15 +2079,69 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
 pub unsafe extern "C" fn msb_sandbox_handle_kill(
     cancel_id: u64,
     name: *const c_char,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let mut h = Sandbox::get(&name).await.map_err(FfiError::from)?;
-            h.kill().await.map_err(FfiError::from)?;
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.kill_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_kill(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_kill().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_request_drain(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            h.request_drain().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_wait_until_stopped(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
+            Ok(sandbox_stop_result_json(&result))
         }))
     })
 }
@@ -2090,28 +2207,30 @@ pub unsafe extern "C" fn msb_sandbox_detach(
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox — stop (graceful) and stop_and_wait
+// Sandbox — lifecycle
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_stop(
     cancel_id: u64,
     handle: Handle,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.stop().await.map_err(FfiError::from)?;
+            sb.stop_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Stop and wait for full shutdown. Returns `{"exit_code": <int|null>}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_stop_and_wait(
+pub unsafe extern "C" fn msb_sandbox_request_stop(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2120,40 +2239,33 @@ pub unsafe extern "C" fn msb_sandbox_stop_and_wait(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let status = sb.stop_and_wait().await.map_err(FfiError::from)?;
-            let code = status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "null".into());
-            Ok(format!(r#"{{"exit_code":{code}}}"#))
+            sb.request_stop().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Kill the sandbox immediately (SIGKILL on the VM process).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_kill(
     cancel_id: u64,
     handle: Handle,
+    timeout_ms: u64,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.kill().await.map_err(FfiError::from)?;
+            sb.kill_with_timeout(std::time::Duration::from_millis(timeout_ms))
+                .await
+                .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-// ---------------------------------------------------------------------------
-// Sandbox — drain, wait, owns_lifecycle
-// ---------------------------------------------------------------------------
-
-/// Trigger graceful drain (SIGUSR1). Returns `{"ok":true}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_drain(
+pub unsafe extern "C" fn msb_sandbox_request_kill(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2162,15 +2274,14 @@ pub unsafe extern "C" fn msb_sandbox_drain(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            sb.drain().await.map_err(FfiError::from)?;
+            sb.request_kill().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
 
-/// Wait for the sandbox process to exit. Returns `{"exit_code": <int|null>}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_wait(
+pub unsafe extern "C" fn msb_sandbox_request_drain(
     cancel_id: u64,
     handle: Handle,
     buf: *mut c_uchar,
@@ -2179,15 +2290,31 @@ pub unsafe extern "C" fn msb_sandbox_wait(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let status = sb.wait().await.map_err(FfiError::from)?;
-            let code = status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "null".into());
-            Ok(format!(r#"{{"exit_code":{code}}}"#))
+            sb.request_drain().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
         }))
     })
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_wait_until_stopped(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.wait_until_stopped().await.map_err(FfiError::from)?;
+            Ok(sandbox_stop_result_json(&result))
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox — owns_lifecycle
+// ---------------------------------------------------------------------------
 
 /// Reports whether this handle owns the sandbox lifecycle (synchronous).
 /// Returns `{"owns":true}` or `{"owns":false}`.
@@ -2265,6 +2392,32 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         name = name_json,
         status = sandbox_status_str(h.status()),
         config = cfg_json,
+    )
+}
+
+fn sandbox_stop_result_json(result: &microsandbox::sandbox::SandboxStopResult) -> String {
+    let name_json = serde_json::to_string(&result.name).unwrap_or_else(|_| "\"\"".into());
+    let source_json = result
+        .source
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .unwrap_or(None)
+        .unwrap_or_else(|| "null".to_string());
+    let exit_code = result
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let signal = result
+        .signal
+        .map(|signal| signal.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        r#"{{"name":{name},"status":"{status}","exit_code":{exit_code},"signal":{signal},"observed_at_unix":{observed_at},"source":{source}}}"#,
+        name = name_json,
+        status = sandbox_status_str(result.status),
+        observed_at = result.observed_at.timestamp(),
+        source = source_json,
     )
 }
 
@@ -2496,7 +2649,7 @@ pub unsafe extern "C" fn msb_sandbox_ssh_connect(
         Ok(Box::pin(async move {
             let client = sb
                 .ssh()
-                .connect_with(|builder| {
+                .open_client_with(|builder| {
                     let mut builder = builder;
                     if let Some(user) = opts.user {
                         builder = builder.user(user);
@@ -2536,7 +2689,7 @@ pub unsafe extern "C" fn msb_sandbox_ssh_server(
         Ok(Box::pin(async move {
             let server = sb
                 .ssh()
-                .server_with(|builder| {
+                .prepare_server_with(|builder| {
                     let mut builder = builder;
                     if let Some(path) = opts.host_key_path {
                         builder = builder.host_key_path(path);
@@ -2584,7 +2737,7 @@ pub unsafe extern "C" fn msb_ssh_server_close(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
+pub unsafe extern "C" fn msb_ssh_server_serve_connection(
     cancel_id: u64,
     server_handle: Handle,
     buf: *mut c_uchar,
@@ -2601,7 +2754,7 @@ pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
                     .clone()
             };
             server
-                .serve(SshStdioStream::new())
+                .serve_connection(SshStdioStream::new())
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
@@ -3065,8 +3218,24 @@ pub unsafe extern "C" fn msb_sandbox_exec(
 
 // ---------------------------------------------------------------------------
 // Sandbox — metrics
-// Output: {cpu_percent,memory_bytes,memory_limit_bytes,disk_*,net_*,uptime_secs}
+// Output: guest-focused CPU, memory, disk, network, and uptime counters.
 // ---------------------------------------------------------------------------
+
+fn metrics_json(m: &microsandbox::sandbox::SandboxMetrics) -> serde_json::Value {
+    serde_json::json!({
+        "cpu_percent": m.cpu_percent,
+        "vcpu_time_ns": m.vcpu_time_ns,
+        "memory_bytes": m.memory_bytes,
+        "memory_available_bytes": m.memory_available_bytes,
+        "memory_host_resident_bytes": m.memory_host_resident_bytes,
+        "memory_limit_bytes": m.memory_limit_bytes,
+        "disk_read_bytes": m.disk_read_bytes,
+        "disk_write_bytes": m.disk_write_bytes,
+        "net_rx_bytes": m.net_rx_bytes,
+        "net_tx_bytes": m.net_tx_bytes,
+        "uptime_secs": m.uptime.as_secs(),
+    })
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_metrics(
@@ -3079,17 +3248,7 @@ pub unsafe extern "C" fn msb_sandbox_metrics(
         let sb = get(handle)?;
         Ok(Box::pin(async move {
             let m = sb.metrics().await.map_err(FfiError::from)?;
-            Ok(serde_json::json!({
-                "cpu_percent": m.cpu_percent,
-                "memory_bytes": m.memory_bytes,
-                "memory_limit_bytes": m.memory_limit_bytes,
-                "disk_read_bytes": m.disk_read_bytes,
-                "disk_write_bytes": m.disk_write_bytes,
-                "net_rx_bytes": m.net_rx_bytes,
-                "net_tx_bytes": m.net_tx_bytes,
-                "uptime_secs": m.uptime.as_secs(),
-            })
-            .to_string())
+            Ok(metrics_json(&m).to_string())
         }))
     })
 }
@@ -3620,17 +3779,7 @@ pub unsafe extern "C" fn msb_metrics_recv(
                 item = recv.recv() => {
                     match item {
                         None => Ok(r#"{"done":true}"#.to_string()),
-                        Some(Ok(m)) => Ok(format!(
-                            r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{net_rx},"net_tx_bytes":{net_tx},"uptime_secs":{up}}}"#,
-                            cpu = m.cpu_percent,
-                            mem = m.memory_bytes,
-                            lim = m.memory_limit_bytes,
-                            dr = m.disk_read_bytes,
-                            dw = m.disk_write_bytes,
-                            net_rx = m.net_rx_bytes,
-                            net_tx = m.net_tx_bytes,
-                            up = m.uptime.as_secs(),
-                        )),
+                        Some(Ok(m)) => Ok(metrics_json(&m).to_string()),
                         Some(Err(e)) => Err(FfiError::from(e)),
                     }
                 }
@@ -4210,24 +4359,11 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
     run_c(cancel_id, buf, buf_len, || {
         Ok(Box::pin(async move {
             let map = all_sandbox_metrics().await.map_err(FfiError::from)?;
-            let mut entries = String::new();
-            for (name, m) in &map {
-                if !entries.is_empty() {
-                    entries.push(',');
-                }
-                entries.push_str(&format!(
-                    r#""{name}":{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                    cpu = m.cpu_percent,
-                    mem = m.memory_bytes,
-                    lim = m.memory_limit_bytes,
-                    dr  = m.disk_read_bytes,
-                    dw  = m.disk_write_bytes,
-                    rx  = m.net_rx_bytes,
-                    tx  = m.net_tx_bytes,
-                    up  = m.uptime.as_secs(),
-                ));
-            }
-            Ok(format!(r#"{{"sandboxes":{{{entries}}}}}"#))
+            let sandboxes: HashMap<_, _> = map
+                .iter()
+                .map(|(name, metrics)| (name, metrics_json(metrics)))
+                .collect();
+            Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
         }))
     })
 }
@@ -4250,42 +4386,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_metrics(
         Ok(Box::pin(async move {
             let handle = Sandbox::get(&name_str).await.map_err(FfiError::from)?;
             let m = handle.metrics().await.map_err(FfiError::from)?;
-            Ok(format!(
-                r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                cpu = m.cpu_percent,
-                mem = m.memory_bytes,
-                lim = m.memory_limit_bytes,
-                dr = m.disk_read_bytes,
-                dw = m.disk_write_bytes,
-                rx = m.net_rx_bytes,
-                tx = m.net_tx_bytes,
-                up = m.uptime.as_secs(),
-            ))
-        }))
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Sandbox.removePersisted
-// ---------------------------------------------------------------------------
-
-/// Remove the sandbox's persisted filesystem + database state.
-/// The sandbox must be stopped. Consumes the live handle.
-/// Returns `{"ok":true}`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_remove_persisted(
-    cancel_id: u64,
-    handle: Handle,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let sb = remove(handle)?.ok_or_else(|| FfiError::invalid_handle(handle))?;
-        let owned = std::sync::Arc::try_unwrap(sb)
-            .map_err(|_| FfiError::internal("sandbox handle still referenced"))?;
-        Ok(Box::pin(async move {
-            owned.remove_persisted().await.map_err(FfiError::from)?;
-            Ok(r#"{"ok":true}"#.to_string())
+            Ok(metrics_json(&m).to_string())
         }))
     })
 }
@@ -5140,6 +5241,29 @@ pub unsafe extern "C" fn msb_agent_open_path(
         Ok(()) => std::ptr::null_mut(),
         Err(e) => err_ptr(e),
     }
+}
+
+/// Resolve the host-side path of a sandbox's agentd relay socket by name.
+///
+/// Synchronous; touches no Rust-side handle state and does not connect. Writes
+/// `{"path":"..."}` to `buf`. The Go SDK exposes this so a caller can dial
+/// agentd over a raw byte transport (e.g. a transparent relay) instead of the
+/// frame-protocol client returned by `msb_agent_open_*`.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string; `buf`/`buf_len` follow the
+/// shared `run` output-buffer contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_socket_path(
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let path = microsandbox::runtime::agent_socket_path(&name).map_err(FfiError::from)?;
+        Ok(serde_json::json!({ "path": path.to_string_lossy() }).to_string())
+    })
 }
 
 #[unsafe(no_mangle)]

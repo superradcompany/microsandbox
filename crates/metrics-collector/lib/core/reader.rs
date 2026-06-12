@@ -195,7 +195,10 @@ mod tests {
             name: format!("s{id}"),
             metrics: SandboxMetrics {
                 cpu_percent: 0.0,
+                vcpu_time_ns: 0,
                 memory_bytes: 0,
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
                 memory_limit_bytes: 0,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,

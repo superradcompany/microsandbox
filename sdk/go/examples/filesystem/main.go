@@ -1,6 +1,6 @@
 // Filesystem operations example for the microsandbox Go SDK.
 //
-// Exercises the SandboxFs API end-to-end: Write/Read, List, Stat,
+// Exercises the SandboxFSOps API end-to-end: Write/Read, List, Stat,
 // Mkdir/Remove/RemoveDir, Copy, Rename, Exists, CopyFromHost / CopyToHost,
 // and the streaming ReadStream / WriteStream helpers.
 //
@@ -40,7 +40,7 @@ func main() {
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 		defer c()
-		_, _ = sb.StopAndWait(stopCtx)
+		_ = sb.Stop(stopCtx)
 		_ = sb.Close()
 		_ = microsandbox.RemoveSandbox(context.Background(), name)
 	}()

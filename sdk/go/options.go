@@ -1,6 +1,10 @@
 package microsandbox
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // SandboxConfig holds configuration for creating a sandbox.
 //
@@ -8,6 +12,7 @@ import "time"
 // SandboxConfig is exported for callers that prefer to build a config value
 // directly and pass it via WithConfig.
 type SandboxConfig struct {
+	Name            string
 	Image           string
 	ImageFstype     string
 	OCIUpperSizeMiB uint32
@@ -50,6 +55,127 @@ type SandboxConfig struct {
 
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
+
+type persistedSandboxConfig struct {
+	Name            string            `json:"name"`
+	Image           json.RawMessage   `json:"image"`
+	ImageFstype     string            `json:"image_fstype"`
+	OCIUpperSizeMiB uint32            `json:"oci_upper_size_mib"`
+	MemoryMiB       uint32            `json:"memory_mib"`
+	CPUs            uint8             `json:"cpus"`
+	Workdir         string            `json:"workdir"`
+	Shell           string            `json:"shell"`
+	SecurityProfile SecurityProfile   `json:"security_profile"`
+	Hostname        string            `json:"hostname"`
+	User            string            `json:"user"`
+	Replace         bool              `json:"replace"`
+	Labels          map[string]string `json:"labels"`
+	Detached        bool              `json:"detached"`
+	Entrypoint      []string          `json:"entrypoint"`
+	LogLevel        LogLevel          `json:"log_level"`
+	QuietLogs       bool              `json:"quiet_logs"`
+	Scripts         map[string]string `json:"scripts"`
+	PullPolicy      PullPolicy        `json:"pull_policy"`
+}
+
+// UnmarshalJSON decodes the persisted Rust sandbox config into the Go SDK's
+// public configuration shape.
+func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
+	var raw persistedSandboxConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	image, imageFstype, upperSizeMiB, upperSizeSet, err := decodePersistedRootfsSource(raw.Image)
+	if err != nil {
+		return err
+	}
+	if raw.ImageFstype != "" {
+		imageFstype = raw.ImageFstype
+	}
+	if raw.OCIUpperSizeMiB != 0 {
+		upperSizeMiB = raw.OCIUpperSizeMiB
+		upperSizeSet = true
+	}
+
+	*c = SandboxConfig{
+		Name:            raw.Name,
+		Image:           image,
+		ImageFstype:     imageFstype,
+		OCIUpperSizeMiB: upperSizeMiB,
+		ociUpperSizeSet: upperSizeSet,
+		MemoryMiB:       raw.MemoryMiB,
+		CPUs:            raw.CPUs,
+		Workdir:         raw.Workdir,
+		Shell:           raw.Shell,
+		SecurityProfile: raw.SecurityProfile,
+		Hostname:        raw.Hostname,
+		User:            raw.User,
+		Replace:         raw.Replace,
+		Labels:          raw.Labels,
+		Detached:        raw.Detached,
+		Entrypoint:      raw.Entrypoint,
+		LogLevel:        raw.LogLevel,
+		QuietLogs:       raw.QuietLogs,
+		Scripts:         raw.Scripts,
+		PullPolicy:      raw.PullPolicy,
+	}
+	return nil
+}
+
+func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", "", 0, false, nil
+	}
+
+	var plain string
+	if err := json.Unmarshal(raw, &plain); err == nil {
+		return plain, "", 0, false, nil
+	}
+
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tagged); err != nil {
+		return "", "", 0, false, err
+	}
+
+	if value, ok := tagged["Oci"]; ok {
+		var source struct {
+			Reference    string  `json:"reference"`
+			UpperSizeMiB *uint32 `json:"upper_size_mib"`
+		}
+		if err := json.Unmarshal(value, &source); err != nil {
+			return "", "", 0, false, err
+		}
+		if source.UpperSizeMiB == nil {
+			return source.Reference, "", 0, false, nil
+		}
+		return source.Reference, "", *source.UpperSizeMiB, true, nil
+	}
+
+	if value, ok := tagged["Bind"]; ok {
+		var path string
+		if err := json.Unmarshal(value, &path); err != nil {
+			return "", "", 0, false, err
+		}
+		return path, "", 0, false, nil
+	}
+
+	if value, ok := tagged["DiskImage"]; ok {
+		var source struct {
+			Path   string  `json:"path"`
+			Fstype *string `json:"fstype"`
+		}
+		if err := json.Unmarshal(value, &source); err != nil {
+			return "", "", 0, false, err
+		}
+		if source.Fstype == nil {
+			return source.Path, "", 0, false, nil
+		}
+		return source.Path, *source.Fstype, 0, false, nil
+	}
+
+	return "", "", 0, false, fmt.Errorf("unknown rootfs source variant: %v", tagged)
+}
 
 // SecurityProfile selects the in-guest security profile.
 type SecurityProfile string
@@ -741,17 +867,20 @@ type MountConfig struct {
 	// to introspect; setting fields below directly is discouraged.
 	kind MountKind
 
-	Bind     string
-	Named    string
-	Tmpfs    bool
-	Disk     string
-	Format   string
-	Fstype   string
-	Readonly bool
-	Noexec   bool
-	Nosuid   bool
-	Nodev    bool
-	SizeMiB  uint32
+	Bind      string
+	Named     string
+	NamedMode string
+	NamedKind string
+	QuotaMiB  uint32
+	Tmpfs     bool
+	Disk      string
+	Format    string
+	Fstype    string
+	Readonly  bool
+	Noexec    bool
+	Nosuid    bool
+	Nodev     bool
+	SizeMiB   uint32
 
 	// StatVirtualization is the per-mount stat-virtualization policy. Only
 	// meaningful for Bind and Named mounts. Zero value preserves the
@@ -793,6 +922,14 @@ type MountOptions struct {
 	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+}
+
+// NamedVolumeOptions tunes sandbox-time named volume provisioning.
+type NamedVolumeOptions struct {
+	Mode     string // "existing", "create", or "ensure-exists"; empty means existing.
+	Kind     string // "dir" or "disk"; empty means dir.
+	SizeMiB  uint32
+	QuotaMiB uint32
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -847,6 +984,25 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 	return MountConfig{
 		kind:               MountKindNamed,
 		Named:              name,
+		Readonly:           opts.Readonly,
+		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
+}
+
+// NamedWith returns a MountConfig that mounts a named persistent volume with
+// explicit creation behavior.
+func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig {
+	return MountConfig{
+		kind:               MountKindNamed,
+		Named:              name,
+		NamedMode:          namedOpts.Mode,
+		NamedKind:          namedOpts.Kind,
+		SizeMiB:            namedOpts.SizeMiB,
+		QuotaMiB:           namedOpts.QuotaMiB,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
 		Nosuid:             opts.Nosuid,

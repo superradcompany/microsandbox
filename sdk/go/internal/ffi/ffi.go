@@ -71,13 +71,18 @@ typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, con
 typedef char *(*msb_sandbox_lookup_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_connect_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_start_fn)(uint64_t cancel_id, const char *name, bool detached, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_handle_stop_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_handle_kill_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_stop_fn)(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_request_stop_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_kill_fn)(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_request_kill_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_request_drain_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_wait_until_stopped_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_stop_and_wait_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_kill_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_kill_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_request_kill_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
@@ -86,7 +91,7 @@ typedef char *(*msb_sandbox_metrics_fn)(uint64_t cancel_id, uint64_t handle, uin
 typedef char *(*msb_sandbox_ssh_connect_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_ssh_server_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_ssh_server_close_fn)(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_ssh_server_serve_stdio_fn)(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_server_serve_connection_fn)(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_ssh_client_exec_fn)(uint64_t cancel_id, uint64_t client_handle, const char *command, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_ssh_client_attach_fn)(uint64_t cancel_id, uint64_t client_handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_ssh_client_close_fn)(uint64_t cancel_id, uint64_t client_handle, uint8_t *buf, size_t buf_len);
@@ -130,13 +135,12 @@ typedef char *(*msb_metrics_close_fn)(uint64_t stream_handle, uint8_t *buf, size
 typedef char *(*msb_exec_stdin_write_fn)(uint64_t cancel_id, uint64_t exec_handle, const char *data_b64, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_stdin_close_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 
-typedef char *(*msb_sandbox_drain_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_wait_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_request_drain_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_wait_until_stopped_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_owns_lifecycle_fn)(uint64_t handle, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_remove_persisted_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_logs_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
@@ -151,6 +155,7 @@ typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint
 typedef char *(*msb_volume_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_get_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_version_fn)(uint8_t *buf, size_t buf_len);
+typedef char *(*msb_agent_socket_path_fn)(const char *name, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_image_get_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
@@ -202,12 +207,17 @@ static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
 static msb_sandbox_start_fn      ptr_msb_sandbox_start      = NULL;
 static msb_sandbox_handle_stop_fn ptr_msb_sandbox_handle_stop = NULL;
+static msb_sandbox_handle_request_stop_fn ptr_msb_sandbox_handle_request_stop = NULL;
 static msb_sandbox_handle_kill_fn ptr_msb_sandbox_handle_kill = NULL;
+static msb_sandbox_handle_request_kill_fn ptr_msb_sandbox_handle_request_kill = NULL;
+static msb_sandbox_handle_request_drain_fn ptr_msb_sandbox_handle_request_drain = NULL;
+static msb_sandbox_handle_wait_until_stopped_fn ptr_msb_sandbox_handle_wait_until_stopped = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
-static msb_sandbox_stop_and_wait_fn ptr_msb_sandbox_stop_and_wait = NULL;
+static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_kill_fn       ptr_msb_sandbox_kill       = NULL;
+static msb_sandbox_request_kill_fn ptr_msb_sandbox_request_kill = NULL;
 static msb_sandbox_list_fn       ptr_msb_sandbox_list       = NULL;
 static msb_sandbox_remove_fn     ptr_msb_sandbox_remove     = NULL;
 static msb_sandbox_exec_fn       ptr_msb_sandbox_exec       = NULL;
@@ -216,7 +226,7 @@ static msb_sandbox_metrics_fn    ptr_msb_sandbox_metrics    = NULL;
 static msb_sandbox_ssh_connect_fn ptr_msb_sandbox_ssh_connect = NULL;
 static msb_sandbox_ssh_server_fn ptr_msb_sandbox_ssh_server = NULL;
 static msb_ssh_server_close_fn   ptr_msb_ssh_server_close   = NULL;
-static msb_ssh_server_serve_stdio_fn ptr_msb_ssh_server_serve_stdio = NULL;
+static msb_ssh_server_serve_connection_fn ptr_msb_ssh_server_serve_connection = NULL;
 static msb_ssh_client_exec_fn    ptr_msb_ssh_client_exec    = NULL;
 static msb_ssh_client_attach_fn  ptr_msb_ssh_client_attach  = NULL;
 static msb_ssh_client_close_fn   ptr_msb_ssh_client_close   = NULL;
@@ -251,8 +261,8 @@ static msb_metrics_recv_fn        ptr_msb_metrics_recv        = NULL;
 static msb_metrics_close_fn       ptr_msb_metrics_close       = NULL;
 static msb_exec_stdin_write_fn    ptr_msb_exec_stdin_write    = NULL;
 static msb_exec_stdin_close_fn   ptr_msb_exec_stdin_close   = NULL;
-static msb_sandbox_drain_fn       ptr_msb_sandbox_drain       = NULL;
-static msb_sandbox_wait_fn        ptr_msb_sandbox_wait        = NULL;
+static msb_sandbox_request_drain_fn ptr_msb_sandbox_request_drain = NULL;
+static msb_sandbox_wait_until_stopped_fn ptr_msb_sandbox_wait_until_stopped = NULL;
 static msb_sandbox_owns_lifecycle_fn ptr_msb_sandbox_owns_lifecycle = NULL;
 static msb_exec_collect_fn         ptr_msb_exec_collect         = NULL;
 static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
@@ -260,7 +270,6 @@ static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
 static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
-static msb_sandbox_remove_persisted_fn ptr_msb_sandbox_remove_persisted = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
 static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
@@ -290,6 +299,7 @@ static msb_agent_ready_bytes_fn     ptr_msb_agent_ready_bytes     = NULL;
 static msb_agent_close_fn           ptr_msb_agent_close           = NULL;
 static msb_agent_free_bytes_fn      ptr_msb_agent_free_bytes      = NULL;
 static msb_version_fn              ptr_msb_version              = NULL;
+static msb_agent_socket_path_fn    ptr_msb_agent_socket_path    = NULL;
 static msb_image_get_fn            ptr_msb_image_get            = NULL;
 static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
@@ -350,12 +360,17 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_connect);
 	RESOLVE(msb_sandbox_start);
 	RESOLVE(msb_sandbox_handle_stop);
+	RESOLVE(msb_sandbox_handle_request_stop);
 	RESOLVE(msb_sandbox_handle_kill);
+	RESOLVE(msb_sandbox_handle_request_kill);
+	RESOLVE(msb_sandbox_handle_request_drain);
+	RESOLVE(msb_sandbox_handle_wait_until_stopped);
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
-	RESOLVE(msb_sandbox_stop_and_wait);
+	RESOLVE(msb_sandbox_request_stop);
 	RESOLVE(msb_sandbox_kill);
+	RESOLVE(msb_sandbox_request_kill);
 	RESOLVE(msb_sandbox_list);
 	RESOLVE(msb_sandbox_remove);
 	RESOLVE(msb_sandbox_exec);
@@ -364,7 +379,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_ssh_connect);
 	RESOLVE(msb_sandbox_ssh_server);
 	RESOLVE(msb_ssh_server_close);
-	RESOLVE(msb_ssh_server_serve_stdio);
+	RESOLVE(msb_ssh_server_serve_connection);
 	RESOLVE(msb_ssh_client_exec);
 	RESOLVE(msb_ssh_client_attach);
 	RESOLVE(msb_ssh_client_close);
@@ -399,8 +414,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_metrics_close);
 	RESOLVE(msb_exec_stdin_write);
 	RESOLVE(msb_exec_stdin_close);
-	RESOLVE(msb_sandbox_drain);
-	RESOLVE(msb_sandbox_wait);
+	RESOLVE(msb_sandbox_request_drain);
+	RESOLVE(msb_sandbox_wait_until_stopped);
 	RESOLVE(msb_sandbox_owns_lifecycle);
 	RESOLVE(msb_exec_collect);
 	RESOLVE(msb_exec_wait);
@@ -408,7 +423,6 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_exec_id);
 	RESOLVE(msb_sandbox_attach);
 	RESOLVE(msb_sandbox_attach_shell);
-	RESOLVE(msb_sandbox_remove_persisted);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
 	RESOLVE(msb_sandbox_logs);
@@ -438,6 +452,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_agent_close);
 	RESOLVE(msb_agent_free_bytes);
 	RESOLVE(msb_version);
+	RESOLVE(msb_agent_socket_path);
 	RESOLVE(msb_image_get);
 	RESOLVE(msb_image_list);
 	RESOLVE(msb_image_inspect);
@@ -495,11 +510,23 @@ char *call_msb_sandbox_connect(uint64_t cancel_id, const char *name, uint8_t *bu
 char *call_msb_sandbox_start(uint64_t cancel_id, const char *name, bool detached, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_start ? ptr_msb_sandbox_start(cancel_id, name, detached, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_handle_stop(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_handle_stop ? ptr_msb_sandbox_handle_stop(cancel_id, name, buf, buf_len) : NULL;
+char *call_msb_sandbox_handle_stop(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_stop ? ptr_msb_sandbox_handle_stop(cancel_id, name, timeout_ms, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_handle_kill(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_handle_kill ? ptr_msb_sandbox_handle_kill(cancel_id, name, buf, buf_len) : NULL;
+char *call_msb_sandbox_handle_request_stop(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_request_stop ? ptr_msb_sandbox_handle_request_stop(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_kill(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_kill ? ptr_msb_sandbox_handle_kill(cancel_id, name, timeout_ms, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_request_kill(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_request_kill ? ptr_msb_sandbox_handle_request_kill(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_request_drain(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_request_drain ? ptr_msb_sandbox_handle_request_drain(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_wait_until_stopped(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_wait_until_stopped ? ptr_msb_sandbox_handle_wait_until_stopped(cancel_id, name, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_close ? ptr_msb_sandbox_close(cancel_id, handle, buf, buf_len) : NULL;
@@ -507,14 +534,17 @@ char *call_msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, 
 char *call_msb_sandbox_detach(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_detach ? ptr_msb_sandbox_detach(cancel_id, handle, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_stop ? ptr_msb_sandbox_stop(cancel_id, handle, buf, buf_len) : NULL;
+char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_stop ? ptr_msb_sandbox_stop(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_stop_and_wait(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_stop_and_wait ? ptr_msb_sandbox_stop_and_wait(cancel_id, handle, buf, buf_len) : NULL;
+char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_kill ? ptr_msb_sandbox_kill(cancel_id, handle, buf, buf_len) : NULL;
+char *call_msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_kill ? ptr_msb_sandbox_kill(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_request_kill(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_request_kill ? ptr_msb_sandbox_request_kill(cancel_id, handle, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_list(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_list ? ptr_msb_sandbox_list(cancel_id, filter_json, buf, buf_len) : NULL;
@@ -540,8 +570,8 @@ char *call_msb_sandbox_ssh_server(uint64_t cancel_id, uint64_t handle, const cha
 char *call_msb_ssh_server_close(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_ssh_server_close ? ptr_msb_ssh_server_close(cancel_id, server_handle, buf, buf_len) : NULL;
 }
-char *call_msb_ssh_server_serve_stdio(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_ssh_server_serve_stdio ? ptr_msb_ssh_server_serve_stdio(cancel_id, server_handle, buf, buf_len) : NULL;
+char *call_msb_ssh_server_serve_connection(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_server_serve_connection ? ptr_msb_ssh_server_serve_connection(cancel_id, server_handle, buf, buf_len) : NULL;
 }
 char *call_msb_ssh_client_exec(uint64_t cancel_id, uint64_t client_handle, const char *command, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_ssh_client_exec ? ptr_msb_ssh_client_exec(cancel_id, client_handle, command, opts, buf, buf_len) : NULL;
@@ -645,11 +675,11 @@ char *call_msb_exec_stdin_write(uint64_t cancel_id, uint64_t exec_handle, const 
 char *call_msb_exec_stdin_close(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_stdin_close ? ptr_msb_exec_stdin_close(cancel_id, exec_handle, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_drain(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_drain ? ptr_msb_sandbox_drain(cancel_id, handle, buf, buf_len) : NULL;
+char *call_msb_sandbox_request_drain(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_request_drain ? ptr_msb_sandbox_request_drain(cancel_id, handle, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_wait(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_wait ? ptr_msb_sandbox_wait(cancel_id, handle, buf, buf_len) : NULL;
+char *call_msb_sandbox_wait_until_stopped(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_wait_until_stopped ? ptr_msb_sandbox_wait_until_stopped(cancel_id, handle, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_owns_lifecycle(uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_owns_lifecycle ? ptr_msb_sandbox_owns_lifecycle(handle, buf, buf_len) : NULL;
@@ -671,9 +701,6 @@ char *call_msb_sandbox_attach(uint64_t cancel_id, uint64_t handle, const char *c
 }
 char *call_msb_sandbox_attach_shell(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_attach_shell ? ptr_msb_sandbox_attach_shell(cancel_id, handle, buf, buf_len) : NULL;
-}
-char *call_msb_sandbox_remove_persisted(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_remove_persisted ? ptr_msb_sandbox_remove_persisted(cancel_id, handle, buf, buf_len) : NULL;
 }
 char *call_msb_all_sandbox_metrics(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_all_sandbox_metrics ? ptr_msb_all_sandbox_metrics(cancel_id, buf, buf_len) : NULL;
@@ -761,6 +788,9 @@ void call_msb_agent_free_bytes(uint8_t *ptr, size_t len) {
 }
 char *call_msb_version(uint8_t *buf, size_t buf_len) {
 	return ptr_msb_version ? ptr_msb_version(buf, buf_len) : NULL;
+}
+char *call_msb_agent_socket_path(const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_agent_socket_path ? ptr_msb_agent_socket_path(name, buf, buf_len) : NULL;
 }
 char *call_msb_image_get(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_get ? ptr_msb_image_get(cancel_id, reference, buf, buf_len) : NULL;
@@ -963,6 +993,8 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindPatchFailed            = "patch_failed"
+	KindMetricsDisabled        = "metrics_disabled"
+	KindMetricsUnavailable     = "metrics_unavailable"
 	KindUnsupportedOperation   = "unsupported_operation"
 	KindIO                     = "io"
 )
@@ -1398,6 +1430,8 @@ type RegistryAuthOptions struct {
 type MountSpec struct {
 	Bind               string `json:"bind,omitempty"`
 	Named              string `json:"named,omitempty"`
+	NamedMode          string `json:"named_mode,omitempty"`
+	NamedKind          string `json:"named_kind,omitempty"`
 	Tmpfs              bool   `json:"tmpfs,omitempty"`
 	Disk               string `json:"disk,omitempty"`
 	Format             string `json:"format,omitempty"`
@@ -1407,6 +1441,7 @@ type MountSpec struct {
 	Nosuid             bool   `json:"nosuid,omitempty"`
 	Nodev              bool   `json:"nodev,omitempty"`
 	SizeMiB            uint32 `json:"size_mib,omitempty"`
+	QuotaMiB           uint32 `json:"quota_mib,omitempty"`
 	StatVirtualization string `json:"stat_virtualization,omitempty"`
 	HostPermissions    string `json:"host_permissions,omitempty"`
 }
@@ -1579,6 +1614,16 @@ type SandboxHandleInfo struct {
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
 }
 
+// SandboxStopResult is the JSON payload returned after observing a stopped sandbox.
+type SandboxStopResult struct {
+	Name           string  `json:"name"`
+	Status         string  `json:"status"`
+	ExitCode       *int    `json:"exit_code"`
+	Signal         *int    `json:"signal"`
+	ObservedAtUnix int64   `json:"observed_at_unix"`
+	Source         *string `json:"source"`
+}
+
 // LogOptions filters persisted sandbox logs.
 type LogOptions struct {
 	Tail    uint64   `json:"tail,omitempty"`
@@ -1721,64 +1766,89 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 	return s, nil
 }
 
-// StopSandboxByName gracefully stops a sandbox identified by name.
-func StopSandboxByName(ctx context.Context, name string) error {
+// StopSandboxByName gracefully stops a sandbox identified by name and waits for stopped observation.
+func StopSandboxByName(ctx context.Context, name string, timeoutMs uint64) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_handle_stop(cancelID, cName, buf, bufLen)
+		return C.call_msb_sandbox_handle_stop(cancelID, cName, C.uint64_t(timeoutMs), buf, bufLen)
 	})
 	return err
 }
 
-// KillSandboxByName terminates a sandbox identified by name.
-func KillSandboxByName(ctx context.Context, name string) error {
+// RequestStopSandboxByName requests graceful shutdown without waiting for stopped observation.
+func RequestStopSandboxByName(ctx context.Context, name string) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_handle_kill(cancelID, cName, buf, bufLen)
+		return C.call_msb_sandbox_handle_request_stop(cancelID, cName, buf, bufLen)
 	})
 	return err
 }
 
-// Drain triggers graceful drain (SIGUSR1) on the sandbox.
-func (s *Sandbox) Drain(ctx context.Context) error {
+// KillSandboxByName terminates a sandbox identified by name and waits for stopped observation.
+func KillSandboxByName(ctx context.Context, name string, timeoutMs uint64) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_drain(cancelID, s.h(), buf, bufLen)
+		return C.call_msb_sandbox_handle_kill(cancelID, cName, C.uint64_t(timeoutMs), buf, bufLen)
 	})
 	return err
 }
 
-// Wait blocks until the sandbox process exits. Returns the exit code or -1.
-func (s *Sandbox) Wait(ctx context.Context) (int, error) {
+// RequestKillSandboxByName requests force termination without waiting for stopped observation.
+func RequestKillSandboxByName(ctx context.Context, name string) error {
 	if err := ensureLoaded(); err != nil {
-		return 0, err
+		return err
 	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_request_kill(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
+// RequestDrainSandboxByName requests graceful drain without waiting for completion.
+func RequestDrainSandboxByName(ctx context.Context, name string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_request_drain(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
+// WaitSandboxByNameUntilStopped waits until a named sandbox reaches terminal state.
+func WaitSandboxByNameUntilStopped(ctx context.Context, name string) (*SandboxStopResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_wait(cancelID, s.h(), buf, bufLen)
+		return C.call_msb_sandbox_handle_wait_until_stopped(cancelID, cName, buf, bufLen)
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var resp struct {
-		ExitCode *int `json:"exit_code"`
+	var result SandboxStopResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse wait_until_stopped response: %w", err)
 	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		return 0, fmt.Errorf("parse wait response: %w", err)
-	}
-	if resp.ExitCode == nil {
-		return -1, nil
-	}
-	return *resp.ExitCode, nil
+	return &result, nil
 }
 
 // OwnsLifecycle reports whether this handle owns the sandbox VM lifecycle.
@@ -1856,50 +1926,77 @@ func (s *Sandbox) Detach(ctx context.Context) error {
 	return err
 }
 
-// Stop gracefully stops the sandbox without waiting for exit.
-func (s *Sandbox) Stop(ctx context.Context) error {
+// Stop gracefully stops the sandbox and waits for stopped observation.
+func (s *Sandbox) Stop(ctx context.Context, timeoutMs uint64) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop(cancelID, s.h(), buf, bufLen)
+		return C.call_msb_sandbox_stop(cancelID, s.h(), C.uint64_t(timeoutMs), buf, bufLen)
 	})
 	return err
 }
 
-// StopAndWait stops the sandbox and waits for its process to exit.
-// Returns the exit code, or -1 if the guest did not report one.
-func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
+// RequestStop requests graceful shutdown without waiting for stopped observation.
+func (s *Sandbox) RequestStop(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
-		return 0, err
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// Kill terminates the sandbox and waits for stopped observation.
+func (s *Sandbox) Kill(ctx context.Context, timeoutMs uint64) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_kill(cancelID, s.h(), C.uint64_t(timeoutMs), buf, bufLen)
+	})
+	return err
+}
+
+// RequestKill requests force termination without waiting for stopped observation.
+func (s *Sandbox) RequestKill(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_request_kill(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// RequestDrain requests graceful drain without waiting for completion.
+func (s *Sandbox) RequestDrain(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_request_drain(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// WaitUntilStopped waits until the sandbox reaches terminal state.
+func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop_and_wait(cancelID, s.h(), buf, bufLen)
+		return C.call_msb_sandbox_wait_until_stopped(cancelID, s.h(), buf, bufLen)
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var resp struct {
-		ExitCode *int `json:"exit_code"`
+	var result SandboxStopResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse wait_until_stopped response: %w", err)
 	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		return 0, fmt.Errorf("parse stop_and_wait response: %w", err)
-	}
-	if resp.ExitCode == nil {
-		return -1, nil
-	}
-	return *resp.ExitCode, nil
-}
-
-// Kill terminates the sandbox immediately (SIGKILL).
-func (s *Sandbox) Kill(ctx context.Context) error {
-	if err := ensureLoaded(); err != nil {
-		return err
-	}
-	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_kill(cancelID, s.h(), buf, bufLen)
-	})
-	return err
+	return &result, nil
 }
 
 // ListSandboxes returns metadata for all known sandboxes (running or stopped),
@@ -2401,13 +2498,13 @@ func (srv *SSHServer) Close(ctx context.Context) error {
 	return err
 }
 
-// ServeStdio serves one SSH transport over this process's stdin/stdout.
-func (srv *SSHServer) ServeStdio(ctx context.Context) error {
+// ServeConnection serves one SSH transport over this process's stdin/stdout.
+func (srv *SSHServer) ServeConnection(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_ssh_server_serve_stdio(cancelID, srv.h(), buf, bufLen)
+		return C.call_msb_ssh_server_serve_connection(cancelID, srv.h(), buf, bufLen)
 	})
 	return err
 }
@@ -2658,15 +2755,18 @@ func (h *ExecStreamHandle) Close() error {
 
 // Metrics is the resource-usage snapshot reported by Rust.
 type Metrics struct {
-	CPUPercent       float64       `json:"cpu_percent"`
-	MemoryBytes      uint64        `json:"memory_bytes"`
-	MemoryLimitBytes uint64        `json:"memory_limit_bytes"`
-	DiskReadBytes    uint64        `json:"disk_read_bytes"`
-	DiskWriteBytes   uint64        `json:"disk_write_bytes"`
-	NetRxBytes       uint64        `json:"net_rx_bytes"`
-	NetTxBytes       uint64        `json:"net_tx_bytes"`
-	UptimeSecs       uint64        `json:"uptime_secs"`
-	Uptime           time.Duration `json:"-"`
+	CPUPercent              float64       `json:"cpu_percent"`
+	VCPUTimeNs              uint64        `json:"vcpu_time_ns"`
+	MemoryBytes             uint64        `json:"memory_bytes"`
+	MemoryAvailableBytes    *uint64       `json:"memory_available_bytes"`
+	MemoryHostResidentBytes *uint64       `json:"memory_host_resident_bytes"`
+	MemoryLimitBytes        uint64        `json:"memory_limit_bytes"`
+	DiskReadBytes           uint64        `json:"disk_read_bytes"`
+	DiskWriteBytes          uint64        `json:"disk_write_bytes"`
+	NetRxBytes              uint64        `json:"net_rx_bytes"`
+	NetTxBytes              uint64        `json:"net_tx_bytes"`
+	UptimeSecs              uint64        `json:"uptime_secs"`
+	Uptime                  time.Duration `json:"-"`
 }
 
 // Metrics fetches a resource-usage snapshot for this sandbox.
@@ -2733,15 +2833,18 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, err
 	}
 	var raw struct {
-		Done             bool    `json:"done"`
-		CPUPercent       float64 `json:"cpu_percent"`
-		MemoryBytes      uint64  `json:"memory_bytes"`
-		MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
-		DiskReadBytes    uint64  `json:"disk_read_bytes"`
-		DiskWriteBytes   uint64  `json:"disk_write_bytes"`
-		NetRxBytes       uint64  `json:"net_rx_bytes"`
-		NetTxBytes       uint64  `json:"net_tx_bytes"`
-		UptimeSecs       uint64  `json:"uptime_secs"`
+		Done                    bool    `json:"done"`
+		CPUPercent              float64 `json:"cpu_percent"`
+		VCPUTimeNs              uint64  `json:"vcpu_time_ns"`
+		MemoryBytes             uint64  `json:"memory_bytes"`
+		MemoryAvailableBytes    *uint64 `json:"memory_available_bytes"`
+		MemoryHostResidentBytes *uint64 `json:"memory_host_resident_bytes"`
+		MemoryLimitBytes        uint64  `json:"memory_limit_bytes"`
+		DiskReadBytes           uint64  `json:"disk_read_bytes"`
+		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
+		NetRxBytes              uint64  `json:"net_rx_bytes"`
+		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse metrics_recv: %w", err)
@@ -2750,15 +2853,18 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, nil
 	}
 	m := &Metrics{
-		CPUPercent:       raw.CPUPercent,
-		MemoryBytes:      raw.MemoryBytes,
-		MemoryLimitBytes: raw.MemoryLimitBytes,
-		DiskReadBytes:    raw.DiskReadBytes,
-		DiskWriteBytes:   raw.DiskWriteBytes,
-		NetRxBytes:       raw.NetRxBytes,
-		NetTxBytes:       raw.NetTxBytes,
-		UptimeSecs:       raw.UptimeSecs,
-		Uptime:           time.Duration(raw.UptimeSecs) * time.Second,
+		CPUPercent:              raw.CPUPercent,
+		VCPUTimeNs:              raw.VCPUTimeNs,
+		MemoryBytes:             raw.MemoryBytes,
+		MemoryAvailableBytes:    raw.MemoryAvailableBytes,
+		MemoryHostResidentBytes: raw.MemoryHostResidentBytes,
+		MemoryLimitBytes:        raw.MemoryLimitBytes,
+		DiskReadBytes:           raw.DiskReadBytes,
+		DiskWriteBytes:          raw.DiskWriteBytes,
+		NetRxBytes:              raw.NetRxBytes,
+		NetTxBytes:              raw.NetTxBytes,
+		UptimeSecs:              raw.UptimeSecs,
+		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}
 	return m, nil
 }
@@ -3280,20 +3386,8 @@ func (s *Sandbox) FsExists(ctx context.Context, path string) (bool, error) {
 }
 
 // =============================================================================
-// Sandbox extras — RemovePersisted, AllSandboxMetrics, SandboxHandleMetrics
+// Sandbox extras — AllSandboxMetrics, SandboxHandleMetrics
 // =============================================================================
-
-// RemovePersisted removes the sandbox's persisted state (DB record + filesystem).
-// The sandbox must be stopped. The live handle is consumed.
-func (s *Sandbox) RemovePersisted(ctx context.Context) error {
-	if err := ensureLoaded(); err != nil {
-		return err
-	}
-	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_remove_persisted(cancelID, s.h(), buf, bufLen)
-	})
-	return err
-}
 
 // AllSandboxMetrics returns a snapshot of resource usage for every running sandbox.
 func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
@@ -3333,28 +3427,34 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		return nil, err
 	}
 	var raw struct {
-		CPUPercent       float64 `json:"cpu_percent"`
-		MemoryBytes      uint64  `json:"memory_bytes"`
-		MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
-		DiskReadBytes    uint64  `json:"disk_read_bytes"`
-		DiskWriteBytes   uint64  `json:"disk_write_bytes"`
-		NetRxBytes       uint64  `json:"net_rx_bytes"`
-		NetTxBytes       uint64  `json:"net_tx_bytes"`
-		UptimeSecs       uint64  `json:"uptime_secs"`
+		CPUPercent              float64 `json:"cpu_percent"`
+		VCPUTimeNs              uint64  `json:"vcpu_time_ns"`
+		MemoryBytes             uint64  `json:"memory_bytes"`
+		MemoryAvailableBytes    *uint64 `json:"memory_available_bytes"`
+		MemoryHostResidentBytes *uint64 `json:"memory_host_resident_bytes"`
+		MemoryLimitBytes        uint64  `json:"memory_limit_bytes"`
+		DiskReadBytes           uint64  `json:"disk_read_bytes"`
+		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
+		NetRxBytes              uint64  `json:"net_rx_bytes"`
+		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse sandbox_handle_metrics: %w", err)
 	}
 	return &Metrics{
-		CPUPercent:       raw.CPUPercent,
-		MemoryBytes:      raw.MemoryBytes,
-		MemoryLimitBytes: raw.MemoryLimitBytes,
-		DiskReadBytes:    raw.DiskReadBytes,
-		DiskWriteBytes:   raw.DiskWriteBytes,
-		NetRxBytes:       raw.NetRxBytes,
-		NetTxBytes:       raw.NetTxBytes,
-		UptimeSecs:       raw.UptimeSecs,
-		Uptime:           time.Duration(raw.UptimeSecs) * time.Second,
+		CPUPercent:              raw.CPUPercent,
+		VCPUTimeNs:              raw.VCPUTimeNs,
+		MemoryBytes:             raw.MemoryBytes,
+		MemoryAvailableBytes:    raw.MemoryAvailableBytes,
+		MemoryHostResidentBytes: raw.MemoryHostResidentBytes,
+		MemoryLimitBytes:        raw.MemoryLimitBytes,
+		DiskReadBytes:           raw.DiskReadBytes,
+		DiskWriteBytes:          raw.DiskWriteBytes,
+		NetRxBytes:              raw.NetRxBytes,
+		NetTxBytes:              raw.NetTxBytes,
+		UptimeSecs:              raw.UptimeSecs,
+		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}, nil
 }
 
@@ -3617,6 +3717,38 @@ func Version() (string, error) {
 		return "", fmt.Errorf("parse version: %w", err)
 	}
 	return resp.Version, nil
+}
+
+// AgentSocketPath resolves the host-side path of a sandbox's agentd relay
+// socket by name, without connecting.
+func AgentSocketPath(name string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_agent_socket_path(cName, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return "", &e
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	var resp struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(buf[:end], &resp); err != nil {
+		return "", fmt.Errorf("parse agent socket path: %w", err)
+	}
+	return resp.Path, nil
 }
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.

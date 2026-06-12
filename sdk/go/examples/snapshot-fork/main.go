@@ -45,8 +45,8 @@ func main() {
 		log.Fatalf("WriteString marker: %v", err)
 	}
 
-	if _, err := base.StopAndWait(ctx); err != nil {
-		log.Fatalf("StopAndWait base: %v", err)
+	if err := base.Stop(ctx); err != nil {
+		log.Fatalf("Stop base: %v", err)
 	}
 	if err := base.Close(); err != nil {
 		log.Fatalf("Close base: %v", err)
@@ -85,7 +85,7 @@ func main() {
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = fork.StopAndWait(stopCtx)
+		_ = fork.Stop(stopCtx)
 		_ = fork.Close()
 		_ = microsandbox.RemoveSandbox(context.Background(), forkName)
 	}()

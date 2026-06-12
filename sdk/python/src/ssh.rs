@@ -13,8 +13,8 @@ use crate::error::to_py_err;
 //--------------------------------------------------------------------------------------------------
 
 /// SSH namespace for a sandbox.
-#[pyclass(name = "SandboxSsh")]
-pub struct PySandboxSsh {
+#[pyclass(name = "SandboxSshOps")]
+pub struct PySandboxSshOps {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
 
@@ -45,10 +45,10 @@ pub struct PySshServer {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxSsh
+// Methods: SandboxSshOps
 //--------------------------------------------------------------------------------------------------
 
-impl PySandboxSsh {
+impl PySandboxSshOps {
     pub fn new(inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>) -> Self {
         Self { inner }
     }
@@ -60,10 +60,10 @@ impl PySandboxSsh {
 }
 
 #[pymethods]
-impl PySandboxSsh {
+impl PySandboxSshOps {
     /// Connect a native in-process SSH client to this sandbox.
     #[pyo3(signature = (*, user = "root".to_string(), term = None, sftp = true))]
-    fn connect<'py>(
+    fn open_client<'py>(
         &self,
         py: Python<'py>,
         user: String,
@@ -77,7 +77,7 @@ impl PySandboxSsh {
             let sandbox = ssh.clone_sandbox().await?;
             let client = sandbox
                 .ssh()
-                .connect_with(|builder| {
+                .open_client_with(|builder| {
                     let mut builder = builder.user(user).sftp(sftp);
                     if let Some(term) = term {
                         builder = builder.term(term);
@@ -98,7 +98,7 @@ impl PySandboxSsh {
         user = None,
         sftp = true,
     ))]
-    fn server<'py>(
+    fn prepare_server<'py>(
         &self,
         py: Python<'py>,
         host_key_path: Option<PathBuf>,
@@ -113,7 +113,7 @@ impl PySandboxSsh {
             let sandbox = ssh.clone_sandbox().await?;
             let server = sandbox
                 .ssh()
-                .server_with(|builder| {
+                .prepare_server_with(|builder| {
                     let mut builder = builder.sftp(sftp);
                     if let Some(path) = host_key_path {
                         builder = builder.host_key_path(path);
@@ -435,7 +435,7 @@ fn sftp_py_err(error: impl std::fmt::Display) -> PyErr {
 #[pymethods]
 impl PySshServer {
     /// Serve one SSH transport over this process's stdin/stdout.
-    fn serve_stdio<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn serve_connection<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let server = {
@@ -443,7 +443,7 @@ impl PySshServer {
                 guard.as_ref().ok_or_else(crate::error::consumed)?.clone()
             };
             server
-                .serve(microsandbox::sandbox::SshStdioStream::new())
+                .serve_connection(microsandbox::sandbox::SshStdioStream::new())
                 .await
                 .map_err(to_py_err)?;
             Ok(())

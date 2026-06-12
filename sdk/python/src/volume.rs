@@ -155,10 +155,15 @@ impl PyVolume {
 
     /// Create a named volume mount config.
     #[staticmethod]
-    #[pyo3(signature = (name, *, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, *, mode = None, kind = None, size_mib = None, quota_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn named(
         py: Python<'_>,
         name: String,
+        mode: Option<String>,
+        kind: Option<String>,
+        size_mib: Option<u32>,
+        quota_mib: Option<u32>,
         readonly: bool,
         noexec: bool,
         nosuid: bool,
@@ -167,6 +172,18 @@ impl PyVolume {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
+        if let Some(mode) = mode {
+            kwargs.set_item("named_mode", mode)?;
+        }
+        if let Some(kind) = kind {
+            kwargs.set_item("named_kind", kind)?;
+        }
+        if let Some(size_mib) = size_mib {
+            kwargs.set_item("size_mib", size_mib)?;
+        }
+        if let Some(quota_mib) = quota_mib {
+            kwargs.set_item("quota_mib", quota_mib)?;
+        }
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
         kwargs.set_item("nosuid", nosuid)?;

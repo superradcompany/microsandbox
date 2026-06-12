@@ -15,7 +15,7 @@ await sandbox.shell(
 );
 
 // Stop the sandbox so we read a closed log. exec.log persists on disk.
-await sandbox.stopAndWait();
+await sandbox.stop();
 
 const handle = await Sandbox.get("logs-read");
 

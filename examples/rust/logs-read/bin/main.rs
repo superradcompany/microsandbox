@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
         .shell("echo line one; echo line two; echo error line 1>&2; echo line three")
         .await?;
 
-    sb.stop_and_wait().await?;
+    sb.stop().await?;
 
     let handle = Sandbox::get("logs-read").await?;
 

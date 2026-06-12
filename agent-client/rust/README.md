@@ -10,18 +10,18 @@ Use this crate when you already have an agent relay endpoint and want direct pro
 
 ```toml
 [dependencies]
-microsandbox-agent-client = "0.5.5"
-microsandbox-protocol = "0.5.5"
+microsandbox-agent-client = "0.5.6"
+microsandbox-protocol = "0.5.6"
 ```
 
 The crate is transport-agnostic by default. Enable exactly the transport adapter you need:
 
 ```toml
 # Local microsandbox relay sockets.
-microsandbox-agent-client = { version = "0.5.5", features = ["uds"] }
+microsandbox-agent-client = { version = "0.5.6", features = ["uds"] }
 
 # WebSocket relay endpoints.
-microsandbox-agent-client = { version = "0.5.5", features = ["websocket"] }
+microsandbox-agent-client = { version = "0.5.6", features = ["websocket"] }
 ```
 
 The high-level `microsandbox` SDK enables `uds` explicitly because local sandboxes are reached through Unix domain sockets.
@@ -98,7 +98,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 Enable the `websocket` feature:
 
 ```toml
-microsandbox-agent-client = { version = "0.5.5", features = ["websocket"] }
+microsandbox-agent-client = { version = "0.5.6", features = ["websocket"] }
 ```
 
 Then connect to a relay endpoint:

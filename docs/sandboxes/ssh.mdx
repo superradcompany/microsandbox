@@ -43,7 +43,7 @@ msb ssh --name authorize -- uptime
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::start("devbox").await?;
-let ssh = sb.ssh().connect().await?;
+let ssh = sb.ssh().open_client().await?;
 
 let output = ssh.exec("uname -a").await?;
 println!("{}", String::from_utf8_lossy(&output.stdout));
@@ -53,7 +53,7 @@ ssh.close().await?;
 
 ```typescript TypeScript
 const sb = await Sandbox.start("devbox");
-const ssh = await sb.ssh().connect();
+const ssh = await sb.ssh().open_client();
 
 const output = await ssh.exec("uname -a");
 console.log(output.stdout.toString());
@@ -63,7 +63,7 @@ await ssh.close();
 
 ```python Python
 sb = await Sandbox.start("devbox")
-ssh = await sb.ssh().connect()
+ssh = await sb.ssh().open_client()
 
 output = await ssh.exec("uname -a")
 print(output.stdout_text)
@@ -78,7 +78,7 @@ if err != nil {
 }
 defer sb.Close()
 
-ssh, err := sb.SSH().Connect(ctx)
+ssh, err := sb.SSH().OpenClient(ctx)
 if err != nil {
     return err
 }
@@ -107,17 +107,17 @@ let code = sb
 ```
 
 ```typescript TypeScript
-const ssh = await sb.ssh().connect({ term: "xterm-256color" });
+const ssh = await sb.ssh().open_client({ term: "xterm-256color" });
 const code = await ssh.attach({ detachKeys: "ctrl-]" });
 ```
 
 ```python Python
-ssh = await sb.ssh().connect(term="xterm-256color")
+ssh = await sb.ssh().open_client(term="xterm-256color")
 code = await ssh.attach(detach_keys="ctrl-]")
 ```
 
 ```go Go
-ssh, err := sb.SSH().Connect(ctx, m.WithSSHTerm("xterm-256color"))
+ssh, err := sb.SSH().OpenClient(ctx, m.WithSSHTerm("xterm-256color"))
 if err != nil {
     return err
 }

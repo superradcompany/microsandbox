@@ -63,6 +63,7 @@ export interface NativeBindings {
 export interface NapiAgentClientStatic {
   connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
   connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  socketPath(name: string): string;
 }
 
 export interface AgentConnectOptions {
@@ -101,8 +102,8 @@ export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
-  list(): Promise<NapiSandboxInfo[]>;
-  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxInfo[]>;
+  list(): Promise<NapiSandboxHandle[]>;
+  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxHandle[]>;
   remove(name: string): Promise<void>;
 }
 
@@ -186,7 +187,7 @@ export interface NapiSandbox {
   execStreamWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   shell(script: string): Promise<NapiExecOutput>;
   shellStream(script: string): Promise<NapiExecHandle>;
-  fs(): NapiSandboxFs;
+  fs(): NapiSandboxFsOps;
   sshConnect(opts?: NapiSshClientOptions): Promise<NapiSshClient>;
   sshServer(opts?: NapiSshServerOptions): Promise<NapiSshServer>;
   metrics(): Promise<NapiSandboxMetrics>;
@@ -195,12 +196,14 @@ export interface NapiSandbox {
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
-  stopAndWait(): Promise<NapiExitStatus>;
+  requestStop(): Promise<void>;
+  stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
-  drain(): Promise<void>;
-  wait(): Promise<NapiExitStatus>;
+  requestKill(): Promise<void>;
+  killWithTimeout(timeoutMs: number): Promise<void>;
+  requestDrain(): Promise<void>;
+  waitUntilStopped(): Promise<NapiSandboxStopResult>;
   detach(): Promise<void>;
-  removePersisted(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
   logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
 }
@@ -211,19 +214,34 @@ export interface NapiSandboxHandle {
   readonly configJson: string;
   readonly createdAt: number | null;
   readonly updatedAt: number | null;
+  refresh(): Promise<NapiSandboxHandle>;
   metrics(): Promise<NapiSandboxMetrics>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
+  requestKill(): Promise<void>;
+  killWithTimeout(timeoutMs: number): Promise<void>;
+  requestDrain(): Promise<void>;
+  waitUntilStopped(): Promise<NapiSandboxStopResult>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
   logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
   snapshot(name: string): Promise<NapiSnapshot>;
   snapshotTo(path: string): Promise<NapiSnapshot>;
+}
+
+export interface NapiSandboxStopResult {
+  readonly name: string;
+  readonly status: string;
+  readonly exitCode: number | null;
+  readonly signal: number | null;
+  readonly observedAt: number;
+  readonly source: string | null;
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
@@ -306,7 +324,7 @@ export interface NapiSftpClient {
 }
 
 export interface NapiSshServer {
-  serveStdio(): Promise<void>;
+  serveConnection(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -593,7 +611,7 @@ export interface NapiExitStatus {
   readonly success: boolean;
 }
 
-export interface NapiSandboxFs {
+export interface NapiSandboxFsOps {
   read(path: string): Promise<Buffer>;
   readString(path: string): Promise<string>;
   write(path: string, data: Buffer): Promise<void>;
@@ -639,7 +657,10 @@ export interface NapiFsMetadata {
 
 export interface NapiSandboxMetrics {
   readonly cpuPercent: number;
+  readonly vcpuTimeNs: number;
   readonly memoryBytes: number;
+  readonly memoryAvailableBytes?: number;
+  readonly memoryHostResidentBytes?: number;
   readonly memoryLimitBytes: number;
   readonly diskReadBytes: number;
   readonly diskWriteBytes: number;
@@ -917,6 +938,13 @@ export interface NapiBuiltNetworkPolicyDestination {
 export interface NapiMountBuilder {
   bind(host: string): this;
   named(name: string): this;
+  namedWith(
+    name: string,
+    mode?: "existing" | "create" | "ensure-exists",
+    kind?: "dir" | "directory" | "disk",
+    sizeMib?: number,
+    quotaMib?: number,
+  ): this;
   tmpfs(): this;
   disk(host: string): this;
   format(format: string): this;

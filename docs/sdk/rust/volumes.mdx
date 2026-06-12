@@ -193,6 +193,46 @@ Mount a named volume. The volume must already exist (create it with [`Volume::bu
 
 ---
 
+#### named_with()
+
+```rust
+fn named_with(
+    self,
+    name: impl Into<String>,
+    f: impl FnOnce(NamedVolumeBuilder) -> NamedVolumeBuilder,
+) -> Self
+```
+
+Mount a named volume with explicit sandbox-time existence behavior. `NamedVolumeMode::Existing` is the default and behaves like [`named()`](#named). `.create()` creates the volume and fails if it already exists. `.ensure_exists()` creates the volume if it is missing or reuses an existing compatible volume.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .volume("/cache", |v| v.named_with("pip-cache", |n| n.ensure_exists()))
+    .volume("/var/lib/docker", |v| {
+        v.named_with("docker-data", |n| n.ensure_exists().disk().size(20.gib()))
+    })
+    .create()
+    .await?;
+```
+
+The ensure-exists mode validates existing volume metadata. It errors when the existing volume has a different kind, quota, capacity, or explicitly requested labels than the requested configuration; it does not mutate existing volume metadata.
+
+**Named volume builder methods**
+
+| Method | Description |
+|--------|-------------|
+| `existing()` | Require the volume to already exist. This is the default. |
+| `create()` | Create the volume and fail if it already exists. |
+| `ensure_exists()` | Create the volume if missing or reuse a compatible existing volume. |
+| `directory()` | Use directory-backed storage. This is the default. |
+| `disk()` | Use disk-backed raw ext4 storage. Requires `size(...)` when creating or ensuring a missing volume. |
+| `size(size)` | Disk capacity. |
+| `quota(size)` | Directory volume quota. |
+| `label(key, value)` | Attach a label to newly-created volumes and require matching labels for ensure-existing volumes when labels are requested. |
+
+---
+
 #### readonly()
 
 ```rust

@@ -136,6 +136,12 @@ const (
 	// loaded. Call EnsureInstalled() before using any SDK functions.
 	ErrLibraryNotLoaded
 
+	// ErrMetricsDisabled indicates metrics sampling is disabled for this sandbox.
+	ErrMetricsDisabled
+
+	// ErrMetricsUnavailable indicates metrics have no current sample for this sandbox.
+	ErrMetricsUnavailable
+
 	// ErrUnsupportedOperation indicates the sandbox runtime is too old for the
 	// requested feature; restart the sandbox to update it.
 	ErrUnsupportedOperation
@@ -204,6 +210,10 @@ func (k ErrorKind) String() string {
 		return "Cancelled"
 	case ErrLibraryNotLoaded:
 		return "LibraryNotLoaded"
+	case ErrMetricsDisabled:
+		return "MetricsDisabled"
+	case ErrMetricsUnavailable:
+		return "MetricsUnavailable"
 	case ErrUnsupportedOperation:
 		return "UnsupportedOperation"
 	case ErrInternal:
@@ -319,6 +329,10 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrCancelled
 	case ffi.KindLibraryNotLoaded:
 		return ErrLibraryNotLoaded
+	case ffi.KindMetricsDisabled:
+		return ErrMetricsDisabled
+	case ffi.KindMetricsUnavailable:
+		return ErrMetricsUnavailable
 	case ffi.KindUnsupportedOperation:
 		return ErrUnsupportedOperation
 	default:

@@ -33,7 +33,7 @@ async def main():
     )
     print(f"Running services:\n{services.stdout_text.rstrip()}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
 
 
 asyncio.run(main())

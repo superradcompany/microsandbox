@@ -26,34 +26,46 @@ pub struct LiveMetric {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Time elapsed between sandbox start and the sample timestamp.
     pub uptime: Duration,
-    /// CPU usage as a percentage across all host CPUs.
+    /// Guest vCPU usage as a percentage.
     pub cpu_percent: f32,
-    /// Resident memory in bytes.
+    /// Cumulative guest vCPU execution time across all vCPUs.
+    pub vcpu_time_ns: u64,
+    /// Guest-used memory in bytes.
     pub memory_bytes: u64,
+    /// Guest-available memory in bytes when reported by the guest.
+    pub memory_available_bytes: Option<u64>,
+    /// Host-resident guest memory in bytes for capacity diagnostics.
+    pub memory_host_resident_bytes: Option<u64>,
     /// Configured memory limit in bytes.
     pub memory_limit_bytes: u64,
-    /// Cumulative disk bytes read.
+    /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
-    /// Cumulative disk bytes written.
+    /// Cumulative guest logical storage bytes written.
     pub disk_write_bytes: u64,
-    /// Cumulative network bytes received.
+    /// Cumulative guest-facing network bytes received.
     pub net_rx_bytes: u64,
-    /// Cumulative network bytes transmitted.
+    /// Cumulative guest-facing network bytes transmitted.
     pub net_tx_bytes: u64,
 }
 
 /// Point-in-time metrics for a running sandbox (no identity fields).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SandboxMetrics {
-    /// CPU usage as a percentage across all host CPUs.
+    /// Guest vCPU usage as a percentage.
     pub cpu_percent: f32,
-    /// Resident memory usage in bytes.
+    /// Cumulative guest vCPU execution time across all vCPUs.
+    pub vcpu_time_ns: u64,
+    /// Guest-used memory in bytes.
     pub memory_bytes: u64,
+    /// Guest-available memory in bytes when reported by the guest.
+    pub memory_available_bytes: Option<u64>,
+    /// Host-resident guest memory in bytes for capacity diagnostics.
+    pub memory_host_resident_bytes: Option<u64>,
     /// Configured guest memory limit in bytes.
     pub memory_limit_bytes: u64,
-    /// Cumulative disk bytes read by the sandbox process.
+    /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
-    /// Cumulative disk bytes written by the sandbox process.
+    /// Cumulative guest logical storage bytes written.
     pub disk_write_bytes: u64,
     /// Cumulative network bytes delivered from the runtime to the guest.
     pub net_rx_bytes: u64,
@@ -93,7 +105,10 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
             name: live.name,
             metrics: SandboxMetrics {
                 cpu_percent: live.cpu_percent,
+                vcpu_time_ns: live.vcpu_time_ns,
                 memory_bytes: live.memory_bytes,
+                memory_available_bytes: live.memory_available_bytes,
+                memory_host_resident_bytes: live.memory_host_resident_bytes,
                 memory_limit_bytes: live.memory_limit_bytes,
                 disk_read_bytes: live.disk_read_bytes,
                 disk_write_bytes: live.disk_write_bytes,

@@ -1,15 +1,27 @@
 //! Sandbox metrics APIs backed by the shared-memory live registry.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZero;
+use std::time::{Duration, Instant};
 
 use futures::stream;
 use microsandbox_db::DbReadConnection;
 use microsandbox_metrics::{LiveMetric, MetricsRegistry};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
+use crate::db::entity::{run as run_entity, sandbox as sandbox_entity};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxConfig};
+use super::{Sandbox, SandboxConfig, SandboxStatus};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const FIRST_METRICS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FIRST_METRICS_MIN_WAIT: Duration = Duration::from_millis(500);
+const FIRST_METRICS_MAX_WAIT: Duration = Duration::from_secs(10);
+const FIRST_METRICS_INTERVAL_MULTIPLIER: u32 = 3;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -18,15 +30,21 @@ use super::{Sandbox, SandboxConfig};
 /// Point-in-time metrics for a running sandbox.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SandboxMetrics {
-    /// CPU usage as a percentage across all host CPUs.
+    /// Guest vCPU usage as a percentage.
     pub cpu_percent: f32,
-    /// Resident memory usage in bytes.
+    /// Cumulative guest vCPU execution time across all vCPUs.
+    pub vcpu_time_ns: u64,
+    /// Guest-used memory in bytes.
     pub memory_bytes: u64,
+    /// Guest-available memory in bytes when reported by the guest.
+    pub memory_available_bytes: Option<u64>,
+    /// Host-resident guest memory in bytes for capacity diagnostics.
+    pub memory_host_resident_bytes: Option<u64>,
     /// Configured guest memory limit in bytes.
     pub memory_limit_bytes: u64,
-    /// Cumulative disk bytes read by the sandbox process.
+    /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
-    /// Cumulative disk bytes written by the sandbox process.
+    /// Cumulative guest logical storage bytes written.
     pub disk_write_bytes: u64,
     /// Cumulative network bytes delivered from the runtime to the guest.
     pub net_rx_bytes: u64,
@@ -36,6 +54,14 @@ pub struct SandboxMetrics {
     pub uptime: Duration,
     /// Timestamp of the sample.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+struct MetricsStreamState {
+    ticker: tokio::time::Interval,
+    db: Option<DbReadConnection>,
+    run_id: Option<i32>,
+    registry: Option<MetricsRegistry>,
+    seen_sample: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -77,16 +103,20 @@ impl Sandbox {
             interval
         };
 
-        stream::unfold(tokio::time::interval(interval), move |mut ticker| {
+        let state = MetricsStreamState {
+            ticker: tokio::time::interval(interval),
+            db: None,
+            run_id: None,
+            registry: None,
+            seen_sample: false,
+        };
+
+        stream::unfold(state, move |mut state| {
             let config = config.clone();
             async move {
-                ticker.tick().await;
-                let pools = crate::db::init_global().await;
-                let item = match pools {
-                    Ok(pools) => metrics_for_sandbox(pools.read(), db_id, &config).await,
-                    Err(err) => Err(err),
-                };
-                Some((item, ticker))
+                state.ticker.tick().await;
+                let item = metrics_stream_tick(&mut state, db_id, &config).await;
+                Some((item, state))
             }
         })
         .right_stream()
@@ -103,14 +133,52 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
         return Ok(HashMap::new());
     };
 
-    let snapshot = registry.active_snapshot().map_err(metrics_error)?;
-    Ok(snapshot
+    let pools = crate::db::init_global().await?;
+    let db = pools.read();
+    let sandboxes = sandbox_entity::Entity::find()
+        .filter(
+            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
+        )
+        .all(db)
+        .await?;
+
+    if sandboxes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let sandbox_ids: Vec<i32> = sandboxes.iter().map(|sandbox| sandbox.id).collect();
+    let sandbox_names: HashMap<i32, String> = sandboxes
         .into_iter()
-        .map(|live| {
-            let metrics = to_sandbox_metrics(&live, None);
-            (live.name, metrics)
-        })
-        .collect())
+        .map(|sandbox| (sandbox.id, sandbox.name))
+        .collect();
+    let runs = run_entity::Entity::find()
+        .filter(run_entity::Column::SandboxId.is_in(sandbox_ids.iter().copied()))
+        .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
+        .order_by_desc(run_entity::Column::StartedAt)
+        .all(db)
+        .await?;
+
+    let mut seen_sandboxes = HashSet::new();
+    let mut run_names = HashMap::with_capacity(runs.len());
+    for run in runs {
+        if !seen_sandboxes.insert(run.sandbox_id) {
+            continue;
+        }
+        if let Some(name) = sandbox_names.get(&run.sandbox_id) {
+            run_names.insert(run.id, name.clone());
+        }
+    }
+
+    let snapshot = registry.active_snapshot().map_err(metrics_error)?;
+    let mut out = HashMap::with_capacity(run_names.len());
+    for live in snapshot {
+        let Some(name) = run_names.get(&live.run_id) else {
+            continue;
+        };
+        let metrics = to_sandbox_metrics(&live, None);
+        out.insert(name.clone(), metrics);
+    }
+    Ok(out)
 }
 
 pub(super) async fn metrics_for_sandbox(
@@ -120,26 +188,82 @@ pub(super) async fn metrics_for_sandbox(
 ) -> MicrosandboxResult<SandboxMetrics> {
     let run = super::load_active_run(db, sandbox_id)
         .await?
-        .ok_or_else(|| {
-            MicrosandboxError::Custom(format!(
-                "sandbox {sandbox_id} is not running; metrics are unavailable"
-            ))
-        })?;
+        .ok_or_else(|| MicrosandboxError::MetricsUnavailable(config.name.clone()))?;
 
-    let registry = open_registry()?.ok_or_else(|| {
-        MicrosandboxError::Custom(format!(
-            "sandbox {sandbox_id} has no live metrics slot (registry unavailable)"
-        ))
-    })?;
+    let registry = open_registry()?
+        .ok_or_else(|| MicrosandboxError::MetricsUnavailable(config.name.clone()))?;
 
     // Run-id lookup only. Falling back to sandbox-id would surface a Stale
     // slot from a prior run, since it carries the same sandbox_id — readers
     // would observe prior-run counters attributed to the current run.
-    let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? else {
-        return Err(MicrosandboxError::Custom(format!(
-            "sandbox {sandbox_id} has no live metrics slot"
-        )));
+    let deadline = Instant::now() + first_metrics_wait_timeout(config.effective_metrics_interval());
+    let live = loop {
+        if let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? {
+            break live;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        tokio::time::sleep(FIRST_METRICS_POLL_INTERVAL.min(remaining)).await;
     };
+
+    Ok(to_sandbox_metrics(&live, Some(config)))
+}
+
+async fn metrics_stream_tick(
+    state: &mut MetricsStreamState,
+    sandbox_id: i32,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<SandboxMetrics> {
+    if state.db.is_none() {
+        state.db = Some(crate::db::init_global().await?.read().clone());
+    }
+
+    let db = state.db.as_ref().expect("stream DB initialized");
+    if state.run_id.is_none() {
+        let run = super::load_active_run(db, sandbox_id)
+            .await?
+            .ok_or_else(|| MicrosandboxError::MetricsUnavailable(config.name.clone()))?;
+        state.run_id = Some(run.id);
+    }
+
+    if state.registry.is_none() {
+        state.registry = Some(
+            open_registry()?
+                .ok_or_else(|| MicrosandboxError::MetricsUnavailable(config.name.clone()))?,
+        );
+    }
+
+    let run_id = state.run_id.expect("stream run id initialized");
+    let registry = state
+        .registry
+        .as_ref()
+        .expect("stream metrics registry initialized");
+    let deadline = Instant::now() + first_metrics_wait_timeout(config.effective_metrics_interval());
+    let live = loop {
+        if let Some(live) = registry.get_by_run_id(run_id).map_err(metrics_error)? {
+            break live;
+        }
+
+        if state.seen_sample {
+            state.run_id = None;
+            state.registry = None;
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            state.run_id = None;
+            state.registry = None;
+            return Err(MicrosandboxError::MetricsUnavailable(config.name.clone()));
+        }
+
+        tokio::time::sleep(FIRST_METRICS_POLL_INTERVAL.min(remaining)).await;
+    };
+    state.seen_sample = true;
 
     Ok(to_sandbox_metrics(&live, Some(config)))
 }
@@ -160,7 +284,10 @@ fn open_registry() -> MicrosandboxResult<Option<MetricsRegistry>> {
 fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: live.cpu_percent,
+        vcpu_time_ns: live.vcpu_time_ns,
         memory_bytes: live.memory_bytes,
+        memory_available_bytes: live.memory_available_bytes,
+        memory_host_resident_bytes: live.memory_host_resident_bytes,
         memory_limit_bytes: match (live.memory_limit_bytes, config) {
             (0, Some(config)) => memory_limit_bytes(config),
             (bytes, _) => bytes,
@@ -180,4 +307,46 @@ fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
 
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
     u64::from(config.memory_mib) * 1024 * 1024
+}
+
+fn first_metrics_wait_timeout(interval: Option<NonZero<u64>>) -> Duration {
+    let Some(interval) = interval else {
+        return Duration::ZERO;
+    };
+
+    Duration::from_millis(interval.get())
+        .saturating_mul(FIRST_METRICS_INTERVAL_MULTIPLIER)
+        .clamp(FIRST_METRICS_MIN_WAIT, FIRST_METRICS_MAX_WAIT)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_metrics_wait_timeout_scales_with_sample_interval() {
+        let interval = NonZero::new(1_000).unwrap();
+
+        assert_eq!(
+            first_metrics_wait_timeout(Some(interval)),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn first_metrics_wait_timeout_is_bounded() {
+        assert_eq!(
+            first_metrics_wait_timeout(Some(NonZero::new(1).unwrap())),
+            FIRST_METRICS_MIN_WAIT
+        );
+        assert_eq!(
+            first_metrics_wait_timeout(Some(NonZero::new(60_000).unwrap())),
+            FIRST_METRICS_MAX_WAIT
+        );
+        assert_eq!(first_metrics_wait_timeout(None), Duration::ZERO);
+    }
 }

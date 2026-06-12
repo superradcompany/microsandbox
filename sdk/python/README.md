@@ -63,7 +63,7 @@ async def main():
     print(output.stdout_text)
 
     # Stop the sandbox.
-    await sandbox.stop_and_wait()
+    await sandbox.stop()
 
 asyncio.run(main())
 ```
@@ -103,7 +103,7 @@ async for event in handle:
         case "stderr": sys.stderr.buffer.write(event.data)
         case "exited": break
 
-await sandbox.stop_and_wait()
+await sandbox.stop()
 ```
 
 ### Filesystem Operations
@@ -151,7 +151,7 @@ writer = await Sandbox.create(
 )
 
 await writer.shell("echo 'hello' > /data/message.txt")
-await writer.stop_and_wait()
+await writer.stop()
 
 # Mount the same volume in another sandbox (read-only).
 reader = await Sandbox.create(
@@ -164,7 +164,7 @@ reader = await Sandbox.create(
 output = await reader.shell("cat /data/message.txt")
 print(output.stdout_text)  # "hello\n"
 
-await reader.stop_and_wait()
+await reader.stop()
 
 # Cleanup.
 await Sandbox.remove("writer")
@@ -315,7 +315,7 @@ await sandbox.detach()
 
 # Later, from another process:
 handle = await Sandbox.get("background")
-reconnected = await handle.connect()
+reconnected = await handle.open_client()
 output = await reconnected.shell("echo reconnected")
 ```
 
@@ -419,7 +419,7 @@ if not is_installed():
 | `ExecOutput` | Captured stdout/stderr with exit status |
 | `ExecHandle` | Streaming execution handle — async iterator over events |
 | `ExecSink` | Writable stdin channel for streaming exec |
-| `SandboxFs` | Guest filesystem operations (read, write, list, copy, stat) |
+| `SandboxFsOps` | Guest filesystem operations (read, write, list, copy, stat) |
 | `FsReadStream` | Async iterator over file data chunks |
 | `FsWriteSink` | Async context manager for streaming writes |
 | `Volume` | Persistent named volume |

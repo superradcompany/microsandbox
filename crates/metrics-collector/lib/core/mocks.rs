@@ -84,7 +84,10 @@ pub(crate) fn collection(seq: i32) -> MetricsCollection {
             name: format!("sandbox-{seq}"),
             metrics: SandboxMetrics {
                 cpu_percent: seq as f32,
+                vcpu_time_ns: seq as u64,
                 memory_bytes: 1,
+                memory_available_bytes: Some(2),
+                memory_host_resident_bytes: Some(3),
                 memory_limit_bytes: 2,
                 disk_read_bytes: 3,
                 disk_write_bytes: 4,

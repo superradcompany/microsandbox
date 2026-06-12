@@ -96,7 +96,7 @@ pub enum MicrosandboxError {
 
     /// A filesystem operation failed inside the sandbox.
     #[error("sandbox fs error: {0}")]
-    SandboxFs(String),
+    SandboxFsOps(String),
 
     /// The requested image was not found.
     #[error("image not found: {0}")]
@@ -153,6 +153,10 @@ pub enum MicrosandboxError {
     /// Metrics sampling is disabled for this sandbox.
     #[error("metrics disabled for sandbox: {0}")]
     MetricsDisabled(String),
+
+    /// Live metrics are enabled but no valid guest sample is available yet.
+    #[error("metrics unavailable for sandbox: {0}")]
+    MetricsUnavailable(String),
 
     /// A log stream fell behind enough that the file it was reading
     /// rotated out of the on-disk retention window. The stream

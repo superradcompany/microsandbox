@@ -23,7 +23,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
     base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
     fork = None
     try:
-        await base.stop_and_wait()
+        await base.stop()
 
         base_handle = await Sandbox.get(base_name)
         snapshot = await base_handle.snapshot(snapshot_name)
@@ -56,7 +56,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
     finally:
         if fork is not None:
             with suppress(Exception):
-                await fork.stop_and_wait()
+                await fork.stop()
         await remove_sandbox(fork_name)
         await remove_sandbox(base_name)
         await remove_snapshot(snapshot_name)

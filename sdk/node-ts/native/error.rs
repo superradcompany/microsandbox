@@ -30,7 +30,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::ExecFailed(_) => "ExecFailed",
         MicrosandboxError::Terminal(_) => "Terminal",
-        MicrosandboxError::SandboxFs(_) => "SandboxFs",
+        MicrosandboxError::SandboxFsOps(_) => "SandboxFsOps",
         MicrosandboxError::ImageNotFound(_) => "ImageNotFound",
         MicrosandboxError::ImageInUse(_) => "ImageInUse",
         MicrosandboxError::VolumeNotFound(_) => "VolumeNotFound",
@@ -44,6 +44,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissing",
         MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrity",
         MicrosandboxError::MetricsDisabled(_) => "MetricsDisabled",
+        MicrosandboxError::MetricsUnavailable(_) => "MetricsUnavailable",
         MicrosandboxError::MissedRotation { .. } => "MissedRotation",
         MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
         MicrosandboxError::AgentClient(microsandbox::AgentClientError::UnsupportedOperation {

@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         output.stdout()?.trim().lines().last().unwrap_or("?"),
     );
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Sandbox::remove("net-secrets").await?;
 
     Ok(())
