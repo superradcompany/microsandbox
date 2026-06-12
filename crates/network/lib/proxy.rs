@@ -143,8 +143,10 @@ async fn tcp_proxy_task(
     }
 
     let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls {
-        extract_http_host(&initial_buf)
-            .map(|host| SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared))
+        Some(match extract_http_host(&initial_buf) {
+            Some(host) => SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared),
+            None => SecretsHandler::new_plain_http_invalid_host(&secrets),
+        })
     } else {
         None
     };
