@@ -13,8 +13,12 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 import { Volume } from "microsandbox";
 
 const data = await Volume.builder("my-data")
-  .quota(100)
   .label("env", "prod")
+  .create();
+
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
   .create();
 ```
 
@@ -28,7 +32,7 @@ const data = await Volume.builder("my-data")
 static builder(name: string): VolumeBuilder
 ```
 
-Begin building a named volume. Configure with `.quota(...)` and `.label(...)`, then call `.create()`.
+Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` to create a disk-backed volume.
 
 **Parameters**
 
@@ -157,7 +161,8 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | Method | Description |
 |--------|-------------|
 | `bind(host)` | Mount a host directory into the guest. |
-| `named(name)` | Mount a named volume created via [`Volume.builder`](#volumebuilder). |
+| `named(name)` | Mount an existing named volume created via [`Volume.builder`](#volumebuilder). |
+| `namedWith(name, mode?, kind?, sizeMib?, quotaMib?)` | Mount a named volume with explicit behavior. `mode` is `"existing"`, `"create"`, or `"ensure-exists"`; `kind` is `"dir"` or `"disk"`. |
 | `tmpfs()` | Mount an in-memory filesystem. |
 | `disk(host)` | Mount a host disk image as a virtio-blk device. |
 | `format(fmt)` | Disk image format (`'qcow2' \| 'raw' \| 'vmdk'`). Defaults to the file extension. Disk only. |
@@ -168,6 +173,20 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | `nodev()` | Ignore device files on the mount. |
 | `size(mib)` | Cap in MiB. Tmpfs only. |
 | `build()` | Internal — produce a `VolumeMount`. |
+
+`named(name)` is existing-only. Use `namedWith` when sandbox creation should create or ensure the volume exists:
+
+```typescript
+await using sb = await Sandbox.builder("worker")
+  .image("python")
+  .volume("/cache", (m) => m.namedWith("pip-cache", "ensure-exists"))
+  .volume("/var/lib/docker", (m) =>
+    m.namedWith("docker-data", "ensure-exists", "disk", 20 * 1024)
+  )
+  .create();
+```
+
+`"create"` fails when the named volume already exists. `"ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
 
 ### VolumeMount
 
@@ -205,7 +224,10 @@ type DiskImageFormat = "qcow2" | "raw" | "vmdk";
 
 | Method | Description |
 |--------|-------------|
-| `quota(mib)` | Maximum storage size in MiB |
+| `directory()` | Create a directory-backed volume |
+| `disk()` | Create a raw ext4 disk-backed volume |
+| `size(mib)` | Disk capacity in MiB; required after `disk()` |
+| `quota(mib)` | Recorded quota metadata for directory volumes |
 | `label(key, value)` | Add a metadata label |
 | `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
 | `create()` | Build and create the volume; returns a [`Volume`](#volume) |
@@ -217,7 +239,9 @@ Frozen configuration produced by `VolumeBuilder.build()`.
 | Field | Type | Description |
 |-------|------|-------------|
 | name | `string` | Volume name |
+| kind | `"dir" \| "disk"` | Volume kind |
 | quotaMib | `number \| null` | Maximum storage size in MiB |
+| capacityMib | `number \| null` | Disk capacity in MiB |
 | labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
 
 ### VolumeHandle
@@ -225,8 +249,12 @@ Frozen configuration produced by `VolumeBuilder.build()`.
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `string` | Volume name |
+| kind | `string` | Volume kind |
 | quotaMib | `number \| null` | Storage quota |
 | usedBytes | `number` | Current disk usage in bytes |
+| capacityBytes | `number \| null` | Disk capacity in bytes |
+| diskFormat | `string \| null` | Disk image format |
+| diskFstype | `string \| null` | Inner disk filesystem |
 | labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
 | createdAt | `Date \| null` | Creation timestamp |
 | fs() | [`VolumeFs`](#volumefs) | Host-side filesystem on this volume (live handles only) |
@@ -236,4 +264,4 @@ Handles in the array returned by `Volume.list()` are read-only: calling `.fs()` 
 
 ### VolumeFs
 
-Host-side filesystem operations on a volume's directory. Same surface area as [`SandboxFs`](/sdk/typescript/filesystem) (read, readToString, readStream, write, writeStream, list, mkdir, removeDir, remove, copy, rename, stat, exists) — but operates directly on the host without booting a sandbox.
+Host-side filesystem operations on a volume's directory. Same surface area as [`SandboxFsOps`](/sdk/typescript/filesystem) (read, readToString, readStream, write, writeStream, list, mkdir, removeDir, remove, copy, rename, stat, exists) — but operates directly on the host without booting a sandbox.

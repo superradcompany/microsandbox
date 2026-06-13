@@ -30,6 +30,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("Host-side:  could not reach guest server: {e}"),
     }
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

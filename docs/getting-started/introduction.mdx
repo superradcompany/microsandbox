@@ -1,12 +1,14 @@
 ---
 title: "Introduction"
-description: "Every agent deserves its own computer"
+description: "Easy, fast, local microVMs for untrusted workloads"
 icon: "house"
 ---
 
-AI agents run with whatever privileges you give them, and most of the time that's too many. They can see host environment variables, reach the network freely, and modify files wherever the process is allowed to write. A prompt injection turns those privileges into attack surface.
+microsandbox is a local microVM runtime for untrusted workloads: AI agents, user code, plugins, package installs, CI jobs, dev environments, scrapers, and automation.
 
-microsandbox gives each workload its own local microVM: a real Linux kernel, isolated filesystem, and host-controlled network stack. It keeps the developer loop simple while moving untrusted code out of the host process.
+Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Your app or the `msb` CLI starts it locally, talks to it through a host-guest command channel, and controls what it can access.
+
+It keeps the familiar workflow of OCI images and command execution, while moving risky work out of the host process.
 
 <Tip>
   Boot a microVM in one command.
@@ -21,9 +23,18 @@ microsandbox gives each workload its own local microVM: a real Linux kernel, iso
 - **Hardware isolation.** Each sandbox is a VM, not a container namespace on the host kernel.
 - **Local runtime.** The SDK starts the sandbox process directly. No daemon, remote service, or infrastructure setup.
 - **Fast startup.** Sandboxes are lightweight enough to create from application code.
-- **OCI images.** Use familiar images from Docker Hub, GHCR, ECR, GCR, or another OCI-compatible registry.
+- **Docker-like inputs.** Use familiar OCI images from Docker Hub, GHCR, ECR, GCR, or another registry.
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
 - **Multi-language SDKs.** Rust, TypeScript, Python, and Go expose the same core model.
+
+## Common workloads
+
+- **AI agents.** Give coding agents and tool-using assistants a dedicated machine for commands, files, package installs, and generated code.
+- **User code execution.** Run submitted scripts, notebooks, plugins, and extensions away from the host.
+- **CI/CD and builds.** Isolate test jobs, compilers, package managers, and build tools.
+- **Dev environments.** Create disposable Linux machines without touching your laptop or host Docker daemon.
+- **Scrapers and automation.** Allow internet access while blocking private networks and metadata services.
+- **Secure tool execution.** Run CLIs and dependencies that should not see host secrets or ambient credentials.
 
 ## What makes it different
 

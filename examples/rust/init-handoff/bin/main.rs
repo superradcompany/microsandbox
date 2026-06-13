@@ -33,6 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("Running services:\n{}", services.stdout()?.trim_end());
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

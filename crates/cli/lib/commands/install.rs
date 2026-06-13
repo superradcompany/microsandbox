@@ -9,7 +9,10 @@ use microsandbox::config;
 
 use crate::ui;
 
-use super::common::validate_volume_spec;
+use super::common::{
+    validate_mount_dir_spec, validate_mount_disk_spec, validate_mount_file_spec,
+    validate_mount_named_spec, validate_volume_spec,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -44,6 +47,22 @@ pub struct InstallArgs {
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
     pub volume: Vec<String>,
+
+    /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_dir: Vec<String>,
+
+    /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_file: Vec<String>,
+
+    /// Explicitly mount a disk image into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
+
+    /// Explicitly mount a named volume into the sandbox (`NAME:DEST[:OPTIONS]`).
+    #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
+    pub mount_named: Vec<String>,
 
     /// Set the default working directory for commands.
     #[arg(short, long)]
@@ -97,6 +116,18 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
     validate_alias_name(alias_name)?;
     for volume in &args.volume {
         validate_volume_spec(volume)?;
+    }
+    for mount in &args.mount_dir {
+        validate_mount_dir_spec(mount)?;
+    }
+    for mount in &args.mount_file {
+        validate_mount_file_spec(mount)?;
+    }
+    for mount in &args.mount_disk {
+        validate_mount_disk_spec(mount)?;
+    }
+    for mount in &args.mount_named {
+        validate_mount_named_spec(mount)?;
     }
 
     let alias_path = bin_dir.join(alias_name);
@@ -275,6 +306,22 @@ fn append_resource_options(parts: &mut Vec<String>, args: &InstallArgs) {
     for vol in &args.volume {
         parts.push("-v".into());
         parts.push(shell_quote(vol));
+    }
+    for mount in &args.mount_dir {
+        parts.push("--mount-dir".into());
+        parts.push(shell_quote(mount));
+    }
+    for mount in &args.mount_file {
+        parts.push("--mount-file".into());
+        parts.push(shell_quote(mount));
+    }
+    for mount in &args.mount_disk {
+        parts.push("--mount-disk".into());
+        parts.push(shell_quote(mount));
+    }
+    for mount in &args.mount_named {
+        parts.push("--mount-named".into());
+        parts.push(shell_quote(mount));
     }
     if let Some(ref workdir) = args.workdir {
         parts.push("-w".into());

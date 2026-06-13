@@ -102,6 +102,11 @@ class MetricsDisabledError(MicrosandboxError):
     code = "metrics-disabled"
 
 
+class MetricsUnavailableError(MicrosandboxError):
+    """Metrics are not available for the sandbox's current run."""
+    code = "metrics-unavailable"
+
+
 class UnsupportedOperationError(MicrosandboxError):
     """The sandbox runtime is too old for the requested operation."""
     code = "unsupported-operation"

@@ -41,7 +41,7 @@ pub mod volume;
 /// When connecting to an already-running sandbox, this is a no-op.
 pub async fn maybe_stop(sandbox: &Sandbox) {
     if sandbox.owns_lifecycle()
-        && let Err(e) = sandbox.stop_and_wait().await
+        && let Err(e) = sandbox.stop().await
     {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }

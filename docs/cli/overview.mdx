@@ -13,6 +13,8 @@ The `msb` CLI lets you create, manage, and interact with sandboxes from the term
 curl -fsSL https://install.microsandbox.dev | sh
 ```
 
+The installer writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it.
+
 <Note>
   microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
 </Note>

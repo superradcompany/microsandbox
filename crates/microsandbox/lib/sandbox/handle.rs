@@ -4,12 +4,9 @@ use sea_orm::EntityTrait;
 
 use std::sync::Arc;
 
-use crate::{
-    MicrosandboxResult, agent::AgentClient, db::entity::sandbox as sandbox_entity,
-    runtime::SpawnMode,
-};
+use crate::{MicrosandboxResult, db::entity::sandbox as sandbox_entity, runtime::SpawnMode};
 
-use super::{Sandbox, SandboxConfig, SandboxStatus};
+use super::{Sandbox, SandboxConfig, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -32,6 +29,9 @@ pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// an error — the sandbox is force-killed and the call returns
 /// successfully.
 pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Default timeout for observing stopped state after force termination.
+pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -97,6 +97,11 @@ impl SandboxHandle {
     /// is malformed (e.g., schema changed since the sandbox was created).
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         Ok(serde_json::from_str(&self.config_json)?)
+    }
+
+    /// Return a fresh handle for the same sandbox name.
+    pub async fn refresh(&self) -> MicrosandboxResult<SandboxHandle> {
+        Sandbox::get(&self.name).await
     }
 
     /// When this sandbox was first created, if recorded.
@@ -189,7 +194,7 @@ impl SandboxHandle {
             )));
         }
 
-        let client = AgentClient::connect_sandbox_with_timeout(&self.name, timeout).await?;
+        let client = crate::agent::connect_sandbox_with_timeout(&self.name, timeout).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {
@@ -236,91 +241,136 @@ impl SandboxHandle {
     }
 
     /// Stop the sandbox gracefully, using [`DEFAULT_STOP_TIMEOUT`].
-    ///
-    /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost
-    /// across a later restart. Waits up to the default timeout for a
-    /// clean exit; if the sandbox is still running after that, it is
-    /// force-killed.
-    ///
-    /// Unlike [`connect_with_timeout`](Self::connect_with_timeout), an
-    /// expired timeout here does **not** return an error — it
-    /// transitions to a force-kill and the call still returns `Ok`.
-    /// Use [`stop_with_timeout`](Self::stop_with_timeout) to override
-    /// the budget for a single call.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout.
-    ///
-    /// `timeout` is the end-to-end deadline for a clean exit. If the
-    /// sandbox is still running when the deadline expires, it is
-    /// force-killed; the call returns `Ok` either way — it does not
-    /// surface a timeout error.
-    ///
-    /// - `timeout > 0`: ask the sandbox to shut down cleanly and wait
-    ///   up to `timeout`; force-kill anything still running afterward.
-    ///   Pending writes that exceed the budget may be lost.
-    /// - `timeout == Duration::ZERO`: force-kill immediately
-    ///   (equivalent to [`kill`](Self::kill)). Pending writes that the
-    ///   workload hasn't `fsync`'d may be lost — same durability as a
-    ///   sudden power loss on a physical machine.
+    /// Stop the sandbox gracefully with an explicit timeout before escalation.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status) {
             return Ok(());
         }
 
-        let pid = self.pid.filter(|pid| super::pid_is_alive(*pid));
-        // Tracks whether we issued a SIGKILL. After SIGKILL the process is
-        // guaranteed dead by kernel time; `pid_is_alive` still returns true
-        // during the zombie window before the parent's `waitpid`, so we
-        // can't rely on it to gate the DB update.
-        let mut sigkilled = false;
-
         if timeout.is_zero() {
-            // Skip graceful path — caller asked for immediate kill.
-            let pids = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-            if !pids.is_empty() {
-                sigkilled = true;
-                wait_for_exit(&pids, std::time::Duration::from_secs(5)).await;
-            }
-        } else {
-            let deadline = tokio::time::Instant::now() + timeout;
-            self.shutdown_via_agent_or_sigterm(deadline).await;
-
-            if let Some(pid) = pid {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                wait_for_exit(&[pid], remaining).await;
-                if super::pid_is_alive(pid) {
-                    tracing::warn!(
-                        sandbox = %self.name,
-                        timeout_secs = timeout.as_secs(),
-                        "graceful stop exceeded timeout, escalating to SIGKILL"
-                    );
-                    let _ = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-                    sigkilled = true;
-                    wait_for_exit(&[pid], std::time::Duration::from_secs(5)).await;
-                }
-            }
+            current.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
+            return Ok(());
         }
 
-        // Idempotent with the VMM exit observer (vm.rs build_vm): on a clean
-        // poweroff the observer already wrote Stopped; this just covers paths
-        // where the observer didn't get to run (e.g., SIGKILL escalation, or
-        // a sandbox owned by a foreign process). After SIGKILL we trust the
-        // kernel and don't poll the zombie window.
-        let all_dead = sigkilled || pid.map(|p| !super::pid_is_alive(p)).unwrap_or(true);
-        if all_dead {
-            let db = crate::db::init_global().await?.write();
-            if let Err(e) =
-                super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
-            {
-                tracing::warn!(sandbox = %self.name, error = %e, "failed to update sandbox status after stop");
-            }
+        current.request_stop().await?;
+
+        match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {}
         }
 
+        tracing::warn!(
+            sandbox = %current.name,
+            timeout_secs = timeout.as_secs(),
+            "graceful stop exceeded timeout, escalating to SIGKILL"
+        );
+        current.request_kill().await?;
+        match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, current.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                current.name
+            ))),
+        }
+    }
+
+    /// Request graceful shutdown without waiting for observed stopped state.
+    pub async fn request_stop(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status) {
+            return Ok(());
+        }
+
+        let deadline = tokio::time::Instant::now() + DEFAULT_CONNECT_TIMEOUT;
+        current.shutdown_via_agent_or_sigterm(deadline).await;
         Ok(())
+    }
+
+    /// Request force termination without waiting for observed stopped state.
+    pub async fn request_kill(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status) {
+            return Ok(());
+        }
+
+        let pids = signal_pid(current.pid, nix::sys::signal::Signal::SIGKILL)?;
+        if pids.is_empty() {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "cannot kill sandbox '{}': sandbox state is unavailable",
+                current.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Request drain without waiting for observed stopped state.
+    pub async fn request_drain(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status) {
+            return Ok(());
+        }
+
+        let pids = signal_pid(current.pid, nix::sys::signal::Signal::SIGUSR1)?;
+        if pids.is_empty() {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "cannot drain sandbox '{}': sandbox state is unavailable",
+                current.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Force-kill the sandbox and wait until it is observed stopped.
+    pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await
+    }
+
+    /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
+    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status) {
+            return Ok(());
+        }
+
+        current.request_kill().await?;
+        match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                current.name
+            ))),
+        }
+    }
+
+    /// Wait until this sandbox is observed in a terminal non-running state.
+    pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        loop {
+            let current = self.refresh().await?;
+            if sandbox_status_is_terminal(current.status) {
+                return Ok(SandboxStopResult {
+                    name: current.name,
+                    status: current.status,
+                    exit_code: None,
+                    signal: None,
+                    observed_at: chrono::Utc::now(),
+                    source: Some("refreshed runtime state".to_string()),
+                });
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     /// Send `core.shutdown` via the agent relay, with the handshake
@@ -331,7 +381,7 @@ impl SandboxHandle {
         let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         match self.connect_with_timeout(budget).await {
             Ok(sandbox) => {
-                if let Err(e) = sandbox.stop().await {
+                if let Err(e) = sandbox.request_stop().await {
                     tracing::warn!(
                         sandbox = %self.name,
                         error = %e,
@@ -351,59 +401,27 @@ impl SandboxHandle {
         }
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
-    ///
-    /// Waits for the process to exit (up to 5 seconds) and marks the
-    /// sandbox as `Stopped`.
-    ///
-    /// Pending writes that the workload hasn't `fsync`'d may be lost —
-    /// same durability semantics as a sudden power loss on a physical
-    /// machine. Use [`stop`](Self::stop) for graceful shutdown that
-    /// gives the workload a chance to flush.
-    pub async fn kill(&mut self) -> MicrosandboxResult<()> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
-            return Ok(());
-        }
-
-        let pids = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-
-        if !pids.is_empty() {
-            wait_for_exit(&pids, std::time::Duration::from_secs(5)).await;
-        }
-
-        // Mark stopped if all processes are confirmed dead (or were already gone).
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| !super::pid_is_alive(*pid));
-
-        if all_dead {
-            let db = crate::db::init_global().await?.write();
-            if let Err(e) =
-                super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
-            {
-                tracing::warn!(sandbox = %self.name, error = %e, "failed to update sandbox status after kill");
-            }
-            self.status = SandboxStatus::Stopped;
-        }
-
-        Ok(())
-    }
-
     /// Remove this sandbox from the database and filesystem.
     ///
     /// The sandbox must be stopped first. Use [`stop`](SandboxHandle::stop) or
     /// [`kill`](SandboxHandle::kill) to stop it before removing.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
-        if self.status == SandboxStatus::Running || self.status == SandboxStatus::Draining {
+        let current = self.refresh().await?;
+        if matches!(
+            current.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        ) {
             return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                 "cannot remove sandbox '{}': still running",
-                self.name
+                current.name
             )));
         }
 
         let pools = crate::db::init_global().await?;
 
-        super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
-        super::free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
-        sandbox_entity::Entity::delete_by_id(self.db_id)
+        super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&current.name))?;
+        super::free_metrics_slot_for(current.db_id, None, microsandbox_metrics::ReleaseMode::Free);
+        sandbox_entity::Entity::delete_by_id(current.db_id)
             .exec(pools.write())
             .await?;
 
@@ -427,15 +445,6 @@ fn signal_pid(pid: Option<i32>, signal: nix::sys::signal::Signal) -> Microsandbo
     Ok(vec![])
 }
 
-/// Poll until all PIDs have exited or the timeout is reached.
-async fn wait_for_exit(pids: &[i32], timeout: std::time::Duration) {
-    let start = std::time::Instant::now();
-    let poll_interval = std::time::Duration::from_millis(50);
-
-    while start.elapsed() < timeout {
-        if pids.iter().all(|pid| !super::pid_is_alive(*pid)) {
-            return;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
+fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
+    matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)
 }

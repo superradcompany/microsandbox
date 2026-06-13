@@ -18,7 +18,7 @@ async def main():
     )
 
     await writer.shell("echo 'hello from sandbox A' > /data/message.txt")
-    await writer.stop_and_wait()
+    await writer.stop()
 
     # Sandbox B reads from the same volume.
     reader = await Sandbox.create(
@@ -31,7 +31,7 @@ async def main():
     output = await reader.shell("cat /data/message.txt")
     print(output.stdout_text)
 
-    await reader.stop_and_wait()
+    await reader.stop()
 
     # Clean up.
     await Sandbox.remove("writer")

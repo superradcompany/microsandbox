@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .shell("echo 'hello from sandbox A' > /data/message.txt")
         .await?;
 
-    writer.stop_and_wait().await?;
+    writer.stop().await?;
 
     let reader = Sandbox::builder("reader")
         .image("alpine")
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = reader.shell("cat /data/message.txt").await?;
     println!("{}", output.stdout()?);
 
-    reader.stop_and_wait().await?;
+    reader.stop().await?;
 
     Sandbox::remove("writer").await?;
     Sandbox::remove("reader").await?;

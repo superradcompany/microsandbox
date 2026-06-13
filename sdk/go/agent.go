@@ -63,6 +63,23 @@ func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error) {
 	return &AgentClient{inner: inner}, nil
 }
 
+// AgentSocketPath returns the host-side filesystem path of a sandbox's agentd
+// relay socket, resolved the same way ConnectAgentSandbox dials it internally
+// (preferring the hashed path, falling back to the legacy name-derived path).
+//
+// Use this when you need to talk to agentd over a raw byte transport — for
+// example a transparent relay that splices bytes between a WebSocket and the
+// socket — rather than the frame-protocol AgentClient that Connect* returns.
+// The sandbox need not be running; the path is derived from the name and the
+// configured home directory.
+func AgentSocketPath(name string) (string, error) {
+	path, err := ffi.AgentSocketPath(name)
+	if err != nil {
+		return "", wrapFFI(err)
+	}
+	return path, nil
+}
+
 // Request sends one raw frame and awaits one response frame.
 func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*RawFrame, error) {
 	frame, err := c.inner.Request(ctx, flags, body)

@@ -4,7 +4,7 @@ description: What the networking stack defends against
 icon: "shield-halved"
 ---
 
-microsandbox's networking defaults are shaped around giving an AI agent, a scraper, or some other untrusted workload access to the internet without letting it pivot into your internal infrastructure. This page walks through the specific threats the stack is designed to handle and where each defense lives.
+microsandbox's networking defaults are shaped around giving untrusted workloads access to the internet without letting them pivot into your internal infrastructure. That includes AI agents, scrapers, package managers, build jobs, plugins, and other code that should not see your host or private network. This page walks through the specific threats the stack is designed to handle and where each defense lives.
 
 ## Private IPs and the host's local network
 
@@ -16,14 +16,14 @@ The largest class of real damage comes from workloads reaching things that live 
 - `169.254.169.254` (cloud metadata, takes precedence over link-local)
 - the per-sandbox gateway IPs (`Group::Host`)
 
-If an agent runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Override the default with `--net-default-egress allow` only when the workload genuinely needs broad reach, or use `--no-net` when it doesn't need network at all.
+If a workload runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Override the default with `--net-default-egress allow` only when the workload genuinely needs broad reach, or use `--no-net` when it doesn't need network at all.
 
 ## Cloud metadata endpoints
 
 On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service, a well-known SSRF target because it hands out temporary credentials to anything that can connect. The default policy blocks it via the `Group::Public` complement. For custom policies that flip `default_egress` to `Allow`, `Group::Metadata` lets you deny it explicitly:
 
 ```bash
-msb create python --name agent \
+msb create python --name worker \
     --net-default-egress allow \
     --net-rule "deny@meta"
 ```

@@ -48,6 +48,8 @@ func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volu
 	}
 	info, err := ffi.CreateVolume(ctx, name, ffi.VolumeCreateOptions{
 		QuotaMiB: o.QuotaMiB,
+		Kind:     string(o.Kind),
+		SizeMiB:  o.SizeMiB,
 		Labels:   o.Labels,
 	})
 	if err != nil {
@@ -83,8 +85,12 @@ func RemoveVolume(ctx context.Context, name string) error {
 type VolumeHandle struct {
 	name          string
 	path          string
+	kind          VolumeKind
 	quotaMiB      *uint32
 	usedBytes     uint64
+	capacityBytes *uint64
+	diskFormat    *string
+	diskFstype    *string
 	labels        map[string]string
 	createdAtUnix *int64
 }
@@ -93,8 +99,12 @@ func volumeHandleFromInfo(info *ffi.VolumeHandleInfo) *VolumeHandle {
 	return &VolumeHandle{
 		name:          info.Name,
 		path:          info.Path,
+		kind:          VolumeKind(info.Kind),
 		quotaMiB:      info.QuotaMiB,
 		usedBytes:     info.UsedBytes,
+		capacityBytes: info.CapacityBytes,
+		diskFormat:    info.DiskFormat,
+		diskFstype:    info.DiskFstype,
 		labels:        info.Labels,
 		createdAtUnix: info.CreatedAtUnix,
 	}
@@ -106,11 +116,23 @@ func (h *VolumeHandle) Name() string { return h.name }
 // Path returns the host filesystem path of the volume's data directory.
 func (h *VolumeHandle) Path() string { return h.path }
 
+// Kind returns the volume storage kind.
+func (h *VolumeHandle) Kind() VolumeKind { return h.kind }
+
 // QuotaMiB returns the quota in MiB, or nil if unlimited.
 func (h *VolumeHandle) QuotaMiB() *uint32 { return h.quotaMiB }
 
 // UsedBytes returns the amount of space used by the volume in bytes.
 func (h *VolumeHandle) UsedBytes() uint64 { return h.usedBytes }
+
+// CapacityBytes returns disk capacity in bytes for disk volumes.
+func (h *VolumeHandle) CapacityBytes() *uint64 { return h.capacityBytes }
+
+// DiskFormat returns the disk image format for disk volumes.
+func (h *VolumeHandle) DiskFormat() *string { return h.diskFormat }
+
+// DiskFstype returns the inner filesystem for disk volumes.
+func (h *VolumeHandle) DiskFstype() *string { return h.diskFstype }
 
 // Labels returns the labels attached to this volume.
 func (h *VolumeHandle) Labels() map[string]string { return h.labels }

@@ -53,15 +53,13 @@ pub const RUN_SUBDIR: &str = "run";
 /// Subdirectory under `run` for metrics-related diagnostic artifacts.
 pub const METRICS_RUN_SUBDIR: &str = "metrics";
 
-/// Filename of the optional registry-name diagnostic file under `run/metrics`.
-pub const METRICS_REGISTRY_NAME_FILENAME: &str = "registry-v1.name";
-
 /// Prefix used when constructing the POSIX shared-memory object name for the
 /// live metrics registry. Combined with a stable hash of `GlobalConfig::home()`
 /// so concurrent `MSB_HOME`-isolated environments do not collide.
 ///
 /// Kept short because macOS limits `shm_open` names to ~31 bytes including the
-/// leading slash; the final form is `<prefix>-<hex16>-v1` (28 bytes).
+/// leading slash; the final form is `<prefix>-<hex16>-vN` (28 bytes for
+/// single-digit ABI versions).
 pub const METRICS_SHM_PREFIX: &str = "/msb-met";
 
 //--------------------------------------------------------------------------------------------------
@@ -134,6 +132,21 @@ pub fn stable_hash_path(path: &std::path::Path) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+/// Filename of the optional registry-name diagnostic file under `run/metrics`.
+pub fn metrics_registry_name_filename(registry_abi_version: u32) -> String {
+    format!("registry-v{registry_abi_version}.name")
+}
+
+/// Derive the POSIX shared-memory object name for a metrics registry.
+pub fn metrics_registry_shm_name(home: &std::path::Path, registry_abi_version: u32) -> String {
+    format!(
+        "{}-{}-v{}",
+        METRICS_SHM_PREFIX,
+        stable_hash_path(home),
+        registry_abi_version
+    )
 }
 
 /// Resolve the microsandbox home directory.
@@ -235,5 +248,16 @@ mod tests {
         let resolved = resolve_home();
         unsafe { std::env::remove_var("MSB_HOME") };
         assert_eq!(resolved, custom);
+    }
+
+    #[test]
+    fn test_metrics_registry_names_include_abi_version() {
+        let home = std::path::Path::new("/tmp/msb-home");
+
+        assert_eq!(metrics_registry_name_filename(2), "registry-v2.name");
+        assert_eq!(
+            metrics_registry_shm_name(home, 2),
+            format!("{}-{}-v2", METRICS_SHM_PREFIX, stable_hash_path(home))
+        );
     }
 }

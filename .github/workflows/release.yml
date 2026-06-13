@@ -258,7 +258,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -307,14 +307,14 @@ jobs:
             cp build/agentd artifacts/agentd-${{ matrix.arch }}
           fi
 
-          # Bundle: msb + libkrunfw + Go FFI cdylib
+          # Bundle: msb + libkrunfw
           if [ "${{ matrix.os }}" = "darwin" ]; then
             go_ffi_file=libmicrosandbox_go_ffi.dylib
           else
             go_ffi_file=libmicrosandbox_go_ffi.so
           fi
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
-            -C build msb ${{ matrix.libkrunfw_file }} $go_ffi_file
+            -C build msb ${{ matrix.libkrunfw_file }}
 
           # Standalone Go FFI cdylib named to match sdk/go/internal/bundle/
           # bundles/ so the go-sdk-tag job can drop it in directly.
@@ -492,6 +492,15 @@ jobs:
           npm ci
           npm run build:ts
 
+      - name: Build and publish agent client package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: agent-client/typescript
+        run: |
+          npm ci
+          npm run build
+          npm publish --access public
+
       - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -599,6 +608,7 @@ jobs:
           for crate in \
             microsandbox-utils \
             microsandbox-protocol \
+            microsandbox-agent-client \
             microsandbox-agentd \
             microsandbox-db \
             microsandbox-migration \
@@ -630,7 +640,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Download Python SDK wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

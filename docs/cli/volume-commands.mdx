@@ -11,12 +11,15 @@ Named volumes persist independently of sandboxes and are stored by default under
 
 ```bash
 msb volume create my-data
-msb volume create my-data --size 10G
+msb volume create --name my-data
+msb volume create docker-data --kind disk --size 10G
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--size` | Storage quota (e.g. `100M`, `1G`, `10G`) |
+| `--name` | Volume name, as an alternative to the positional name |
+| `--kind` | Volume kind (`dir` or `disk`; default `dir`) |
+| `--size` | Disk capacity for `--kind disk` (e.g. `100M`, `1G`, `10G`) |
 | `-q`, `--quiet` | Suppress output (only print the volume name) |
 
 ## msb volume ls
@@ -51,17 +54,23 @@ msb volume rm cache-1 cache-2   # Remove multiple
 
 ## Using volumes with sandboxes
 
-Mount a named volume when creating or running a sandbox. The volume name goes before the colon, the guest path after.
+Mount a named volume when creating or running a sandbox. The volume name goes before the colon, the guest path after. CLI named mounts are idempotent: if the named volume is missing, microsandbox creates it; if it already exists with compatible settings, microsandbox reuses it.
 
 ```bash
-# Create a volume, then mount it
-msb volume create app-data --size 5G
+# Create or reuse a directory-backed named volume, then mount it
 msb run --name worker -v app-data:/data python
+
+# Create or reuse a disk-backed named volume, then mount it
+msb run --name docker-demo \
+  --mount-named docker-data:/var/lib/docker:kind=disk,size=20G \
+  docker:dind
 
 # Share between sandboxes
 msb run --name writer -v shared:/data alpine -- sh -c "echo hello > /data/msg.txt"
 msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
 ```
+
+`--mount-named` accepts named-volume creation options in the mount option block: `kind=dir|disk`, `size=<size>` for disk-backed volumes, and `quota=<size>` for directory-backed volumes. `kind=disk` requires `size=...`; `size=...` without `kind=disk` is rejected. If an existing volume has a different kind, capacity, or quota than the requested settings, sandbox creation fails instead of silently changing the volume.
 
 <Tip>
   The CLI distinguishes bind mounts from named volumes by looking for a `/` or `.` prefix. `./src:/app` is a bind mount (host path). `myvolume:/data` is a named volume. This matches Docker's convention.

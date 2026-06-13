@@ -26,7 +26,7 @@ async def main():
     output = await sb.shell("ip addr show eth0")
     print(f"Interface:\n{output.stdout_text}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
 
 
 asyncio.run(main())

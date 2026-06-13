@@ -96,7 +96,7 @@ impl ExecOpts {
 //--------------------------------------------------------------------------------------------------
 
 /// Execute the `msb run` command.
-pub async fn run(args: RunArgs) -> anyhow::Result<()> {
+pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> anyhow::Result<()> {
     let is_named = args.sandbox.name.is_some();
     let name = args.sandbox.name.clone().unwrap_or_else(ui::generate_name);
 
@@ -108,7 +108,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         return run_existing(name, args).await;
     }
 
-    run_new(name, is_named, args).await
+    run_new(name, is_named, args, log_level).await
 }
 
 /// Run in an existing named sandbox — start if stopped, connect if running.
@@ -150,7 +150,12 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 }
 
 /// Create a new sandbox and run in it.
-async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<()> {
+async fn run_new(
+    name: String,
+    is_named: bool,
+    mut args: RunArgs,
+    log_level: Option<microsandbox::LogLevel>,
+) -> anyhow::Result<()> {
     let mut builder = Sandbox::builder(&name);
     if let Some(ref snap) = args.snapshot {
         builder = builder.from_snapshot(snap.clone());
@@ -158,6 +163,11 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         builder = builder.image(image.as_str());
     } else {
         anyhow::bail!("either an image or --snapshot is required");
+    }
+    if args.sandbox.log_level.is_none()
+        && let Some(log_level) = log_level
+    {
+        args.sandbox.log_level = Some(log_level.to_string());
     }
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
@@ -200,11 +210,11 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
-            if let Err(e) = sandbox.stop_and_wait().await {
+            if let Err(e) = sandbox.stop().await {
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
             if !is_named {
-                let _ = sandbox.remove_persisted().await;
+                let _ = Sandbox::remove(sandbox.name()).await;
             }
             return Ok(());
         }
@@ -213,13 +223,13 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await;
 
     // Cleanup always runs, even on exec/attach/IO errors.
-    if let Err(e) = sandbox.stop_and_wait().await {
+    if let Err(e) = sandbox.stop().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }
 
     // Remove unnamed (ephemeral) sandboxes.
     if !is_named {
-        let _ = sandbox.remove_persisted().await;
+        let _ = Sandbox::remove(sandbox.name()).await;
     }
 
     handle_exit(result?)

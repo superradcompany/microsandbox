@@ -31,6 +31,7 @@ use crate::icmp_relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
+use crate::secrets::config::SecretsConfig;
 use crate::shared::SharedState;
 use crate::tls::{proxy as tls_proxy, state::TlsState};
 use crate::udp_relay::UdpRelay;
@@ -199,6 +200,7 @@ pub fn smoltcp_poll_loop(
     published_ports: Vec<PublishedPort>,
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
+    secrets: Arc<SecretsConfig>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -522,6 +524,7 @@ pub fn smoltcp_poll_loop(
                 conn.to_smoltcp,
                 shared.clone(),
                 network_policy.clone(),
+                secrets.clone(),
                 conn.upstream_connected,
             );
         }

@@ -17,6 +17,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::secrets::config::{SecretsConfig, ViolationAction};
+use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 use crate::tls::sni;
 
@@ -58,6 +60,7 @@ pub fn spawn_tcp_proxy(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
+    secrets: Arc<SecretsConfig>,
     upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
@@ -68,6 +71,7 @@ pub fn spawn_tcp_proxy(
             to_smoltcp,
             shared,
             network_policy,
+            secrets,
             upstream_connected,
         )
         .await
@@ -79,6 +83,7 @@ pub fn spawn_tcp_proxy(
 
 /// Core TCP proxy: peek for SNI, evaluate egress policy, then either
 /// connect and relay or drop the channels.
+#[allow(clippy::too_many_arguments)]
 async fn tcp_proxy_task(
     guest_dst: SocketAddr,
     connect_dst: SocketAddr,
@@ -86,12 +91,14 @@ async fn tcp_proxy_task(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
+    secrets: Arc<SecretsConfig>,
     upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
-    // Peek only when there's a Domain/DomainSuffix rule that could
-    // need an SNI to refine. Otherwise the SYN handler's decision is
-    // authoritative.
-    let (initial_buf, sni) = if network_policy.has_domain_rules() {
+    // Peek when:
+    // - there are Domain/DomainSuffix rules that need SNI to refine egress, OR
+    // - secrets are configured (we need the Host header for plain-HTTP substitution)
+    let needs_peek = network_policy.has_domain_rules() || !secrets.secrets.is_empty();
+    let (mut initial_buf, sni) = if needs_peek {
         peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
     } else {
         (Vec::new(), None)
@@ -125,16 +132,54 @@ async fn tcp_proxy_task(
         }
     }
 
+    let is_tls = initial_buf.first() == Some(&0x16);
+
+    // For plain-HTTP connections with secrets, peek_for_sni bails on the first
+    // non-TLS byte and may return before headers are complete. Keep reading until
+    // \r\n\r\n so extract_http_host always sees a full header block.
+    if !is_tls && secrets.has_plain_http_candidates() {
+        initial_buf =
+            peek_for_http_headers(initial_buf, &mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+    }
+
+    let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls {
+        Some(match extract_http_host(&initial_buf) {
+            Some(host) => SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared),
+            None => SecretsHandler::new_plain_http_invalid_host(&secrets),
+        })
+    } else {
+        None
+    };
+
     let stream = TcpStream::connect(connect_dst).await?;
     upstream_connected.store(true, Ordering::Release);
     let (mut server_rx, mut server_tx) = stream.into_split();
 
-    // Replay the buffered first flight before relay starts.
-    if !initial_buf.is_empty()
-        && let Err(e) = server_tx.write_all(&initial_buf).await
-    {
-        tracing::debug!(dst = %connect_dst, error = %e, "replay of buffered first flight failed");
-        return Ok(());
+    // Replay the buffered first flight — run through secrets handler first.
+    if !initial_buf.is_empty() {
+        let out = match secrets_handler.as_mut() {
+            Some(h) => match h.substitute(&initial_buf) {
+                Ok(cow) => cow.into_owned(),
+                Err(action) => {
+                    tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
+                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                        shared.trigger_termination();
+                    }
+                    return Ok(());
+                }
+            },
+            None => initial_buf,
+        };
+        if !out.is_empty() {
+            if let Err(e) = server_tx.write_all(&out).await {
+                tracing::debug!(dst = %connect_dst, error = %e, "replay of buffered first flight failed");
+                return Ok(());
+            }
+            if let Err(e) = server_tx.flush().await {
+                tracing::debug!(dst = %connect_dst, error = %e, "flush after first flight failed");
+                return Ok(());
+            }
+        }
     }
 
     let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
@@ -145,13 +190,32 @@ async fn tcp_proxy_task(
     // server → guest: read from server socket, send via channel + wake poll.
     loop {
         tokio::select! {
-            // Guest → server.
+            // Guest → server: substitute placeholders before forwarding.
             data = from_smoltcp.recv() => {
                 match data {
                     Some(bytes) => {
-                        if let Err(e) = server_tx.write_all(&bytes).await {
-                            tracing::debug!(dst = %connect_dst, error = %e, "write to server failed");
-                            break;
+                        let out = match secrets_handler.as_mut() {
+                            Some(h) => match h.substitute(&bytes) {
+                                Ok(cow) => cow.into_owned(),
+                                Err(action) => {
+                                    tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
+                                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                                        shared.trigger_termination();
+                                    }
+                                    break;
+                                }
+                            },
+                            None => bytes.to_vec(),
+                        };
+                        if !out.is_empty() {
+                            if let Err(e) = server_tx.write_all(&out).await {
+                                tracing::debug!(dst = %connect_dst, error = %e, "write to server failed");
+                                break;
+                            }
+                            if let Err(e) = server_tx.flush().await {
+                                tracing::debug!(dst = %connect_dst, error = %e, "flush to server failed");
+                                break;
+                            }
                         }
                     }
                     // Channel closed — smoltcp socket was closed by guest.
@@ -159,7 +223,7 @@ async fn tcp_proxy_task(
                 }
             }
 
-            // Server → guest.
+            // Server → guest: no substitution — server never sends placeholders.
             result = server_rx.read(&mut server_buf) => {
                 match result {
                     Ok(0) => break, // Server closed connection.
@@ -183,6 +247,73 @@ async fn tcp_proxy_task(
     }
 
     Ok(())
+}
+
+/// Extract the `Host:` header value from an already-buffered HTTP header block.
+///
+/// Returns `None` if:
+/// - The first byte is `0x16` (TLS — not HTTP)
+/// - The buffer does not yet contain `\r\n\r\n` (headers incomplete)
+/// - No `Host:` header is present
+///
+/// Strips port suffix, lowercases, and trims whitespace. Result is
+/// ready for byte-equal matching against `SecretEntry::allowed_hosts`.
+fn extract_http_host(buf: &[u8]) -> Option<String> {
+    if buf.first() == Some(&0x16) {
+        return None;
+    }
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    req.parse(buf).ok()?;
+    req.headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("host"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .map(|v| {
+            let host = v.trim();
+            // Strip port suffix.
+            host.rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or(host)
+                .to_ascii_lowercase()
+        })
+        .filter(|h| !h.is_empty())
+}
+
+/// Buffer chunks from `rx` into `buf` until `\r\n\r\n` is seen, the cap is
+/// reached, or the budget expires.
+async fn peek_for_http_headers(
+    mut buf: Vec<u8>,
+    rx: &mut mpsc::Receiver<Bytes>,
+    max: usize,
+    budget: Duration,
+) -> Vec<u8> {
+    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        return buf;
+    }
+    let timeout_fut = tokio::time::sleep(budget);
+    tokio::pin!(timeout_fut);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut timeout_fut => break,
+            data = rx.recv() => {
+                match data {
+                    Some(bytes) => {
+                        buf.extend_from_slice(&bytes);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                        if buf.len() >= max {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    buf
 }
 
 /// Buffer the first flight until SNI can be extracted, or until one
@@ -596,5 +727,253 @@ mod tests {
             .unwrap_or(HostnameSource::CacheOnly);
         let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
         assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    // ── extract_http_host ──────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_http_host_basic() {
+        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(extract_http_host(buf), Some("example.com".into()));
+    }
+
+    #[test]
+    fn extract_http_host_strips_port() {
+        let buf = b"POST /api HTTP/1.1\r\nHost: api.company.com:8080\r\n\r\n";
+        assert_eq!(extract_http_host(buf), Some("api.company.com".into()));
+    }
+
+    #[test]
+    fn extract_http_host_case_insensitive_lowercased() {
+        let buf = b"GET / HTTP/1.1\r\nhost: Example.COM\r\n\r\n";
+        assert_eq!(extract_http_host(buf), Some("example.com".into()));
+    }
+
+    #[test]
+    fn extract_http_host_no_host_header() {
+        let buf = b"GET / HTTP/1.1\r\nX-Other: foo\r\n\r\n";
+        assert_eq!(extract_http_host(buf), None);
+    }
+
+    #[test]
+    fn extract_http_host_incomplete_headers() {
+        let buf = b"GET / HTTP/1.1\r\nHost: x";
+        assert_eq!(extract_http_host(buf), None);
+    }
+
+    #[test]
+    fn extract_http_host_tls_first_byte() {
+        let buf = [0x16u8, 0x03, 0x01, 0x00, 0x01];
+        assert_eq!(extract_http_host(&buf), None);
+    }
+
+    // ── plain-HTTP secret substitution ────────────────────────────────────────
+
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, SecretsConfig};
+
+    fn make_plain_http_secret(placeholder: &str, value: &str, require_tls: bool) -> SecretsConfig {
+        SecretsConfig {
+            secrets: vec![SecretEntry {
+                env_var: "API_KEY".into(),
+                value: value.into(),
+                placeholder: placeholder.into(),
+                allowed_hosts: vec![HostPattern::Any],
+                injection: SecretInjection {
+                    headers: true,
+                    basic_auth: false,
+                    query_params: false,
+                    body: false,
+                },
+                on_violation: None,
+                require_tls_identity: require_tls,
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn spawn_sink() -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                }
+            }
+            received
+        });
+        (addr, handle)
+    }
+
+    async fn relay_through_proxy(
+        request: Vec<u8>,
+        secrets: SecretsConfig,
+        handle: JoinHandle<Vec<u8>>,
+        server_addr: SocketAddr,
+    ) -> Vec<u8> {
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let shared = SharedState::new(4);
+        let policy = Arc::new(NetworkPolicy::default());
+        let secrets = Arc::new(secrets);
+        let upstream_connected = Arc::new(AtomicBool::new(false));
+
+        from_tx.send(Bytes::from(request)).await.unwrap();
+        drop(from_tx);
+
+        tcp_proxy_task(
+            server_addr,
+            server_addr,
+            from_rx,
+            to_tx,
+            Arc::new(shared),
+            policy,
+            secrets,
+            upstream_connected,
+        )
+        .await
+        .unwrap();
+
+        handle.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn plain_http_substitutes_placeholder_when_host_arrives_in_second_segment() {
+        // Host header split across TCP segments — peek_for_http_headers must keep
+        // reading until \r\n\r\n before extract_http_host is called.
+        let (addr, sink) = spawn_sink().await;
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", false);
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let upstream_connected = Arc::new(AtomicBool::new(false));
+
+        from_tx
+            .send(Bytes::from_static(b"GET /api HTTP/1.1\r\n"))
+            .await
+            .unwrap();
+        from_tx
+            .send(Bytes::from_static(
+                b"Host: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n",
+            ))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        tcp_proxy_task(
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(secrets),
+            upstream_connected,
+        )
+        .await
+        .unwrap();
+
+        let wire = String::from_utf8(sink.await.unwrap()).unwrap();
+        assert!(wire.contains("real-secret-value"), "got: {wire:?}");
+        assert!(!wire.contains("$MSB_KEY"), "got: {wire:?}");
+    }
+
+    #[tokio::test]
+    async fn plain_http_substitutes_placeholder_in_first_flight() {
+        let (addr, sink) = spawn_sink().await;
+
+        let request =
+            b"GET /api HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n"
+                .to_vec();
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", false);
+
+        let wire =
+            String::from_utf8(relay_through_proxy(request, secrets, sink, addr).await).unwrap();
+        assert!(
+            wire.contains("real-secret-value"),
+            "real value must reach server, got: {wire:?}"
+        );
+        assert!(
+            !wire.contains("$MSB_KEY"),
+            "placeholder must not reach server, got: {wire:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_no_substitution_when_require_tls_identity_true() {
+        let (addr, sink) = spawn_sink().await;
+
+        let request =
+            b"GET /api HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n"
+                .to_vec();
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", true);
+
+        let wire =
+            String::from_utf8_lossy(&relay_through_proxy(request, secrets, sink, addr).await)
+                .into_owned();
+        assert!(
+            wire.contains("$MSB_KEY"),
+            "placeholder must be forwarded unchanged when require_tls_identity=true, got: {wire:?}"
+        );
+        assert!(
+            !wire.contains("real-secret-value"),
+            "real value must not leak when require_tls_identity=true, got: {wire:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_large_body_forwarded_verbatim_in_relay_loop() {
+        // Body arrives in a separate segment after headers — flows through the relay
+        // loop, not the peek path. Ensures no bytes are dropped and header substitution
+        // still happens.
+        let (addr, sink) = spawn_sink().await;
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-value", false);
+
+        let body = "x".repeat(32_000);
+        let header = format!(
+            "POST /upload HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let upstream_connected = Arc::new(AtomicBool::new(false));
+
+        from_tx
+            .send(Bytes::from(header.into_bytes()))
+            .await
+            .unwrap();
+        from_tx
+            .send(Bytes::from(body.clone().into_bytes()))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        tcp_proxy_task(
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(secrets),
+            upstream_connected,
+        )
+        .await
+        .unwrap();
+
+        let wire = String::from_utf8_lossy(&sink.await.unwrap()).into_owned();
+        assert!(wire.contains(&body), "got {} bytes", wire.len());
+        assert!(!wire.contains("$MSB_KEY"), "got: {wire:?}");
     }
 }

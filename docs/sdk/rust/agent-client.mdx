@@ -14,20 +14,21 @@ The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`
 
 ```rust
 use microsandbox::{
-    AgentClient,
+    agent,
     protocol::{
         fs::{FsOp, FsRequest, FsResponse},
         message::MessageType,
     },
 };
 
-let client = AgentClient::connect_sandbox("dev").await?;
+let client = agent::connect_sandbox("dev").await?;
 let response = client
     .request(
         MessageType::FsRequest,
         &FsRequest {
             op: FsOp::Stat {
                 path: "/etc/os-release".to_string(),
+                follow_symlink: true,
             },
         },
     )
@@ -47,13 +48,23 @@ Connect to an agent relay socket by path. The connection performs the relay hand
 
 ---
 
-#### connect_sandbox()
+#### agent::connect_sandbox()
 
 ```rust
-async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
+async fn agent::connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
 ```
 
 Resolve a sandbox name to its relay socket path and connect to it. Sandbox names are limited to 128 UTF-8 bytes.
+
+---
+
+#### AgentClient::socket_path()
+
+```rust
+fn AgentClient::socket_path(name: &str) -> MicrosandboxResult<PathBuf>
+```
+
+Resolve a sandbox's relay socket path **without connecting**. Returns the same path `connect_sandbox` would dial, so you can talk to `agentd` over a raw byte transport (e.g. a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running.
 
 ---
 
@@ -70,7 +81,7 @@ Send one typed protocol message and wait for one response frame with the same co
 #### stream()
 
 ```rust
-async fn stream<T: Serialize>(&self, t: MessageType, payload: &T) -> AgentClientResult<(u32, UnboundedReceiver<Message>)>
+async fn stream<T: Serialize>(&self, t: MessageType, payload: &T) -> AgentClientResult<(u32, Receiver<Message>)>
 ```
 
 Open a typed streaming session. The returned id is the protocol correlation id. Use it with [`send()`](#send) for follow-up messages such as stdin, resize, signal, or file data chunks.
@@ -102,7 +113,7 @@ Allocate a correlation id, send one raw frame, and wait for one raw response fra
 #### stream_raw()
 
 ```rust
-async fn stream_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<(u32, UnboundedReceiver<RawFrame>)>
+async fn stream_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<(u32, Receiver<RawFrame>)>
 ```
 
 Open a raw streaming session. The receiver yields raw frames for the returned correlation id until a terminal frame is delivered or the receiver is dropped.

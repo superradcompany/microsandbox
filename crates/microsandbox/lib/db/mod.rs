@@ -198,6 +198,7 @@ mod tests {
             "sandbox_rootfs",
             "snapshot_index",
             "volume",
+            "volume_attach",
         ];
 
         assert_eq!(table_names, expected);
@@ -429,6 +430,6 @@ mod tests {
             .try_get_by_index::<i64>(0)
             .unwrap();
 
-        assert_eq!(migration_count, 10);
+        assert_eq!(migration_count, 11);
     }
 }

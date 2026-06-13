@@ -112,8 +112,28 @@ impl JsVolumeHandle {
     }
 
     #[napi(getter)]
+    pub fn kind(&self) -> String {
+        self.inner.kind().as_str().to_string()
+    }
+
+    #[napi(getter)]
     pub fn used_bytes(&self) -> f64 {
         self.inner.used_bytes() as f64
+    }
+
+    #[napi(getter)]
+    pub fn capacity_bytes(&self) -> Option<f64> {
+        self.inner.capacity_bytes().map(|v| v as f64)
+    }
+
+    #[napi(getter)]
+    pub fn disk_format(&self) -> Option<String> {
+        self.inner.disk_format().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn disk_fstype(&self) -> Option<String> {
+        self.inner.disk_fstype().map(str::to_string)
     }
 
     #[napi(getter)]
@@ -301,8 +321,12 @@ impl JsVolumeFsWriteSink {
 fn volume_handle_to_info(handle: &VolumeHandle) -> VolumeInfo {
     VolumeInfo {
         name: handle.name().to_string(),
+        kind: handle.kind().as_str().to_string(),
         quota_mib: handle.quota_mib(),
         used_bytes: handle.used_bytes() as f64,
+        capacity_bytes: handle.capacity_bytes().map(|bytes| bytes as f64),
+        disk_format: handle.disk_format().map(str::to_string),
+        disk_fstype: handle.disk_fstype().map(str::to_string),
         labels: handle
             .labels()
             .iter()

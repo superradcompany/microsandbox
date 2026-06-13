@@ -34,7 +34,7 @@ async def main():
     except Exception as e:
         print(f"Host-side: could not reach guest server: {e}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

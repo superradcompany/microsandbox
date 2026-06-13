@@ -111,7 +111,7 @@ func runScenario(ctx context.Context, name string, s scenario) {
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 		defer c()
-		_, _ = sb.StopAndWait(stopCtx)
+		_ = sb.Stop(stopCtx)
 		_ = sb.Close()
 		_ = microsandbox.RemoveSandbox(context.Background(), name)
 	}()

@@ -33,7 +33,7 @@ async def main():
     output = await sb.shell("cat /etc/os-release")
     print(f"os-release:\n{output.stdout_text}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

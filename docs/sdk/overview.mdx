@@ -96,7 +96,7 @@ func main() {
         log.Fatal(err)
     }
     defer func() {
-        _, _ = sb.StopAndWait(context.Background())
+        _, _ = sb.Stop(context.Background())
         _ = sb.Close()
     }()
 

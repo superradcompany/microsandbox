@@ -1,5 +1,6 @@
 //! `msb self` subcommands for managing the msb installation itself.
 
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,7 @@ pub enum SelfCommand {
     #[command(visible_alias = "upgrade")]
     Update(SelfUpdateArgs),
 
-    /// Remove msb, libkrunfw, and shell configuration.
+    /// Remove msb, libkrunfw, and command links.
     Uninstall(SelfUninstallArgs),
 }
 
@@ -84,7 +85,7 @@ impl UninstallCategory {
 
     fn label(&self) -> &'static str {
         match self {
-            Self::All => "All — remove everything and clean shell config",
+            Self::All => "All — remove everything and command links",
             Self::Sandboxes => "Sandboxes — sandbox state and rootfs",
             Self::Volumes => "Volumes — named volumes",
             Self::Cache => "Cache — OCI image layers",
@@ -133,6 +134,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     let latest_clean = latest.strip_prefix('v').unwrap_or(&latest);
     if !args.force && latest_clean == CURRENT_VERSION {
         done("Already up to date.");
+        link_public_commands(&resolve_base_dir()?)?;
         return Ok(());
     }
 
@@ -142,7 +144,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
 
     let spinner = ui::Spinner::start("Updating", &format!("to {latest}"));
     let result = microsandbox::setup::Setup::builder()
-        .base_dir(base_dir)
+        .base_dir(base_dir.clone())
         .version(latest_clean.to_string())
         .force(true)
         .build()
@@ -154,6 +156,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
             spinner.finish_clear();
             done(&format!("Updated msb in {}", bin_dir.display()));
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
+            link_public_commands(&base_dir)?;
         }
         Err(e) => {
             spinner.finish_clear();
@@ -228,12 +231,13 @@ async fn run_uninstall(args: SelfUninstallArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remove everything: shell config + entire base directory.
+/// Remove everything: command links, legacy shell config, and entire base directory.
 fn uninstall_all(base_dir: &Path) -> anyhow::Result<()> {
-    clean_shell_config()?;
-    std::fs::remove_dir_all(base_dir)?;
+    remove_public_command_links(base_dir)?;
+    clean_legacy_shell_config()?;
+    fs::remove_dir_all(base_dir)?;
     ui::success("Removed", &base_dir.display().to_string());
-    done("Uninstall complete. Restart your shell to apply changes.");
+    done("Uninstall complete.");
     Ok(())
 }
 
@@ -406,6 +410,74 @@ fn resolve_base_dir() -> anyhow::Result<PathBuf> {
     Ok(microsandbox_utils::resolve_home())
 }
 
+fn local_bin_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".local").join("bin"))
+}
+
+fn public_command_links(base_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
+    let local_bin = local_bin_dir()?;
+    let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
+
+    Some(vec![
+        (local_bin.join("msb"), bin_dir.join("msb")),
+        (local_bin.join("microsandbox"), bin_dir.join("microsandbox")),
+    ])
+}
+
+fn link_public_commands(base_dir: &Path) -> anyhow::Result<()> {
+    let Some(links) = public_command_links(base_dir) else {
+        ui::warn("Skipped command links because no home directory was found");
+        return Ok(());
+    };
+
+    if let Some(parent) = links.first().and_then(|(link, _)| link.parent()) {
+        fs::create_dir_all(parent)?;
+    }
+
+    for (link, target) in links {
+        if link.exists() && !link.is_symlink() {
+            ui::warn(&format!(
+                "Skipped {} because it already exists",
+                link.display()
+            ));
+            continue;
+        }
+
+        if link.is_symlink() {
+            fs::remove_file(&link)?;
+        }
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        ui::success(
+            "Linked",
+            &format!("{} -> {}", link.display(), target.display()),
+        );
+    }
+
+    Ok(())
+}
+
+fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
+    let Some(links) = public_command_links(base_dir) else {
+        return Ok(());
+    };
+
+    for (link, target) in links {
+        if !link.is_symlink() {
+            continue;
+        }
+
+        if fs::read_link(&link)? == target {
+            fs::remove_file(&link)?;
+            ui::success("Removed", &link.display().to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn info(msg: &str) {
     eprintln!("{} {msg}", style("info").cyan().bold());
 }
@@ -467,7 +539,7 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
         if let Ok(content) = std::fs::read_to_string(&path)
             && content.lines().nth(1) == Some(INSTALL_MARKER)
         {
-            std::fs::remove_file(&path)?;
+            fs::remove_file(&path)?;
             let name = entry.file_name().to_string_lossy().to_string();
             ui::success("Removed", &format!("alias {name}"));
         }
@@ -476,21 +548,24 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remove microsandbox marker blocks from shell config files.
-fn clean_shell_config() -> anyhow::Result<()> {
+/// Remove microsandbox marker blocks from shell config files left by older installers.
+fn clean_legacy_shell_config() -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
 
     for rc in [".profile", ".bash_profile", ".bashrc", ".zshrc"] {
         let path = home.join(rc);
         if path.exists() && remove_marker_block(&path)? {
-            ui::success("Cleaned", &format!("~/{rc}"));
+            ui::success("Cleaned legacy shell config", &format!("~/{rc}"));
         }
     }
 
     let fish_conf = home.join(".config/fish/conf.d/microsandbox.fish");
     if fish_conf.exists() {
-        std::fs::remove_file(&fish_conf)?;
-        ui::success("Removed", "~/.config/fish/conf.d/microsandbox.fish");
+        fs::remove_file(&fish_conf)?;
+        ui::success(
+            "Removed legacy shell config",
+            "~/.config/fish/conf.d/microsandbox.fish",
+        );
     }
 
     Ok(())

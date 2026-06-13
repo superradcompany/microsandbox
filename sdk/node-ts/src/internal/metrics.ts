@@ -4,7 +4,10 @@ import type { NapiSandboxMetrics } from "./napi.js";
 export function metricsFromNapi(raw: NapiSandboxMetrics): SandboxMetrics {
   return {
     cpuPercent: raw.cpuPercent,
+    vcpuTimeNs: raw.vcpuTimeNs,
     memoryBytes: raw.memoryBytes,
+    memoryAvailableBytes: raw.memoryAvailableBytes ?? null,
+    memoryHostResidentBytes: raw.memoryHostResidentBytes ?? null,
     memoryLimitBytes: raw.memoryLimitBytes,
     diskReadBytes: raw.diskReadBytes,
     diskWriteBytes: raw.diskWriteBytes,

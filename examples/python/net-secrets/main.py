@@ -38,7 +38,7 @@ async def main():
     lines = output.stdout_text.strip().splitlines()
     print(f"HTTPS to cloudflare.com with placeholder (disallowed): {lines[-1] if lines else '?'}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     await Sandbox.remove("net-secrets")
 
 

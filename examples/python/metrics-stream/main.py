@@ -33,7 +33,7 @@ async def main():
 
     print(f"Collected {count} metric samples")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

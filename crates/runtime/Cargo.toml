@@ -28,7 +28,7 @@ microsandbox-metrics.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-utils.workspace = true
-msb_krun = { version = "0.1.14", features = ["blk"] }
+msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
 rustls = { workspace = true }
 sea-orm.workspace = true
