@@ -58,7 +58,7 @@ pub async fn maybe_stop(sandbox: &Sandbox) {
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
     let handle = Sandbox::get(name).await?;
 
-    match handle.status() {
+    match handle.status_snapshot() {
         SandboxStatus::Running | SandboxStatus::Draining => {
             // Connect to the running sandbox process via the agent relay.
             let sandbox = handle.connect().await?;
@@ -94,11 +94,11 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
                 }
             }
         }
-        SandboxStatus::Paused => {
+        SandboxStatus::Created | SandboxStatus::Starting | SandboxStatus::Paused => {
             anyhow::bail!(
                 "sandbox '{}' is in state {:?} and cannot be started",
                 name,
-                handle.status()
+                handle.status_snapshot()
             );
         }
     }

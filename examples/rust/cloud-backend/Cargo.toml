@@ -1,0 +1,15 @@
+[package]
+name = "cloud-backend"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "cloud-backend"
+path = "bin/main.rs"
+
+[dependencies]
+microsandbox = { path = "../../../crates/microsandbox" }
+tokio = { version = "1.42", features = ["full"] }
+futures = "0.3"
+anyhow = "1"

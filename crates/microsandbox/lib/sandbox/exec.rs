@@ -289,6 +289,15 @@ pub(crate) fn validate_rlimits(rlimits: &[Rlimit]) -> MicrosandboxResult<()> {
 }
 
 impl ExecOutput {
+    /// Create output from raw parts.
+    pub(crate) fn from_parts(status: ExitStatus, stdout: Bytes, stderr: Bytes) -> Self {
+        Self {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
     /// Exit code and success flag of the completed process.
     pub fn status(&self) -> ExitStatus {
         self.status
@@ -511,5 +520,178 @@ impl ExecSink {
             .send(self.id, MessageType::ExecStdin, &payload)
             .await?;
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Module: local (free fn impls called by LocalBackend's SandboxBackend impl)
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) mod local {
+    //! Local exec dispatch keyed by `(sandbox_name, cmd, opts)`.
+    //!
+    //! Opens a fresh agent UDS each call (option A in the parity plan).
+
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use microsandbox_protocol::{
+        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+        message::{Message, MessageType},
+    };
+    use tokio::sync::mpsc;
+
+    use crate::{
+        MicrosandboxError, MicrosandboxResult,
+        backend::LocalBackend,
+        sandbox::{SandboxConfig, build_exec_request},
+    };
+
+    use super::{ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode};
+
+    pub(crate) async fn exec_stream(
+        local: &LocalBackend,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> MicrosandboxResult<ExecHandle> {
+        exec_stream_with_pty_size(local, name, config, cmd, opts, 24, 80).await
+    }
+
+    pub(crate) async fn exec_stream_with_pty_size(
+        local: &LocalBackend,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+        rows: u16,
+        cols: u16,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let client = Arc::new(super::super::fs::local::connect_agent(local, name).await?);
+        let ExecOptions {
+            args,
+            cwd,
+            user,
+            env,
+            rlimits,
+            tty,
+            stdin: stdin_mode,
+            timeout: _,
+        } = opts;
+
+        tracing::debug!(
+            sandbox = %name,
+            cmd = %cmd,
+            args = ?args,
+            cwd = ?cwd,
+            tty,
+            "exec_stream"
+        );
+
+        let req = build_exec_request(
+            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
+        );
+        let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
+
+        let stdin = match &stdin_mode {
+            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client))),
+            _ => None,
+        };
+
+        if let StdinMode::Bytes(ref data) = stdin_mode {
+            let data = data.clone();
+            let bridge = Arc::clone(&client);
+            tokio::spawn(async move {
+                let payload = ExecStdin { data };
+                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                let close = ExecStdin { data: Vec::new() };
+                let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
+            });
+        }
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        tokio::spawn(event_mapper_task(rx, event_tx));
+
+        Ok(ExecHandle::new(id, event_rx, stdin, client))
+    }
+
+    pub(crate) async fn exec(
+        local: &LocalBackend,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let timeout_duration = opts.timeout;
+        let mut handle = exec_stream(local, name, config, cmd, opts).await?;
+
+        match timeout_duration {
+            Some(duration) => match tokio::time::timeout(duration, handle.collect()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let _ = handle.kill().await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), handle.collect())
+                            .await;
+                    Err(MicrosandboxError::ExecTimeout(duration))
+                }
+            },
+            None => handle.collect().await,
+        }
+    }
+
+    /// Background task that converts raw protocol messages into [`ExecEvent`]s.
+    async fn event_mapper_task(
+        mut rx: mpsc::Receiver<Message>,
+        tx: mpsc::UnboundedSender<ExecEvent>,
+    ) {
+        while let Some(msg) = rx.recv().await {
+            let event = match msg.t {
+                MessageType::ExecStarted => match msg.payload::<ExecStarted>() {
+                    Ok(started) => ExecEvent::Started { pid: started.pid },
+                    Err(_) => continue,
+                },
+                MessageType::ExecStdout => match msg.payload::<ExecStdout>() {
+                    Ok(out) => ExecEvent::Stdout(Bytes::from(out.data)),
+                    Err(_) => continue,
+                },
+                MessageType::ExecStderr => match msg.payload::<ExecStderr>() {
+                    Ok(err) => ExecEvent::Stderr(Bytes::from(err.data)),
+                    Err(_) => continue,
+                },
+                MessageType::ExecExited => {
+                    if let Ok(exited) = msg.payload::<ExecExited>() {
+                        let _ = tx.send(ExecEvent::Exited { code: exited.code });
+                    }
+                    break;
+                }
+                MessageType::ExecFailed => {
+                    if let Ok(failed) = msg.payload::<microsandbox_protocol::exec::ExecFailed>() {
+                        let _ = tx.send(ExecEvent::Failed(failed));
+                    }
+                    break;
+                }
+                MessageType::ExecStdinError => {
+                    match msg.payload::<microsandbox_protocol::exec::ExecStdinError>() {
+                        Ok(payload) => ExecEvent::StdinError(payload),
+                        Err(_) => continue,
+                    }
+                }
+                _ => continue,
+            };
+            if tx.send(event).is_err() {
+                break;
+            }
+        }
+    }
+
+    // Re-export so backend trait impl can also use ExitStatus for typing.
+    #[allow(dead_code)]
+    pub(crate) fn _exit_status(code: i32) -> ExitStatus {
+        ExitStatus {
+            code,
+            success: code == 0,
+        }
     }
 }

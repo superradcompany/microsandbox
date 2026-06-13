@@ -17,6 +17,11 @@ class InvalidConfigError(MicrosandboxError):
     code = "invalid-config"
 
 
+class CloudHttpError(MicrosandboxError):
+    """Cloud control-plane request failed."""
+    code = "cloud-http"
+
+
 class SandboxNotFoundError(MicrosandboxError):
     """Sandbox does not exist."""
     code = "sandbox-not-found"
@@ -110,3 +115,8 @@ class MetricsUnavailableError(MicrosandboxError):
 class UnsupportedOperationError(MicrosandboxError):
     """The sandbox runtime is too old for the requested operation."""
     code = "unsupported-operation"
+
+
+class UnsupportedError(MicrosandboxError):
+    """The selected backend does not support a requested feature yet."""
+    code = "unsupported"

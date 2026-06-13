@@ -1,21 +1,30 @@
 //! Named volume management.
 //!
-//! Volumes are persistent host-side directories stored under
-//! `~/.microsandbox/volumes/<name>/` with metadata tracked in the database.
+//! Volumes are persistent named storage. Locally they are host-side
+//! directories under `~/.microsandbox/volumes/<name>/` with metadata tracked
+//! in SQLite. Cloud-side they ultimately live in the org's S3 namespace via
+//! msb-cloud (Phase 6; today every cloud op returns `Unsupported`).
+//!
+//! Per the SDK local-cloud parity plan (D6.4) [`Volume`] and [`VolumeHandle`]
+//! stay single types regardless of backend. Each holds an
+//! [`Arc<dyn Backend>`](crate::backend::Backend) to route lifecycle ops
+//! through, and a backend-private [`VolumeInner`] / [`VolumeHandleInner`]
+//! enum carrying variant-specific state.
 
 pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 
-use std::{fs::File, os::fd::AsRawFd, path::PathBuf};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use microsandbox_image::ext4::{self, Ext4FormatOptions};
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
+use crate::backend::{
+    Backend, BackendKind, VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+};
 use crate::{
-    MicrosandboxError, MicrosandboxResult,
-    db::entity::{sandbox as sandbox_entity, volume as volume_entity},
-    sandbox::{NamedVolumeMode, SandboxConfig, SandboxStatus, VolumeMount},
-    size::Mebibytes,
+    MicrosandboxError, MicrosandboxResult, db::entity::volume as volume_entity, size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -23,13 +32,16 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// A named volume.
+///
+/// Holds the backend it was created on plus a backend-private
+/// [`VolumeInner`] enum carrying variant-specific state. Reach variant data
+/// via [`Volume::local`] / [`Volume::cloud`]; the public surface stays
+/// backend-agnostic.
+#[derive(Clone)]
 pub struct Volume {
+    backend: Arc<dyn Backend>,
+    inner: Arc<VolumeInner>,
     name: String,
-    path: PathBuf,
-    kind: VolumeKind,
-    capacity_bytes: Option<u64>,
-    disk_format: Option<String>,
-    disk_fstype: Option<String>,
 }
 
 /// Configuration for creating a volume.
@@ -61,22 +73,17 @@ pub enum VolumeKind {
     Disk,
 }
 
-/// A lightweight handle to a volume from the database.
+/// A lightweight handle to a volume.
 ///
-/// Provides metadata access and management operations without requiring
-/// a live [`Volume`] instance. Obtained via [`Volume::get`] or [`Volume::list`].
-#[derive(Debug)]
+/// Provides metadata access and management operations without requiring a
+/// live [`Volume`] instance. Obtained via [`Volume::get`] or [`Volume::list`].
+///
+/// Like [`Volume`], holds an [`Arc<dyn Backend>`] plus a backend-private
+/// [`VolumeHandleInner`] enum; users see a single uniform type.
 pub struct VolumeHandle {
-    db_id: i32,
+    backend: Arc<dyn Backend>,
+    inner: VolumeHandleInner,
     name: String,
-    kind: VolumeKind,
-    quota_mib: Option<u32>,
-    used_bytes: u64,
-    capacity_bytes: Option<u64>,
-    disk_format: Option<String>,
-    disk_fstype: Option<String>,
-    labels: Vec<(String, String)>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Builder for creating a volume.
@@ -84,13 +91,165 @@ pub struct VolumeBuilder {
     config: VolumeConfig,
 }
 
-/// Result of provisioning a named volume record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VolumeProvision {
-    /// The volume record was inserted by this operation.
-    Inserted,
-    /// A compatible existing record was reused.
-    Existing,
+//--------------------------------------------------------------------------------------------------
+// Methods: Volume (static)
+//--------------------------------------------------------------------------------------------------
+
+impl Volume {
+    /// Start building a new named volume. Call `.create()` on the returned
+    /// builder to persist it.
+    pub fn builder(name: impl Into<String>) -> VolumeBuilder {
+        VolumeBuilder::new(name)
+    }
+
+    /// Provision a volume.
+    ///
+    /// Routes through the ambient
+    /// [`default_backend`](crate::backend::default_backend) so a cloud profile
+    /// dispatches to [`CloudBackend`](crate::backend::CloudBackend) instead of
+    /// the local disk path. The returned `Volume` carries the backend it was
+    /// created on; subsequent method calls keep using that backend.
+    ///
+    /// Locally fails with [`MicrosandboxError::VolumeAlreadyExists`] if a
+    /// volume with the same name already exists.
+    pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
+        let backend = crate::backend::default_backend();
+        backend.volumes().create(backend.clone(), config).await
+    }
+
+    /// Get a volume handle by name from the active backend.
+    pub async fn get(name: &str) -> MicrosandboxResult<VolumeHandle> {
+        let backend = crate::backend::default_backend();
+        backend.volumes().get(backend.clone(), name).await
+    }
+
+    /// List all volumes from the active backend.
+    pub async fn list() -> MicrosandboxResult<Vec<VolumeHandle>> {
+        let backend = crate::backend::default_backend();
+        backend.volumes().list(backend.clone()).await
+    }
+
+    /// Remove a volume by name via the active backend.
+    pub async fn remove(name: &str) -> MicrosandboxResult<()> {
+        let backend = crate::backend::default_backend();
+        backend.volumes().remove(backend.clone(), name).await
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Volume (construction helpers)
+//--------------------------------------------------------------------------------------------------
+
+impl Volume {
+    /// Build an outer `Volume` from local-variant inner state.
+    pub(crate) fn from_local(
+        backend: Arc<dyn Backend>,
+        local: VolumeLocalState,
+        name: String,
+    ) -> Self {
+        Self {
+            backend,
+            inner: Arc::new(VolumeInner::Local(local)),
+            name,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Volume (instance)
+//--------------------------------------------------------------------------------------------------
+
+impl Volume {
+    /// Unique name identifying this volume.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Which backend variant this volume is bound to.
+    pub fn backend_kind(&self) -> BackendKind {
+        self.backend.kind()
+    }
+
+    /// Local-only volume state. Returns `Some` for local-backed volumes.
+    pub fn local(&self) -> Option<&VolumeLocalState> {
+        match &*self.inner {
+            VolumeInner::Local(s) => Some(s),
+            VolumeInner::Cloud(_) => None,
+        }
+    }
+
+    /// Cloud-only volume state. Returns `Some` for cloud-backed volumes.
+    pub fn cloud(&self) -> Option<&crate::backend::VolumeCloudState> {
+        match &*self.inner {
+            VolumeInner::Cloud(s) => Some(s),
+            VolumeInner::Local(_) => None,
+        }
+    }
+
+    /// Host-side directory where this volume's data is stored (local backend
+    /// only).
+    ///
+    /// Errors with [`MicrosandboxError::Unsupported`] for cloud volumes —
+    /// cloud bytes live in the org's S3 namespace, not on the caller's host.
+    pub fn path(&self) -> MicrosandboxResult<&Path> {
+        match &*self.inner {
+            VolumeInner::Local(s) => Ok(&s.path),
+            VolumeInner::Cloud(_) => Err(MicrosandboxError::Unsupported {
+                feature: "Volume::path on cloud".into(),
+                available_when: "never — cloud volumes don't live on the host".into(),
+            }),
+        }
+    }
+
+    /// Storage kind for this volume.
+    pub fn kind(&self) -> VolumeKind {
+        match &*self.inner {
+            VolumeInner::Local(s) => s.kind,
+            VolumeInner::Cloud(s) => s.kind,
+        }
+    }
+
+    /// Disk capacity in bytes for disk volumes.
+    pub fn capacity_bytes(&self) -> Option<u64> {
+        match &*self.inner {
+            VolumeInner::Local(s) => s.capacity_bytes,
+            VolumeInner::Cloud(s) => s.capacity_bytes,
+        }
+    }
+
+    /// Disk image format for disk volumes.
+    pub fn disk_format(&self) -> Option<&str> {
+        match &*self.inner {
+            VolumeInner::Local(s) => s.disk_format.as_deref(),
+            VolumeInner::Cloud(s) => s.disk_format.as_deref(),
+        }
+    }
+
+    /// Inner disk filesystem for disk volumes.
+    pub fn disk_fstype(&self) -> Option<&str> {
+        match &*self.inner {
+            VolumeInner::Local(s) => s.disk_fstype.as_deref(),
+            VolumeInner::Cloud(s) => s.disk_fstype.as_deref(),
+        }
+    }
+
+    /// Host path to the managed raw disk image for disk volumes.
+    pub fn disk_path(&self) -> Option<PathBuf> {
+        (self.kind() == VolumeKind::Disk).then(|| {
+            self.path()
+                .expect("disk_path is only available for local disk volumes")
+                .join("disk.raw")
+        })
+    }
+
+    /// Operate on the volume's filesystem (read, write, list files) without
+    /// needing a running sandbox.
+    ///
+    /// Routes through the backend trait — local ops hit `tokio::fs`, cloud
+    /// ops will route through msb-cloud HTTP once Phase 6 lands.
+    pub fn fs(&self) -> VolumeFs<'_> {
+        VolumeFs::new(self.backend.clone(), &self.name)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -98,8 +257,14 @@ pub(crate) enum VolumeProvision {
 //--------------------------------------------------------------------------------------------------
 
 impl VolumeHandle {
-    /// Create a handle from a database entity model.
-    pub(crate) fn from_model(model: volume_entity::Model) -> Self {
+    /// Build a handle from a local volume DB row.
+    ///
+    /// Derives the host-side path from the `backend`'s [`LocalBackend`]
+    /// view — callers don't have to thread the same backend in twice.
+    /// Panics if `backend` is not a [`LocalBackend`]; this is the local
+    /// construction path and is only called from `get_local` / `list_local`,
+    /// which have already routed through the local trait impl.
+    pub(crate) fn from_local_model(backend: Arc<dyn Backend>, model: volume_entity::Model) -> Self {
         let labels = model
             .labels
             .as_deref()
@@ -111,369 +276,146 @@ impl VolumeHandle {
             })
             .unwrap_or_default();
 
+        let local_backend = backend
+            .as_local()
+            .expect("from_local_model called outside a LocalBackend context");
+        let path = local_backend.volume_path(&model.name);
+        let name = model.name;
         Self {
-            db_id: model.id,
-            name: model.name,
-            kind: VolumeKind::from_db_value(&model.kind),
-            quota_mib: model.quota_mib.map(|v| v.max(0) as u32),
-            used_bytes: model.size_bytes.unwrap_or(0).max(0) as u64,
-            capacity_bytes: model.capacity_bytes.map(|v| v.max(0) as u64),
-            disk_format: model.disk_format,
-            disk_fstype: model.disk_fstype,
-            labels,
-            created_at: model.created_at.map(|dt| dt.and_utc()),
+            backend,
+            inner: VolumeHandleInner::Local(VolumeHandleLocalState {
+                db_id: model.id,
+                path,
+                kind: VolumeKind::from_db_value(&model.kind),
+                quota_mib: model.quota_mib.map(|v| v.max(0) as u32),
+                used_bytes: model.size_bytes.unwrap_or(0).max(0) as u64,
+                capacity_bytes: model.capacity_bytes.map(|v| v.max(0) as u64),
+                disk_format: model.disk_format,
+                disk_fstype: model.disk_fstype,
+                labels,
+                created_at: model.created_at.map(|dt| dt.and_utc()),
+            }),
+            name,
         }
     }
 
-    /// Unique name identifying this volume. Used to reference the volume
-    /// in sandbox mount configurations via `v.named(handle.name())`.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Storage kind for this volume.
-    pub fn kind(&self) -> VolumeKind {
-        self.kind
-    }
-
-    /// Maximum storage in MiB, or `None` if unlimited.
-    pub fn quota_mib(&self) -> Option<u32> {
-        self.quota_mib
-    }
-
-    /// Disk usage snapshot from when this handle was created. Not live —
-    /// call [`Volume::get`] again for a fresh reading.
-    pub fn used_bytes(&self) -> u64 {
-        self.used_bytes
-    }
-
-    /// Disk capacity in bytes for disk volumes.
-    pub fn capacity_bytes(&self) -> Option<u64> {
-        self.capacity_bytes
-    }
-
-    /// Disk image format for disk volumes. V1 always creates `raw`.
-    pub fn disk_format(&self) -> Option<&str> {
-        self.disk_format.as_deref()
-    }
-
-    /// Inner disk filesystem for disk volumes. V1 always creates `ext4`.
-    pub fn disk_fstype(&self) -> Option<&str> {
-        self.disk_fstype.as_deref()
-    }
-
-    /// Host path to the managed raw disk image for disk volumes.
-    pub fn disk_path(&self) -> Option<PathBuf> {
-        (self.kind == VolumeKind::Disk).then(|| {
-            crate::config::config()
-                .volumes_dir()
-                .join(&self.name)
-                .join("disk.raw")
-        })
-    }
-
-    /// Key-value labels for organizing and filtering volumes.
-    pub fn labels(&self) -> &[(String, String)] {
-        &self.labels
-    }
-
-    /// When this volume was first created, if recorded.
-    pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.created_at
-    }
-
-    /// Operate on the volume's host-side directory (read, write, list files)
-    /// without needing a running sandbox.
-    pub fn fs(&self) -> fs::VolumeFs<'_> {
-        let path = crate::config::config().volumes_dir().join(&self.name);
-        fs::VolumeFs::from_path(path)
-    }
-
-    /// Remove this volume from the database and filesystem.
-    ///
-    /// Deletes the DB record first, then the directory. An orphaned directory
-    /// is easier to detect and clean up than an orphaned DB record.
-    pub async fn remove(&self) -> MicrosandboxResult<()> {
-        let _name_lock = lock_volume_name(&self.name)?;
-        let _disk_lock = lock_disk_volume_for_remove(self)?;
-        let pools = crate::db::init_global().await?;
-        ensure_volume_not_referenced_by_active_sandbox(pools.read(), &self.name).await?;
-
-        // Delete the DB record first.
-        volume_entity::Entity::delete_by_id(self.db_id)
-            .exec(pools.write())
-            .await?;
-
-        // Then delete the directory.
-        let path = crate::config::config().volumes_dir().join(&self.name);
-        if path.exists() {
-            tokio::fs::remove_dir_all(&path).await?;
-        }
-
-        Ok(())
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: Static
-//--------------------------------------------------------------------------------------------------
-
-impl Volume {
-    /// Start building a new named volume. Call `.create()` on the returned
-    /// builder to persist it.
-    pub fn builder(name: impl Into<String>) -> VolumeBuilder {
-        VolumeBuilder::new(name)
-    }
-
-    /// Provision a volume: creates the host directory and database record.
-    /// Fails with [`MicrosandboxError::VolumeAlreadyExists`] if a volume
-    /// with the same name already exists.
-    pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
-        tracing::debug!(
-            name = %config.name,
-            kind = config.kind.as_str(),
-            quota_mib = ?config.quota_mib,
-            capacity_mib = ?config.capacity_mib,
-            "Volume::create"
-        );
-        validate_volume_name(&config.name)?;
-        validate_volume_config(&config)?;
-        let _name_lock = lock_volume_name(&config.name)?;
-
-        let pools = crate::db::init_global().await?;
-
-        // Check for existing volume.
-        let existing = volume_entity::Entity::find()
-            .filter(volume_entity::Column::Name.eq(&config.name))
-            .one(pools.read())
-            .await?;
-        if existing.is_some() {
-            return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
-        }
-
-        let volumes_dir = crate::config::config().volumes_dir();
-        tokio::fs::create_dir_all(&volumes_dir).await?;
-        let path = volumes_dir.join(&config.name);
-        if path.exists() {
-            return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
-        }
-
-        let temp = tempfile::Builder::new()
-            .prefix(&format!(".{}.", config.name))
-            .tempdir_in(&volumes_dir)?;
-        provision_volume_path(&config, temp.path()).await?;
-        tokio::fs::rename(temp.path(), &path).await?;
-        let _ = temp.keep();
-
-        // Serialize labels.
-        let labels_json = if config.labels.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&config.labels)?)
-        };
-
-        // Insert DB record first — orphaned directories are easier to clean
-        // up than orphaned DB records.
-        let now = chrono::Utc::now().naive_utc();
-        let capacity_bytes = config.capacity_mib.map(|mib| i64::from(mib) * 1024 * 1024);
-        let model = volume_entity::ActiveModel {
-            name: Set(config.name.clone()),
-            kind: Set(config.kind.as_str().to_string()),
-            quota_mib: Set(config.quota_mib.map(|v| v as i32)),
-            size_bytes: Set(None),
-            capacity_bytes: Set(capacity_bytes),
-            disk_format: Set((config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
-            disk_fstype: Set((config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
-            labels: Set(labels_json),
-            created_at: Set(Some(now)),
-            updated_at: Set(Some(now)),
-            ..Default::default()
-        };
-
-        if let Err(e) = volume_entity::Entity::insert(model)
-            .exec(pools.write())
-            .await
-        {
-            let _ = tokio::fs::remove_dir_all(&path).await;
-            return Err(e.into());
-        }
-
-        Ok(Self {
-            name: config.name,
-            path,
-            kind: config.kind,
-            capacity_bytes: capacity_bytes.map(|v| v as u64),
-            disk_format: (config.kind == VolumeKind::Disk).then(|| "raw".to_string()),
-            disk_fstype: (config.kind == VolumeKind::Disk).then(|| "ext4".to_string()),
-        })
-    }
-
-    /// Provision the volume DB record inside the caller's transaction.
-    ///
-    /// Lets sandbox-time named volume creation insert the volume and sandbox
-    /// in one atomic write so a concurrent `Volume::list` cannot observe the
-    /// volume before the owning sandbox exists.
-    /// Returns [`MicrosandboxError::VolumeAlreadyExists`] if the name
-    /// is already in the table.
-    ///
-    /// The caller is responsible for creating the on-disk directory
-    /// after the transaction commits (or rolling back via
-    /// `Volume::remove` if the directory step fails).
-    pub(crate) async fn provision_in_transaction<C: ConnectionTrait>(
-        txn: &C,
-        config: &VolumeConfig,
-        mode: NamedVolumeMode,
-    ) -> MicrosandboxResult<VolumeProvision> {
-        validate_volume_name(&config.name)?;
-        validate_volume_config(config)?;
-
-        let existing = volume_entity::Entity::find()
-            .filter(volume_entity::Column::Name.eq(&config.name))
-            .one(txn)
-            .await?;
-        if let Some(existing) = existing {
-            return match mode {
-                NamedVolumeMode::Create => {
-                    Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()))
-                }
-                NamedVolumeMode::EnsureExists => {
-                    validate_existing_volume_config(&existing, config)?;
-                    Ok(VolumeProvision::Existing)
-                }
-                NamedVolumeMode::Existing => Ok(VolumeProvision::Existing),
-            };
-        }
-
-        if mode == NamedVolumeMode::Existing {
-            return Err(MicrosandboxError::VolumeNotFound(config.name.clone()));
-        }
-
-        let labels_json = if config.labels.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&config.labels)?)
-        };
-        let now = chrono::Utc::now().naive_utc();
-        let capacity_bytes = config.capacity_mib.map(|mib| i64::from(mib) * 1024 * 1024);
-        let model = volume_entity::ActiveModel {
-            name: Set(config.name.clone()),
-            kind: Set(config.kind.as_str().to_string()),
-            quota_mib: Set(config.quota_mib.map(|v| v as i32)),
-            size_bytes: Set(None),
-            capacity_bytes: Set(capacity_bytes),
-            disk_format: Set((config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
-            disk_fstype: Set((config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
-            labels: Set(labels_json),
-            created_at: Set(Some(now)),
-            updated_at: Set(Some(now)),
-            ..Default::default()
-        };
-        volume_entity::Entity::insert(model).exec(txn).await?;
-        Ok(VolumeProvision::Inserted)
-    }
-
-    /// Resolve the on-disk path for a named volume.
-    pub(crate) fn path_for(name: &str) -> PathBuf {
-        crate::config::config().volumes_dir().join(name)
-    }
-
-    /// Provision the on-disk artifact for a volume registered via
-    /// [`provision_in_transaction`].
-    pub(crate) async fn materialise_for(config: &VolumeConfig) -> MicrosandboxResult<()> {
-        let volumes_dir = crate::config::config().volumes_dir();
-        tokio::fs::create_dir_all(&volumes_dir).await?;
-        let path = volumes_dir.join(&config.name);
-        if path.exists() {
-            return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
-        }
-        let temp = tempfile::Builder::new()
-            .prefix(&format!(".{}.", config.name))
-            .tempdir_in(&volumes_dir)?;
-        provision_volume_path(config, temp.path()).await?;
-        tokio::fs::rename(temp.path(), &path).await?;
-        let _ = temp.keep();
-        Ok(())
-    }
-
-    /// Get a volume handle by name from the database.
-    ///
-    /// Returns a lightweight handle for metadata and management operations.
-    pub async fn get(name: &str) -> MicrosandboxResult<VolumeHandle> {
-        let db = crate::db::init_global().await?.read();
-
-        let model = volume_entity::Entity::find()
-            .filter(volume_entity::Column::Name.eq(name))
-            .one(db)
-            .await?
-            .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
-
-        Ok(VolumeHandle::from_model(model))
-    }
-
-    /// List all volumes, ordered by creation time (newest first).
-    pub async fn list() -> MicrosandboxResult<Vec<VolumeHandle>> {
-        let db = crate::db::init_global().await?.read();
-
-        let models = volume_entity::Entity::find()
-            .order_by_desc(volume_entity::Column::CreatedAt)
-            .all(db)
-            .await?;
-
-        Ok(models.into_iter().map(VolumeHandle::from_model).collect())
-    }
-
-    /// Delete a volume's database record and host directory.
-    /// Fails with [`MicrosandboxError::VolumeNotFound`] if no such volume exists.
-    pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        Self::get(name).await?.remove().await
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: Instance
-//--------------------------------------------------------------------------------------------------
-
-impl Volume {
     /// Unique name identifying this volume.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Storage kind for this volume.
-    pub fn kind(&self) -> VolumeKind {
-        self.kind
+    /// Which backend variant this handle is bound to.
+    pub fn backend_kind(&self) -> BackendKind {
+        self.backend.kind()
     }
 
-    /// Host-side directory where this volume's data is stored
-    /// (under `~/.microsandbox/volumes/<name>/`).
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
+    /// Local-only handle state. Returns `Some` for local-backed handles.
+    pub fn local(&self) -> Option<&VolumeHandleLocalState> {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => Some(s),
+            VolumeHandleInner::Cloud(_) => None,
+        }
+    }
+
+    /// Cloud-only handle state. Returns `Some` for cloud-backed handles.
+    pub fn cloud(&self) -> Option<&crate::backend::VolumeHandleCloudState> {
+        match &self.inner {
+            VolumeHandleInner::Cloud(s) => Some(s),
+            VolumeHandleInner::Local(_) => None,
+        }
+    }
+
+    /// Maximum storage in MiB, or `None` if unlimited.
+    pub fn quota_mib(&self) -> Option<u32> {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.quota_mib,
+            VolumeHandleInner::Cloud(s) => s.quota_mib,
+        }
+    }
+
+    /// Storage kind for this volume.
+    pub fn kind(&self) -> VolumeKind {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.kind,
+            VolumeHandleInner::Cloud(s) => s.kind,
+        }
+    }
+
+    /// Disk usage snapshot from when this handle was created. Not live —
+    /// call [`Volume::get`] again for a fresh reading.
+    pub fn used_bytes(&self) -> u64 {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.used_bytes,
+            VolumeHandleInner::Cloud(s) => s.used_bytes,
+        }
     }
 
     /// Disk capacity in bytes for disk volumes.
     pub fn capacity_bytes(&self) -> Option<u64> {
-        self.capacity_bytes
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.capacity_bytes,
+            VolumeHandleInner::Cloud(s) => s.capacity_bytes,
+        }
     }
 
-    /// Disk image format for disk volumes. V1 always creates `raw`.
+    /// Disk image format for disk volumes.
     pub fn disk_format(&self) -> Option<&str> {
-        self.disk_format.as_deref()
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.disk_format.as_deref(),
+            VolumeHandleInner::Cloud(s) => s.disk_format.as_deref(),
+        }
     }
 
-    /// Inner disk filesystem for disk volumes. V1 always creates `ext4`.
+    /// Inner disk filesystem for disk volumes.
     pub fn disk_fstype(&self) -> Option<&str> {
-        self.disk_fstype.as_deref()
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.disk_fstype.as_deref(),
+            VolumeHandleInner::Cloud(s) => s.disk_fstype.as_deref(),
+        }
     }
 
     /// Host path to the managed raw disk image for disk volumes.
     pub fn disk_path(&self) -> Option<PathBuf> {
-        (self.kind == VolumeKind::Disk).then(|| self.path.join("disk.raw"))
+        match &self.inner {
+            VolumeHandleInner::Local(s) if s.kind == VolumeKind::Disk => {
+                Some(s.path.join("disk.raw"))
+            }
+            _ => None,
+        }
     }
 
-    /// Operate on the volume's host-side directory (read, write, list files)
-    /// without needing a running sandbox.
-    pub fn fs(&self) -> fs::VolumeFs<'_> {
-        fs::VolumeFs::from_path_ref(&self.path)
+    /// Key-value labels for organizing and filtering volumes.
+    pub fn labels(&self) -> &[(String, String)] {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => &s.labels,
+            VolumeHandleInner::Cloud(s) => &s.labels,
+        }
+    }
+
+    /// When this volume was first created, if recorded.
+    pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        match &self.inner {
+            VolumeHandleInner::Local(s) => s.created_at,
+            VolumeHandleInner::Cloud(s) => s.created_at,
+        }
+    }
+
+    /// Operate on the volume's filesystem (read, write, list files) without
+    /// needing a running sandbox. Routes through the bound backend.
+    pub fn fs(&self) -> VolumeFs<'_> {
+        VolumeFs::new(self.backend.clone(), &self.name)
+    }
+
+    /// Remove this volume.
+    ///
+    /// Locally deletes the DB record first, then the directory. An orphaned
+    /// directory is easier to detect and clean up than an orphaned DB record.
+    /// Cloud handles route through the backend's remove endpoint.
+    pub async fn remove(&self) -> MicrosandboxResult<()> {
+        self.backend
+            .volumes()
+            .remove(self.backend.clone(), &self.name)
+            .await
     }
 }
 
@@ -540,7 +482,8 @@ impl VolumeBuilder {
         self.config
     }
 
-    /// Create the volume.
+    /// Create the volume. Routes through the ambient
+    /// [`default_backend`](crate::backend::default_backend).
     pub async fn create(self) -> MicrosandboxResult<Volume> {
         Volume::create(self.config).await
     }
@@ -577,13 +520,179 @@ impl VolumeKind {
     }
 }
 
+impl std::fmt::Debug for VolumeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VolumeHandle")
+            .field("name", &self.name)
+            .field("backend_kind", &self.backend.kind())
+            .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Local lifecycle (called from the LocalBackend VolumeBackend impl)
+//--------------------------------------------------------------------------------------------------
+
+/// Local create path. Inserts a DB record, creates the host directory, and
+/// returns a wrapped [`Volume`]. On directory-create failure rolls back the
+/// DB insert so we don't leak phantom rows.
+pub(crate) async fn create_local(
+    backend: Arc<dyn Backend>,
+    config: VolumeConfig,
+) -> MicrosandboxResult<Volume> {
+    tracing::debug!(name = %config.name, quota_mib = ?config.quota_mib, "Volume::create");
+    validate_volume_name(&config.name)?;
+    validate_volume_config(&config)?;
+
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "Volume::create_local".into(),
+            available_when: "with a LocalBackend".into(),
+        })?;
+    let pools = local_backend.db().await?;
+
+    // Check for existing volume.
+    let existing = volume_entity::Entity::find()
+        .filter(volume_entity::Column::Name.eq(&config.name))
+        .one(pools.read())
+        .await?;
+    if existing.is_some() {
+        return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
+    }
+
+    // Serialize labels.
+    let labels_json = if config.labels.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&config.labels)?)
+    };
+
+    // Insert DB record first — orphaned directories are easier to clean
+    // up than orphaned DB records.
+    let now = chrono::Utc::now().naive_utc();
+    let model = volume_entity::ActiveModel {
+        name: Set(config.name.clone()),
+        kind: Set(config.kind.as_str().to_string()),
+        quota_mib: Set(config.quota_mib.map(|v| v as i32)),
+        size_bytes: Set(None),
+        capacity_bytes: Set(config.capacity_mib.map(|mib| i64::from(mib) * 1024 * 1024)),
+        disk_format: Set((config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
+        disk_fstype: Set((config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
+        labels: Set(labels_json),
+        created_at: Set(Some(now)),
+        updated_at: Set(Some(now)),
+        ..Default::default()
+    };
+
+    volume_entity::Entity::insert(model)
+        .exec(pools.write())
+        .await?;
+
+    // Create the volume directory. If this fails, clean up the DB record.
+    let path = local_backend.volume_path(&config.name);
+
+    if let Err(e) = provision_volume_path(&config, &path).await {
+        let _ = volume_entity::Entity::delete_many()
+            .filter(volume_entity::Column::Name.eq(&config.name))
+            .exec(pools.write())
+            .await;
+        return Err(e);
+    }
+
+    Ok(Volume::from_local(
+        backend,
+        VolumeLocalState {
+            path,
+            kind: config.kind,
+            capacity_bytes: config.capacity_mib.map(|mib| u64::from(mib) * 1024 * 1024),
+            disk_format: (config.kind == VolumeKind::Disk).then(|| "raw".to_string()),
+            disk_fstype: (config.kind == VolumeKind::Disk).then(|| "ext4".to_string()),
+        },
+        config.name,
+    ))
+}
+
+/// Local get path. Loads a volume row by name and wraps it in a
+/// [`VolumeHandle`] bound to the supplied backend.
+pub(crate) async fn get_local(
+    backend: Arc<dyn Backend>,
+    name: &str,
+) -> MicrosandboxResult<VolumeHandle> {
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "Volume::get_local".into(),
+            available_when: "with a LocalBackend".into(),
+        })?;
+    let db = local_backend.db().await?.read();
+
+    let model = volume_entity::Entity::find()
+        .filter(volume_entity::Column::Name.eq(name))
+        .one(db)
+        .await?
+        .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
+
+    let handle = VolumeHandle::from_local_model(backend, model);
+    Ok(handle)
+}
+
+/// Local list path. Returns all volumes ordered newest-first.
+pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<Vec<VolumeHandle>> {
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "Volume::list_local".into(),
+            available_when: "with a LocalBackend".into(),
+        })?;
+    let db = local_backend.db().await?.read();
+
+    let models = volume_entity::Entity::find()
+        .order_by_desc(volume_entity::Column::CreatedAt)
+        .all(db)
+        .await?;
+
+    Ok(models
+        .into_iter()
+        .map(|m| VolumeHandle::from_local_model(backend.clone(), m))
+        .collect())
+}
+
+/// Local remove path. Deletes the DB record first, then the directory.
+pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> MicrosandboxResult<()> {
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "Volume::remove_local".into(),
+            available_when: "with a LocalBackend".into(),
+        })?;
+    let pools = local_backend.db().await?;
+
+    let model = volume_entity::Entity::find()
+        .filter(volume_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
+
+    volume_entity::Entity::delete_by_id(model.id)
+        .exec(pools.write())
+        .await?;
+
+    let path = local_backend.volume_path(name);
+    if path.exists() {
+        tokio::fs::remove_dir_all(&path).await?;
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-async fn provision_volume_path(
+pub(crate) async fn provision_volume_path(
     config: &VolumeConfig,
-    path: &std::path::Path,
+    path: &Path,
 ) -> MicrosandboxResult<()> {
     tokio::fs::create_dir_all(path).await?;
 
@@ -611,12 +720,12 @@ async fn provision_volume_path(
     }
 }
 
-fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
+pub(crate) fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
     match config.kind {
         VolumeKind::Directory => {
             if config.capacity_mib.is_some() {
                 return Err(MicrosandboxError::InvalidConfig(
-                    "directory named volumes do not support .size(...) / --size in v1".into(),
+                    "directory named volumes do not support .size(...) / --size".into(),
                 ));
             }
             Ok(())
@@ -635,151 +744,6 @@ fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
             Ok(())
         }
     }
-}
-
-fn validate_existing_volume_config(
-    existing: &volume_entity::Model,
-    requested: &VolumeConfig,
-) -> MicrosandboxResult<()> {
-    let existing_kind = VolumeKind::from_db_value(&existing.kind);
-    if existing_kind != requested.kind {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "named volume {:?} already exists with kind {:?}, requested {:?}",
-            requested.name, existing_kind, requested.kind
-        )));
-    }
-
-    let requested_quota = requested.quota_mib.map(|value| value as i32);
-    if existing.quota_mib != requested_quota {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "named volume {:?} already exists with quota {:?}, requested {:?}",
-            requested.name, existing.quota_mib, requested_quota
-        )));
-    }
-
-    let requested_capacity = requested
-        .capacity_mib
-        .map(|value| i64::from(value) * 1024 * 1024);
-    if existing.capacity_bytes != requested_capacity {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "named volume {:?} already exists with capacity {:?}, requested {:?}",
-            requested.name, existing.capacity_bytes, requested_capacity
-        )));
-    }
-
-    if !requested.labels.is_empty() {
-        let existing_labels = existing
-            .labels
-            .as_deref()
-            .map(serde_json::from_str::<Vec<(String, String)>>)
-            .transpose()?
-            .unwrap_or_default();
-        if existing_labels != requested.labels {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "named volume {:?} already exists with different labels",
-                requested.name
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn lock_volume_name(name: &str) -> MicrosandboxResult<File> {
-    let volumes_dir = crate::config::config().volumes_dir();
-    std::fs::create_dir_all(&volumes_dir)?;
-    let locks_dir = volumes_dir.join(".locks");
-    std::fs::create_dir_all(&locks_dir)?;
-    let path = locks_dir.join(format!("{name}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)?;
-
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    Ok(file)
-}
-
-fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Option<File>> {
-    if handle.kind() != VolumeKind::Disk {
-        return Ok(None);
-    }
-
-    let Some(path) = handle.disk_path() else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|e| {
-            MicrosandboxError::InvalidConfig(format!(
-                "open disk named volume {} for removal: {e}",
-                handle.name()
-            ))
-        })?;
-
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = std::io::Error::last_os_error();
-        if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "volume {:?} is currently attached by a running sandbox",
-                handle.name()
-            )));
-        }
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "lock disk named volume {} for removal: {err}",
-            handle.name()
-        )));
-    }
-
-    Ok(Some(file))
-}
-
-async fn ensure_volume_not_referenced_by_active_sandbox<C>(
-    db: &C,
-    name: &str,
-) -> MicrosandboxResult<()>
-where
-    C: ConnectionTrait,
-{
-    let sandboxes = sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Status.is_in([
-            SandboxStatus::Running,
-            SandboxStatus::Draining,
-            SandboxStatus::Paused,
-        ]))
-        .all(db)
-        .await?;
-
-    for sandbox in sandboxes {
-        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
-        if config.mounts.iter().any(|mount| {
-            matches!(
-                mount,
-                VolumeMount::Named {
-                    name: mounted_name,
-                    ..
-                } if mounted_name == name
-            )
-        }) {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "volume {name:?} is attached to active sandbox {:?}",
-                sandbox.name
-            )));
-        }
-    }
-
-    Ok(())
 }
 
 /// Validate that a volume name is safe for use as a directory name.

@@ -22,7 +22,7 @@ mod verify;
 
 use std::path::{Path, PathBuf};
 
-use crate::MicrosandboxResult;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 /// A snapshot artifact on disk.
 ///
@@ -100,7 +100,9 @@ impl Snapshot {
     /// cache; index failures are logged but do not fail the call —
     /// the artifact is the source of truth.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
-        create::create_snapshot(config).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        create::create_snapshot(local, config).await
     }
 
     /// Open an existing snapshot artifact by path or bare name.
@@ -112,7 +114,9 @@ impl Snapshot {
     /// upper file exists with the recorded size. It does not read the
     /// full upper contents.
     pub async fn open(path_or_name: impl AsRef<str>) -> MicrosandboxResult<Self> {
-        store::open_snapshot(path_or_name.as_ref()).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::open_snapshot(local, path_or_name.as_ref()).await
     }
 
     /// Verify recorded content integrity for this snapshot, if present.
@@ -143,7 +147,9 @@ impl Snapshot {
 
     /// Get a handle by digest, name, or path from the local index.
     pub async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle> {
-        store::get_handle(name_or_digest).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::get_handle(local, name_or_digest).await
     }
 
     /// List indexed snapshots from the local DB cache.
@@ -152,14 +158,18 @@ impl Snapshot {
     /// index and won't appear here; use [`list_dir`](Self::list_dir)
     /// to enumerate artifacts on disk directly.
     pub async fn list() -> MicrosandboxResult<Vec<SnapshotHandle>> {
-        store::list_indexed().await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::list_indexed(local).await
     }
 
     /// Walk a directory and parse each subdirectory's manifest. Does
     /// not touch the index. Skips entries that don't look like
     /// snapshot artifacts.
     pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>> {
-        store::list_dir(dir.as_ref()).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::list_dir(local, dir.as_ref()).await
     }
 
     /// Remove a snapshot artifact (by path or name) and its index row.
@@ -167,13 +177,17 @@ impl Snapshot {
     /// Refuses if the snapshot has indexed children, unless `force`
     /// is set. The artifact directory is deleted on success.
     pub async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
-        store::remove_snapshot(path_or_name, force).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::remove_snapshot(local, path_or_name, force).await
     }
 
     /// Rebuild the local index from the artifacts in `dir`. Returns
     /// the number of artifacts indexed.
     pub async fn reindex(dir: impl AsRef<Path>) -> MicrosandboxResult<usize> {
-        store::reindex_dir(dir.as_ref()).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        store::reindex_dir(local, dir.as_ref()).await
     }
 
     /// Bundle a snapshot into a `.tar.zst` archive.
@@ -182,7 +196,9 @@ impl Snapshot {
         out: &Path,
         opts: archive::ExportOpts,
     ) -> MicrosandboxResult<()> {
-        archive::export_snapshot(name_or_path, out, opts).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::export_snapshot(local, name_or_path, out, opts).await
     }
 
     /// Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
@@ -191,7 +207,18 @@ impl Snapshot {
         archive_path: &Path,
         dest: Option<&Path>,
     ) -> MicrosandboxResult<SnapshotHandle> {
-        archive::import_snapshot(archive_path, dest).await
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::import_snapshot(local, archive_path, dest).await
+    }
+}
+
+/// Build an `Unsupported` error for snapshot ops that aren't wired through
+/// the cloud trait yet. Snapshots are local-only today.
+fn snapshots_require_local() -> MicrosandboxError {
+    MicrosandboxError::Unsupported {
+        feature: "Snapshot operations".into(),
+        available_when: "when cloud snapshots land".into(),
     }
 }
 

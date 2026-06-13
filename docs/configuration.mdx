@@ -49,6 +49,17 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
         "secret_name": "dockerhub-token"
       }
     }
+  },
+  "active_profile": "prod",
+  "profiles": {
+    "prod": {
+      "backend": "cloud",
+      "url": "https://cloud.example.com",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "backend": "local"
+    }
   }
 }
 ```
@@ -64,6 +75,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
 | `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
 | `registries` | [reference](#registries) | Container registry authentication |
+| `active_profile` | `null` | Default backend profile name |
+| `profiles` | `{}` | Named backend profiles |
 
 ## `database`
 
@@ -150,3 +163,44 @@ When pulling from a registry, credentials are resolved in this order:
 3. **Config file** `registries.auth` entries in `config.json`
 4. **Docker config** `~/.docker/config.json` credential helpers
 5. **Anonymous** (no authentication)
+
+## Backend profiles
+
+Backend profiles let CLI and SDK calls choose between the local runtime and a cloud backend from the same `config.json` file.
+
+```json
+{
+  "active_profile": "prod",
+  "profiles": {
+    "prod": {
+      "backend": "cloud",
+      "url": "https://cloud.example.com",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "backend": "local"
+    }
+  }
+}
+```
+
+Use `active_profile` for the default profile. Use `MSB_PROFILE=<name>` to override it for a single command:
+
+```bash
+MSB_PROFILE=prod msb run python -- python -V
+```
+
+Cloud profiles require `url` and `api_key_ref`. Supported credential references are:
+
+| Prefix | Description |
+|--------|-------------|
+| `env:<VAR_NAME>` | Read the API key from an environment variable |
+| `inline:<API_KEY>` | Store the API key directly in `config.json`; use only for development or CI |
+
+Backend resolution uses this order:
+
+1. Programmatic backend set by the SDK
+2. `MSB_BACKEND=local`, or `MSB_API_URL` plus `MSB_API_KEY`
+3. `MSB_PROFILE=<name>`
+4. `active_profile`
+5. Local runtime

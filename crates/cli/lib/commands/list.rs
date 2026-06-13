@@ -48,9 +48,9 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         .into_iter()
         .filter(|s| {
             if args.running {
-                s.status() == SandboxStatus::Running
+                s.status_snapshot() == SandboxStatus::Running
             } else if args.stopped {
-                s.status() == SandboxStatus::Stopped
+                s.status_snapshot() == SandboxStatus::Stopped
             } else {
                 true
             }
@@ -78,7 +78,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 
     for s in &filtered {
         let image = extract_image(s.config_json());
-        let status = format!("{:?}", s.status());
+        let status = format!("{:?}", s.status_snapshot());
         let created = s
             .created_at()
             .as_ref()
@@ -117,7 +117,7 @@ fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
         .map(|s| {
             serde_json::json!({
                 "name": s.name(),
-                "status": format!("{:?}", s.status()),
+                "status": format!("{:?}", s.status_snapshot()),
                 "created_at": s.created_at().map(|dt| ui::format_json_datetime(&dt)),
                 "image": extract_image(s.config_json()),
             })

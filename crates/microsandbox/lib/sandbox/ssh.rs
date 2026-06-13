@@ -11,10 +11,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use microsandbox_protocol::fs::FS_CHUNK_SIZE;
-use microsandbox_protocol::message::{Message, MessageType};
-use microsandbox_protocol::tcp::{
-    TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed,
+use microsandbox_protocol::{
+    fs::{
+        FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse,
+        FsResponseData, FsSetAttrs,
+    },
+    message::MessageType,
 };
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
@@ -42,7 +44,7 @@ pub const DEFAULT_SSH_PORT: u16 = 2222;
 
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
-pub struct SandboxSshOps {
+pub struct SandboxSsh {
     sandbox: Sandbox,
 }
 
@@ -101,9 +103,6 @@ pub struct SshClient {
     handle: russh::client::Handle<SshClientHandler>,
     term: String,
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
-    /// Protocol generation negotiated with the sandbox, captured at connect.
-    /// SFTP rides on the filesystem protocol, so it is gated against this through
-    /// `AgentClient::ensure_version_compat_for`.
     negotiated_version: u8,
 }
 
@@ -148,19 +147,6 @@ struct SshSession {
     channels: HashMap<ChannelId, ChannelState>,
 }
 
-impl Drop for SshSession {
-    fn drop(&mut self) {
-        // If the session is torn down without a per-channel close (e.g. the
-        // connection drops), abort any still-running tcp relay tasks so they
-        // don't linger waiting on a guest acknowledgement.
-        for state in self.channels.values() {
-            if let ChannelState::Tcp { relay, .. } = state {
-                relay.abort();
-            }
-        }
-    }
-}
-
 enum ChannelState {
     Pending {
         channel: Option<Channel<Msg>>,
@@ -170,13 +156,6 @@ enum ChannelState {
     Exec {
         control: ExecControl,
         stdin: Option<ExecSink>,
-    },
-    Tcp {
-        id: u32,
-        client: Arc<AgentClient>,
-        /// The guest->ssh relay task. Aborted on channel close so teardown is
-        /// immediate instead of waiting for the guest to acknowledge the close.
-        relay: tokio::task::JoinHandle<()>,
     },
     Sftp,
 }
@@ -189,10 +168,10 @@ struct PtyInfo {
 }
 
 struct SftpServerSession {
-    fs: crate::sandbox::fs::SandboxFsOps,
+    client: Arc<AgentClient>,
     cwd: String,
     next_handle: u64,
-    handles: HashMap<String, crate::sandbox::FsHandle>,
+    handles: HashMap<String, crate::sandbox::fs::FsHandle>,
 }
 
 /// Ordered duplex stream backed by this process's stdin and stdout.
@@ -215,25 +194,30 @@ enum ExecCommand {
 
 impl Sandbox {
     /// Return the SSH namespace for this sandbox.
-    pub fn ssh(&self) -> SandboxSshOps {
-        SandboxSshOps {
+    pub fn ssh(&self) -> SandboxSsh {
+        SandboxSsh {
             sandbox: self.clone(),
         }
     }
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxSshOps
+// Methods: SandboxSsh
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxSshOps {
+impl SandboxSsh {
+    /// Connect a native in-process SSH client to this sandbox.
+    pub async fn connect(&self) -> MicrosandboxResult<SshClient> {
+        self.connect_with(|opts| opts).await
+    }
+
     /// Connect a native in-process SSH client to this sandbox.
     pub async fn open_client(&self) -> MicrosandboxResult<SshClient> {
-        self.open_client_with(|opts| opts).await
+        self.connect().await
     }
 
     /// Connect a native in-process SSH client with custom options.
-    pub async fn open_client_with(
+    pub async fn connect_with(
         &self,
         f: impl FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder,
     ) -> MicrosandboxResult<SshClient> {
@@ -251,7 +235,7 @@ impl SandboxSshOps {
         let term = options.term.clone();
         let sftp = options.sftp;
         let server = self
-            .prepare_server_with(|opts| {
+            .server_with(|opts| {
                 opts.host_key(host_key)
                     .authorized_key(authorized_key)
                     .user(user.clone())
@@ -260,7 +244,7 @@ impl SandboxSshOps {
             .await?;
 
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
-        let server_task = tokio::spawn(async move { server.serve_connection(server_stream).await });
+        let server_task = tokio::spawn(async move { server.serve(server_stream).await });
         let mut client = match russh::client::connect_stream(
             Arc::new(russh::client::Config::default()),
             client_stream,
@@ -307,24 +291,48 @@ impl SandboxSshOps {
         })
     }
 
+    /// Connect a native in-process SSH client with custom options.
+    pub async fn open_client_with(
+        &self,
+        f: impl FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder,
+    ) -> MicrosandboxResult<SshClient> {
+        self.connect_with(f).await
+    }
+
+    /// Prepare a reusable SSH server endpoint for this sandbox.
+    pub async fn server(&self) -> MicrosandboxResult<SshServer> {
+        self.server_with(|opts| opts).await
+    }
+
     /// Prepare a reusable SSH server endpoint for this sandbox.
     pub async fn prepare_server(&self) -> MicrosandboxResult<SshServer> {
-        self.prepare_server_with(|opts| opts).await
+        self.server().await
     }
 
     /// Prepare a reusable SSH server endpoint with custom options.
-    pub async fn prepare_server_with(
+    pub async fn server_with(
         &self,
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
+        let local_backend =
+            self.sandbox
+                .backend()
+                .as_local()
+                .ok_or_else(|| MicrosandboxError::Unsupported {
+                    feature: "Sandbox::ssh on cloud".into(),
+                    available_when: "when cloud SSH proxying lands".into(),
+                })?;
         let options = f(SshServerOptionsBuilder::default()).build();
-        let authorized_keys = build_authorized_keys(&options)?;
+        let authorized_keys = build_authorized_keys(&options, local_backend.config())?;
         let host_key = match options.host_key {
             Some(key) => key,
             None => {
                 let (host_key_path, secure_parent) = match options.host_key_path {
                     Some(path) => (path, false),
-                    None => (default_host_key_path(self.sandbox.name()), true),
+                    None => (
+                        default_host_key_path(local_backend, self.sandbox.name()),
+                        true,
+                    ),
                 };
                 load_or_create_host_key(&host_key_path, secure_parent)?
             }
@@ -343,6 +351,14 @@ impl SandboxSshOps {
         };
 
         Ok(SshServer { config, settings })
+    }
+
+    /// Prepare a reusable SSH server endpoint with custom options.
+    pub async fn prepare_server_with(
+        &self,
+        f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
+    ) -> MicrosandboxResult<SshServer> {
+        self.server_with(f).await
     }
 }
 
@@ -659,16 +675,9 @@ impl SshClient {
         Ok(exit_code)
     }
 
-    /// Reject SFTP on a sandbox too old for the filesystem protocol it rides on,
-    /// with the same consolidated error as a direct filesystem call.
-    fn ensure_sftp_supported(&self) -> MicrosandboxResult<()> {
-        AgentClient::ensure_version_compat_for(MessageType::FsRequest, self.negotiated_version)?;
-        Ok(())
-    }
-
     /// Open an SFTP client session over this SSH connection.
     pub async fn sftp(&self) -> MicrosandboxResult<SftpClient> {
-        self.ensure_sftp_supported()?;
+        AgentClient::ensure_version_compat_for(MessageType::FsRequest, self.negotiated_version)?;
 
         let mut channel = self
             .handle
@@ -772,7 +781,7 @@ impl SshServerOptionsBuilder {
 
 impl SshServer {
     /// Serve one SSH connection over an ordered duplex stream.
-    pub async fn serve_connection<S>(&self, stream: S) -> MicrosandboxResult<()>
+    pub async fn serve<S>(&self, stream: S) -> MicrosandboxResult<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -787,6 +796,14 @@ impl SshServer {
             .await
             .map_err(|e| MicrosandboxError::Custom(format!("SSH session failed: {e}")))?;
         Ok(())
+    }
+
+    /// Serve one SSH connection over an ordered duplex stream.
+    pub async fn serve_connection<S>(&self, stream: S) -> MicrosandboxResult<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.serve(stream).await
     }
 }
 
@@ -809,7 +826,16 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
-        let client = Arc::new(crate::agent::connect_sandbox(self.settings.sandbox.name()).await?);
+        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
+            MicrosandboxError::Unsupported {
+                feature: "Sandbox::ssh on cloud".into(),
+                available_when: "when cloud SSH proxying lands".into(),
+            }
+        })?;
+        let client = Arc::new(
+            crate::sandbox::fs::local::connect_agent(local_backend, self.settings.sandbox.name())
+                .await?,
+        );
         self.client = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -833,7 +859,6 @@ impl SshSession {
             return Ok(());
         };
 
-        let client = self.agent_client().await?;
         let shell = self
             .settings
             .sandbox
@@ -867,11 +892,22 @@ impl SshSession {
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);
         let cols = pty.as_ref().map(|p| p.cols).unwrap_or(80);
-        let handle = self
-            .settings
-            .sandbox
-            .exec_stream_with_agent(client, cmd, opts, rows, cols)
-            .await?;
+        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
+            MicrosandboxError::Unsupported {
+                feature: "Sandbox::ssh exec on cloud".into(),
+                available_when: "when cloud SSH proxying lands".into(),
+            }
+        })?;
+        let handle = crate::sandbox::exec::local::exec_stream_with_pty_size(
+            local_backend,
+            self.settings.sandbox.name(),
+            self.settings.sandbox.config(),
+            cmd,
+            opts,
+            rows,
+            cols,
+        )
+        .await?;
         let (control, stdin, mut events) = handle.into_parts();
         let session_handle = session.handle();
         let pty_enabled = pty.is_some();
@@ -920,90 +956,6 @@ impl SshSession {
         session.channel_success(channel)?;
         Ok(())
     }
-
-    async fn start_tcp_forward(
-        &mut self,
-        channel: Channel<Msg>,
-        host_to_connect: &str,
-        port_to_connect: u32,
-        originator_address: &str,
-        originator_port: u32,
-        session: &mut Session,
-    ) -> anyhow::Result<bool> {
-        if host_to_connect.is_empty() || port_to_connect > u16::MAX as u32 {
-            tracing::warn!(
-                host = host_to_connect,
-                port = port_to_connect,
-                originator_address,
-                originator_port,
-                "ssh direct-tcpip rejected invalid destination"
-            );
-            return Ok(false);
-        }
-
-        let client = self.agent_client().await?;
-        if !client.supports(MessageType::TcpConnect) {
-            tracing::warn!(
-                negotiated_version = client.negotiated_version(),
-                "ssh direct-tcpip needs a newer sandbox runtime; restart the sandbox to enable forwarding"
-            );
-            return Ok(false);
-        }
-
-        let channel_id = channel.id();
-        drop(channel);
-        let req = TcpConnect {
-            host: host_to_connect.to_string(),
-            port: port_to_connect as u16,
-        };
-        let (tcp_id, mut tcp_rx) = client.stream(MessageType::TcpConnect, &req).await?;
-        let Some(first) = tcp_rx.recv().await else {
-            tracing::debug!(
-                host = host_to_connect,
-                port = port_to_connect,
-                "ssh direct-tcpip rejected because agent stream closed before connect reply"
-            );
-            return Ok(false);
-        };
-
-        match first.t {
-            MessageType::TcpConnected => {
-                let _: TcpConnected = first.payload()?;
-                let session_handle = session.handle();
-                let relay = tokio::spawn(async move {
-                    relay_tcp_to_ssh(channel_id, tcp_rx, session_handle).await;
-                });
-                self.channels.insert(
-                    channel_id,
-                    ChannelState::Tcp {
-                        id: tcp_id,
-                        client,
-                        relay,
-                    },
-                );
-                Ok(true)
-            }
-            MessageType::TcpFailed => {
-                let failed: TcpFailed = first.payload()?;
-                tracing::debug!(
-                    host = host_to_connect,
-                    port = port_to_connect,
-                    error = failed.error,
-                    "ssh direct-tcpip rejected because guest TCP connect failed"
-                );
-                Ok(false)
-            }
-            other => {
-                tracing::warn!(
-                    host = host_to_connect,
-                    port = port_to_connect,
-                    message_type = other.as_str(),
-                    "ssh direct-tcpip rejected unexpected agent reply"
-                );
-                Ok(false)
-            }
-        }
-    }
 }
 
 impl russh::server::Handler for SshSession {
@@ -1048,26 +1000,6 @@ impl russh::server::Handler for SshSession {
             },
         );
         Ok(true)
-    }
-
-    async fn channel_open_direct_tcpip(
-        &mut self,
-        channel: Channel<Msg>,
-        host_to_connect: &str,
-        port_to_connect: u32,
-        originator_address: &str,
-        originator_port: u32,
-        session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        self.start_tcp_forward(
-            channel,
-            host_to_connect,
-            port_to_connect,
-            originator_address,
-            originator_port,
-            session,
-        )
-        .await
     }
 
     async fn env_request(
@@ -1150,15 +1082,13 @@ impl russh::server::Handler for SshSession {
         };
 
         let client = self.agent_client().await?;
-        if !client.supports(MessageType::FsRequest) {
-            // SFTP rides on the filesystem protocol; reject the subsystem on a
-            // sandbox too old for it. TODO(upgrade-0.6): Remove in 0.6.x or later
-            // once live-sandbox compatibility for versions before 0.5 is dropped.
+        if client.is_legacy_protocol() {
+            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
+            // compatibility for versions before 0.5 is no longer supported.
             session.channel_failure(channel)?;
             return Ok(());
         }
 
-        let fs = crate::sandbox::fs::SandboxFsOps::new(&client);
         let cwd = self
             .settings
             .sandbox
@@ -1170,7 +1100,7 @@ impl russh::server::Handler for SshSession {
             .clone()
             .unwrap_or_else(|| "/".to_string());
         let sftp = SftpServerSession {
-            fs,
+            client,
             cwd,
             next_handle: 0,
             handles: HashMap::new(),
@@ -1189,23 +1119,6 @@ impl russh::server::Handler for SshSession {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
-            _ => None,
-        };
-        if let Some((id, client)) = tcp {
-            client
-                .send(
-                    id,
-                    MessageType::TcpData,
-                    &TcpData {
-                        data: data.to_vec(),
-                    },
-                )
-                .await?;
-            return Ok(());
-        }
-
         if let Some(ChannelState::Exec {
             stdin: Some(stdin), ..
         }) = self.channels.get(&channel)
@@ -1220,15 +1133,6 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
-            _ => None,
-        };
-        if let Some((id, client)) = tcp {
-            client.send(id, MessageType::TcpEof, &TcpEof {}).await?;
-            return Ok(());
-        }
-
         if let Some(ChannelState::Exec {
             stdin: Some(stdin), ..
         }) = self.channels.get(&channel)
@@ -1243,22 +1147,13 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Remove once and match on the state; an earlier `remove` per arm would drop
-        // a non-Tcp channel before the Exec arm could run its process teardown.
-        match self.channels.remove(&channel) {
-            Some(ChannelState::Tcp { id, client, relay }) => {
-                // Stop the guest->ssh relay immediately; the TcpClose then tells the
-                // guest to close its socket.
-                relay.abort();
-                let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
+        if let Some(ChannelState::Exec { control, stdin }) = self.channels.remove(&channel) {
+            if let Some(stdin) = stdin {
+                let _ = stdin.close().await;
             }
-            Some(ChannelState::Exec { control, stdin }) => {
-                if let Some(stdin) = stdin {
-                    let _ = stdin.close().await;
-                }
-                let _ = control.kill().await;
-            }
-            _ => {}
+            let _ = control.kill().await;
+        } else {
+            self.channels.remove(&channel);
         }
         Ok(())
     }
@@ -1339,7 +1234,7 @@ impl SftpServerSession {
         }
     }
 
-    fn track_handle(&mut self, handle: crate::sandbox::FsHandle) -> String {
+    fn track_handle(&mut self, handle: crate::sandbox::fs::FsHandle) -> String {
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
         let token = self.next_handle.to_string();
         self.handles.insert(token.clone(), handle);
@@ -1349,7 +1244,7 @@ impl SftpServerSession {
     fn resolve_handle(
         &self,
         token: &str,
-    ) -> Result<crate::sandbox::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .get(token)
             .copied()
@@ -1359,7 +1254,7 @@ impl SftpServerSession {
     fn forget_handle(
         &mut self,
         token: &str,
-    ) -> Result<crate::sandbox::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .remove(token)
             .ok_or(russh_sftp::protocol::StatusCode::Failure)
@@ -1368,11 +1263,11 @@ impl SftpServerSession {
 
 impl Drop for SftpServerSession {
     fn drop(&mut self) {
-        let fs = self.fs.clone();
+        let client = Arc::clone(&self.client);
         let handles: Vec<_> = self.handles.drain().map(|(_, handle)| handle).collect();
         tokio::spawn(async move {
             for handle in handles {
-                let _ = fs.close_handle(handle).await;
+                let _ = sftp_close_handle(&client, handle).await;
             }
         });
     }
@@ -1402,9 +1297,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = self.normalize_path(filename);
         let options = open_flags_to_options(pflags, &attrs);
-        let handle = self
-            .fs
-            .open_file(&path, options)
+        let handle = sftp_open_file(&self.client, &path, options)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Handle {
@@ -1419,7 +1312,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.forget_handle(&handle)?;
-        self.fs.close_handle(handle).await.map_err(status_code)?;
+        sftp_close_handle(&self.client, handle)
+            .await
+            .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1432,9 +1327,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Data, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
         let len = len.min(FS_CHUNK_SIZE as u32);
-        let data = self
-            .fs
-            .read_handle(handle, offset, Some(len as u64))
+        let data = sftp_read_handle(&self.client, handle, offset, Some(len as u64))
             .await
             .map_err(status_code)?;
         if data.is_empty() {
@@ -1454,8 +1347,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         data: Vec<u8>,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        self.fs
-            .write_handle(handle, offset, data)
+        sftp_write_handle(&self.client, handle, offset, data)
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1467,9 +1359,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let path = self.normalize_path(path);
-        let attrs = self
-            .fs
-            .stat_with_follow(&path, false)
+        let attrs = sftp_stat(&self.client, &path, false)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
@@ -1484,9 +1374,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let path = self.normalize_path(path);
-        let attrs = self
-            .fs
-            .stat_with_follow(&path, true)
+        let attrs = sftp_stat(&self.client, &path, true)
             .await
             .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
@@ -1501,7 +1389,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        let attrs = self.fs.fstat(handle).await.map_err(status_code)?;
+        let attrs = sftp_fstat(&self.client, handle)
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Attrs {
             id,
             attrs: metadata_to_sftp_attrs(&attrs),
@@ -1515,8 +1405,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs
-            .set_stat(&path, true, attrs_to_set_attrs(&attrs))
+        sftp_set_stat(&self.client, &path, true, attrs_to_set_attrs(&attrs))
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1529,8 +1418,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        self.fs
-            .fset_stat(handle, attrs_to_set_attrs(&attrs))
+        sftp_fset_stat(&self.client, handle, attrs_to_set_attrs(&attrs))
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1542,7 +1430,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = self.normalize_path(path);
-        let handle = self.fs.open_dir(&path).await.map_err(status_code)?;
+        let handle = sftp_open_dir(&self.client, &path)
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Handle {
             id,
             handle: self.track_handle(handle),
@@ -1555,7 +1445,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         handle: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let handle = self.resolve_handle(&handle)?;
-        let entries = self.fs.read_dir(handle, None).await.map_err(status_code)?;
+        let entries = sftp_read_dir(&self.client, handle, None)
+            .await
+            .map_err(status_code)?;
         if entries.is_empty() {
             return Err(russh_sftp::protocol::StatusCode::Eof);
         }
@@ -1571,7 +1463,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         filename: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(filename);
-        self.fs.remove(&path).await.map_err(status_code)?;
+        sftp_simple_op(&self.client, FsOp::Remove { path })
+            .await
+            .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1582,10 +1476,17 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs.mkdir(&path).await.map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::Mkdir {
+                path: path.clone(),
+                mode: attrs.permissions,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         if attrs.permissions.is_some() {
-            self.fs
-                .set_stat(&path, true, attrs_to_set_attrs(&attrs))
+            sftp_set_stat(&self.client, &path, true, attrs_to_set_attrs(&attrs))
                 .await
                 .map_err(status_code)?;
         }
@@ -1598,7 +1499,15 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let path = self.normalize_path(path);
-        self.fs.remove_empty_dir(&path).await.map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::RemoveDir {
+                path,
+                recursive: false,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1608,7 +1517,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let path = self.normalize_path(path);
-        let path = self.fs.real_path(&path).await.map_err(status_code)?;
+        let path = sftp_path_op(&self.client, FsOp::RealPath { path })
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Name {
             id,
             files: vec![russh_sftp::protocol::File::dummy(path)],
@@ -1623,10 +1534,15 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let oldpath = self.normalize_path(oldpath);
         let newpath = self.normalize_path(newpath);
-        self.fs
-            .rename(&oldpath, &newpath)
-            .await
-            .map_err(status_code)?;
+        sftp_simple_op(
+            &self.client,
+            FsOp::Rename {
+                src: oldpath,
+                dst: newpath,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 
@@ -1636,7 +1552,9 @@ impl russh_sftp::server::Handler for SftpServerSession {
         path: String,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
         let path = self.normalize_path(path);
-        let target = self.fs.read_link(&path).await.map_err(status_code)?;
+        let target = sftp_path_op(&self.client, FsOp::ReadLink { path })
+            .await
+            .map_err(status_code)?;
         Ok(russh_sftp::protocol::Name {
             id,
             files: vec![russh_sftp::protocol::File::dummy(target)],
@@ -1651,8 +1569,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let target = linkpath;
         let link_path = self.normalize_path(targetpath);
-        self.fs
-            .symlink(&target, &link_path)
+        sftp_simple_op(&self.client, FsOp::Symlink { target, link_path })
             .await
             .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
@@ -1714,12 +1631,15 @@ impl AsyncWrite for SshStdioStream {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<String>> {
+fn build_authorized_keys(
+    options: &SshServerOptions,
+    config: &crate::config::LocalConfig,
+) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
         keys.extend(load_authorized_keys(path)?);
     } else if options.authorized_keys.is_empty() {
-        keys.extend(load_authorized_keys(&default_authorized_keys_path())?);
+        keys.extend(load_authorized_keys(&default_authorized_keys_path(config))?);
     }
     for key in &options.authorized_keys {
         keys.push(parse_authorized_key(key)?);
@@ -1732,67 +1652,15 @@ fn build_authorized_keys(options: &SshServerOptions) -> MicrosandboxResult<Vec<S
     Ok(keys)
 }
 
-async fn relay_tcp_to_ssh(
-    channel: ChannelId,
-    mut tcp_rx: tokio::sync::mpsc::Receiver<Message>,
-    session: russh::server::Handle,
-) {
-    while let Some(msg) = tcp_rx.recv().await {
-        match msg.t {
-            MessageType::TcpData => match msg.payload::<TcpData>() {
-                Ok(data) => {
-                    if session.data(channel, Bytes::from(data.data)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp data: {e}");
-                    let _ = session.close(channel).await;
-                    return;
-                }
-            },
-            MessageType::TcpEof => {
-                if let Err(e) = msg.payload::<TcpEof>() {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp eof: {e}");
-                }
-                let _ = session.eof(channel).await;
-            }
-            MessageType::TcpClosed => {
-                if let Err(e) = msg.payload::<TcpClosed>() {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp closed: {e}");
-                }
-                let _ = session.eof(channel).await;
-                let _ = session.close(channel).await;
-                return;
-            }
-            MessageType::TcpFailed => {
-                match msg.payload::<TcpFailed>() {
-                    Ok(failed) => {
-                        tracing::debug!(
-                            error = failed.error,
-                            "ssh direct-tcpip: guest TCP stream failed"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("ssh direct-tcpip: failed to decode tcp failed: {e}");
-                    }
-                }
-                let _ = session.close(channel).await;
-                return;
-            }
-            _ => {}
-        }
-    }
-
-    let _ = session.close(channel).await;
+fn default_authorized_keys_path(config: &crate::config::LocalConfig) -> PathBuf {
+    config.ssh_dir().join("authorized_keys")
 }
 
-fn default_authorized_keys_path() -> PathBuf {
-    crate::config::config().ssh_dir().join("authorized_keys")
-}
-
-fn default_host_key_path(sandbox_name: &str) -> PathBuf {
-    crate::config::config()
+fn default_host_key_path(
+    local_backend: &crate::backend::LocalBackend,
+    sandbox_name: &str,
+) -> PathBuf {
+    local_backend
         .sandboxes_dir()
         .join(sandbox_name)
         .join(microsandbox_utils::SSH_SUBDIR)
@@ -1955,11 +1823,243 @@ fn signal_to_libc(signal: Sig) -> Option<i32> {
     }
 }
 
+async fn sftp_response(client: &AgentClient, op: FsOp) -> MicrosandboxResult<FsResponse> {
+    let req = FsRequest { op };
+    let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+    let resp: FsResponse = resp_msg.payload()?;
+    if resp.ok {
+        Ok(resp)
+    } else {
+        Err(MicrosandboxError::SandboxFsOps(
+            resp.error.unwrap_or_else(|| "unknown error".into()),
+        ))
+    }
+}
+
+async fn sftp_simple_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<()> {
+    sftp_response(client, op).await.map(|_| ())
+}
+
+async fn sftp_path_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<String> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Path(path)) => Ok(path),
+        _ => Err(MicrosandboxError::SandboxFsOps(
+            "unexpected response data for path operation".into(),
+        )),
+    }
+}
+
+async fn sftp_open_file(
+    client: &AgentClient,
+    path: &str,
+    options: FsOpenOptions,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    sftp_handle_op(
+        client,
+        FsOp::OpenFile {
+            path: path.to_string(),
+            options,
+        },
+    )
+    .await
+}
+
+async fn sftp_open_dir(
+    client: &AgentClient,
+    path: &str,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    sftp_handle_op(
+        client,
+        FsOp::OpenDir {
+            path: path.to_string(),
+        },
+    )
+    .await
+}
+
+async fn sftp_handle_op(
+    client: &AgentClient,
+    op: FsOp,
+) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Handle(handle)) => Ok(handle),
+        _ => Err(MicrosandboxError::SandboxFsOps(
+            "unexpected response data for handle operation".into(),
+        )),
+    }
+}
+
+async fn sftp_close_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(client, FsOp::CloseHandle { handle }).await
+}
+
+async fn sftp_read_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    offset: u64,
+    len: Option<u64>,
+) -> MicrosandboxResult<Bytes> {
+    let req = FsRequest {
+        op: FsOp::Read {
+            handle,
+            offset,
+            len,
+        },
+    };
+    let (_id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
+
+    let mut data = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg.t {
+            MessageType::FsData => {
+                let chunk: FsData = msg.payload()?;
+                data.extend_from_slice(&chunk.data);
+            }
+            MessageType::FsResponse => {
+                let resp: FsResponse = msg.payload()?;
+                if resp.ok {
+                    return Ok(Bytes::from(data));
+                }
+                return Err(MicrosandboxError::SandboxFsOps(
+                    resp.error.unwrap_or_else(|| "unknown error".into()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Err(MicrosandboxError::SandboxFsOps(
+        "channel closed before read response".into(),
+    ))
+}
+
+async fn sftp_write_handle(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    offset: u64,
+    data: Vec<u8>,
+) -> MicrosandboxResult<()> {
+    let req = FsRequest {
+        op: FsOp::Write {
+            handle,
+            offset,
+            len: Some(data.len() as u64),
+        },
+    };
+    let (id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
+
+    for chunk in data.chunks(FS_CHUNK_SIZE) {
+        client
+            .send(
+                id,
+                MessageType::FsData,
+                &FsData {
+                    data: chunk.to_vec(),
+                },
+            )
+            .await?;
+    }
+    client
+        .send(id, MessageType::FsData, &FsData { data: Vec::new() })
+        .await?;
+
+    while let Some(msg) = rx.recv().await {
+        if msg.t == MessageType::FsResponse {
+            let resp: FsResponse = msg.payload()?;
+            if resp.ok {
+                return Ok(());
+            }
+            return Err(MicrosandboxError::SandboxFsOps(
+                resp.error.unwrap_or_else(|| "unknown error".into()),
+            ));
+        }
+    }
+
+    Err(MicrosandboxError::SandboxFsOps(
+        "channel closed before write response".into(),
+    ))
+}
+
+async fn sftp_stat(
+    client: &AgentClient,
+    path: &str,
+    follow_symlink: bool,
+) -> MicrosandboxResult<FsEntryInfo> {
+    sftp_stat_op(
+        client,
+        FsOp::Stat {
+            path: path.to_string(),
+            follow_symlink,
+        },
+    )
+    .await
+}
+
+async fn sftp_fstat(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+) -> MicrosandboxResult<FsEntryInfo> {
+    sftp_stat_op(client, FsOp::FStat { handle }).await
+}
+
+async fn sftp_stat_op(client: &AgentClient, op: FsOp) -> MicrosandboxResult<FsEntryInfo> {
+    match sftp_response(client, op).await?.data {
+        Some(FsResponseData::Stat(info)) => Ok(info),
+        _ => Err(MicrosandboxError::SandboxFsOps(
+            "unexpected response data for stat operation".into(),
+        )),
+    }
+}
+
+async fn sftp_set_stat(
+    client: &AgentClient,
+    path: &str,
+    follow_symlink: bool,
+    attrs: FsSetAttrs,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(
+        client,
+        FsOp::SetStat {
+            path: path.to_string(),
+            follow_symlink,
+            attrs,
+        },
+    )
+    .await
+}
+
+async fn sftp_fset_stat(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    attrs: FsSetAttrs,
+) -> MicrosandboxResult<()> {
+    sftp_simple_op(client, FsOp::FSetStat { handle, attrs }).await
+}
+
+async fn sftp_read_dir(
+    client: &AgentClient,
+    handle: crate::sandbox::fs::FsHandle,
+    limit: Option<u32>,
+) -> MicrosandboxResult<Vec<FsEntryInfo>> {
+    match sftp_response(client, FsOp::ReadDir { handle, limit })
+        .await?
+        .data
+    {
+        Some(FsResponseData::List(entries)) => Ok(entries),
+        _ => Err(MicrosandboxError::SandboxFsOps(
+            "unexpected response data for readdir operation".into(),
+        )),
+    }
+}
+
 fn open_flags_to_options(
     flags: russh_sftp::protocol::OpenFlags,
     attrs: &russh_sftp::protocol::FileAttributes,
-) -> crate::sandbox::FsOpenOptions {
-    crate::sandbox::FsOpenOptions {
+) -> FsOpenOptions {
+    FsOpenOptions {
         read: flags.contains(russh_sftp::protocol::OpenFlags::READ),
         write: flags.contains(russh_sftp::protocol::OpenFlags::WRITE),
         append: flags.contains(russh_sftp::protocol::OpenFlags::APPEND),
@@ -1970,8 +2070,8 @@ fn open_flags_to_options(
     }
 }
 
-fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> crate::sandbox::FsSetAttrs {
-    crate::sandbox::FsSetAttrs {
+fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> FsSetAttrs {
+    FsSetAttrs {
         mode: attrs.permissions,
         uid: attrs.uid,
         gid: attrs.gid,
@@ -1981,9 +2081,7 @@ fn attrs_to_set_attrs(attrs: &russh_sftp::protocol::FileAttributes) -> crate::sa
     }
 }
 
-fn metadata_to_sftp_attrs(
-    metadata: &crate::sandbox::FsMetadata,
-) -> russh_sftp::protocol::FileAttributes {
+fn metadata_to_sftp_attrs(metadata: &FsEntryInfo) -> russh_sftp::protocol::FileAttributes {
     russh_sftp::protocol::FileAttributes {
         size: Some(metadata.size),
         uid: Some(metadata.uid),
@@ -1991,12 +2089,15 @@ fn metadata_to_sftp_attrs(
         gid: Some(metadata.gid),
         group: None,
         permissions: Some(metadata.mode),
-        atime: metadata.accessed.map(|t| t.timestamp().max(0) as u32),
-        mtime: metadata.modified.map(|t| t.timestamp().max(0) as u32),
+        atime: metadata.atime.map(|t| t.max(0) as u32),
+        mtime: metadata
+            .mtime
+            .or(metadata.modified)
+            .map(|t| t.max(0) as u32),
     }
 }
 
-fn entry_to_sftp_file(entry: crate::sandbox::FsEntry) -> russh_sftp::protocol::File {
+fn entry_to_sftp_file(entry: FsEntryInfo) -> russh_sftp::protocol::File {
     let filename = entry
         .path
         .rsplit('/')
@@ -2013,8 +2114,8 @@ fn entry_to_sftp_file(entry: crate::sandbox::FsEntry) -> russh_sftp::protocol::F
             gid: Some(entry.gid),
             group: None,
             permissions: Some(entry.mode),
-            atime: entry.accessed.map(|t| t.timestamp().max(0) as u32),
-            mtime: entry.modified.map(|t| t.timestamp().max(0) as u32),
+            atime: entry.atime.map(|t| t.max(0) as u32),
+            mtime: entry.mtime.or(entry.modified).map(|t| t.max(0) as u32),
         },
     )
 }

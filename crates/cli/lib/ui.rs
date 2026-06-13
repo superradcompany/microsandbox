@@ -326,6 +326,8 @@ pub fn success(verb: &str, target: &str) {
 /// Format a sandbox status with appropriate color.
 pub fn format_status(status: &str) -> String {
     match status {
+        "Created" => format!("{}", style("created").dim()),
+        "Starting" => format!("{}", style("starting").yellow().bold()),
         "Running" => format!("{}", style("running").green().bold()),
         "Stopped" => format!("{}", style("stopped").dim()),
         "Paused" => format!("{}", style("paused").yellow().bold()),
