@@ -1467,9 +1467,13 @@ fn sandbox_cli_args(
         args.push(OsString::from(format!("{}={user}", ENV_USER)));
     }
 
-    // Hostname: explicit value or fall back to sandbox name.
+    // Hostname: explicit value or fall back to a sandbox-name-derived form
+    // that fits within the Linux UTS limit.
     {
-        let hostname = config.hostname.as_deref().unwrap_or(&config.name);
+        let hostname = match config.hostname.as_deref() {
+            Some(h) => h.to_string(),
+            None => crate::sandbox::hostname_from_sandbox_name(&config.name),
+        };
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
     }

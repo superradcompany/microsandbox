@@ -72,6 +72,9 @@ use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 /// truncation.
 pub const MAX_SANDBOX_NAME_BYTES: usize = microsandbox_metrics::SLOT_NAME_BYTES;
 
+/// Maximum UTF-8 byte length for a guest hostname (Linux `__NEW_UTS_LEN`).
+pub const MAX_HOSTNAME_BYTES: usize = 64;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -2037,6 +2040,35 @@ pub(super) fn validate_sandbox_name_for_runtime(name: &str) -> MicrosandboxResul
     runtime::resolve_sandbox_agent_socket_path(name).map(|_| ())
 }
 
+/// Derive a guest hostname from a sandbox name, fitting within
+/// [`MAX_HOSTNAME_BYTES`]. Names short enough pass through unchanged;
+/// longer names collapse to a deterministic `<prefix>-<hash>` form so
+/// distinct sandbox names never share a hostname.
+pub(crate) fn hostname_from_sandbox_name(name: &str) -> String {
+    if name.len() <= MAX_HOSTNAME_BYTES {
+        return name.to_string();
+    }
+
+    // 55-byte prefix + '-' + 8 hex chars of sha256 = 64 bytes.
+    const HASH_HEX_LEN: usize = 8;
+    const PREFIX_MAX: usize = MAX_HOSTNAME_BYTES - 1 - HASH_HEX_LEN;
+
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let suffix = format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    );
+
+    let mut end = PREFIX_MAX;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}-{}", &name[..end], suffix)
+}
+
 pub(crate) fn sandbox_name_validation_message(name: &str) -> Option<String> {
     if name.is_empty() {
         return Some("sandbox name is required".into());
@@ -2758,11 +2790,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        HostPermissions, MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxFilter,
-        SandboxStatus, StatVirtualization, VolumeMount, digest_pinned_reference,
-        filter_sandbox_ids, insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
-        reconcile_sandbox_runtime_state, remove_dir_if_exists, validate_labels,
-        validate_rootfs_source, validate_sandbox_name_for_runtime,
+        HostPermissions, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig,
+        SandboxFilter, SandboxStatus, StatVirtualization, VolumeMount, digest_pinned_reference,
+        filter_sandbox_ids, hostname_from_sandbox_name, insert_sandbox_record,
+        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
+        remove_dir_if_exists, validate_labels, validate_rootfs_source,
+        validate_sandbox_name_for_runtime,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2980,6 +3013,59 @@ mod tests {
             err.to_string(),
             "invalid config: sandbox name is too long: 130 bytes (max 128)"
         );
+    }
+
+    #[test]
+    fn test_hostname_from_sandbox_name_passes_short_names_through() {
+        let name = "short-name";
+        assert_eq!(hostname_from_sandbox_name(name), name);
+
+        let name = "a".repeat(MAX_HOSTNAME_BYTES);
+        assert_eq!(hostname_from_sandbox_name(&name), name);
+    }
+
+    #[test]
+    fn test_hostname_from_sandbox_name_collapses_long_names_to_64_bytes() {
+        let derived = hostname_from_sandbox_name(&"a".repeat(MAX_HOSTNAME_BYTES + 1));
+        assert_eq!(derived.len(), MAX_HOSTNAME_BYTES);
+
+        let derived = hostname_from_sandbox_name(&"a".repeat(MAX_SANDBOX_NAME_BYTES));
+        assert_eq!(derived.len(), MAX_HOSTNAME_BYTES);
+
+        let bytes = derived.as_bytes();
+        assert_eq!(bytes[MAX_HOSTNAME_BYTES - 9], b'-');
+        assert!(
+            bytes[MAX_HOSTNAME_BYTES - 8..]
+                .iter()
+                .all(u8::is_ascii_hexdigit)
+        );
+    }
+
+    #[test]
+    fn test_hostname_from_sandbox_name_is_deterministic_and_unique() {
+        let a = "a".repeat(MAX_SANDBOX_NAME_BYTES);
+        let mut b = a.clone();
+        b.pop();
+        b.push('b');
+
+        assert_eq!(
+            hostname_from_sandbox_name(&a),
+            hostname_from_sandbox_name(&a)
+        );
+        assert_ne!(
+            hostname_from_sandbox_name(&a),
+            hostname_from_sandbox_name(&b)
+        );
+    }
+
+    #[test]
+    fn test_hostname_from_sandbox_name_respects_utf8_boundaries() {
+        let name = "é".repeat(64);
+        assert_eq!(name.len(), 128);
+
+        let derived = hostname_from_sandbox_name(&name);
+        assert!(derived.len() <= MAX_HOSTNAME_BYTES);
+        assert!(derived.is_char_boundary(derived.len()));
     }
 
     #[test]
