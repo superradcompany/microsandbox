@@ -4,8 +4,6 @@
 //! OCI image metadata in the database. The on-disk layer cache is managed
 //! by [`microsandbox_image::GlobalCache`]; this module owns the DB lifecycle.
 
-use std::{collections::HashSet, path::Path};
-
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, RelationTrait, Set,
@@ -18,13 +16,11 @@ use microsandbox_image::{
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    db::{
-        self,
-        entity::{
-            config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
-            manifest as manifest_entity, manifest_layer as manifest_layer_entity,
-            sandbox_rootfs as sandbox_rootfs_entity, snapshot as snapshot_entity,
-        },
+    backend::LocalBackend,
+    db::entity::{
+        config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
+        manifest as manifest_entity, manifest_layer as manifest_layer_entity,
+        sandbox_rootfs as sandbox_rootfs_entity,
     },
 };
 
@@ -119,14 +115,6 @@ pub struct ImagePruneReport {
     pub bytes_reclaimed: Option<u64>,
 }
 
-/// Disk artifacts to clean up after a successful image prune transaction.
-#[derive(Debug, Default)]
-struct ImagePruneCleanup {
-    references: Vec<String>,
-    manifest_digests: Vec<String>,
-    layer_diff_ids: Vec<String>,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods: ImageHandle
 //--------------------------------------------------------------------------------------------------
@@ -189,10 +177,11 @@ impl Image {
     /// This avoids ~25–30 redundant write statements per cached create
     /// and keeps SQLite's single-writer lock free for other work.
     pub async fn persist(
+        local: &LocalBackend,
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
-        let pools = db::init_global().await?;
+        let pools = local.db().await?;
         let db = pools.write();
         let reference = reference.to_string();
 
@@ -261,8 +250,8 @@ impl Image {
     }
 
     /// Get an image handle by reference.
-    pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let db = db::init_global().await?.read();
+    pub async fn get(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle> {
+        let db = local.db().await?.read();
 
         let (image_ref_model, manifest) = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -279,8 +268,8 @@ impl Image {
     }
 
     /// List all cached images, ordered by creation time (newest first).
-    pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let db = db::init_global().await?.read();
+    pub async fn list(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>> {
+        let db = local.db().await?.read();
 
         let models = image_ref_entity::Entity::find()
             .order_by_desc(image_ref_entity::Column::CreatedAt)
@@ -296,8 +285,8 @@ impl Image {
     }
 
     /// Get full detail for an image (config + layers).
-    pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let db = db::init_global().await?.read();
+    pub async fn inspect(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail> {
+        let db = local.db().await?.read();
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -390,8 +379,12 @@ impl Image {
     ///
     /// If `force` is false and the image is referenced by any sandbox, returns
     /// [`MicrosandboxError::ImageInUse`].
-    pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let pools = db::init_global().await?;
+    pub async fn remove(
+        local: &LocalBackend,
+        reference: &str,
+        force: bool,
+    ) -> MicrosandboxResult<()> {
+        let pools = local.db().await?;
         let db = pools.write();
 
         let image_ref_model = image_ref_entity::Entity::find()
@@ -482,7 +475,7 @@ impl Image {
             .await?;
 
         // Best-effort on-disk cleanup (outside transaction).
-        let cache_dir = crate::config::config().cache_dir();
+        let cache_dir = local.cache_dir();
         if let Ok(cache) = GlobalCache::new(&cache_dir) {
             for diff_id_str in &layer_diff_ids {
                 if let Ok(diff_id) = diff_id_str.parse::<Digest>() {
@@ -508,148 +501,54 @@ impl Image {
         Ok(())
     }
 
-    /// Remove cached image data that is not used by any sandbox or indexed snapshot.
+    /// Garbage-collect orphaned layers whose EROFS images are no longer
+    /// referenced by any manifest.
     ///
-    /// Pruning removes unused image references, then removes manifests and layers
-    /// that become unreachable. Images used by existing sandboxes are preserved.
-    pub async fn prune() -> MicrosandboxResult<ImagePruneReport> {
-        let pools = db::init_global().await?;
-        let db = pools.write();
+    /// Returns the number of layers removed.
+    pub async fn gc_layers(local: &LocalBackend) -> MicrosandboxResult<u32> {
+        let pools = local.db().await?;
 
-        let (mut report, cleanup) = db
-            .transaction(|txn| async move {
-                let sandbox_refs = sandbox_rootfs_entity::Entity::find()
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .filter_map(|r| r.manifest_id)
-                    .collect::<HashSet<_>>();
-
-                let snapshot_refs = snapshot_entity::Entity::find()
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .map(|s| s.image_manifest_digest)
-                    .collect::<HashSet<_>>();
-
-                let mut report = ImagePruneReport::default();
-                let mut cleanup = ImagePruneCleanup::default();
-
-                let image_refs = image_ref_entity::Entity::find()
-                    .find_also_related(manifest_entity::Entity)
-                    .all(&txn)
-                    .await?;
-
-                for (image_ref, manifest) in image_refs {
-                    let Some(manifest) = manifest else {
-                        continue;
-                    };
-                    if sandbox_refs.contains(&manifest.id)
-                        || snapshot_refs.contains(manifest.digest.as_str())
-                    {
-                        continue;
-                    }
-
-                    image_ref_entity::Entity::delete_by_id(image_ref.id)
-                        .exec(&txn)
-                        .await?;
-                    cleanup.references.push(image_ref.reference);
-                    report.image_refs_removed += 1;
-                }
-
-                let manifests = manifest_entity::Entity::find().all(&txn).await?;
-                for manifest in manifests {
-                    if sandbox_refs.contains(&manifest.id)
-                        || snapshot_refs.contains(manifest.digest.as_str())
-                    {
-                        continue;
-                    }
-
-                    let remaining_refs = image_ref_entity::Entity::find()
-                        .filter(image_ref_entity::Column::ManifestId.eq(manifest.id))
-                        .count(&txn)
-                        .await?;
-                    if remaining_refs > 0 {
-                        continue;
-                    }
-
-                    manifest_entity::Entity::delete_by_id(manifest.id)
-                        .exec(&txn)
-                        .await?;
-
-                    cleanup.manifest_digests.push(manifest.digest);
-                    report.manifests_removed += 1;
-                }
-
-                let orphaned_layers = layer_entity::Entity::find()
-                    .left_join(manifest_layer_entity::Entity)
-                    .filter(manifest_layer_entity::Column::Id.is_null())
-                    .all(&txn)
-                    .await?;
-
-                for layer in orphaned_layers {
-                    layer_entity::Entity::delete_by_id(layer.id)
-                        .exec(&txn)
-                        .await?;
-                    cleanup.layer_diff_ids.push(layer.diff_id);
-                    report.layers_removed += 1;
-                }
-
-                cleanup.layer_diff_ids.sort();
-                cleanup.layer_diff_ids.dedup();
-
-                Ok::<_, MicrosandboxError>((txn, (report, cleanup)))
-            })
+        // Find layers with zero manifest_layer references.
+        let orphans: Vec<layer_entity::Model> = layer_entity::Entity::find()
+            .left_join(manifest_layer_entity::Entity)
+            .filter(manifest_layer_entity::Column::Id.is_null())
+            .all(pools.read())
             .await?;
 
-        let cache_dir = crate::config::config().cache_dir();
-        if let Ok(cache) = GlobalCache::new(&cache_dir) {
-            let mut bytes_reclaimed = 0u64;
-            let mut measured = false;
+        let cache_dir = local.cache_dir();
+        let cache = GlobalCache::new(&cache_dir).ok();
+        let mut removed = 0u32;
 
-            for reference in &cleanup.references {
-                if let Ok(image_ref) = reference.parse::<Reference>() {
-                    let _ = cache.delete_image_metadata(&image_ref);
-                }
+        for orphan in &orphans {
+            layer_entity::Entity::delete_by_id(orphan.id)
+                .exec(pools.write())
+                .await?;
+
+            // Best-effort on-disk cleanup.
+            if let Some(ref cache) = cache
+                && let Ok(diff_id) = orphan.diff_id.parse::<Digest>()
+            {
+                let _ = tokio::fs::remove_file(cache.layer_erofs_path(&diff_id)).await;
+                let _ = tokio::fs::remove_file(cache.layer_erofs_lock_path(&diff_id)).await;
             }
-
-            for diff_id_str in &cleanup.layer_diff_ids {
-                if let Ok(diff_id) = diff_id_str.parse::<Digest>() {
-                    let (removed, bytes) =
-                        remove_file_measured(&cache.layer_erofs_path(&diff_id)).await;
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.layer_erofs_lock_path(&diff_id)).await;
-                }
-            }
-
-            for manifest_digest in &cleanup.manifest_digests {
-                if let Ok(digest) = manifest_digest.parse::<Digest>() {
-                    let (removed, bytes) =
-                        remove_file_measured(&cache.fsmeta_erofs_path(&digest)).await;
-                    if removed {
-                        report.fsmeta_removed += 1;
-                    }
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.fsmeta_erofs_lock_path(&digest)).await;
-
-                    let (removed, bytes) = remove_file_measured(&cache.vmdk_path(&digest)).await;
-                    if removed {
-                        report.vmdk_removed += 1;
-                    }
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.vmdk_lock_path(&digest)).await;
-                }
-            }
-
-            if measured {
-                report.bytes_reclaimed = Some(bytes_reclaimed);
-            }
+            removed += 1;
         }
 
-        Ok(report)
+        Ok(removed)
+    }
+
+    /// Run full garbage collection: orphaned layers.
+    pub async fn gc(local: &LocalBackend) -> MicrosandboxResult<u32> {
+        Self::gc_layers(local).await
+    }
+
+    /// Remove cached image data that is not used by any sandbox.
+    pub async fn prune(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
+        let layers_removed = Self::gc_layers(local).await?;
+        Ok(ImagePruneReport {
+            layers_removed,
+            ..Default::default()
+        })
     }
 }
 
@@ -677,19 +576,6 @@ fn build_handle_from_parts(
         total_size_bytes: manifest.and_then(|m| m.total_size_bytes),
         created_at: model.created_at.map(|dt| dt.and_utc()),
         updated_at: model.updated_at.map(|dt| dt.and_utc()),
-    }
-}
-
-/// Remove a file and return whether it existed plus its measured size.
-async fn remove_file_measured(path: &Path) -> (bool, u64) {
-    let bytes = tokio::fs::metadata(path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or_default();
-
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => (true, bytes),
-        Err(_) => (false, 0),
     }
 }
 

@@ -10,8 +10,11 @@ honours it natively as its highest-precedence tier — no SDK-side
 wrapping needed.
 
 libkrunfw is located by the Rust resolver relative to ``msb`` (``../lib/``),
-which matches the wheel bundle layout. Pass ``libkrunfw_path`` to
-``Sandbox.create(...)`` for per-sandbox overrides.
+which matches the wheel bundle layout. To override it, set the
+``MSB_LIBKRUNFW_PATH`` env var (highest precedence) or call
+``microsandbox.set_libkrunfw_path(...)`` once at startup. libkrunfw is a
+process-level concern (one dylib per process address space), so per-sandbox
+overrides aren't supported.
 """
 
 from __future__ import annotations

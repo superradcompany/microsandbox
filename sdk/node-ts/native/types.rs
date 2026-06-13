@@ -27,8 +27,19 @@ pub struct ExitStatus {
 /// Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
 /// (AND-matched). Omit or leave empty to match every sandbox.
 #[napi(object)]
+#[allow(dead_code)]
 pub struct SandboxListFilter {
     pub labels: Option<HashMap<String, String>>,
+}
+
+/// Lightweight sandbox info returned by `Sandbox.list`.
+#[napi(object)]
+pub struct SandboxInfo {
+    pub name: String,
+    pub status: String,
+    pub config_json: String,
+    pub created_at: Option<f64>,
+    pub updated_at: Option<f64>,
 }
 
 /// One captured log entry from `exec.log`.
