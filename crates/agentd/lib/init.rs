@@ -1,6 +1,6 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
-use crate::config::BootParams;
+use crate::config::{BootParams, SecurityProfile};
 use crate::error::AgentdResult;
 use crate::{network, rlimit, tls};
 
@@ -18,7 +18,7 @@ use crate::{network, rlimit, tls};
 /// Consumes the [`BootParams`] by value — the data is one-shot and not
 /// needed after init returns.
 pub fn init(
-    params: BootParams,
+    mut params: BootParams,
     before_user_mounts: impl FnOnce() -> AgentdResult<()>,
 ) -> AgentdResult<()> {
     rlimit::apply_baseline(&params.rlimits)?;
@@ -28,6 +28,9 @@ pub fn init(
         linux::mount_block_root(spec)?;
     }
     before_user_mounts()?;
+    if params.security_profile == SecurityProfile::Restricted {
+        force_restricted_mount_flags(&mut params);
+    }
     linux::apply_dir_mounts(&params.dir_mounts)?;
     linux::apply_file_mounts(&params.file_mounts)?;
     linux::apply_disk_mounts(&params.disk_mounts)?;
@@ -45,6 +48,25 @@ pub fn init(
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
     Ok(())
+}
+
+fn force_restricted_mount_flags(params: &mut BootParams) {
+    for spec in &mut params.dir_mounts {
+        spec.nosuid = true;
+        spec.nodev = true;
+    }
+    for spec in &mut params.file_mounts {
+        spec.nosuid = true;
+        spec.nodev = true;
+    }
+    for spec in &mut params.disk_mounts {
+        spec.nosuid = true;
+        spec.nodev = true;
+    }
+    for spec in &mut params.tmpfs {
+        spec.nosuid = true;
+        spec.nodev = true;
+    }
 }
 
 fn ensure_scripts_profile_block(profile: &str) -> String {
@@ -347,6 +369,38 @@ mod linux {
         )))
     }
 
+    /// Filesystem-specific mount data for disk-image volume mounts.
+    fn disk_mount_data(fstype: &str, readonly: bool) -> Option<&'static str> {
+        if readonly && fstype == "ext4" {
+            // A read-only block device cannot replay an ext4 journal. `noload`
+            // lets seeded or intentionally read-only ext4 images mount without
+            // attempting journal recovery.
+            Some("noload")
+        } else {
+            None
+        }
+    }
+
+    /// Try mounting a disk-image volume, adding filesystem-specific options
+    /// where read-only block devices need them.
+    fn try_mount_disk_any(
+        device: &str,
+        target: &str,
+        flags: MsFlags,
+        readonly: bool,
+        fstypes: &[String],
+    ) -> AgentdResult<()> {
+        for fstype in fstypes {
+            let data = disk_mount_data(fstype, readonly);
+            if mount::mount(Some(device), target, Some(fstype.as_str()), flags, data).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(AgentdError::Init(format!(
+            "disk mount: failed to mount {device} at {target}: no supported filesystem found"
+        )))
+    }
+
     /// Mounts each virtiofs directory volume from the parsed specs.
     pub fn apply_dir_mounts(specs: &[DirMountSpec]) -> AgentdResult<()> {
         for spec in specs {
@@ -363,7 +417,13 @@ mod linux {
         fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        let mut flags = MsFlags::MS_RELATIME;
+        if spec.nosuid {
+            flags |= MsFlags::MS_NOSUID;
+        }
+        if spec.nodev {
+            flags |= MsFlags::MS_NODEV;
+        }
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }
@@ -423,7 +483,13 @@ mod linux {
         })?;
 
         // 2. Mount the virtiofs share at the staging directory.
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        let mut flags = MsFlags::MS_RELATIME;
+        if spec.nosuid {
+            flags |= MsFlags::MS_NOSUID;
+        }
+        if spec.nodev {
+            flags |= MsFlags::MS_NODEV;
+        }
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }
@@ -487,8 +553,13 @@ mod linux {
             })?;
 
             // 6. Remount the file bind with the guest-facing VFS flags.
-            let mut remount_flags =
-                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
+            let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT;
+            if spec.nosuid {
+                remount_flags |= MsFlags::MS_NOSUID;
+            }
+            if spec.nodev {
+                remount_flags |= MsFlags::MS_NODEV;
+            }
             if spec.noexec {
                 remount_flags |= MsFlags::MS_NOEXEC;
             }
@@ -544,11 +615,15 @@ mod linux {
         if specs.is_empty() {
             return Ok(());
         }
-        // Read /proc/filesystems once and reuse the candidate list across
-        // all autodetect mounts in this batch.
-        let fstypes = read_proc_filesystems()?;
+        // Read /proc/filesystems only when at least one mount needs
+        // autodetection, then reuse the candidate list across the batch.
+        let fstypes = if specs.iter().any(|spec| spec.fstype.is_none()) {
+            Some(read_proc_filesystems()?)
+        } else {
+            None
+        };
         for spec in specs {
-            mount_disk(spec, &fstypes)?;
+            mount_disk(spec, fstypes.as_deref())?;
         }
         Ok(())
     }
@@ -607,14 +682,20 @@ mod linux {
         None
     }
 
-    fn mount_disk(spec: &DiskMountSpec, fstypes: &[String]) -> AgentdResult<()> {
+    fn mount_disk(spec: &DiskMountSpec, fstypes: Option<&[String]>) -> AgentdResult<()> {
         let path = spec.guest_path.as_str();
         fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("disk mount: create dir {path}: {e}")))?;
 
         let device = resolve_disk_device(&spec.id)?;
 
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        let mut flags = MsFlags::MS_RELATIME;
+        if spec.nosuid {
+            flags |= MsFlags::MS_NOSUID;
+        }
+        if spec.nodev {
+            flags |= MsFlags::MS_NODEV;
+        }
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }
@@ -623,20 +704,17 @@ mod linux {
         }
 
         if let Some(fstype) = spec.fstype.as_deref() {
-            mount::mount(
-                Some(device.as_str()),
-                path,
-                Some(fstype),
-                flags,
-                None::<&str>,
-            )
-            .map_err(|e| {
+            let data = disk_mount_data(fstype, spec.readonly);
+            mount::mount(Some(device.as_str()), path, Some(fstype), flags, data).map_err(|e| {
                 AgentdError::Init(format!(
                     "disk mount: failed to mount {device} at {path} as {fstype}: {e}"
                 ))
             })?;
         } else {
-            try_mount_any(&device, path, flags, fstypes)?;
+            let fstypes = fstypes.ok_or_else(|| {
+                AgentdError::Init("disk mount: missing filesystem autodetect list".into())
+            })?;
+            try_mount_disk_any(&device, path, flags, spec.readonly, fstypes)?;
         }
 
         Ok(())
@@ -674,8 +752,13 @@ mod linux {
         fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
-        // Flags: nosuid + nodev (sensible safety defaults).
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        let mut flags = MsFlags::MS_RELATIME;
+        if spec.nosuid {
+            flags |= MsFlags::MS_NOSUID;
+        }
+        if spec.nodev {
+            flags |= MsFlags::MS_NODEV;
+        }
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }

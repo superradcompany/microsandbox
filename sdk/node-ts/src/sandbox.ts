@@ -11,8 +11,7 @@ import {
   type NapiSandboxConfig,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
-import { SandboxFs } from "./fs.js";
-import type { ExitStatus } from "./exit-status.js";
+import { SandboxFsOps } from "./fs.js";
 import {
   LogEntry,
   LogStream,
@@ -22,11 +21,11 @@ import {
   logReadOptionsToNapi,
   logStreamOptionsToNapi,
 } from "./logs.js";
-import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
+import { SandboxHandle, type SandboxStopResult } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
-import { SandboxSsh } from "./ssh.js";
+import { SandboxSshOps } from "./ssh.js";
 
 /**
  * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
@@ -34,7 +33,7 @@ import { SandboxSsh } from "./ssh.js";
  *
  * The instance IS the napi-rs `SandboxBuilder` class — every setter is a
  * native call, no TS-side reimplementation. Only the terminal `create()`
- * / `createDetached()` methods are wrapped here so they return a TS
+ * method is wrapped here so it returns a TS
  * `Sandbox` (which adds `Symbol.asyncDispose`, error-mapping, and a few
  * sync getters on top of the native handle).
  */
@@ -51,9 +50,7 @@ export type SandboxConfig = NapiSandboxConfig;
 
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
-  createDetached(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
-  createDetachedWithPullProgress(): Promise<PullProgressCreate>;
 }
 
 /**
@@ -118,21 +115,22 @@ export class Sandbox implements AsyncDisposable {
   /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     const nb = new napi.SandboxBuilder(name);
+    let detached = false;
+    const origDetached = nb.detached.bind(nb);
     const origCreate = nb.create.bind(nb);
-    const origCreateDetached = nb.createDetached.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
-    const origCreateDetachedWithPP =
-      nb.createDetachedWithPullProgress.bind(nb);
+    const wrapped = nb as unknown as {
+      detached: (enabled: boolean) => SandboxBuilder;
+    };
+    wrapped.detached = (enabled: boolean) => {
+      detached = enabled;
+      origDetached(enabled);
+      return nb as unknown as SandboxBuilder;
+    };
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name, /*ownsLifecycle*/ true);
-    };
-    (
-      nb as unknown as { createDetached: () => Promise<Sandbox> }
-    ).createDetached = async () => {
-      const inner = await withMappedErrors(() => origCreateDetached());
-      return new Sandbox(inner, name, /*ownsLifecycle*/ false);
+      return new Sandbox(inner, name, /*ownsLifecycle*/ !detached);
     };
     (
       nb as unknown as {
@@ -140,15 +138,7 @@ export class Sandbox implements AsyncDisposable {
       }
     ).createWithPullProgress = async () => {
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name, /*attached*/ true);
-    };
-    (
-      nb as unknown as {
-        createDetachedWithPullProgress: () => Promise<PullProgressCreate>;
-      }
-    ).createDetachedWithPullProgress = async () => {
-      const raw = await withMappedErrors(() => origCreateDetachedWithPP());
-      return new PullProgressCreate(raw, name, /*attached*/ false);
+      return new PullProgressCreate(raw, name, /*attached*/ !detached);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -184,8 +174,8 @@ export class Sandbox implements AsyncDisposable {
 
   /** List all known sandboxes. */
   static async list(): Promise<SandboxHandle[]> {
-    const infos = await withMappedErrors(() => napi.Sandbox.list());
-    return infos.map(sandboxInfoToHandle);
+    const handles = await withMappedErrors(() => napi.Sandbox.list());
+    return handles.map((handle) => new SandboxHandle(handle));
   }
 
   /**
@@ -195,8 +185,8 @@ export class Sandbox implements AsyncDisposable {
   static async listWith(filter: {
     labels?: Record<string, string>;
   }): Promise<SandboxHandle[]> {
-    const infos = await withMappedErrors(() => napi.Sandbox.listWith(filter));
-    return infos.map(sandboxInfoToHandle);
+    const handles = await withMappedErrors(() => napi.Sandbox.listWith(filter));
+    return handles.map((handle) => new SandboxHandle(handle));
   }
 
   /**
@@ -278,14 +268,14 @@ export class Sandbox implements AsyncDisposable {
 
   // -- filesystem ---------------------------------------------------------
 
-  fs(): SandboxFs {
-    return new SandboxFs(this.inner.fs());
+  fs(): SandboxFsOps {
+    return new SandboxFsOps(this.inner.fs());
   }
 
   // -- ssh ----------------------------------------------------------------
 
-  ssh(): SandboxSsh {
-    return new SandboxSsh(this.inner);
+  ssh(): SandboxSshOps {
+    return new SandboxSshOps(this.inner);
   }
 
   // -- config -------------------------------------------------------------
@@ -353,28 +343,38 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.stop());
   }
 
-  async stopAndWait(): Promise<ExitStatus> {
-    return await withMappedErrors(() => this.inner.stopAndWait());
+  async requestStop(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestStop());
+  }
+
+  async stopWithTimeout(timeoutMs: number): Promise<void> {
+    await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 
   async kill(): Promise<void> {
     await withMappedErrors(() => this.inner.kill());
   }
 
-  async drain(): Promise<void> {
-    await withMappedErrors(() => this.inner.drain());
+  async requestKill(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestKill());
   }
 
-  async wait(): Promise<ExitStatus> {
-    return await withMappedErrors(() => this.inner.wait());
+  async killWithTimeout(timeoutMs: number): Promise<void> {
+    await withMappedErrors(() => this.inner.killWithTimeout(timeoutMs));
+  }
+
+  async requestDrain(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestDrain());
+  }
+
+  async waitUntilStopped(): Promise<SandboxStopResult> {
+    return sandboxStopResultFromNapi(
+      await withMappedErrors(() => this.inner.waitUntilStopped()),
+    );
   }
 
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
-  }
-
-  async removePersisted(): Promise<void> {
-    await withMappedErrors(() => this.inner.removePersisted());
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
@@ -385,6 +385,24 @@ export class Sandbox implements AsyncDisposable {
       // best-effort dispose
     }
   }
+}
+
+function sandboxStopResultFromNapi(result: {
+  name: string;
+  status: string;
+  exitCode?: number | null;
+  signal?: number | null;
+  observedAt: number;
+  source?: string | null;
+}): SandboxStopResult {
+  return {
+    name: result.name,
+    status: result.status as SandboxStopResult["status"],
+    exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null,
+    observedAt: new Date(result.observedAt),
+    source: result.source ?? null,
+  };
 }
 
 const snakeToCamel = (k: string): string =>

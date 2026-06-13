@@ -67,6 +67,11 @@ class ImageNotFoundError(MicrosandboxError):
     code = "image-not-found"
 
 
+class ImageInUseError(MicrosandboxError):
+    """Image is still referenced by one or more sandboxes."""
+    code = "image-in-use"
+
+
 class ImagePullFailedError(MicrosandboxError):
     """Image pull failed."""
     code = "image-pull-failed"
@@ -95,6 +100,11 @@ class IoError(MicrosandboxError):
 class MetricsDisabledError(MicrosandboxError):
     """Metrics sampling is disabled for this sandbox."""
     code = "metrics-disabled"
+
+
+class MetricsUnavailableError(MicrosandboxError):
+    """Metrics are not available for the sandbox's current run."""
+    code = "metrics-unavailable"
 
 
 class UnsupportedOperationError(MicrosandboxError):

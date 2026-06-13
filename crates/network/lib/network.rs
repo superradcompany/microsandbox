@@ -195,6 +195,7 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
+        let secrets = Arc::new(self.config.secrets.clone());
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -209,6 +210,7 @@ impl SmoltcpNetwork {
                         published_ports,
                         max_connections,
                         tokio_handle,
+                        secrets,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),

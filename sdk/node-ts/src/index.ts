@@ -33,7 +33,7 @@ export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
-export { SandboxSsh, SftpClient, SshClient, SshServer } from "./ssh.js";
+export { SandboxSshOps, SftpClient, SshClient, SshServer } from "./ssh.js";
 export type {
   SshAttachOptions,
   SshClientOptions,
@@ -43,7 +43,7 @@ export type {
 } from "./ssh.js";
 
 // Filesystem
-export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
+export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
 export { Volume } from "./volume.js";
@@ -89,6 +89,7 @@ export type {
   ImageConfigDetail,
   ImageDetail,
   ImageLayerDetail,
+  ImagePruneReport,
 } from "./image.js";
 
 // Logs
@@ -144,7 +145,6 @@ function wrapMethodWithErrorMap(cls: any, method: string) {
 
 wrapMethodWithErrorMap(napi.MountBuilder, "build");
 wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
-wrapMethodWithErrorMap(napi.SandboxBuilder, "createDetached");
 wrapMethodWithErrorMap(napi.PatchBuilder, "build");
 wrapMethodWithErrorMap(napi.DnsBuilder, "build");
 wrapMethodWithErrorMap(napi.SecretBuilder, "build");
@@ -365,12 +365,13 @@ export {
   JsonError,
   LibkrunfwNotFoundError,
   MetricsDisabledError,
+  MetricsUnavailableError,
   MicrosandboxError,
   NixError,
   PatchFailedError,
   ProtocolError,
   RuntimeError,
-  SandboxFsError,
+  SandboxFsOpsError,
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,

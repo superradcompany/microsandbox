@@ -14,8 +14,12 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(unique)]
     pub name: String,
+    pub kind: String,
     pub quota_mib: Option<i32>,
     pub size_bytes: Option<i64>,
+    pub capacity_bytes: Option<i64>,
+    pub disk_format: Option<String>,
+    pub disk_fstype: Option<String>,
     pub labels: Option<String>,
     pub created_at: Option<DateTime>,
     pub updated_at: Option<DateTime>,

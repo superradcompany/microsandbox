@@ -518,9 +518,17 @@ fn poll_fd_readable_timeout(fd: RawFd, timeout_ms: i32) {
 
 pub(crate) fn push_guest_frame_blocking(
     shared: &ConsoleSharedState,
-    mut frame: Vec<u8>,
+    frame: Vec<u8>,
 ) -> RuntimeResult<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    push_guest_frame_until(shared, frame, std::time::Duration::from_secs(60))
+}
+
+pub(crate) fn push_guest_frame_until(
+    shared: &ConsoleSharedState,
+    mut frame: Vec<u8>,
+    timeout: std::time::Duration,
+) -> RuntimeResult<()> {
+    let deadline = std::time::Instant::now() + timeout;
 
     loop {
         match shared.rx_ring.push(frame) {

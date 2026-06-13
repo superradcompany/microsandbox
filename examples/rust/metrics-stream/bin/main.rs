@@ -38,6 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

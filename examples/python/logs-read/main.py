@@ -19,7 +19,7 @@ async def main():
     )
 
     # exec.log is read after the sandbox is stopped; it persists on disk.
-    await sb.stop_and_wait()
+    await sb.stop()
 
     handle = await Sandbox.get("logs-read")
 

@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exit_code = sandbox.attach_shell().await?;
     println!("Shell exited with code {exit_code}");
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     println!("Sandbox stopped.");
 
     Ok(())

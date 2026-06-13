@@ -53,8 +53,7 @@ export interface NativeBindings {
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
-  readonly imageGcLayers: () => Promise<number>;
-  readonly imageGc: () => Promise<number>;
+  readonly imagePrune: () => Promise<NapiImagePruneReport>;
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
@@ -64,6 +63,7 @@ export interface NativeBindings {
 export interface NapiAgentClientStatic {
   connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
   connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  socketPath(name: string): string;
 }
 
 export interface AgentConnectOptions {
@@ -102,8 +102,8 @@ export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
-  list(): Promise<NapiSandboxInfo[]>;
-  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxInfo[]>;
+  list(): Promise<NapiSandboxHandle[]>;
+  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxHandle[]>;
   remove(name: string): Promise<void>;
 }
 
@@ -129,10 +129,12 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
+  detached(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;
   shell(shell: string): this;
+  security(profile: "default" | "restricted"): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
@@ -174,9 +176,7 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
-  createDetached(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
-  createDetachedWithPullProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandbox {
@@ -187,7 +187,7 @@ export interface NapiSandbox {
   execStreamWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   shell(script: string): Promise<NapiExecOutput>;
   shellStream(script: string): Promise<NapiExecHandle>;
-  fs(): NapiSandboxFs;
+  fs(): NapiSandboxFsOps;
   sshConnect(opts?: NapiSshClientOptions): Promise<NapiSshClient>;
   sshServer(opts?: NapiSshServerOptions): Promise<NapiSshServer>;
   metrics(): Promise<NapiSandboxMetrics>;
@@ -196,12 +196,14 @@ export interface NapiSandbox {
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
-  stopAndWait(): Promise<NapiExitStatus>;
+  requestStop(): Promise<void>;
+  stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
-  drain(): Promise<void>;
-  wait(): Promise<NapiExitStatus>;
+  requestKill(): Promise<void>;
+  killWithTimeout(timeoutMs: number): Promise<void>;
+  requestDrain(): Promise<void>;
+  waitUntilStopped(): Promise<NapiSandboxStopResult>;
   detach(): Promise<void>;
-  removePersisted(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
   logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
 }
@@ -212,19 +214,34 @@ export interface NapiSandboxHandle {
   readonly configJson: string;
   readonly createdAt: number | null;
   readonly updatedAt: number | null;
+  refresh(): Promise<NapiSandboxHandle>;
   metrics(): Promise<NapiSandboxMetrics>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
+  requestKill(): Promise<void>;
+  killWithTimeout(timeoutMs: number): Promise<void>;
+  requestDrain(): Promise<void>;
+  waitUntilStopped(): Promise<NapiSandboxStopResult>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
   logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
   snapshot(name: string): Promise<NapiSnapshot>;
   snapshotTo(path: string): Promise<NapiSnapshot>;
+}
+
+export interface NapiSandboxStopResult {
+  readonly name: string;
+  readonly status: string;
+  readonly exitCode: number | null;
+  readonly signal: number | null;
+  readonly observedAt: number;
+  readonly source: string | null;
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
@@ -307,7 +324,7 @@ export interface NapiSftpClient {
 }
 
 export interface NapiSshServer {
-  serveStdio(): Promise<void>;
+  serveConnection(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -330,8 +347,12 @@ export type NapiVolumeBuilderCtor = new (name: string) => NapiVolumeBuilder;
 // Same setters/terminal split as `NapiSandboxBuilder` — see comment
 // there for why.
 export interface NapiVolumeBuilderSetters {
+  directory(): this;
+  disk(): this;
   quota(mib: number): this;
+  size(mib: number): this;
   label(key: string, value: string): this;
+  build(): NapiVolumeConfig;
 }
 
 export interface NapiVolumeBuilder extends NapiVolumeBuilderSetters {
@@ -344,10 +365,22 @@ export interface NapiVolume {
   fs(): NapiVolumeFs;
 }
 
+export interface NapiVolumeConfig {
+  readonly name: string;
+  readonly kind: string;
+  readonly quotaMib?: number | null;
+  readonly capacityMib?: number | null;
+  readonly labels: Record<string, string>;
+}
+
 export interface NapiVolumeHandle {
   readonly name: string;
+  readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
+  readonly capacityBytes: number | null | undefined;
+  readonly diskFormat: string | null | undefined;
+  readonly diskFstype: string | null | undefined;
   readonly labels: Record<string, string>;
   readonly createdAt: number | null | undefined;
   fs(): NapiVolumeFs;
@@ -381,8 +414,12 @@ export interface NapiVolumeFsWriteSink {
 
 export interface NapiVolumeInfo {
   readonly name: string;
+  readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
+  readonly capacityBytes: number | null | undefined;
+  readonly diskFormat: string | null | undefined;
+  readonly diskFstype: string | null | undefined;
   readonly labels: Record<string, string>;
   readonly createdAt: number | null | undefined;
 }
@@ -520,6 +557,15 @@ export interface NapiImageDetail extends NapiImageInfo {
   readonly layers: NapiImageLayerDetail[];
 }
 
+export interface NapiImagePruneReport {
+  readonly imageRefsRemoved: number;
+  readonly manifestsRemoved: number;
+  readonly layersRemoved: number;
+  readonly fsmetaRemoved: number;
+  readonly vmdkRemoved: number;
+  readonly bytesReclaimed: number | null | undefined;
+}
+
 export interface NapiSetup {
   baseDir(path: string): NapiSetup;
   version(version: string): NapiSetup;
@@ -565,7 +611,7 @@ export interface NapiExitStatus {
   readonly success: boolean;
 }
 
-export interface NapiSandboxFs {
+export interface NapiSandboxFsOps {
   read(path: string): Promise<Buffer>;
   readString(path: string): Promise<string>;
   write(path: string, data: Buffer): Promise<void>;
@@ -611,7 +657,10 @@ export interface NapiFsMetadata {
 
 export interface NapiSandboxMetrics {
   readonly cpuPercent: number;
+  readonly vcpuTimeNs: number;
   readonly memoryBytes: number;
+  readonly memoryAvailableBytes?: number;
+  readonly memoryHostResidentBytes?: number;
   readonly memoryLimitBytes: number;
   readonly diskReadBytes: number;
   readonly diskWriteBytes: number;
@@ -889,12 +938,21 @@ export interface NapiBuiltNetworkPolicyDestination {
 export interface NapiMountBuilder {
   bind(host: string): this;
   named(name: string): this;
+  namedWith(
+    name: string,
+    mode?: "existing" | "create" | "ensure-exists",
+    kind?: "dir" | "directory" | "disk",
+    sizeMib?: number,
+    quotaMib?: number,
+  ): this;
   tmpfs(): this;
   disk(host: string): this;
   format(format: string): this;
   fstype(fstype: string): this;
   readonly(): this;
   noexec(): this;
+  nosuid(): this;
+  nodev(): this;
   size(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
@@ -906,6 +964,8 @@ export interface NapiVolumeMount {
   readonly guest: string;
   readonly readonly: boolean;
   readonly noexec: boolean;
+  readonly nosuid: boolean;
+  readonly nodev: boolean;
   readonly host?: string;
   readonly name?: string;
   readonly sizeMib?: number;

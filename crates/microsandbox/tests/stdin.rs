@@ -42,7 +42,7 @@ async fn stdin_bytes_writes_payload_larger_than_pipe_capacity() {
         .await
         .expect("write stdin payload");
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     assert!(
@@ -87,7 +87,7 @@ async fn stdin_bytes_waits_for_slow_reader() {
         .await
         .expect("write stdin payload");
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     assert!(
@@ -165,7 +165,7 @@ async fn stdin_pipe_streams_chunks_in_order() {
         }
     }
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     assert_eq!(exit_code, Some(0), "guest command exited non-zero");
@@ -228,7 +228,7 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
         }
     }
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
     assert_eq!(exit_code, Some(0), "guest command exited non-zero");

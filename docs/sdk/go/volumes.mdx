@@ -11,8 +11,12 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 
 ```go
 vol, err := m.CreateVolume(ctx, "my-data",
-    m.WithVolumeQuota(100),
     m.WithVolumeLabels(map[string]string{"env": "prod"}),
+)
+
+dockerData, err := m.CreateVolume(ctx, "docker-data",
+    m.WithVolumeKind(m.VolumeKindDisk),
+    m.WithVolumeSize(20 * 1024),
 )
 ```
 
@@ -103,7 +107,27 @@ Delete a volume by name. All sandboxes referencing the volume must be stopped.
 func WithVolumeQuota(mebibytes uint32) VolumeOption
 ```
 
-Set the volume's maximum storage size in MiB. Zero means unlimited.
+Set recorded quota metadata for directory volumes. Zero means unlimited.
+
+---
+
+#### WithVolumeKind()
+
+```go
+func WithVolumeKind(kind VolumeKind) VolumeOption
+```
+
+Select the volume kind. Valid values are `VolumeKindDir` and `VolumeKindDisk`.
+
+---
+
+#### WithVolumeSize()
+
+```go
+func WithVolumeSize(mebibytes uint32) VolumeOption
+```
+
+Set disk volume capacity in MiB. Required with `VolumeKindDisk`.
 
 ---
 
@@ -125,8 +149,12 @@ Metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#li
 |--------|---------|-------------|
 | `Name()` | `string` | Volume name |
 | `Path()` | `string` | Host filesystem path of the volume's data directory |
+| `Kind()` | `VolumeKind` | Volume kind: `VolumeKindDir` or `VolumeKindDisk` |
 | `QuotaMiB()` | `*uint32` | Quota in MiB, or `nil` if unlimited |
 | `UsedBytes()` | `uint64` | Current disk usage in bytes |
+| `CapacityBytes()` | `*uint64` | Disk capacity in bytes |
+| `DiskFormat()` | `*string` | Disk image format |
+| `DiskFstype()` | `*string` | Disk filesystem type |
 | `Labels()` | `map[string]string` | Metadata labels |
 | `CreatedAt()` | `time.Time` | Creation timestamp, zero value if unknown |
 | `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
@@ -297,7 +325,44 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
 func (mountFactory) Named(name string, opts MountOptions) MountConfig
 ```
 
-Mount a named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+Mount an existing named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+
+---
+
+#### Mount.NamedWith()
+
+```go
+func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
+```
+
+Mount a named persistent volume with explicit sandbox-time existence behavior. `NamedVolumeOptions.Mode` accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `NamedVolumeOptions.Kind` accepts `"dir"` (default) or `"disk"`.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/cache": m.Mount.NamedWith("pip-cache", m.MountOptions{}, m.NamedVolumeOptions{
+            Mode: "ensure-exists",
+        }),
+        "/var/lib/docker": m.Mount.NamedWith("docker-data", m.MountOptions{}, m.NamedVolumeOptions{
+            Mode:    "ensure-exists",
+            Kind:    "disk",
+            SizeMiB: 20 * 1024,
+        }),
+    }),
+)
+```
+
+`Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
+
+**NamedVolumeOptions**
+
+| Field | Description |
+|-------|-------------|
+| `Mode` | `"existing"`, `"create"`, or `"ensure-exists"`; empty means `"existing"` |
+| `Kind` | `"dir"` or `"disk"`; empty means `"dir"` |
+| `SizeMiB` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
+| `QuotaMiB` | Directory volume quota in MiB |
 
 ---
 
@@ -331,6 +396,8 @@ Tuning struct for `Mount.Bind` and `Mount.Named`.
 |-------|------|-------------|
 | Readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### TmpfsOptions
 
@@ -341,6 +408,8 @@ Tuning struct for `Mount.Tmpfs`.
 | SizeMiB | `uint32` | Maximum size in MiB |
 | Readonly | `bool` | Mount as read-only |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### DiskOptions
 
@@ -352,6 +421,8 @@ Tuning struct for `Mount.Disk`.
 | Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional; omitted means auto-detect |
 | Readonly | `bool` | Mount as read-only |
 | Noexec | `bool` | Prevent direct execution from the mount |
+| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| Nodev | `bool` | Ignore device files on the mount |
 
 ### MountConfig
 
@@ -367,6 +438,8 @@ Discriminated mount configuration produced by `Mount` helpers. Inspect the kind 
 | Fstype | `string` | Inner filesystem type |
 | Readonly | `bool` | Whether the mount is read-only |
 | Noexec | `bool` | Whether direct execution from the mount is disabled |
+| Nosuid | `bool` | Whether setuid/setgid privilege elevation from files on the mount is ignored |
+| Nodev | `bool` | Whether device files on the mount are ignored |
 | SizeMiB | `uint32` | Size limit for tmpfs mounts |
 
 ### MountKind
@@ -394,7 +467,9 @@ The config struct populated by [`VolumeOption`](#volumeoption) functions. Most c
 
 | Field | Type | Description |
 |-------|------|-------------|
+| Kind | `VolumeKind` | Volume kind (`VolumeKindDir` by default) |
 | QuotaMiB | `uint32` | Maximum storage size in MiB (zero = unlimited) |
+| SizeMiB | `uint32` | Disk capacity in MiB for `VolumeKindDisk` |
 | Labels | `map[string]string` | Metadata labels |
 
 ### VolumeOption

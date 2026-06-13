@@ -122,13 +122,13 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
                 await connected.detach()
         with suppress(Exception):
             if sandbox is not None:
-                await sandbox.stop_and_wait()
+                await sandbox.stop()
         if handle is None:
             with suppress(Exception):
                 handle = await Sandbox.get(name)
         if handle is not None:
             with suppress(Exception):
-                await handle.stop_with_timeout(10.0)
+                await handle.stop(timeout=10.0)
         await remove_sandbox(name)
 
 

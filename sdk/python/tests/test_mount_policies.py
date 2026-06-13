@@ -13,6 +13,7 @@ from microsandbox import (
     HostPermissions,
     MountConfig,
     MountKind,
+    SecurityProfile,
     StatVirtualization,
 )
 
@@ -36,10 +37,24 @@ def test_bind_accepts_policy_strings() -> None:
     assert mc._to_dict() == {
         "readonly": True,
         "noexec": False,
+        "nosuid": False,
+        "nodev": False,
         "bind": "/host/data",
         "stat_virtualization": "relaxed",
         "host_permissions": "mirror",
     }
+
+
+def test_bind_serializes_security_mount_flags() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        nosuid=True,
+        nodev=True,
+    )
+    d = mc._to_dict()
+    assert d["nosuid"] is True
+    assert d["nodev"] is True
 
 
 def test_bind_with_relaxed_and_mirror_serializes_lowercase() -> None:
@@ -105,3 +120,8 @@ def test_stat_virtualization_str_values() -> None:
 def test_host_permissions_str_values() -> None:
     assert HostPermissions.PRIVATE.value == "private"
     assert HostPermissions.MIRROR.value == "mirror"
+
+
+def test_security_profile_str_values() -> None:
+    assert SecurityProfile.DEFAULT.value == "default"
+    assert SecurityProfile.RESTRICTED.value == "restricted"

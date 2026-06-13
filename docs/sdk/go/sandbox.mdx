@@ -90,7 +90,7 @@ func CreateSandbox(
 ) (*Sandbox, error)
 ```
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#instance-methods) owns the VM process — call `Close` (or `StopAndWait` + `Close`) when done.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#instance-methods) owns the VM process — call `Close` (or `Stop` + `Close`) when done.
 
 **Parameters**
 
@@ -118,24 +118,10 @@ if err != nil {
     return err
 }
 defer func() {
-    _, _ = sb.StopAndWait(context.Background())
+    _ = sb.Stop(context.Background())
     _ = sb.Close()
 }()
 ```
-
----
-
-#### CreateSandboxDetached()
-
-```go
-func CreateSandboxDetached(
-    ctx context.Context,
-    name string,
-    opts ...SandboxOption,
-) (*Sandbox, error)
-```
-
-Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox). Sandbox names are limited to 128 UTF-8 bytes.
 
 ---
 
@@ -231,7 +217,7 @@ Return the sandbox's name.
 #### FS()
 
 ```go
-func (s *Sandbox) FS() *SandboxFs
+func (s *Sandbox) FS() *SandboxFsOps
 ```
 
 Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for API details.
@@ -341,33 +327,23 @@ Attach to the sandbox's default shell (configured via [`WithShell`](#withshell),
 
 ---
 
-#### Drain()
-
-```go
-func (s *Sandbox) Drain(ctx context.Context) error
-```
-
-Send a graceful drain signal (SIGUSR1) to the sandbox. Existing commands run to completion, new `exec` calls are rejected. Errors if this handle does not own the lifecycle.
-
----
-
 #### Stop()
 
 ```go
 func (s *Sandbox) Stop(ctx context.Context) error
 ```
 
-Gracefully shut down the sandbox (SIGTERM). Does **not** wait for the VM process to exit — use [`StopAndWait`](#stopandwait) for that.
+Gracefully shut down the sandbox and wait until stopped state is observed. Pass `WithStopTimeout(...)` to control the graceful shutdown window before force-kill.
 
 ---
 
-#### StopAndWait()
+#### RequestStop()
 
 ```go
-func (s *Sandbox) StopAndWait(ctx context.Context) (int, error)
+func (s *Sandbox) RequestStop(ctx context.Context) error
 ```
 
-Stop the sandbox and wait for the VM process to exit. Returns the guest exit code, or `-1` if the guest did not report one.
+Request graceful shutdown and return once the request is sent.
 
 ---
 
@@ -377,21 +353,37 @@ Stop the sandbox and wait for the VM process to exit. Returns the guest exit cod
 func (s *Sandbox) Kill(ctx context.Context) error
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful
-shutdown. Pending writes that the workload hasn't `fsync`'d may be
-lost — same durability semantics as a sudden power loss on a physical
-machine. Use [`Stop()`](#stop) for graceful shutdown that gives the
-workload a chance to flush.
+Force-terminate the sandbox and wait until stopped state is observed. Pass `WithKillTimeout(...)` to control the observation timeout.
 
 ---
 
-#### Wait()
+#### RequestKill()
 
 ```go
-func (s *Sandbox) Wait(ctx context.Context) (int, error)
+func (s *Sandbox) RequestKill(ctx context.Context) error
 ```
 
-Block until the sandbox process exits on its own and return the exit code (`-1` if the guest did not report one). Errors if this handle does not own the lifecycle.
+Request force termination and return once the request is sent.
+
+---
+
+#### RequestDrain()
+
+```go
+func (s *Sandbox) RequestDrain(ctx context.Context) error
+```
+
+Request graceful drain and return once the request is sent.
+
+---
+
+#### WaitUntilStopped()
+
+```go
+func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error)
+```
+
+Block until the sandbox is observed in terminal state.
 
 ---
 
@@ -437,13 +429,13 @@ Convenience that swallows the error and returns `false` on any failure. Suitable
 
 ---
 
-#### RemovePersisted()
+#### RemoveSandbox()
 
 ```go
-func (s *Sandbox) RemovePersisted(ctx context.Context) error
+func RemoveSandbox(ctx context.Context, name string) error
 ```
 
-Remove the sandbox's persisted state (filesystem and database record). The sandbox must already be stopped. This handle becomes invalid after the call.
+Remove a stopped sandbox's persisted state by name.
 
 ---
 
@@ -712,6 +704,16 @@ Shell binary used by [`Sandbox.Shell`](#shell) and [`Sandbox.AttachShell`](#atta
 
 ---
 
+#### WithSecurityProfile()
+
+```go
+func WithSecurityProfile(profile SecurityProfile) SandboxOption
+```
+
+Set the in-guest security profile. Use `SecurityProfileRestricted` for stronger hardening that sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts.
+
+---
+
 #### WithEnv()
 
 ```go
@@ -973,6 +975,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | CPUs             | `uint8`                                              | Virtual CPUs                                                         |
 | Workdir          | `string`                                             | Default working directory                                            |
 | Shell            | `string`                                             | Shell binary used by `Shell` calls                                   |
+| SecurityProfile  | [`SecurityProfile`](#securityprofile)                | In-guest security profile                                            |
 | Hostname         | `string`                                             | Guest hostname                                                       |
 | User             | `string`                                             | Default guest user                                                   |
 | Replace          | `bool`                                               | Replace existing sandbox with same name                              |
@@ -1003,6 +1006,19 @@ type SandboxOption func(*SandboxConfig)
 ```
 
 A functional option for [`CreateSandbox`](#createsandbox). All `WithX` helpers listed above return a `SandboxOption`.
+
+### SecurityProfile
+
+```go
+type SecurityProfile string
+
+const (
+    SecurityProfileDefault    SecurityProfile = "default"
+    SecurityProfileRestricted SecurityProfile = "restricted"
+)
+```
+
+Sandbox-wide in-guest security profile.
 
 ### InitConfig
 

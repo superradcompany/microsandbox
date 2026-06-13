@@ -34,7 +34,7 @@ async def main():
     print(f"Done — {chunk_count} chunks, {total_bytes} bytes total")
     assert total_bytes == FILE_SIZE, f"expected {FILE_SIZE} bytes, got {total_bytes}"
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

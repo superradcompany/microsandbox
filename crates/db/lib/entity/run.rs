@@ -39,6 +39,14 @@ pub enum TerminationReason {
     #[sea_orm(string_value = "IdleTimeout")]
     IdleTimeout,
 
+    /// agentd stopped reporting fresh heartbeat data.
+    #[sea_orm(string_value = "AgentUnresponsive")]
+    AgentUnresponsive,
+
+    /// User or client requested shutdown explicitly.
+    #[sea_orm(string_value = "ShutdownRequested")]
+    ShutdownRequested,
+
     /// SIGUSR1 received (explicit drain request).
     #[sea_orm(string_value = "DrainRequested")]
     DrainRequested,
@@ -104,6 +112,8 @@ impl std::fmt::Display for TerminationReason {
             Self::Failed => f.write_str("Failed"),
             Self::MaxDurationExceeded => f.write_str("MaxDurationExceeded"),
             Self::IdleTimeout => f.write_str("IdleTimeout"),
+            Self::AgentUnresponsive => f.write_str("AgentUnresponsive"),
+            Self::ShutdownRequested => f.write_str("ShutdownRequested"),
             Self::DrainRequested => f.write_str("DrainRequested"),
             Self::Signal => f.write_str("Signal"),
             Self::InternalError => f.write_str("InternalError"),

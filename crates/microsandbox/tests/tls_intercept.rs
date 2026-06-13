@@ -20,6 +20,7 @@ use tokio_rustls::TlsAcceptor;
 
 const LARGE_POST_BODY_LEN: usize = 135_000; // 135 kb, above the old ~128 kib failure threshold.
 const LARGE_SECRET_PAD_LEN: usize = 1024 * 1024; // 1 MiB on each side of the placeholder.
+const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
 const REAL_SECRET: &[u8] = b"real-secret";
 
 //--------------------------------------------------------------------------------------------------
@@ -97,7 +98,7 @@ impl Drop for HostHttps {
 /// Boot a curl sandbox with TLS interception enabled on the fixture port.
 async fn spawn_curl_sandbox(name: &str, port: u16) -> Sandbox {
     Sandbox::builder(name)
-        .image("curlimages/curl")
+        .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
@@ -115,7 +116,7 @@ async fn spawn_curl_sandbox(name: &str, port: u16) -> Sandbox {
 async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) -> Sandbox {
     let allowed_host = allowed_host.to_string();
     Sandbox::builder(name)
-        .image("curlimages/curl")
+        .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
@@ -137,7 +138,7 @@ async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) ->
 
 /// Stop the sandbox and remove it.
 async fn teardown(sb: Sandbox, name: &str) {
-    sb.stop_and_wait().await.expect("stop");
+    sb.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 

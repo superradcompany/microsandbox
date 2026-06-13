@@ -16,7 +16,7 @@ async def main():
     )
     output = await sb.shell("wget -q -O /dev/null --timeout=5 http://example.com && echo OK || echo FAIL")
     print(f"Public HTTP: {output.stdout_text.strip()}")
-    await sb.stop_and_wait()
+    await sb.stop()
 
     # Allow-all: private networks reachable too.
     sb = await Sandbox.create(
@@ -29,7 +29,7 @@ async def main():
     )
     output = await sb.shell("wget -q -O /dev/null --timeout=5 http://example.com && echo OK || echo FAIL")
     print(f"Allow-all HTTP: {output.stdout_text.strip()}")
-    await sb.stop_and_wait()
+    await sb.stop()
 
     # No network: all connections denied.
     sb = await Sandbox.create(
@@ -42,7 +42,7 @@ async def main():
     )
     output = await sb.shell("wget -q -O /dev/null --timeout=3 http://example.com && echo OK || echo BLOCKED")
     print(f"No-network HTTP: {output.stdout_text.strip()}")
-    await sb.stop_and_wait()
+    await sb.stop()
 
     await Sandbox.remove("net-policy-public")
     await Sandbox.remove("net-policy-all")

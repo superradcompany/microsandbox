@@ -5,7 +5,7 @@ import type {
   NapiFsMetadata,
   NapiFsReadStream,
   NapiFsWriteSink,
-  NapiSandboxFs,
+  NapiSandboxFsOps,
 } from "./internal/napi.js";
 import type { FsEntry, FsEntryKind, FsMetadata } from "./fs-types.js";
 
@@ -89,11 +89,11 @@ export class FsWriteSink implements AsyncDisposable {
   }
 }
 
-export class SandboxFs {
-  private readonly inner: NapiSandboxFs;
+export class SandboxFsOps {
+  private readonly inner: NapiSandboxFsOps;
 
   /** @internal */
-  constructor(inner: NapiSandboxFs) {
+  constructor(inner: NapiSandboxFsOps) {
     this.inner = inner;
   }
 

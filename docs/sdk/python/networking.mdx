@@ -29,7 +29,7 @@ Network(
 |-------|------|-------------|
 | policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy) |
 | ports | `Mapping[int, int] \| Sequence[PortBinding]` | Port mappings from host to guest. Mapping form binds to `127.0.0.1`; `PortBinding` can set an explicit bind address |
-| deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
+| deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (NXDOMAIN), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
 | deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
 | dns | [`DnsConfig`](#dnsconfig) ` \| None` | DNS interception configuration |
 | tls | [`TlsConfig`](#tlsconfig) ` \| None` | TLS interception configuration |

@@ -26,11 +26,13 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
-            SandboxFs(_) => ("FilesystemError", err.to_string()),
+            SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
+            ImageInUse(_) => ("ImageInUseError", err.to_string()),
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
             MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
+            MetricsUnavailable(_) => ("MetricsUnavailableError", err.to_string()),
             AgentClient(microsandbox::AgentClientError::UnsupportedOperation { .. }) => {
                 ("UnsupportedOperationError", err.to_string())
             }

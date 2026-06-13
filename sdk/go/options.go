@@ -1,6 +1,10 @@
 package microsandbox
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // SandboxConfig holds configuration for creating a sandbox.
 //
@@ -8,6 +12,7 @@ import "time"
 // SandboxConfig is exported for callers that prefer to build a config value
 // directly and pass it via WithConfig.
 type SandboxConfig struct {
+	Name            string
 	Image           string
 	ImageFstype     string
 	OCIUpperSizeMiB uint32
@@ -17,6 +22,7 @@ type SandboxConfig struct {
 	CPUs            uint8
 	Workdir         string
 	Shell           string
+	SecurityProfile SecurityProfile
 	Hostname        string
 	User            string
 	Replace         bool
@@ -49,6 +55,137 @@ type SandboxConfig struct {
 
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
+
+type persistedSandboxConfig struct {
+	Name            string            `json:"name"`
+	Image           json.RawMessage   `json:"image"`
+	ImageFstype     string            `json:"image_fstype"`
+	OCIUpperSizeMiB uint32            `json:"oci_upper_size_mib"`
+	MemoryMiB       uint32            `json:"memory_mib"`
+	CPUs            uint8             `json:"cpus"`
+	Workdir         string            `json:"workdir"`
+	Shell           string            `json:"shell"`
+	SecurityProfile SecurityProfile   `json:"security_profile"`
+	Hostname        string            `json:"hostname"`
+	User            string            `json:"user"`
+	Replace         bool              `json:"replace"`
+	Labels          map[string]string `json:"labels"`
+	Detached        bool              `json:"detached"`
+	Entrypoint      []string          `json:"entrypoint"`
+	LogLevel        LogLevel          `json:"log_level"`
+	QuietLogs       bool              `json:"quiet_logs"`
+	Scripts         map[string]string `json:"scripts"`
+	PullPolicy      PullPolicy        `json:"pull_policy"`
+}
+
+// UnmarshalJSON decodes the persisted Rust sandbox config into the Go SDK's
+// public configuration shape.
+func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
+	var raw persistedSandboxConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	image, imageFstype, upperSizeMiB, upperSizeSet, err := decodePersistedRootfsSource(raw.Image)
+	if err != nil {
+		return err
+	}
+	if raw.ImageFstype != "" {
+		imageFstype = raw.ImageFstype
+	}
+	if raw.OCIUpperSizeMiB != 0 {
+		upperSizeMiB = raw.OCIUpperSizeMiB
+		upperSizeSet = true
+	}
+
+	*c = SandboxConfig{
+		Name:            raw.Name,
+		Image:           image,
+		ImageFstype:     imageFstype,
+		OCIUpperSizeMiB: upperSizeMiB,
+		ociUpperSizeSet: upperSizeSet,
+		MemoryMiB:       raw.MemoryMiB,
+		CPUs:            raw.CPUs,
+		Workdir:         raw.Workdir,
+		Shell:           raw.Shell,
+		SecurityProfile: raw.SecurityProfile,
+		Hostname:        raw.Hostname,
+		User:            raw.User,
+		Replace:         raw.Replace,
+		Labels:          raw.Labels,
+		Detached:        raw.Detached,
+		Entrypoint:      raw.Entrypoint,
+		LogLevel:        raw.LogLevel,
+		QuietLogs:       raw.QuietLogs,
+		Scripts:         raw.Scripts,
+		PullPolicy:      raw.PullPolicy,
+	}
+	return nil
+}
+
+func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", "", 0, false, nil
+	}
+
+	var plain string
+	if err := json.Unmarshal(raw, &plain); err == nil {
+		return plain, "", 0, false, nil
+	}
+
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tagged); err != nil {
+		return "", "", 0, false, err
+	}
+
+	if value, ok := tagged["Oci"]; ok {
+		var source struct {
+			Reference    string  `json:"reference"`
+			UpperSizeMiB *uint32 `json:"upper_size_mib"`
+		}
+		if err := json.Unmarshal(value, &source); err != nil {
+			return "", "", 0, false, err
+		}
+		if source.UpperSizeMiB == nil {
+			return source.Reference, "", 0, false, nil
+		}
+		return source.Reference, "", *source.UpperSizeMiB, true, nil
+	}
+
+	if value, ok := tagged["Bind"]; ok {
+		var path string
+		if err := json.Unmarshal(value, &path); err != nil {
+			return "", "", 0, false, err
+		}
+		return path, "", 0, false, nil
+	}
+
+	if value, ok := tagged["DiskImage"]; ok {
+		var source struct {
+			Path   string  `json:"path"`
+			Fstype *string `json:"fstype"`
+		}
+		if err := json.Unmarshal(value, &source); err != nil {
+			return "", "", 0, false, err
+		}
+		if source.Fstype == nil {
+			return source.Path, "", 0, false, nil
+		}
+		return source.Path, *source.Fstype, 0, false, nil
+	}
+
+	return "", "", 0, false, fmt.Errorf("unknown rootfs source variant: %v", tagged)
+}
+
+// SecurityProfile selects the in-guest security profile.
+type SecurityProfile string
+
+const (
+	// SecurityProfileDefault preserves normal guest-root semantics.
+	SecurityProfileDefault SecurityProfile = "default"
+	// SecurityProfileRestricted applies stronger in-guest hardening.
+	SecurityProfileRestricted SecurityProfile = "restricted"
+)
 
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
@@ -99,6 +236,11 @@ func WithWorkdir(path string) SandboxOption {
 // Defaults to /bin/sh on most images.
 func WithShell(shell string) SandboxOption {
 	return func(o *SandboxConfig) { o.Shell = shell }
+}
+
+// WithSecurityProfile selects the in-guest security profile.
+func WithSecurityProfile(profile SecurityProfile) SandboxOption {
+	return func(o *SandboxConfig) { o.SecurityProfile = profile }
 }
 
 // WithEnv adds environment variables to the sandbox. Called repeatedly,
@@ -169,7 +311,7 @@ func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 }
 
 // WithDetached creates the sandbox in detached mode. The sandbox continues
-// running after the Go process exits. Reattach via GetSandbox or CreateSandboxDetached.
+// running after the Go process exits. Reattach via GetSandbox.
 func WithDetached() SandboxOption {
 	return func(o *SandboxConfig) { o.Detached = true }
 }
@@ -241,8 +383,8 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	}
 }
 
-// WithPorts publishes host TCP ports into the sandbox. The map key is the
-// host port and the value is the guest port.
+// WithPorts makes TCP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPorts(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.Ports == nil {
@@ -254,7 +396,8 @@ func WithPorts(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// WithPortsUDP publishes host UDP ports into the sandbox.
+// WithPortsUDP makes UDP services running in the sandbox reachable on localhost
+// ports on the host. Each map entry exposes guest port value on host port key.
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	return func(o *SandboxConfig) {
 		if o.PortsUDP == nil {
@@ -266,7 +409,8 @@ func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
-// PortBinding publishes a host port on a specific host bind address.
+// PortBinding describes how to expose a service running in the sandbox on a
+// specific host address and port.
 // Protocol defaults to TCP when empty. Use Bind "0.0.0.0" to expose the
 // published port on all IPv4 interfaces.
 type PortBinding struct {
@@ -276,7 +420,7 @@ type PortBinding struct {
 	Protocol  PortProtocol
 }
 
-// PortProtocol identifies the protocol for a published port binding.
+// PortProtocol identifies the protocol for an exposed sandbox service.
 type PortProtocol string
 
 const (
@@ -284,7 +428,8 @@ const (
 	PortProtocolUDP PortProtocol = "udp"
 )
 
-// WithPortBindings publishes explicit bind-address host ports into the sandbox.
+// WithPortBindings makes services running in the sandbox reachable on explicit
+// host addresses and ports.
 func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.PortBindings = append(o.PortBindings, bindings...)
@@ -391,10 +536,10 @@ type NetworkConfig struct {
 	// TLS configures the transparent TLS interception proxy.
 	TLS *TLSConfig
 
-	// Ports publishes host TCP ports into the sandbox (host→guest).
+	// Ports makes sandbox TCP services reachable on localhost ports on the host.
 	Ports map[uint16]uint16
 
-	// PortBindings publishes host ports on explicit host bind addresses.
+	// PortBindings makes sandbox services reachable on explicit host bind addresses.
 	PortBindings []PortBinding
 
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
@@ -722,15 +867,20 @@ type MountConfig struct {
 	// to introspect; setting fields below directly is discouraged.
 	kind MountKind
 
-	Bind     string
-	Named    string
-	Tmpfs    bool
-	Disk     string
-	Format   string
-	Fstype   string
-	Readonly bool
-	Noexec   bool
-	SizeMiB  uint32
+	Bind      string
+	Named     string
+	NamedMode string
+	NamedKind string
+	QuotaMiB  uint32
+	Tmpfs     bool
+	Disk      string
+	Format    string
+	Fstype    string
+	Readonly  bool
+	Noexec    bool
+	Nosuid    bool
+	Nodev     bool
+	SizeMiB   uint32
 
 	// StatVirtualization is the per-mount stat-virtualization policy. Only
 	// meaningful for Bind and Named mounts. Zero value preserves the
@@ -768,8 +918,18 @@ func (m MountConfig) Kind() MountKind { return m.kind }
 type MountOptions struct {
 	Readonly           bool
 	Noexec             bool
+	Nosuid             bool
+	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+}
+
+// NamedVolumeOptions tunes sandbox-time named volume provisioning.
+type NamedVolumeOptions struct {
+	Mode     string // "existing", "create", or "ensure-exists"; empty means existing.
+	Kind     string // "dir" or "disk"; empty means dir.
+	SizeMiB  uint32
+	QuotaMiB uint32
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -777,6 +937,8 @@ type TmpfsOptions struct {
 	SizeMiB  uint32
 	Readonly bool
 	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
 }
 
 // DiskOptions tunes the Disk factory.
@@ -787,6 +949,8 @@ type DiskOptions struct {
 	Fstype   string
 	Readonly bool
 	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
 }
 
 // mountFactory is the factory namespace for constructing MountConfig values.
@@ -808,6 +972,8 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		Bind:               hostPath,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
 	}
@@ -820,6 +986,27 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 		Named:              name,
 		Readonly:           opts.Readonly,
 		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
+}
+
+// NamedWith returns a MountConfig that mounts a named persistent volume with
+// explicit creation behavior.
+func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig {
+	return MountConfig{
+		kind:               MountKindNamed,
+		Named:              name,
+		NamedMode:          namedOpts.Mode,
+		NamedKind:          namedOpts.Kind,
+		SizeMiB:            namedOpts.SizeMiB,
+		QuotaMiB:           namedOpts.QuotaMiB,
+		Readonly:           opts.Readonly,
+		Noexec:             opts.Noexec,
+		Nosuid:             opts.Nosuid,
+		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
 	}
@@ -833,6 +1020,8 @@ func (mountFactory) Tmpfs(opts TmpfsOptions) MountConfig {
 		SizeMiB:  opts.SizeMiB,
 		Readonly: opts.Readonly,
 		Noexec:   opts.Noexec,
+		Nosuid:   opts.Nosuid,
+		Nodev:    opts.Nodev,
 	}
 }
 
@@ -845,6 +1034,8 @@ func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig {
 		Fstype:   opts.Fstype,
 		Readonly: opts.Readonly,
 		Noexec:   opts.Noexec,
+		Nosuid:   opts.Nosuid,
+		Nodev:    opts.Nodev,
 	}
 }
 
@@ -869,11 +1060,34 @@ func WithMounts(mounts map[string]MountConfig) SandboxOption {
 // VolumeConfig holds configuration for a named volume.
 type VolumeConfig struct {
 	QuotaMiB uint32
+	Kind     VolumeKind
+	SizeMiB  uint32
 	Labels   map[string]string
 }
 
+// VolumeKind describes the storage backing for a named volume.
+type VolumeKind string
+
+const (
+	// VolumeKindDir creates a directory-backed named volume.
+	VolumeKindDir VolumeKind = "dir"
+
+	// VolumeKindDisk creates a raw ext4 disk-backed named volume.
+	VolumeKindDisk VolumeKind = "disk"
+)
+
 // VolumeOption is a functional option for CreateVolume.
 type VolumeOption func(*VolumeConfig)
+
+// WithVolumeKind selects the storage backing for a named volume.
+func WithVolumeKind(kind VolumeKind) VolumeOption {
+	return func(o *VolumeConfig) { o.Kind = kind }
+}
+
+// WithVolumeSize sets disk volume capacity in MiB.
+func WithVolumeSize(mebibytes uint32) VolumeOption {
+	return func(o *VolumeConfig) { o.SizeMiB = mebibytes }
+}
 
 // WithVolumeQuota sets the volume's quota in MiB. Zero means unlimited.
 func WithVolumeQuota(mebibytes uint32) VolumeOption {

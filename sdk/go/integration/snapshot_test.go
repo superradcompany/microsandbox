@@ -25,12 +25,12 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 		removeSnapshotBestEffort(snapshotName)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
+	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
-	if _, err := base.StopAndWait(ctx); err != nil {
-		t.Fatalf("StopAndWait base: %v", err)
+	if err := base.Stop(ctx); err != nil {
+		t.Fatalf("Stop base: %v", err)
 	}
 	if err := base.Close(); err != nil {
 		t.Fatalf("Close base: %v", err)
@@ -103,7 +103,7 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = fork.StopAndWait(stopCtx)
+		_ = fork.Stop(stopCtx)
 		_ = fork.Close()
 	}()
 
@@ -134,12 +134,12 @@ func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
 		removeSnapshotBestEffort(snapshotDir)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
+	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
-	if _, err := base.StopAndWait(ctx); err != nil {
-		t.Fatalf("StopAndWait base: %v", err)
+	if err := base.Stop(ctx); err != nil {
+		t.Fatalf("Stop base: %v", err)
 	}
 	if err := base.Close(); err != nil {
 		t.Fatalf("Close base: %v", err)

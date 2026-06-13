@@ -2,9 +2,15 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
+)
+
+const (
+	defaultStopTimeout = 10 * time.Second
+	defaultKillTimeout = 5 * time.Second
 )
 
 // Sandbox represents a live microsandbox VM. It holds a Rust-side handle
@@ -16,7 +22,7 @@ type Sandbox struct {
 }
 
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
-// VM process — call Close (or StopAndWait + Close) when done.
+// VM process — call Close (or Stop + Close) when done.
 //
 // Sandbox names are limited to 128 UTF-8 bytes.
 //
@@ -48,6 +54,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUs:            o.CPUs,
 		Workdir:         o.Workdir,
 		Shell:           o.Shell,
+		SecurityProfile: string(o.SecurityProfile),
 		Hostname:        o.Hostname,
 		User:            o.User,
 		Replace:         o.Replace,
@@ -98,13 +105,18 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
+				NamedMode:          m.NamedMode,
+				NamedKind:          m.NamedKind,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
 				Format:             m.Format,
 				Fstype:             m.Fstype,
 				Readonly:           m.Readonly,
 				Noexec:             m.Noexec,
+				Nosuid:             m.Nosuid,
+				Nodev:              m.Nodev,
 				SizeMiB:            m.SizeMiB,
+				QuotaMiB:           m.QuotaMiB,
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
 			}
@@ -153,12 +165,41 @@ func durationSecsCeil(d time.Duration) uint64 {
 	return uint64((d + time.Second - 1) / time.Second)
 }
 
-// CreateSandboxDetached creates and boots a sandbox in detached mode. The VM
-// continues running after the returned handle is released or the Go process
-// exits. Reattach via GetSandbox. Sandbox names are limited to 128 UTF-8 bytes.
-func CreateSandboxDetached(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	opts = append(opts, WithDetached())
-	return CreateSandbox(ctx, name, opts...)
+func durationMillisCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64((d + time.Millisecond - 1) / time.Millisecond)
+}
+
+func stopTimeoutMillis(opts []StopOption) uint64 {
+	o := lifecycleOptions{timeout: defaultStopTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return durationMillisCeil(o.timeout)
+}
+
+func killTimeoutMillis(opts []KillOption) uint64 {
+	o := lifecycleOptions{timeout: defaultKillTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return durationMillisCeil(o.timeout)
+}
+
+func sandboxStopResultFromFFI(result *ffi.SandboxStopResult) *SandboxStopResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxStopResult{
+		Name:       result.Name,
+		Status:     SandboxStatus(result.Status),
+		ExitCode:   result.ExitCode,
+		Signal:     result.Signal,
+		ObservedAt: time.Unix(result.ObservedAtUnix, 0),
+		Source:     result.Source,
+	}
 }
 
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
@@ -278,14 +319,17 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	out := make(map[string]*Metrics, len(raw))
 	for name, m := range raw {
 		out[name] = &Metrics{
-			CPUPercent:       m.CPUPercent,
-			MemoryBytes:      m.MemoryBytes,
-			MemoryLimitBytes: m.MemoryLimitBytes,
-			DiskReadBytes:    m.DiskReadBytes,
-			DiskWriteBytes:   m.DiskWriteBytes,
-			NetRxBytes:       m.NetRxBytes,
-			NetTxBytes:       m.NetTxBytes,
-			Uptime:           m.Uptime,
+			CPUPercent:              m.CPUPercent,
+			VCPUTimeNs:              m.VCPUTimeNs,
+			MemoryBytes:             m.MemoryBytes,
+			MemoryAvailableBytes:    m.MemoryAvailableBytes,
+			MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+			MemoryLimitBytes:        m.MemoryLimitBytes,
+			DiskReadBytes:           m.DiskReadBytes,
+			DiskWriteBytes:          m.DiskWriteBytes,
+			NetRxBytes:              m.NetRxBytes,
+			NetTxBytes:              m.NetTxBytes,
+			Uptime:                  m.Uptime,
 		}
 	}
 	return out, nil
@@ -296,6 +340,36 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 // NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"}).
 type SandboxFilter struct {
 	labels map[string]string
+}
+
+type lifecycleOptions struct {
+	timeout time.Duration
+}
+
+// StopOption configures Sandbox.Stop and SandboxHandle.Stop.
+type StopOption func(*lifecycleOptions)
+
+// KillOption configures Sandbox.Kill and SandboxHandle.Kill.
+type KillOption func(*lifecycleOptions)
+
+// SandboxStopResult describes a terminal sandbox state observed by WaitUntilStopped.
+type SandboxStopResult struct {
+	Name       string
+	Status     SandboxStatus
+	ExitCode   *int
+	Signal     *int
+	ObservedAt time.Time
+	Source     *string
+}
+
+// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+func WithStopTimeout(timeout time.Duration) StopOption {
+	return func(o *lifecycleOptions) { o.timeout = timeout }
+}
+
+// WithKillTimeout sets how long Kill waits for stopped-state observation.
+func WithKillTimeout(timeout time.Duration) KillOption {
+	return func(o *lifecycleOptions) { o.timeout = timeout }
 }
 
 // NewSandboxFilter returns an empty filter that matches every sandbox.
@@ -379,6 +453,20 @@ func (h *SandboxHandle) Status() SandboxStatus { return h.status }
 // ConfigJSON returns the raw JSON configuration stored for this sandbox.
 func (h *SandboxHandle) ConfigJSON() string { return h.configJSON }
 
+// Config parses the stored sandbox configuration.
+func (h *SandboxHandle) Config() (*SandboxConfig, error) {
+	var config SandboxConfig
+	if err := json.Unmarshal([]byte(h.configJSON), &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+// Refresh returns a fresh handle for the same sandbox name.
+func (h *SandboxHandle) Refresh(ctx context.Context) (*SandboxHandle, error) {
+	return GetSandbox(ctx, h.name)
+}
+
 // CreatedAt returns the sandbox creation time, or the zero value if unknown.
 func (h *SandboxHandle) CreatedAt() time.Time {
 	if h.createdAtUnix == nil {
@@ -403,14 +491,17 @@ func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
 		return nil, wrapFFI(err)
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -433,14 +524,35 @@ func (h *SandboxHandle) StartDetached(ctx context.Context) (*Sandbox, error) {
 	return StartSandboxDetached(ctx, h.name)
 }
 
-// Stop gracefully stops the sandbox.
-func (h *SandboxHandle) Stop(ctx context.Context) error {
-	return wrapFFI(ffi.StopSandboxByName(ctx, h.name))
+// Stop gracefully stops the sandbox and waits until stopped state is observed.
+func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
+	return wrapFFI(ffi.StopSandboxByName(ctx, h.name, stopTimeoutMillis(opts)))
 }
 
-// Kill terminates the sandbox immediately.
-func (h *SandboxHandle) Kill(ctx context.Context) error {
-	return wrapFFI(ffi.KillSandboxByName(ctx, h.name))
+// RequestStop requests graceful shutdown and returns once the request is sent.
+func (h *SandboxHandle) RequestStop(ctx context.Context) error {
+	return wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
+}
+
+// Kill force-kills the sandbox and waits until stopped state is observed.
+func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
+	return wrapFFI(ffi.KillSandboxByName(ctx, h.name, killTimeoutMillis(opts)))
+}
+
+// RequestKill requests force termination and returns once the request is sent.
+func (h *SandboxHandle) RequestKill(ctx context.Context) error {
+	return wrapFFI(ffi.RequestKillSandboxByName(ctx, h.name))
+}
+
+// RequestDrain requests graceful drain and returns once the request is sent.
+func (h *SandboxHandle) RequestDrain(ctx context.Context) error {
+	return wrapFFI(ffi.RequestDrainSandboxByName(ctx, h.name))
+}
+
+// WaitUntilStopped waits until this sandbox is observed in terminal state.
+func (h *SandboxHandle) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
+	result, err := ffi.WaitSandboxByNameUntilStopped(ctx, h.name)
+	return sandboxStopResultFromFFI(result), wrapFFI(err)
 }
 
 // Remove deletes the sandbox's persisted state. The sandbox must be stopped.
@@ -474,22 +586,24 @@ func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotA
 // Name returns the sandbox's name. Names are limited to 128 UTF-8 bytes.
 func (s *Sandbox) Name() string { return s.inner.Name() }
 
-// Stop gracefully stops the sandbox. It does not wait for the VM process
-// to exit — use StopAndWait for that.
-func (s *Sandbox) Stop(ctx context.Context) error {
-	return wrapFFI(s.inner.Stop(ctx))
+// Stop gracefully stops the sandbox and waits until stopped state is observed.
+func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
+	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
 }
 
-// StopAndWait stops the sandbox and waits for its VM process to exit.
-// Returns the exit code (-1 if the guest didn't report one).
-func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
-	code, err := s.inner.StopAndWait(ctx)
-	return code, wrapFFI(err)
+// RequestStop requests graceful shutdown and returns once the request is sent.
+func (s *Sandbox) RequestStop(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestStop(ctx))
 }
 
-// Kill terminates the sandbox immediately.
-func (s *Sandbox) Kill(ctx context.Context) error {
-	return wrapFFI(s.inner.Kill(ctx))
+// Kill force-kills the sandbox and waits until stopped state is observed.
+func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error {
+	return wrapFFI(s.inner.Kill(ctx, killTimeoutMillis(opts)))
+}
+
+// RequestKill requests force termination and returns once the request is sent.
+func (s *Sandbox) RequestKill(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestKill(ctx))
 }
 
 // Close releases the Rust-side handle. Safe to call multiple times; the
@@ -511,19 +625,15 @@ func (s *Sandbox) Detach(ctx context.Context) error {
 	return wrapFFI(s.inner.Detach(ctx))
 }
 
-// Drain sends a graceful drain signal (SIGUSR1) to the sandbox. This is only
-// meaningful if the guest process handles SIGUSR1; it will error if this
-// handle does not own the lifecycle.
-func (s *Sandbox) Drain(ctx context.Context) error {
-	return wrapFFI(s.inner.Drain(ctx))
+// RequestDrain requests graceful drain and returns once the request is sent.
+func (s *Sandbox) RequestDrain(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestDrain(ctx))
 }
 
-// Wait blocks until the sandbox process exits and returns its exit code.
-// Returns -1 if the guest did not report an exit code. Errors if this handle
-// does not own the lifecycle.
-func (s *Sandbox) Wait(ctx context.Context) (int, error) {
-	code, err := s.inner.Wait(ctx)
-	return code, wrapFFI(err)
+// WaitUntilStopped waits until this sandbox is observed in terminal state.
+func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
+	result, err := s.inner.WaitUntilStopped(ctx)
+	return sandboxStopResultFromFFI(result), wrapFFI(err)
 }
 
 // OwnsLifecycle reports whether this handle owns the VM process. When true,
@@ -543,13 +653,6 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 	return err == nil && owns
 }
 
-// RemovePersisted removes the sandbox's persisted state (filesystem and
-// database record). The sandbox must already be stopped. This handle becomes
-// invalid after the call.
-func (s *Sandbox) RemovePersisted(ctx context.Context) error {
-	return wrapFFI(s.inner.RemovePersisted(ctx))
-}
-
 // Attach starts an interactive PTY session running cmd with optional args.
 // It blocks until the process exits and returns the exit code.
 // The caller's terminal must be a real TTY; this is primarily useful for
@@ -567,8 +670,8 @@ func (s *Sandbox) AttachShell(ctx context.Context) (int, error) {
 }
 
 // FS returns a filesystem accessor for this sandbox.
-func (s *Sandbox) FS() *SandboxFs {
-	return &SandboxFs{sandbox: s}
+func (s *Sandbox) FS() *SandboxFSOps {
+	return &SandboxFSOps{sandbox: s}
 }
 
 // Metrics returns the current resource usage for this sandbox.
@@ -578,14 +681,17 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
 		return nil, wrapFFI(err)
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -606,14 +712,17 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		return nil, nil
 	}
 	return &Metrics{
-		CPUPercent:       m.CPUPercent,
-		MemoryBytes:      m.MemoryBytes,
-		MemoryLimitBytes: m.MemoryLimitBytes,
-		DiskReadBytes:    m.DiskReadBytes,
-		DiskWriteBytes:   m.DiskWriteBytes,
-		NetRxBytes:       m.NetRxBytes,
-		NetTxBytes:       m.NetTxBytes,
-		Uptime:           m.Uptime,
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		Uptime:                  m.Uptime,
 	}, nil
 }
 
@@ -641,12 +750,15 @@ func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*M
 
 // Metrics is a snapshot of sandbox resource usage.
 type Metrics struct {
-	CPUPercent       float64
-	MemoryBytes      uint64
-	MemoryLimitBytes uint64
-	DiskReadBytes    uint64
-	DiskWriteBytes   uint64
-	NetRxBytes       uint64
-	NetTxBytes       uint64
-	Uptime           time.Duration
+	CPUPercent              float64
+	VCPUTimeNs              uint64
+	MemoryBytes             uint64
+	MemoryAvailableBytes    *uint64
+	MemoryHostResidentBytes *uint64
+	MemoryLimitBytes        uint64
+	DiskReadBytes           uint64
+	DiskWriteBytes          uint64
+	NetRxBytes              uint64
+	NetTxBytes              uint64
+	Uptime                  time.Duration
 }

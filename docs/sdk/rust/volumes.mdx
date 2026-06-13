@@ -17,7 +17,7 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 fn builder(name: impl Into<String>) -> VolumeBuilder
 ```
 
-Create a builder for a new named volume. Call `.quota()` to set a storage limit, then `.create()` to finalize.
+Create a builder for a new named volume. Directory-backed volumes are the default. Call `.disk().size(...)` to create a disk-backed volume.
 
 **Parameters**
 
@@ -29,7 +29,7 @@ Create a builder for a new named volume. Call `.quota()` to set a storage limit,
 
 | Type | Description |
 |------|-------------|
-| [`VolumeBuilder`](#volumebuilder) | Builder with `.quota()` and `.create()` |
+| [`VolumeBuilder`](#volumebuilder) | Builder with `.directory()`, `.disk()`, `.size()`, `.quota()`, and `.create()` |
 
 ---
 
@@ -115,13 +115,43 @@ Create the volume on disk.
 fn quota(self, mib: u64) -> Self
 ```
 
-Set the maximum storage size for this volume. The guest cannot write beyond this limit.
+Set the recorded quota metadata for a directory-backed volume.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | mib | `u64` | Quota in MiB |
+
+---
+
+#### directory()
+
+```rust
+fn directory(self) -> Self
+```
+
+Create a directory-backed named volume. This is the default.
+
+---
+
+#### disk()
+
+```rust
+fn disk(self) -> Self
+```
+
+Create a raw ext4 disk-backed named volume.
+
+---
+
+#### size()
+
+```rust
+fn size(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set disk volume capacity. Required after `.disk()`.
 
 ---
 
@@ -160,6 +190,46 @@ Mount a named volume. The volume must already exist (create it with [`Volume::bu
 | Name | Type | Description |
 |------|------|-------------|
 | name | `impl Into<String>` | Volume name |
+
+---
+
+#### named_with()
+
+```rust
+fn named_with(
+    self,
+    name: impl Into<String>,
+    f: impl FnOnce(NamedVolumeBuilder) -> NamedVolumeBuilder,
+) -> Self
+```
+
+Mount a named volume with explicit sandbox-time existence behavior. `NamedVolumeMode::Existing` is the default and behaves like [`named()`](#named). `.create()` creates the volume and fails if it already exists. `.ensure_exists()` creates the volume if it is missing or reuses an existing compatible volume.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .volume("/cache", |v| v.named_with("pip-cache", |n| n.ensure_exists()))
+    .volume("/var/lib/docker", |v| {
+        v.named_with("docker-data", |n| n.ensure_exists().disk().size(20.gib()))
+    })
+    .create()
+    .await?;
+```
+
+The ensure-exists mode validates existing volume metadata. It errors when the existing volume has a different kind, quota, capacity, or explicitly requested labels than the requested configuration; it does not mutate existing volume metadata.
+
+**Named volume builder methods**
+
+| Method | Description |
+|--------|-------------|
+| `existing()` | Require the volume to already exist. This is the default. |
+| `create()` | Create the volume and fail if it already exists. |
+| `ensure_exists()` | Create the volume if missing or reuse a compatible existing volume. |
+| `directory()` | Use directory-backed storage. This is the default. |
+| `disk()` | Use disk-backed raw ext4 storage. Requires `size(...)` when creating or ensuring a missing volume. |
+| `size(size)` | Disk capacity. |
+| `quota(size)` | Directory volume quota. |
+| `label(key, value)` | Attach a label to newly-created volumes and require matching labels for ensure-existing volumes when labels are requested. |
 
 ---
 
@@ -249,4 +319,8 @@ Handle for interacting with a named volume from the host side.
 |-------------------|------|-------------|
 | fs() | `VolumeFsHandle` | Host-side filesystem access - read and write files without a running sandbox |
 | name() | `&str` | Volume name |
+| kind() | `VolumeKind` | Volume kind: `Directory` or `Disk` |
+| capacity_bytes() | `Option<u64>` | Disk capacity in bytes |
+| disk_format() | `Option<&str>` | Disk image format |
+| disk_fstype() | `Option<&str>` | Disk filesystem type |
 | remove() | `()` | Delete this volume from disk |

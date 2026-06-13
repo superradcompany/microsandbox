@@ -1,6 +1,6 @@
 //! Filesystem operations on a running sandbox.
 //!
-//! [`SandboxFs`] provides methods to read, write, list, and manipulate files
+//! [`SandboxFsOps`] provides methods to read, write, list, and manipulate files
 //! inside a running sandbox via the `core.fs.*` protocol messages.
 
 use std::{path::Path, sync::Arc};
@@ -24,7 +24,7 @@ use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 /// All operations go through the agent protocol (`core.fs.*` messages),
 /// which are handled by agentd inside the guest VM.
 #[derive(Clone)]
-pub struct SandboxFs {
+pub struct SandboxFsOps {
     client: Arc<AgentClient>,
 }
 
@@ -108,7 +108,7 @@ pub struct FsMetadata {
 
 /// A streaming reader for file data from the sandbox.
 pub struct FsReadStream {
-    rx: mpsc::UnboundedReceiver<Message>,
+    rx: mpsc::Receiver<Message>,
     client: Arc<AgentClient>,
     close_handle: Option<FsHandle>,
 }
@@ -117,7 +117,7 @@ pub struct FsReadStream {
 pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
-    rx: mpsc::UnboundedReceiver<Message>,
+    rx: mpsc::Receiver<Message>,
     close_handle: Option<FsHandle>,
 }
 
@@ -125,7 +125,7 @@ pub struct FsWriteSink {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxFs {
+impl SandboxFsOps {
     /// Create a new filesystem handle.
     pub fn new(client: &Arc<AgentClient>) -> Self {
         Self {
@@ -167,7 +167,7 @@ impl SandboxFs {
     pub async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String> {
         let data = self.read(path).await?;
         String::from_utf8(Vec::from(data))
-            .map_err(|e| MicrosandboxError::SandboxFs(format!("invalid utf-8: {e}")))
+            .map_err(|e| MicrosandboxError::SandboxFsOps(format!("invalid utf-8: {e}")))
     }
 
     /// Read a file with streaming.
@@ -332,7 +332,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Handle(handle)) => Ok(handle),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for open file".into(),
             )),
         }
@@ -348,7 +348,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Handle(handle)) => Ok(handle),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for open directory".into(),
             )),
         }
@@ -486,7 +486,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Path(path)) => Ok(path),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for readlink".into(),
             )),
         }
@@ -513,7 +513,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Path(path)) => Ok(path),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for realpath".into(),
             )),
         }
@@ -543,7 +543,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Stat(info)) => Ok(entry_info_to_metadata(&info)),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for stat".into(),
             )),
         }
@@ -557,7 +557,7 @@ impl SandboxFs {
         let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Stat(info)) => Ok(entry_info_to_metadata(&info)),
-            _ => Err(MicrosandboxError::SandboxFs(
+            _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for fstat".into(),
             )),
         }
@@ -592,7 +592,7 @@ impl SandboxFs {
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
         match self.stat(path).await {
             Ok(_) => Ok(true),
-            Err(MicrosandboxError::SandboxFs(_)) => Ok(false),
+            Err(MicrosandboxError::SandboxFsOps(_)) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -799,13 +799,13 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 }
 
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
-async fn wait_for_ok_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> MicrosandboxResult<()> {
+async fn wait_for_ok_response(rx: &mut mpsc::Receiver<Message>) -> MicrosandboxResult<()> {
     while let Some(msg) = rx.recv().await {
         if msg.t == MessageType::FsResponse {
             return check_response(msg);
         }
     }
-    Err(MicrosandboxError::SandboxFs(
+    Err(MicrosandboxError::SandboxFsOps(
         "channel closed before response".into(),
     ))
 }
@@ -819,7 +819,7 @@ async fn close_handle(client: &Arc<AgentClient>, handle: FsHandle) -> Microsandb
 }
 
 fn response_error(resp: FsResponse) -> MicrosandboxError {
-    MicrosandboxError::SandboxFs(resp.error.unwrap_or_else(|| "unknown error".into()))
+    MicrosandboxError::SandboxFsOps(resp.error.unwrap_or_else(|| "unknown error".into()))
 }
 
 fn read_only_open_options() -> FsOpenOptions {
@@ -869,7 +869,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let fs = SandboxFs::new(&client);
+        let fs = SandboxFsOps::new(&client);
 
         match fs.stat("/").await {
             Err(MicrosandboxError::AgentClient(AgentClientError::UnsupportedOperation {

@@ -8,9 +8,10 @@ set -eu
 # ---------------------------------------------------------------------------
 
 GITHUB_REPO="superradcompany/microsandbox"
-INSTALL_DIR="$HOME/.microsandbox"
+INSTALL_DIR="${MSB_HOME:-$HOME/.microsandbox}"
 BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib"
+LOCAL_BIN_DIR="$HOME/.local/bin"
 
 # libkrunfw versioned filenames (must match the build)
 LIBKRUNFW_VERSION="5.2.1"
@@ -19,10 +20,6 @@ LIBKRUNFW_ABI="5"
 # Current Linux release bundles are built on GitHub Actions ubuntu-latest,
 # which currently maps to Ubuntu 24.04 (glibc 2.39).
 LINUX_GLIBC_MIN_VERSION="2.39"
-
-# Shell config markers
-MARKER_START="# >>> microsandbox >>>"
-MARKER_END="# <<< microsandbox <<<"
 
 # Progress bar
 BAR_WIDTH=40
@@ -73,134 +70,38 @@ need_cmd() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Shell configuration
-# ---------------------------------------------------------------------------
+link_command() {
+    _name=$1
+    _target=$2
+    _link="$LOCAL_BIN_DIR/$_name"
 
-detect_current_shell() {
-    _shell_path="${SHELL:-/bin/sh}"
-    case "$(basename "$_shell_path")" in
-        bash) CURRENT_SHELL="bash" ;;
-        zsh)  CURRENT_SHELL="zsh" ;;
-        fish) CURRENT_SHELL="fish" ;;
-        *)    CURRENT_SHELL="sh" ;;
-    esac
+    if [ -e "$_link" ] && [ ! -L "$_link" ]; then
+        warn "Skipped $_link because it already exists and is not a symlink"
+        return
+    fi
+
+    mkdir -p "$LOCAL_BIN_DIR"
+    ln -sf "$_target" "$_link"
+    success "Linked $_link -> $_target"
 }
 
-# Update a shell config file idempotently with a marker block.
-# If the file doesn't exist it is created. If a marker block already
-# exists it is replaced in-place. Otherwise the block is appended.
-update_shell_config() {
-    _file=$1
-    _block=$2
+link_commands() {
+    link_command msb "$BIN_DIR/msb"
+    link_command microsandbox "$BIN_DIR/microsandbox"
 
-    if [ ! -f "$_file" ]; then
-        mkdir -p "$(dirname "$_file")"
-        printf '%s\n' "$_block" > "$_file"
-        return 0
-    fi
-
-    # Back up the original file on first modification
-    if [ ! -f "${_file}.pre-microsandbox" ]; then
-        cp -p "$_file" "${_file}.pre-microsandbox"
-    fi
-
-    if grep -qF "$MARKER_START" "$_file"; then
-        # Replace existing block in-place (ENVIRON avoids awk -v escape issues)
-        _tmp="${_file}.msb_tmp"
-        _MSB_BLOCK="$_block" awk '
-            BEGIN { block = ENVIRON["_MSB_BLOCK"] }
-            /^# >>> microsandbox >>>/ {
-                if (!done) { print block; done=1 }
-                skip=1; next
-            }
-            /^# <<< microsandbox <<</ { skip=0; next }
-            !skip
-        ' "$_file" > "$_tmp"
-        mv "$_tmp" "$_file"
-    else
-        # Append with a leading blank line
-        printf '\n%s\n' "$_block" >> "$_file"
-    fi
-}
-
-# Configure all relevant shell config files with PATH.
-configure_shell() {
-    detect_current_shell
-
-    # Build POSIX block (sh, bash, zsh)
-    _path_line='export PATH="$HOME/.microsandbox/bin:$PATH"'
-    _posix_block="${MARKER_START}
-${_path_line}
-${MARKER_END}"
-
-    # Build fish block
-    _fish_path='set -gx PATH "$HOME/.microsandbox/bin" $PATH'
-    _fish_block="${MARKER_START}
-${_fish_path}
-${MARKER_END}"
-
-    _did_bashrc=false
-    _did_zshrc=false
-    _did_profile=false
-
-    printf "\n"
-    printf "  ${BOLD}Shell Configuration${RESET}\n"
-    printf "\n"
-
-    # Update existing POSIX shell config files
-    for _file in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$_file" ]; then
-            update_shell_config "$_file" "$_posix_block"
-            _display="${_file#$HOME}"
-            success "Configured ~${_display}"
-            case "$_file" in
-                */.bashrc)  _did_bashrc=true ;;
-                */.zshrc)   _did_zshrc=true ;;
-                */.profile) _did_profile=true ;;
-            esac
-        fi
-    done
-
-    # If current shell's primary config wasn't updated, create it
-    case "$CURRENT_SHELL" in
-        bash)
-            if [ "$_did_bashrc" = false ]; then
-                update_shell_config "$HOME/.bashrc" "$_posix_block"
-                success "Configured ~/.bashrc"
-            fi
-            ;;
-        zsh)
-            if [ "$_did_zshrc" = false ]; then
-                update_shell_config "$HOME/.zshrc" "$_posix_block"
-                success "Configured ~/.zshrc"
-            fi
-            ;;
-        sh)
-            if [ "$_did_profile" = false ]; then
-                update_shell_config "$HOME/.profile" "$_posix_block"
-                success "Configured ~/.profile"
-            fi
+    COMMAND_HINT="msb"
+    case ":$PATH:" in
+        *":$LOCAL_BIN_DIR:"*) ;;
+        *)
+            COMMAND_HINT="$LOCAL_BIN_DIR/msb"
+            printf "\n"
+            printf "  ${YELLOW}Note:${RESET} %s is not on your PATH.\n" "$LOCAL_BIN_DIR"
+            printf "  Add it to your shell profile if you want to run ${BOLD}msb${RESET} directly:\n"
+            printf "\n"
+            printf "    ${DIM}export${RESET} PATH=\"%s:\$PATH\"\n" "$LOCAL_BIN_DIR"
+            printf "\n"
             ;;
     esac
-
-    # Fish: update if config dir exists or fish is the current shell
-    if [ -d "$HOME/.config/fish" ] || [ "$CURRENT_SHELL" = "fish" ]; then
-        _fish_conf="$HOME/.config/fish/conf.d/microsandbox.fish"
-        update_shell_config "$_fish_conf" "$_fish_block"
-        success "Configured ~/.config/fish/conf.d/microsandbox.fish"
-    fi
-
-    printf "\n"
-    printf "  Restart your shell or run:\n"
-    printf "\n"
-    case "$CURRENT_SHELL" in
-        fish) printf "    ${DIM}source ~/.config/fish/conf.d/microsandbox.fish${RESET}\n" ;;
-        zsh)  printf "    ${DIM}source ~/.zshrc${RESET}\n" ;;
-        bash) printf "    ${DIM}source ~/.bashrc${RESET}\n" ;;
-        *)    printf "    ${DIM}. ~/.profile${RESET}\n" ;;
-    esac
-    printf "\n"
 }
 
 # ---------------------------------------------------------------------------
@@ -395,14 +296,6 @@ get_latest_version() {
 # ---------------------------------------------------------------------------
 
 main() {
-    # Parse arguments
-    MODIFY_PATH="yes"
-    for _arg in "$@"; do
-        case "$_arg" in
-            --no-modify-path) MODIFY_PATH="no" ;;
-        esac
-    done
-
     need_cmd curl
     need_cmd tar
     need_cmd uname
@@ -480,22 +373,9 @@ main() {
     success "Linked microsandbox -> msb in $BIN_DIR/"
     success "Installed libkrunfw to $LIB_DIR/"
 
-    # Configure shell environment
-    if [ "$MODIFY_PATH" = "yes" ]; then
-        configure_shell
-    else
-        printf "\n"
-        printf "  Add the following to your shell profile:\n"
-        printf "\n"
-        if [ "$OS" = "linux" ]; then
-            printf "    ${DIM}export${RESET} PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
-        elif [ "$OS" = "darwin" ]; then
-            printf "    ${DIM}export${RESET} PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
-        fi
-        printf "\n"
-    fi
+    link_commands
 
-    success "Installation complete! Run 'msb --tree' to get started."
+    success "Installation complete! Run '$COMMAND_HINT --help' to get started."
     printf "\n"
 }
 

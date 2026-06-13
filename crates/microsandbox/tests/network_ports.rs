@@ -96,7 +96,7 @@ async fn udp_published_port_round_trips() {
         String::new()
     };
 
-    sandbox.stop_and_wait().await.expect("stop");
+    sandbox.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 
     assert_eq!(

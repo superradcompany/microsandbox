@@ -18,7 +18,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
   });
 
   afterAll(async () => {
-    await sb?.stopAndWait().catch(() => undefined);
+    await sb?.stop().catch(() => undefined);
     await Sandbox.remove(SANDBOX_NAME).catch(() => undefined);
   });
 
@@ -50,7 +50,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(code).toBe(7);
   });
 
-  it("reads and writes files via SandboxFs", async () => {
+  it("reads and writes files via SandboxFsOps", async () => {
     const fs = sb.fs();
     await fs.write("/tmp/x.txt", "data\n");
     expect(await fs.readToString("/tmp/x.txt")).toBe("data\n");
@@ -125,7 +125,7 @@ describe("Node.js SDK Pull Progress", () => {
 
 		const sb = await session.awaitSandbox();
 		expect(sb.name).toBe(NAME_ITER);
-		await sb.stopAndWait();
+		await sb.stop();
 	}, 180_000);
 
 	it("streams events via recv() without the async iterator", async () => {
@@ -149,16 +149,17 @@ describe("Node.js SDK Pull Progress", () => {
 		expect(eventTypes[eventTypes.length - 1]).toBe("complete");
 
 		const sb = await session.awaitSandbox();
-		await sb.stopAndWait();
+		await sb.stop();
 	}, 120_000);
 
-	it("createDetachedWithPullProgress yields events and creates a detached sandbox", async () => {
+	it("detached createWithPullProgress yields events and creates a detached sandbox", async () => {
 		const session = await Sandbox.builder(NAME_DETACHED)
 			.image("mirror.gcr.io/library/alpine")
 			.cpus(1)
 			.memory(512)
 			.replace()
-			.createDetachedWithPullProgress();
+			.detached(true)
+			.createWithPullProgress();
 
 		const types: string[] = [];
 		for await (const ev of session) types.push(ev.kind);
@@ -170,7 +171,7 @@ describe("Node.js SDK Pull Progress", () => {
 		const sb = await session.awaitSandbox();
 		expect(sb.name).toBe(NAME_DETACHED);
 
-		await sb.stopAndWait();
+		await sb.stop();
 	}, 120_000);
 
 	it("result() rejects when the image cannot be pulled", async () => {
@@ -203,7 +204,7 @@ describe("Node.js SDK Pull Progress", () => {
 		expect(sb.name).toBe(NAME_DOUBLE);
 		await expect(session.awaitSandbox()).rejects.toThrow(/already (called|consumed)/);
 
-		await sb.stopAndWait();
+		await sb.stop();
 	}, 120_000);
 });
 
@@ -230,7 +231,7 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
   }, 180_000);
 
   afterAll(async () => {
-    for (const sb of created) await sb.stopAndWait().catch(() => undefined);
+    for (const sb of created) await sb.stop().catch(() => undefined);
     for (const n of [webName, jobName, otherName]) {
       await Sandbox.remove(n).catch(() => undefined);
     }

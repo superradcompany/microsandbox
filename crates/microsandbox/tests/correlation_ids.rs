@@ -27,10 +27,10 @@ async fn shutdown_control_id_zero_stops_sandbox() {
         .await
         .expect("create sandbox");
 
-    let stop_result = tokio::time::timeout(Duration::from_secs(30), sandbox.stop_and_wait()).await;
+    let stop_result = tokio::time::timeout(Duration::from_secs(30), sandbox.stop()).await;
 
     if stop_result.is_err() {
-        if let Ok(mut h) = Sandbox::get(name).await {
+        if let Ok(h) = Sandbox::get(name).await {
             let _ = h.kill().await;
             let _ = h.remove().await;
         }
@@ -38,6 +38,6 @@ async fn shutdown_control_id_zero_stops_sandbox() {
     Sandbox::remove(name).await.ok();
 
     stop_result
-        .expect("stop_and_wait timed out; relay likely rejected core.shutdown id 0")
-        .expect("stop_and_wait failed");
+        .expect("stop timed out; relay likely rejected core.shutdown id 0")
+        .expect("stop failed");
 }

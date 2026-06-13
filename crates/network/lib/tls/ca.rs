@@ -1,6 +1,6 @@
 //! Certificate authority generation and loading.
 
-use rcgen::{Certificate, CertificateParams, DistinguishedName, IsCa, KeyPair};
+use rcgen::{CertificateParams, DistinguishedName, IsCa, Issuer, KeyPair};
 use rustls::pki_types::CertificateDer;
 
 //--------------------------------------------------------------------------------------------------
@@ -9,10 +9,8 @@ use rustls::pki_types::CertificateDer;
 
 /// A certificate authority for signing per-domain certificates.
 pub struct CertAuthority {
-    /// Signed CA certificate (needed by rcgen for signing leaf certs).
-    pub cert: Certificate,
-    /// CA key pair.
-    pub key_pair: KeyPair,
+    /// CA issuer handle for signing leaf certificates.
+    pub issuer: Issuer<'static, KeyPair>,
     /// DER-encoded CA certificate.
     pub cert_der: CertificateDer<'static>,
     /// PEM-encoded CA certificate (for guest installation).
@@ -44,10 +42,10 @@ impl CertAuthority {
 
         let cert_pem = cert.pem();
         let cert_der = CertificateDer::from(cert.der().to_vec());
+        let issuer = Issuer::new(params, key_pair);
 
         Self {
-            cert,
-            key_pair,
+            issuer,
             cert_der,
             cert_pem,
         }
@@ -57,7 +55,6 @@ impl CertAuthority {
     ///
     /// The original PEM/DER bytes are preserved for `cert_pem()`/`cert_der`
     /// so the identity served to guests matches the persisted file exactly.
-    /// The re-signed `Certificate` is only used as rcgen's signing handle.
     pub fn load(cert_pem_bytes: &[u8], key_pem_bytes: &[u8]) -> Result<Self, String> {
         let cert_pem_str =
             std::str::from_utf8(cert_pem_bytes).map_err(|e| format!("invalid cert PEM: {e}"))?;
@@ -67,19 +64,13 @@ impl CertAuthority {
         let key_pair =
             KeyPair::from_pem(key_pem_str).map_err(|e| format!("failed to parse CA key: {e}"))?;
 
-        // Re-sign to get an rcgen Certificate handle for signing leaf certs.
-        let params = CertificateParams::from_ca_cert_pem(cert_pem_str)
+        let issuer = Issuer::from_ca_cert_pem(cert_pem_str, key_pair)
             .map_err(|e| format!("failed to parse CA cert: {e}"))?;
-        let cert = params
-            .self_signed(&key_pair)
-            .map_err(|e| format!("failed to re-sign CA cert: {e}"))?;
 
-        // Parse the ORIGINAL PEM to get stable DER bytes (not the re-signed output).
         let original_der = pem_to_der(cert_pem_str)?;
 
         Ok(Self {
-            cert,
-            key_pair,
+            issuer,
             cert_der: CertificateDer::from(original_der),
             cert_pem: cert_pem_str.to_string(),
         })
@@ -92,7 +83,7 @@ impl CertAuthority {
 
     /// Get the CA private key as PEM bytes (for persistence).
     pub fn key_pem(&self) -> Vec<u8> {
-        self.key_pair.serialize_pem().as_bytes().to_vec()
+        self.issuer.key().serialize_pem().as_bytes().to_vec()
     }
 }
 

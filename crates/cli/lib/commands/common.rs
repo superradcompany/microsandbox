@@ -1,9 +1,12 @@
 //! Common sandbox configuration flags shared between commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
-use microsandbox::sandbox::{Patch, Sandbox, SandboxBuilder, SandboxFilter};
+use microsandbox::VolumeKind;
+use microsandbox::sandbox::{
+    DiskImageFormat, MountBuilder, Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile,
+};
 
 use crate::ui;
 
@@ -29,6 +32,22 @@ pub struct SandboxOpts {
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
     pub volume: Vec<String>,
+
+    /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_dir: Vec<String>,
+
+    /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_file: Vec<String>,
+
+    /// Explicitly mount a disk image into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
+
+    /// Explicitly mount a named volume into the sandbox (`NAME:DEST[:OPTIONS]`).
+    #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
+    pub mount_named: Vec<String>,
 
     /// Set the default working directory for commands.
     #[arg(short, long)]
@@ -68,6 +87,10 @@ pub struct SandboxOpts {
     /// Mount a temporary in-memory filesystem (PATH, PATH:SIZE, or PATH:SIZE:OPTIONS).
     #[arg(long)]
     pub tmpfs: Vec<String>,
+
+    /// In-guest security profile (default or restricted).
+    #[arg(long, value_parser = ["default", "restricted"])]
+    pub security: Option<String>,
 
     /// Register a shell snippet as a named script (NAME=BODY). The body
     /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
@@ -321,9 +344,15 @@ pub struct SandboxOpts {
 struct CliMountOptions {
     readonly: bool,
     noexec: bool,
+    nosuid: bool,
+    nodev: bool,
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
+    named_kind: Option<VolumeKind>,
+    fstype: Option<String>,
+    format: Option<DiskImageFormat>,
 }
 
 /// Which keyed options are valid for a public CLI mount flag.
@@ -331,6 +360,23 @@ struct CliMountOptions {
 struct CliMountOptionSupport {
     policies: bool,
     size: bool,
+    quota: bool,
+    named_kind: bool,
+    fstype: bool,
+    format: bool,
+}
+
+/// Parsed `SOURCE:DEST[:OPTIONS]` mount specification.
+struct ParsedCliMountSpec<'a> {
+    source: &'a str,
+    guest: &'a str,
+    options: CliMountOptions,
+}
+
+/// Expected host path kind for explicit bind mount flags.
+enum HostPathKind {
+    Directory,
+    File,
 }
 
 /// File or directory copy behavior.
@@ -351,6 +397,10 @@ impl SandboxOpts {
         let base = self.cpus.is_some()
             || self.memory.is_some()
             || !self.volume.is_empty()
+            || !self.mount_dir.is_empty()
+            || !self.mount_file.is_empty()
+            || !self.mount_disk.is_empty()
+            || !self.mount_named.is_empty()
             || self.workdir.is_some()
             || self.shell.is_some()
             || !self.env.is_empty()
@@ -373,7 +423,8 @@ impl SandboxOpts {
             || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
-            || self.idle_timeout.is_some();
+            || self.idle_timeout.is_some()
+            || self.security.is_some();
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
@@ -451,6 +502,18 @@ pub fn apply_sandbox_opts(
     for vol_str in &opts.volume {
         builder = apply_volume(builder, vol_str)?;
     }
+    for mount_str in &opts.mount_dir {
+        builder = apply_explicit_dir_mount(builder, mount_str)?;
+    }
+    for mount_str in &opts.mount_file {
+        builder = apply_explicit_file_mount(builder, mount_str)?;
+    }
+    for mount_str in &opts.mount_disk {
+        builder = apply_explicit_disk_mount(builder, mount_str)?;
+    }
+    for mount_str in &opts.mount_named {
+        builder = apply_explicit_named_mount(builder, mount_str)?;
+    }
 
     // --- Tmpfs ---
     for tmpfs_str in &opts.tmpfs {
@@ -465,6 +528,12 @@ pub fn apply_sandbox_opts(
             }
             if options.noexec {
                 m = m.noexec();
+            }
+            if options.nosuid {
+                m = m.nosuid();
+            }
+            if options.nodev {
+                m = m.nodev();
             }
             m
         });
@@ -499,6 +568,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref size) = opts.oci_upper_size {
         let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
         builder = builder.oci_upper_size(size_mib);
+    }
+    if let Some(ref security) = opts.security {
+        builder = builder.security(parse_security_profile(security)?);
     }
 
     // --- Handoff init ---
@@ -644,50 +716,38 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,stat-virt=...][,host-perms=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let (source, guest_and_opts) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest[:options]"))?;
-
-    let (guest, opts) = match guest_and_opts.split_once(':') {
-        Some((g, o)) => (g, Some(o)),
-        None => {
-            if guest_and_opts.contains(',') {
-                let suggestion = guest_and_opts
-                    .split_once(',')
-                    .map(|(guest, opts)| format!("{source}:{guest}:{opts}"))
-                    .unwrap_or_else(|| format!("{source}:{guest_and_opts}:ro"));
-                anyhow::bail!(
-                    "volume options must use Docker-style source:guest:options syntax, \
-                     for example {suggestion}"
-                );
-            }
-            (guest_and_opts, None)
-        }
-    };
-    let options = parse_cli_mount_options(
-        opts,
+    let parsed = parse_cli_mount_spec(
+        "volume",
+        spec,
         CliMountOptionSupport {
             policies: true,
             ..CliMountOptionSupport::default()
         },
     )?;
 
-    let is_path = microsandbox_utils::looks_like_local_path_text(source);
-    let source = source.to_string();
-    let guest = guest.to_string();
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
     Ok(builder.volume(guest, move |mut m| {
         m = if is_path {
             m.bind(&source)
         } else {
-            m.named(&source)
+            m.named_with(&source, |v| v.ensure_exists())
         };
         if options.readonly {
             m = m.readonly();
         }
         if options.noexec {
             m = m.noexec();
+        }
+        if options.nosuid {
+            m = m.nosuid();
+        }
+        if options.nodev {
+            m = m.nodev();
         }
         if let Some(sv) = options.stat_virtualization {
             m = m.stat_virtualization(sv);
@@ -704,6 +764,232 @@ pub fn validate_volume_spec(spec: &str) -> anyhow::Result<()> {
     apply_volume(SandboxBuilder::new("__msb_volume_validation__"), spec).map(|_| ())
 }
 
+/// Validate an explicit `--mount-dir` syntax without retaining a builder.
+pub fn validate_mount_dir_spec(spec: &str) -> anyhow::Result<()> {
+    apply_explicit_dir_mount(SandboxBuilder::new("__msb_mount_dir_validation__"), spec).map(|_| ())
+}
+
+/// Validate an explicit `--mount-file` syntax without retaining a builder.
+pub fn validate_mount_file_spec(spec: &str) -> anyhow::Result<()> {
+    apply_explicit_file_mount(SandboxBuilder::new("__msb_mount_file_validation__"), spec)
+        .map(|_| ())
+}
+
+/// Validate an explicit `--mount-disk` syntax without retaining a builder.
+pub fn validate_mount_disk_spec(spec: &str) -> anyhow::Result<()> {
+    apply_explicit_disk_mount(SandboxBuilder::new("__msb_mount_disk_validation__"), spec)
+        .map(|_| ())
+}
+
+/// Validate an explicit `--mount-named` syntax without retaining a builder.
+pub fn validate_mount_named_spec(spec: &str) -> anyhow::Result<()> {
+    apply_explicit_named_mount(SandboxBuilder::new("__msb_mount_named_validation__"), spec)
+        .map(|_| ())
+}
+
+/// Apply a `--mount-dir` spec to the builder.
+pub fn apply_explicit_dir_mount(
+    builder: SandboxBuilder,
+    spec: &str,
+) -> anyhow::Result<SandboxBuilder> {
+    let parsed = parse_cli_mount_spec(
+        "mount-dir",
+        spec,
+        CliMountOptionSupport {
+            policies: true,
+            ..CliMountOptionSupport::default()
+        },
+    )?;
+    ensure_host_kind("mount-dir", parsed.source, HostPathKind::Directory)?;
+
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+    Ok(builder.volume(guest, move |m| {
+        apply_common_mount_options(m.bind(&source), options)
+    }))
+}
+
+/// Apply a `--mount-file` spec to the builder.
+pub fn apply_explicit_file_mount(
+    builder: SandboxBuilder,
+    spec: &str,
+) -> anyhow::Result<SandboxBuilder> {
+    let parsed = parse_cli_mount_spec(
+        "mount-file",
+        spec,
+        CliMountOptionSupport {
+            policies: true,
+            ..CliMountOptionSupport::default()
+        },
+    )?;
+    ensure_host_kind("mount-file", parsed.source, HostPathKind::File)?;
+
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+    Ok(builder.volume(guest, move |m| {
+        apply_common_mount_options(m.bind(&source), options)
+    }))
+}
+
+/// Apply a `--mount-disk` spec to the builder.
+pub fn apply_explicit_disk_mount(
+    builder: SandboxBuilder,
+    spec: &str,
+) -> anyhow::Result<SandboxBuilder> {
+    let parsed = parse_cli_mount_spec(
+        "mount-disk",
+        spec,
+        CliMountOptionSupport {
+            fstype: true,
+            format: true,
+            ..CliMountOptionSupport::default()
+        },
+    )?;
+
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+    Ok(builder.volume(guest, move |mut m| {
+        m = m.disk(&source);
+        if let Some(format) = options.format {
+            m = m.format(format);
+        }
+        if let Some(fstype) = options.fstype.as_deref() {
+            m = m.fstype(fstype);
+        }
+        apply_common_mount_options(m, options)
+    }))
+}
+
+/// Apply a `--mount-named` spec to the builder.
+pub fn apply_explicit_named_mount(
+    builder: SandboxBuilder,
+    spec: &str,
+) -> anyhow::Result<SandboxBuilder> {
+    let parsed = parse_cli_mount_spec(
+        "mount-named",
+        spec,
+        CliMountOptionSupport {
+            policies: true,
+            size: true,
+            quota: true,
+            named_kind: true,
+            ..CliMountOptionSupport::default()
+        },
+    )?;
+    if microsandbox_utils::looks_like_local_path_text(parsed.source) {
+        anyhow::bail!(
+            "mount-named source must be a volume name, not a host path: {}",
+            parsed.source
+        );
+    }
+    if parsed.options.size_mib.is_some()
+        && !matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+    {
+        anyhow::bail!("mount-named option `size` requires kind=disk");
+    }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && parsed.options.size_mib.is_none()
+    {
+        anyhow::bail!("mount-named kind=disk requires size=...");
+    }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && parsed.options.quota_mib.is_some()
+    {
+        anyhow::bail!("mount-named kind=disk does not support quota=...");
+    }
+
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+    Ok(builder.volume(guest, move |m| {
+        let mount = m.named_with(&source, |mut v| {
+            v = v.ensure_exists();
+            if let Some(kind) = options.named_kind {
+                v = match kind {
+                    VolumeKind::Directory => v.directory(),
+                    VolumeKind::Disk => v.disk(),
+                };
+            }
+            if let Some(size_mib) = options.size_mib {
+                v = v.size(size_mib);
+            }
+            if let Some(quota_mib) = options.quota_mib {
+                v = v.quota(quota_mib);
+            }
+            v
+        });
+        apply_common_mount_options(mount, options)
+    }))
+}
+
+/// Apply common read/mount behavior options to a mount builder.
+fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions) -> MountBuilder {
+    if options.readonly {
+        mount = mount.readonly();
+    }
+    if options.noexec {
+        mount = mount.noexec();
+    }
+    if options.nosuid {
+        mount = mount.nosuid();
+    }
+    if options.nodev {
+        mount = mount.nodev();
+    }
+    if let Some(sv) = options.stat_virtualization {
+        mount = mount.stat_virtualization(sv);
+    }
+    if let Some(hp) = options.host_permissions {
+        mount = mount.host_permissions(hp);
+    }
+    mount
+}
+
+/// Parse `SOURCE:DEST[:OPTIONS]` with mount-kind-specific option support.
+fn parse_cli_mount_spec<'a>(
+    context: &str,
+    spec: &'a str,
+    support: CliMountOptionSupport,
+) -> anyhow::Result<ParsedCliMountSpec<'a>> {
+    let (source, guest_and_opts) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("{context} must be in format source:guest[:options]"))?;
+
+    if source.is_empty() {
+        anyhow::bail!("{context} source must not be empty");
+    }
+
+    let (guest, opts) = match guest_and_opts.split_once(':') {
+        Some((g, o)) => (g, Some(o)),
+        None => {
+            if guest_and_opts.contains(',') {
+                let suggestion = guest_and_opts
+                    .split_once(',')
+                    .map(|(guest, opts)| format!("{source}:{guest}:{opts}"))
+                    .unwrap_or_else(|| format!("{source}:{guest_and_opts}:ro"));
+                anyhow::bail!(
+                    "{context} options must use source:guest:options syntax, \
+                     for example {suggestion}"
+                );
+            }
+            (guest_and_opts, None)
+        }
+    };
+
+    if guest.is_empty() {
+        anyhow::bail!("{context} guest path must not be empty");
+    }
+
+    Ok(ParsedCliMountSpec {
+        source,
+        guest,
+        options: parse_cli_mount_options(opts, support)?,
+    })
+}
+
 /// Parse public comma-separated mount options.
 fn parse_cli_mount_options(
     opts: Option<&str>,
@@ -715,9 +1001,14 @@ fn parse_cli_mount_options(
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
+    let mut seen_nodev = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_size = false;
+    let mut seen_quota = false;
+    let mut seen_named_kind = false;
+    let mut seen_fstype = false;
+    let mut seen_format = false;
 
     let Some(opts) = opts else {
         return Ok(parsed);
@@ -748,6 +1039,14 @@ fn parse_cli_mount_options(
                     anyhow::bail!("mount option `nosuid` specified more than once");
                 }
                 seen_nosuid = true;
+                parsed.nosuid = true;
+            }
+            "nodev" => {
+                if seen_nodev {
+                    anyhow::bail!("mount option `nodev` specified more than once");
+                }
+                seen_nodev = true;
+                parsed.nodev = true;
             }
             "suid" | "exec" | "dev" => {
                 anyhow::bail!("unsupported mount option {opt:?}");
@@ -792,7 +1091,46 @@ fn parse_cli_mount_options(
                         parsed.size_mib =
                             Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
                     }
-                    "stat-virt" | "host-perms" | "size" => {
+                    "quota" if support.quota => {
+                        if seen_quota {
+                            anyhow::bail!("mount option `quota` specified more than once");
+                        }
+                        seen_quota = true;
+                        parsed.quota_mib =
+                            Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
+                    }
+                    "kind" if support.named_kind => {
+                        if seen_named_kind {
+                            anyhow::bail!("mount option `kind` specified more than once");
+                        }
+                        seen_named_kind = true;
+                        parsed.named_kind = Some(match value {
+                            "dir" | "directory" => VolumeKind::Directory,
+                            "disk" => VolumeKind::Disk,
+                            other => anyhow::bail!(
+                                "invalid named volume kind {other:?} (expected dir|disk)"
+                            ),
+                        });
+                    }
+                    "fstype" if support.fstype => {
+                        if seen_fstype {
+                            anyhow::bail!("mount option `fstype` specified more than once");
+                        }
+                        seen_fstype = true;
+                        validate_fstype_option(value)?;
+                        parsed.fstype = Some(value.to_string());
+                    }
+                    "format" if support.format => {
+                        if seen_format {
+                            anyhow::bail!("mount option `format` specified more than once");
+                        }
+                        seen_format = true;
+                        parsed.format = Some(value.parse::<DiskImageFormat>().map_err(|e| {
+                            anyhow::anyhow!("invalid disk image format {value:?}: {e}")
+                        })?);
+                    }
+                    "stat-virt" | "host-perms" | "size" | "quota" | "kind" | "fstype"
+                    | "format" => {
                         anyhow::bail!("mount option `{key}` is not valid here");
                     }
                     other => anyhow::bail!("unknown mount option {other:?}"),
@@ -802,6 +1140,30 @@ fn parse_cli_mount_options(
     }
 
     Ok(parsed)
+}
+
+/// Validate a disk inner filesystem option before passing it to the SDK builder.
+fn validate_fstype_option(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("mount option `fstype` must not be empty");
+    }
+    if value.chars().any(|c| matches!(c, ',' | ';' | ':' | '=')) {
+        anyhow::bail!("mount option `fstype` must not contain ',', ';', ':', or '='");
+    }
+    Ok(())
+}
+
+/// Validate that an explicit host bind source has the requested kind.
+fn ensure_host_kind(context: &str, source: &str, kind: HostPathKind) -> anyhow::Result<()> {
+    let path = Path::new(source);
+    let metadata =
+        std::fs::metadata(path).map_err(|e| anyhow::anyhow!("{context} source {source:?}: {e}"))?;
+    match kind {
+        HostPathKind::Directory if metadata.is_dir() => Ok(()),
+        HostPathKind::Directory => anyhow::bail!("{context} source is not a directory: {source}"),
+        HostPathKind::File if metadata.is_file() => Ok(()),
+        HostPathKind::File => anyhow::bail!("{context} source is not a regular file: {source}"),
+    }
 }
 
 /// Apply network-related options to the builder (requires "net" feature).
@@ -1257,8 +1619,16 @@ fn looks_like_mount_options(segment: &str) -> bool {
         || segment.contains('=')
         || matches!(
             segment,
-            "ro" | "rw" | "noexec" | "nosuid" | "suid" | "exec" | "dev"
+            "ro" | "rw" | "noexec" | "nosuid" | "nodev" | "suid" | "exec" | "dev"
         )
+}
+
+fn parse_security_profile(value: &str) -> anyhow::Result<SecurityProfile> {
+    match value {
+        "default" => Ok(SecurityProfile::Default),
+        "restricted" => Ok(SecurityProfile::Restricted),
+        other => anyhow::bail!("invalid security profile {other:?}"),
+    }
 }
 
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
@@ -1710,6 +2080,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_sandbox_opts_sets_security_profile() {
+        let opts = SandboxOpts {
+            security: Some("restricted".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
     async fn apply_sandbox_opts_adds_cli_rootfs_patches() {
         let file = write_temp("config");
         let dir = make_temp_dir("msb-patch-dir");
@@ -1762,6 +2147,15 @@ mod tests {
         config.mounts.into_iter().next().unwrap()
     }
 
+    async fn build_explicit(
+        spec: &str,
+        apply: fn(SandboxBuilder, &str) -> anyhow::Result<SandboxBuilder>,
+    ) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let config = apply(builder, spec).unwrap().build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
     #[tokio::test]
     async fn test_apply_volume_bind_defaults_to_strict_private() {
         let mount = build_one("/host:/guest").await;
@@ -1785,6 +2179,20 @@ mod tests {
         let mount = build_one("/host:/guest:ro").await;
         match mount {
             VolumeMount::Bind { options, .. } => assert!(options.readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_explicit_security_mount_flags() {
+        let mount = build_one("/host:/guest:nosuid,nodev").await;
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert!(!options.readonly);
+                assert!(!options.noexec);
+                assert!(options.nosuid);
+                assert!(options.nodev);
+            }
             other => panic!("expected Bind, got {other:?}"),
         }
     }
@@ -1859,13 +2267,157 @@ mod tests {
             VolumeMount::Named {
                 name,
                 stat_virtualization,
+                create,
                 ..
             } => {
                 assert_eq!(name, "mycache");
                 assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert_eq!(
+                    create.as_ref().map(|create| create.mode()),
+                    Some(microsandbox::sandbox::NamedVolumeMode::EnsureExists)
+                );
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_dir_mount() {
+        let dir = make_temp_dir("msb-mount-dir");
+        let spec = format!("{}:/work:ro,host-perms=mirror", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                host_permissions,
+                options,
+                ..
+            } => {
+                assert_eq!(host, dir);
+                assert_eq!(guest, "/work");
+                assert!(options.readonly);
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_file_mount() {
+        let file = write_temp("fixture");
+        let spec = format!("{}:/fixture:ro,noexec", file.display());
+        let mount = build_explicit(&spec, apply_explicit_file_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                ..
+            } => {
+                assert_eq!(host, file);
+                assert_eq!(guest, "/fixture");
+                assert!(options.readonly);
+                assert!(options.noexec);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_disk_mount() {
+        let disk = write_temp("not a real filesystem, just validating config");
+        let spec = format!(
+            "{}:/data:format=qcow2,fstype=ext4,ro,noexec",
+            disk.display()
+        );
+        let mount = build_explicit(&spec, apply_explicit_disk_mount).await;
+        match mount {
+            VolumeMount::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                options,
+            } => {
+                assert_eq!(host, disk);
+                assert_eq!(guest, "/data");
+                assert_eq!(format, DiskImageFormat::Qcow2);
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+                assert!(options.noexec);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_named_mount() {
+        let mount =
+            build_explicit("cache:/data:stat-virt=relaxed", apply_explicit_named_mount).await;
+        match mount {
+            VolumeMount::Named {
+                name,
+                guest,
+                stat_virtualization,
+                create,
+                ..
+            } => {
+                assert_eq!(name, "cache");
+                assert_eq!(guest, "/data");
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert_eq!(
+                    create.as_ref().map(|create| create.mode()),
+                    Some(microsandbox::sandbox::NamedVolumeMode::EnsureExists)
+                );
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_named_mount_disk_ensure_options() {
+        let mount = build_explicit(
+            "cache-disk:/data:kind=disk,size=2G",
+            apply_explicit_named_mount,
+        )
+        .await;
+        match mount {
+            VolumeMount::Named { create, .. } => {
+                let create = create.expect("mount-named should ensure the named volume");
+                assert_eq!(
+                    create.mode(),
+                    microsandbox::sandbox::NamedVolumeMode::EnsureExists
+                );
+                assert_eq!(create.kind(), VolumeKind::Disk);
+                assert_eq!(create.capacity_mib(), Some(2048));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_explicit_disk_rejects_policy_option() {
+        let err = match apply_explicit_disk_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "/tmp/disk.raw:/data:stat-virt=relaxed",
+        ) {
+            Ok(_) => panic!("expected mount-disk to reject stat-virt"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("not valid here"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_explicit_file_rejects_disk_option() {
+        let file = write_temp("fixture");
+        let spec = format!("{}:/fixture:fstype=ext4", file.display());
+        let err =
+            match apply_explicit_file_mount(SandboxBuilder::new("test").image("alpine"), &spec) {
+                Ok(_) => panic!("expected mount-file to reject fstype"),
+                Err(err) => err,
+            };
+        assert!(err.to_string().contains("not valid here"), "got: {err}");
     }
 
     fn expect_apply_volume_err(spec: &str) -> String {
@@ -1929,11 +2481,13 @@ mod tests {
 
     #[test]
     fn test_parse_tmpfs_accepts_keyed_size_and_flags() {
-        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec").unwrap();
+        let (path, size, options) = parse_tmpfs("/seed:size=64,ro,noexec,nosuid,nodev").unwrap();
         assert_eq!(path, "/seed");
         assert_eq!(size, Some(64));
         assert!(options.readonly);
         assert!(options.noexec);
+        assert!(options.nosuid);
+        assert!(options.nodev);
     }
 
     #[tokio::test]

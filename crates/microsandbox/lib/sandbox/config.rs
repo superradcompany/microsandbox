@@ -12,7 +12,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 use super::{
     exec::Rlimit,
     init::HandoffInit,
-    types::{MountOptions, Patch, RootfsSource, VolumeMount},
+    types::{MountOptions, Patch, RootfsSource, SecurityProfile, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -135,6 +135,14 @@ pub struct SandboxConfig {
     /// Volume mounts.
     #[serde(default)]
     pub mounts: Vec<VolumeMount>,
+
+    /// In-guest security profile.
+    ///
+    /// `Default` preserves normal guest-root behavior. `Restricted` applies
+    /// stronger in-guest hardening that is incompatible with workflows such
+    /// as `sudo` and Docker-in-Docker.
+    #[serde(default)]
+    pub security_profile: SecurityProfile,
 
     /// Rootfs patches applied before VM start.
     ///
@@ -433,6 +441,7 @@ impl Default for SandboxConfig {
             labels: HashMap::new(),
             rlimits: Vec::new(),
             mounts: Vec::new(),
+            security_profile: SecurityProfile::default(),
             patches: Vec::new(),
             #[cfg(feature = "net")]
             network: microsandbox_network::config::NetworkConfig::default(),

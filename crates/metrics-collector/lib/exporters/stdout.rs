@@ -175,7 +175,10 @@ mod tests {
             pid: 100,
             metrics: SandboxMetrics {
                 cpu_percent: 12.5,
+                vcpu_time_ns: 1,
                 memory_bytes: 14 * 1024 * 1024,
+                memory_available_bytes: Some(13 * 1024 * 1024),
+                memory_host_resident_bytes: Some(12 * 1024 * 1024),
                 memory_limit_bytes: 512 * 1024 * 1024,
                 disk_read_bytes: 1024,
                 disk_write_bytes: 2048,

@@ -142,7 +142,7 @@ async fn run_connect_args(args: SshConnectArgs) -> anyhow::Result<()> {
 async fn connect_to_sandbox(name: String, remote_command: Vec<String>) -> anyhow::Result<()> {
     let sandbox = super::resolve_and_start(&name, false).await?;
     let result = async {
-        let ssh = sandbox.ssh().connect().await?;
+        let ssh = sandbox.ssh().open_client().await?;
         if remote_command.is_empty() {
             ssh.attach().await
         } else {
@@ -172,9 +172,9 @@ async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
     let port = args.port.unwrap_or(DEFAULT_SSH_PORT);
 
     let result = async {
-        let server = sandbox.ssh().server().await?;
+        let server = sandbox.ssh().prepare_server().await?;
         if args.stdio {
-            server.serve(SshStdioStream::new()).await
+            server.serve_connection(SshStdioStream::new()).await
         } else {
             let listener = TcpListener::bind((host.as_str(), port)).await?;
             let addr = listener.local_addr()?;
@@ -185,7 +185,7 @@ async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
                         let (stream, _) = accepted?;
                         let server = server.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = server.serve(stream).await {
+                            if let Err(error) = server.serve_connection(stream).await {
                                 tracing::debug!(%error, "SSH connection failed");
                             }
                         });

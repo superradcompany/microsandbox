@@ -66,7 +66,7 @@ let policy = NetworkPolicy::builder()
     .egress(|e| e.udp().tcp().port(53).allow_host())
     .build()?;
 
-let sb = Sandbox::builder("secure-agent")
+let sb = Sandbox::builder("restricted-worker")
     .image("alpine")
     .network(|n| n.policy(policy))
     .create()
@@ -76,7 +76,7 @@ let sb = Sandbox::builder("secure-agent")
 ```typescript TypeScript
 import { NetworkPolicy, Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("secure-agent")
+await using sb = await Sandbox.builder("restricted-worker")
     .image("alpine")
     .network((n) => n.policy(
         NetworkPolicy.builder()
@@ -92,7 +92,7 @@ await using sb = await Sandbox.builder("secure-agent")
 from microsandbox import Network, Sandbox
 
 sb = await Sandbox.create(
-    "secure-agent",
+    "restricted-worker",
     image="alpine",
     network={
         "policy": {
@@ -107,7 +107,7 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := m.CreateSandbox(ctx, "secure-agent",
+sb, err := m.CreateSandbox(ctx, "restricted-worker",
     m.WithImage("alpine"),
     m.WithNetwork(&m.NetworkConfig{
         DefaultEgress: m.PolicyActionDeny,
@@ -120,7 +120,7 @@ sb, err := m.CreateSandbox(ctx, "secure-agent",
 ```
 
 ```bash CLI
-msb create alpine --name secure-agent \
+msb create alpine --name restricted-worker \
   --net-default-egress deny \
   --net-rule "allow@public:tcp:443,allow@host:udp:53"
 ```
@@ -173,7 +173,7 @@ Use an explicit bind address, such as `0.0.0.0`, only when you intentionally wan
 From inside the sandbox, `host.microsandbox.internal` resolves to the host machine. The default policy denies host access, so allow the `host` group when a sandbox needs to call a dev server, database, or other local service.
 
 ```bash
-msb create python --name dev-agent \
+msb create python --name devbox \
   --net-rule "allow@public,allow@host"
 ```
 

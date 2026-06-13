@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
-    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO,
-    HANDOFF_INIT_SEP, exec::ExecRlimit,
+    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
+    HANDOFF_INIT_AUTO, HANDOFF_INIT_SEP, exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -55,6 +55,9 @@ pub struct BootParams {
 
     /// Parsed `MSB_TMPFS` — tmpfs mount specs (empty when unset).
     pub(crate) tmpfs: Vec<TmpfsSpec>,
+
+    /// Parsed `MSB_SECURITY_PROFILE` — in-guest security profile.
+    pub(crate) security_profile: SecurityProfile,
 
     /// `MSB_HOSTNAME` — guest hostname.
     pub(crate) hostname: Option<String>,
@@ -105,14 +108,28 @@ pub struct HandoffInit {
 
 /// Runtime configuration surviving past init; referenced by the agent loop.
 ///
-/// Currently holds only the default guest user used when an exec request
-/// does not specify its own.
+/// Holds runtime settings used after init, including the default guest user
+/// and security profile for exec sessions.
 #[derive(Debug)]
 pub struct AgentdConfig {
     /// `MSB_USER` — default guest user for exec sessions.
     ///
     /// Captured at startup; changes to `MSB_USER` afterward are not observed.
     pub(crate) user: Option<String>,
+
+    /// In-guest security profile for exec sessions.
+    pub(crate) security_profile: SecurityProfile,
+}
+
+/// In-guest security profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SecurityProfile {
+    /// Preserve normal guest-root behavior.
+    #[default]
+    Default,
+
+    /// Set `no_new_privs`, drop `CAP_SYS_ADMIN`, and force `nosuid,nodev` mounts.
+    Restricted,
 }
 
 /// Parsed tmpfs mount specification.
@@ -122,6 +139,8 @@ pub(crate) struct TmpfsSpec {
     pub size_mib: Option<u32>,
     pub mode: Option<u32>,
     pub noexec: bool,
+    pub nosuid: bool,
+    pub nodev: bool,
     pub readonly: bool,
 }
 
@@ -148,6 +167,8 @@ pub(crate) struct DirMountSpec {
     pub guest_path: String,
     pub readonly: bool,
     pub noexec: bool,
+    pub nosuid: bool,
+    pub nodev: bool,
 }
 
 /// Parsed virtiofs file volume mount specification.
@@ -158,6 +179,8 @@ pub(crate) struct FileMountSpec {
     pub guest_path: String,
     pub readonly: bool,
     pub noexec: bool,
+    pub nosuid: bool,
+    pub nodev: bool,
 }
 
 /// Parsed disk-image volume mount specification.
@@ -174,6 +197,8 @@ pub(crate) struct DiskMountSpec {
     pub fstype: Option<String>,
     pub readonly: bool,
     pub noexec: bool,
+    pub nosuid: bool,
+    pub nodev: bool,
 }
 
 /// Parsed common volume mount option block.
@@ -181,6 +206,8 @@ pub(crate) struct DiskMountSpec {
 struct ParsedMountOptions {
     readonly: bool,
     noexec: bool,
+    nosuid: bool,
+    nodev: bool,
     fstype: Option<String>,
     size_mib: Option<u32>,
     mode: Option<u32>,
@@ -273,6 +300,10 @@ impl BootParams {
                 .map(|v| parse_rlimits(&v))
                 .transpose()?
                 .unwrap_or_default(),
+            security_profile: read_env(ENV_SECURITY_PROFILE)
+                .map(|v| parse_security_profile(&v))
+                .transpose()?
+                .unwrap_or_default(),
             handoff_init: parse_handoff_init()?,
         })
     }
@@ -307,6 +338,10 @@ impl AgentdConfig {
     pub fn from_env() -> AgentdResult<Self> {
         Ok(Self {
             user: read_env(ENV_USER),
+            security_profile: read_env(ENV_SECURITY_PROFILE)
+                .map(|v| parse_security_profile(&v))
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }
@@ -314,6 +349,16 @@ impl AgentdConfig {
 //--------------------------------------------------------------------------------------------------
 // Parse Functions: Block Root / Volume Mounts / Tmpfs
 //--------------------------------------------------------------------------------------------------
+
+fn parse_security_profile(value: &str) -> AgentdResult<SecurityProfile> {
+    match value {
+        "default" => Ok(SecurityProfile::Default),
+        "restricted" => Ok(SecurityProfile::Restricted),
+        other => Err(AgentdError::Config(format!(
+            "{ENV_SECURITY_PROFILE} unknown value: {other}"
+        ))),
+    }
+}
 
 /// Parses `MSB_BLOCK_ROOT` into a kind-based spec.
 ///
@@ -378,6 +423,7 @@ fn parse_mount_options(
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
+    let mut seen_nodev = false;
     let mut seen_fstype = false;
     let mut seen_size = false;
     let mut seen_mode = false;
@@ -417,6 +463,16 @@ fn parse_mount_options(
                     )));
                 }
                 seen_nosuid = true;
+                parsed.nosuid = true;
+            }
+            "nodev" => {
+                if seen_nodev {
+                    return Err(AgentdError::Config(format!(
+                        "{env_name} option 'nodev' specified more than once"
+                    )));
+                }
+                seen_nodev = true;
+                parsed.nodev = true;
             }
             "suid" | "exec" | "dev" => {
                 return Err(AgentdError::Config(format!(
@@ -526,6 +582,8 @@ fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec> {
         guest_path: guest_path.to_string(),
         readonly: options.readonly,
         noexec: options.noexec,
+        nosuid: options.nosuid,
+        nodev: options.nodev,
     })
 }
 
@@ -578,6 +636,8 @@ fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
         guest_path: guest_path.to_string(),
         readonly: options.readonly,
         noexec: options.noexec,
+        nosuid: options.nosuid,
+        nodev: options.nodev,
     })
 }
 
@@ -626,6 +686,8 @@ fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
         fstype: options.fstype,
         readonly: options.readonly,
         noexec: options.noexec,
+        nosuid: options.nosuid,
+        nodev: options.nodev,
     })
 }
 
@@ -639,7 +701,7 @@ fn parse_tmpfs_mounts(val: &str) -> AgentdResult<Vec<TmpfsSpec>> {
 
 /// Parses a single tmpfs entry: `path[:opts]`.
 ///
-/// Supported options are `size=N`, `mode=N`, `ro`, `rw`, `nosuid`, and `noexec`.
+/// Supported options are `size=N`, `mode=N`, `ro`, `rw`, `nosuid`, `nodev`, and `noexec`.
 /// Mode is parsed as octal (e.g. `mode=1777`).
 fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
     let (path, opts) = match entry.split_once(':') {
@@ -673,6 +735,8 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
         size_mib: options.size_mib,
         mode: options.mode,
         noexec: options.noexec,
+        nosuid: options.nosuid,
+        nodev: options.nodev,
         readonly: options.readonly,
     })
 }

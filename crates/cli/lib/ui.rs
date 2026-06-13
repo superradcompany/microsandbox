@@ -348,7 +348,7 @@ pub fn detail_kv(key: &str, value: &str) {
 
 /// Print an indented key-value pair in detail views.
 pub fn detail_kv_indent(key: &str, value: &str) {
-    println!("  {:<14}{value}", style(format!("{key}:")).cyan());
+    println!("  {:<14}{value}", style(format!("{key}:")).dim());
 }
 
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.

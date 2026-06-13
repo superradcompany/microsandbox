@@ -138,6 +138,7 @@
                   "sdk/python/networking",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
+                  "sdk/python/images",
                   "sdk/python/agent-client"
                 ]
               },
@@ -187,8 +188,8 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker/docker",
               "recipes/docker/docker-in-sandbox",
+              "recipes/docker/docker",
               "recipes/docker/local-images"
             ]
           },
@@ -235,7 +236,7 @@
   "appearance": {
     "default": "system"
   },
-  "description": "Every agent deserves its own machine",
+  "description": "Easy, fast, local microVMs for untrusted workloads",
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

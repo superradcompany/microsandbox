@@ -9,22 +9,18 @@ multi-ecosystem-groups:
   dependencies:
     schedule:
       interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    target-branch: "main"
 
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
     patterns: ["*"]
     multi-ecosystem-group: "dependencies"
-    commit-message:
-      prefix: "chore"
-      include: "scope"
-    target-branch: "main"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     patterns: ["*"]
     multi-ecosystem-group: "dependencies"
-    commit-message:
-      prefix: "chore(ci)"
-      include: "scope"
-    target-branch: "main"

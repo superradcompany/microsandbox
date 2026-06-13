@@ -98,6 +98,17 @@ class AgentClient:
     ) -> AgentClient:
         return cls(await _PyAgentClient.connect(path, timeout=timeout))
 
+    @staticmethod
+    def socket_path(name: str) -> str:
+        """Resolve a sandbox's agentd relay socket path without connecting.
+
+        Returns the same path :meth:`connect_sandbox` would dial, so a caller
+        can talk to agentd over a raw byte transport instead of this frame
+        client. The sandbox need not be running. Sandbox names are limited to
+        128 UTF-8 bytes.
+        """
+        return _PyAgentClient.socket_path(name)
+
     async def request(self, flags: int, body: bytes) -> RawFrame:
         return await self._native.request(flags, body)
 

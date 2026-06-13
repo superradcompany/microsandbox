@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = sandbox.shell("cat /etc/os-release").await?;
     println!("os-release:\n{}", output.stdout()?);
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }
 

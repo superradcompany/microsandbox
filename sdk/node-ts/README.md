@@ -63,7 +63,7 @@ console.log(output.stdout());
 
 The `await using` form (Node.js 22+) automatically calls `Sandbox.stop` when
 `sandbox` falls out of scope. If you need finer control, drop the `using` and
-call `sandbox.stopAndWait()` explicitly.
+call `sandbox.stop()` explicitly.
 
 ## Examples
 
@@ -308,11 +308,12 @@ Detached sandboxes survive the Node.js process:
 // Create detached — drops the lifecycle on this handle's `Symbol.asyncDispose`.
 const sb = await Sandbox.builder("background")
   .image("python")
-  .createDetached();
+  .detached(true)
+  .create();
 
 // Later, from another process:
 const handle = await Sandbox.get("background");
-const live = await handle.connect();              // no lifecycle ownership
+const live = await handle.openClient();              // no lifecycle ownership
 await live.shell("echo reconnected");
 ```
 
@@ -368,8 +369,8 @@ const detail = await Image.inspect("python:3.12");
 console.log(detail.config?.entrypoint, detail.config?.workingDir);
 
 await Image.remove("old:tag", { force: true });
-const reclaimed = await Image.gcLayers();
-console.log(`reclaimed ${reclaimed} orphaned layers`);
+const report = await Image.prune();
+console.log(`removed ${report.imageRefsRemoved} unused image refs`);
 ```
 
 ### Replace Existing
@@ -462,7 +463,7 @@ await setup()
 | Symbol | Description |
 |---|---|
 | `Sandbox` | Live sandbox — lifecycle, exec, fs, metrics. Implements `AsyncDisposable`. |
-| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()` / `.createDetached()`. |
+| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()`. |
 | `SandboxHandle` | Lightweight DB handle — `connect()`, `start()`, `stop()`, `kill()`. |
 | `SandboxConfig` | Built sandbox configuration (output of `SandboxBuilder.build()`). |
 | `SandboxStatus` | `"running" \| "stopped" \| "crashed" \| "draining"` |
@@ -485,7 +486,7 @@ await setup()
 
 | Symbol | Description |
 |---|---|
-| `SandboxFs` | Guest fs ops (read, write, list, mkdir, copy, rename, stat, exists, copyFromHost, copyToHost, readStream, writeStream). |
+| `SandboxFsOps` | Guest fs ops (read, write, list, mkdir, copy, rename, stat, exists, copyFromHost, copyToHost, readStream, writeStream). |
 | `FsReadStream` | Streaming reader — `AsyncIterable<Uint8Array>`. |
 | `FsWriteSink` | Streaming writer — `write()`, `close()`, `Symbol.asyncDispose`. |
 | `FsEntry` / `FsMetadata` / `FsEntryKind` | Listing entry, stat metadata, kind union. |
@@ -497,14 +498,14 @@ await setup()
 | `Volume` / `VolumeBuilder` / `VolumeHandle` | Named persistent storage with quotas and labels. |
 | `VolumeFs` | Host-side fs ops on a volume's directory (no sandbox required). |
 | `VolumeFsReadStream` / `VolumeFsWriteSink` | Streaming variants. |
-| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `size`. |
+| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `noexec`, `nosuid`, `nodev`, `size`. |
 | `VolumeMount` | Discriminated union of mount kinds. |
 
 ### Image Cache
 
 | Symbol | Description |
 |---|---|
-| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `gcLayers`, `gc`. |
+| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `prune`. |
 | `ImageHandle` / `ImageDetail` / `ImageConfigDetail` / `ImageLayerDetail` | Cached image metadata. |
 | `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type. |
 | `intoRootfsSource(input)` | Resolve a string into the right `RootfsSource`. |
@@ -552,7 +553,7 @@ await setup()
 
 `MicrosandboxError` is the base class; every Rust variant has a typed subclass:
 
-`IoError`, `HttpError`, `LibkrunfwNotFoundError`, `DatabaseError`, `InvalidConfigError`, `SandboxNotFoundError`, `SandboxStillRunningError`, `RuntimeError`, `JsonError`, `ProtocolError`, `NixError`, `ExecTimeoutError` (carries `timeoutMs`), `TerminalError`, `SandboxFsError`, `ImageNotFoundError`, `ImageInUseError`, `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageError`, `PatchFailedError`, `CustomError`.
+`IoError`, `HttpError`, `LibkrunfwNotFoundError`, `DatabaseError`, `InvalidConfigError`, `SandboxNotFoundError`, `SandboxStillRunningError`, `RuntimeError`, `JsonError`, `ProtocolError`, `NixError`, `ExecTimeoutError` (carries `timeoutMs`), `TerminalError`, `SandboxFsOpsError`, `ImageNotFoundError`, `ImageInUseError`, `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageError`, `PatchFailedError`, `CustomError`.
 
 ## License
 

@@ -16,7 +16,7 @@ microsandbox = { version = "0.4.6", features = ["ssh"] }
 #### ssh()
 
 ```rust
-fn ssh(&self) -> SandboxSsh
+fn ssh(&self) -> SandboxSshOps
 ```
 
 Return the SSH namespace for this sandbox.
@@ -25,9 +25,9 @@ Return the SSH namespace for this sandbox.
 
 | Type | Description |
 |------|-------------|
-| [`SandboxSsh`](#sandboxssh) | SSH client and server helpers |
+| [`SandboxSshOps`](#sandboxssh) | SSH client and server helpers |
 
-## SandboxSsh
+## SandboxSshOps
 
 ---
 

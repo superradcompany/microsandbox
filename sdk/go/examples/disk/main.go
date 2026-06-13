@@ -139,7 +139,7 @@ func boot(ctx context.Context, suffix string, opts ...microsandbox.SandboxOption
 func teardown(sb *microsandbox.Sandbox) {
 	stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 	defer c()
-	_, _ = sb.StopAndWait(stopCtx)
+	_ = sb.Stop(stopCtx)
 	_ = sb.Close()
 	_ = microsandbox.RemoveSandbox(context.Background(), sb.Name())
 }

@@ -63,6 +63,8 @@ describe("MountBuilder", () => {
       guest: "/data",
       readonly: false,
       noexec: false,
+      nosuid: false,
+      nodev: false,
       statVirtualization: "strict",
       hostPermissions: "private",
     });
@@ -80,6 +82,8 @@ describe("MountBuilder", () => {
       sizeMib: 64,
       readonly: true,
       noexec: false,
+      nosuid: false,
+      nodev: false,
     });
   });
 
@@ -97,6 +101,23 @@ describe("MountBuilder", () => {
     expect(
       new MountBuilder("/seed").disk("./fixture.qcow2").noexec().build(),
     ).toMatchObject({ kind: "disk", noexec: true });
+  });
+
+  it("propagates nosuid and nodev across mount kinds", () => {
+    expect(
+      new MountBuilder("/data").bind("/host/data").nosuid().nodev().build(),
+    ).toMatchObject({ kind: "bind", nosuid: true, nodev: true });
+    expect(new MountBuilder("/cache").named("v1").nosuid().nodev().build()).toMatchObject(
+      { kind: "named", nosuid: true, nodev: true },
+    );
+    expect(new MountBuilder("/scratch").tmpfs().nosuid().nodev().build()).toMatchObject({
+      kind: "tmpfs",
+      nosuid: true,
+      nodev: true,
+    });
+    expect(
+      new MountBuilder("/seed").disk("./fixture.qcow2").nosuid().nodev().build(),
+    ).toMatchObject({ kind: "disk", nosuid: true, nodev: true });
   });
 
   it("auto-infers disk format from the host extension", () => {
@@ -269,6 +290,14 @@ describe("SandboxBuilder.build", () => {
       type: "Tmpfs",
       sizeMib: 64,
     });
+  });
+
+  it("sets the restricted security profile", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .security("restricted")
+      .build();
+    expect(cfg.securityProfile).toBe("restricted");
   });
 
   it("invalid volume invocations defer to .build() / .create()", async () => {

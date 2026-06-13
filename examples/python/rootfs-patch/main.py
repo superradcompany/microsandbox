@@ -38,7 +38,7 @@ async def main():
     output = await sb.shell("stat -c '%a' /app")
     print(f"/app permissions: {output.stdout_text.strip()}")
 
-    await sb.stop_and_wait()
+    await sb.stop()
     print("Sandbox stopped.")
 
 

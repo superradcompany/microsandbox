@@ -356,7 +356,7 @@ The CLI prepends the same payload as a styled `error:` block before any captured
 
 ## Resource cleanup
 
-Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope. In Go, pair every `CreateSandbox` with a `defer` that calls `StopAndWait` + `Close`.
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope. In Go, pair every `CreateSandbox` with a `defer` that calls `Stop` + `Close`.
 
 <CodeGroup>
 ```rust Rust
@@ -405,7 +405,7 @@ if err != nil {
 defer func() {
     stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    _, _ = sb.StopAndWait(stopCtx)
+    _, _ = sb.Stop(stopCtx)
     _ = sb.Close()
 }()
 
