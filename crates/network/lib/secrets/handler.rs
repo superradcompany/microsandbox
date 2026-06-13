@@ -2061,7 +2061,7 @@ fn http2_request_summary(headers: &str) -> RequestSummary {
     summary
 }
 
-fn looks_like_http_request_prefix(data: &[u8]) -> bool {
+pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
     if data.is_empty() || b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".starts_with(data) {
         return true;
     }
@@ -2075,7 +2075,7 @@ fn looks_like_http_request_prefix(data: &[u8]) -> bool {
     !method.is_empty() && method.iter().copied().all(is_http_token_byte)
 }
 
-fn first_line_is_not_http_request(data: &[u8]) -> bool {
+pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
     let Some(line_end) = data.windows(2).position(|window| window == b"\r\n") else {
         return false;
     };

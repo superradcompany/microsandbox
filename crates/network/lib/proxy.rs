@@ -19,7 +19,9 @@ use tokio::sync::mpsc;
 
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, ViolationAction};
-use crate::secrets::handler::SecretsHandler;
+use crate::secrets::handler::{
+    SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
+};
 use crate::shared::SharedState;
 use crate::tls::sni;
 
@@ -147,6 +149,7 @@ async fn tcp_proxy_task(
     // server→guest direction. When domain rules already peeked, `initial_buf`
     // is reused and this is cheap; with no secrets it is skipped entirely
     // (`is_tls` only matters for deciding whether to build the handler).
+    let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
     let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
         classify_first_flight(
             initial_buf,
@@ -154,7 +157,7 @@ async fn tcp_proxy_task(
             &mut server_rx,
             &to_smoltcp,
             &shared,
-            secrets.has_plain_http_candidates(),
+            want_headers,
             PEEK_BUF_SIZE,
             PEEK_BUDGET,
         )
@@ -283,7 +286,12 @@ fn extract_http_host(buf: &[u8]) -> Option<String> {
     if buf.first() == Some(&0x16) {
         return None;
     }
-    let mut headers = [httparse::EMPTY_HEADER; 32];
+    // Size the header pool to the buffer rather than a fixed array: a header
+    // line is at least four bytes (`a:\r\n`), so `len / 4` always covers the
+    // real header count, and `httparse` never reports `TooManyHeaders` (which
+    // would make a request with many headers look hostless). The first flight
+    // is capped at PEEK_BUF_SIZE, so this stays bounded.
+    let mut headers = vec![httparse::EMPTY_HEADER; (buf.len() / 4).max(16)];
     let mut req = httparse::Request::new(&mut headers);
     req.parse(buf).ok()?;
     req.headers
@@ -334,11 +342,17 @@ async fn classify_first_flight(
 
     loop {
         // Stop as soon as the protocol class is known and — for plain-HTTP
-        // candidates — a full header block has arrived.
+        // candidates — a full header block has arrived. Bail the moment a
+        // non-TLS flight stops looking like an HTTP request so non-HTTP
+        // protocols (SSH, Postgres) aren't withheld from upstream for the
+        // whole budget while we wait for a `\r\n\r\n` that never comes.
         if !buf.is_empty() {
             let is_tls = buf.first() == Some(&0x16);
+            let not_http = !is_tls
+                && (!looks_like_http_request_prefix(&buf) || first_line_is_not_http_request(&buf));
             let done = !want_headers
                 || is_tls
+                || not_http
                 || buf.len() >= max
                 || buf.windows(4).any(|w| w == b"\r\n\r\n");
             if done {
@@ -833,6 +847,18 @@ mod tests {
         assert_eq!(extract_http_host(&buf), None);
     }
 
+    #[test]
+    fn extract_http_host_with_many_headers() {
+        // Far more headers than a small fixed parse array would hold: the Host
+        // must still be found rather than the request looking hostless.
+        let mut req = Vec::from(&b"GET / HTTP/1.1\r\n"[..]);
+        for i in 0..100 {
+            req.extend_from_slice(format!("X-Pad-{i}: v\r\n").as_bytes());
+        }
+        req.extend_from_slice(b"Host: example.com\r\n\r\n");
+        assert_eq!(extract_http_host(&req), Some("example.com".into()));
+    }
+
     // ── plain-HTTP secret substitution ────────────────────────────────────────
 
     use std::sync::Arc;
@@ -952,6 +978,84 @@ mod tests {
         let wire = String::from_utf8(sink.await.unwrap()).unwrap();
         assert!(wire.contains("real-secret-value"), "got: {wire:?}");
         assert!(!wire.contains("$MSB_KEY"), "got: {wire:?}");
+    }
+
+    #[tokio::test]
+    async fn plain_http_forwards_placeholder_to_allowed_host_with_split_headers() {
+        // A default (require_tls_identity = true) host-bound secret is never
+        // substituted over plain HTTP, but a request to its allowed host must
+        // have the placeholder forwarded unchanged — not blocked as a violation
+        // — even when the Host arrives in a later segment than the request line.
+        let (addr, sink) = spawn_sink().await;
+
+        let shared = SharedState::new(4);
+        shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            ["127.0.0.1".parse::<IpAddr>().unwrap()],
+            StdDuration::from_secs(60),
+        );
+
+        let secrets = SecretsConfig {
+            secrets: vec![SecretEntry {
+                env_var: "API_KEY".into(),
+                value: "real-secret-value".into(),
+                placeholder: "$MSB_KEY".into(),
+                allowed_hosts: vec![HostPattern::Exact("example.com".into())],
+                injection: SecretInjection {
+                    headers: true,
+                    basic_auth: false,
+                    query_params: false,
+                    body: false,
+                },
+                on_violation: None,
+                require_tls_identity: true,
+            }],
+            ..Default::default()
+        };
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let upstream_connected = Arc::new(AtomicBool::new(false));
+
+        from_tx
+            .send(Bytes::from_static(b"GET /api HTTP/1.1\r\n"))
+            .await
+            .unwrap();
+        from_tx
+            .send(Bytes::from_static(
+                b"Host: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n",
+            ))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        tcp_proxy_task(
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(shared),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(secrets),
+            upstream_connected,
+        )
+        .await
+        .unwrap();
+
+        let wire = String::from_utf8(sink.await.unwrap()).unwrap();
+        assert!(
+            wire.contains("Host: example.com"),
+            "request must reach the allowed host, got: {wire:?}"
+        );
+        assert!(
+            wire.contains("$MSB_KEY"),
+            "placeholder must be forwarded unchanged for a require_tls_identity secret, got: {wire:?}"
+        );
+        assert!(
+            !wire.contains("real-secret-value"),
+            "secret must never be substituted over plain HTTP, got: {wire:?}"
+        );
     }
 
     #[tokio::test]
