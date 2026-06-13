@@ -76,7 +76,7 @@ async fn exec_stream_drives_guest_turn_by_turn() {
     let status = child.wait().await.expect("wait for msb exec");
 
     // Clean up before asserting so a failure can't leak the sandbox.
-    sandbox.stop_and_wait().await.expect("stop sandbox");
+    sandbox.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 
     driver.expect("`exec --stream` did not stream turn by turn (deadlocked)");
