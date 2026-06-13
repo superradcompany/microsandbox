@@ -33,6 +33,7 @@ npm start
 
 | Example | Description |
 |---------|-------------|
+| `cloud-backend` | Cloud backend lifecycle and live logs |
 | `root-oci` | OCI image rootfs |
 | `root-bind` | Bind-mounted local directory |
 | `root-block` | qcow2 disk image |

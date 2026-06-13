@@ -77,71 +77,42 @@ char *msb_sandbox_start(uint64_t cancel_id,
 
 char *msb_sandbox_handle_stop(uint64_t cancel_id,
                               const char *name,
-                              uint64_t timeout_ms,
                               unsigned char *buf,
                               uintptr_t buf_len);
-
-char *msb_sandbox_handle_request_stop(uint64_t cancel_id,
-                                      const char *name,
-                                      unsigned char *buf,
-                                      uintptr_t buf_len);
 
 char *msb_sandbox_handle_kill(uint64_t cancel_id,
                               const char *name,
-                              uint64_t timeout_ms,
                               unsigned char *buf,
                               uintptr_t buf_len);
-
-char *msb_sandbox_handle_request_kill(uint64_t cancel_id,
-                                      const char *name,
-                                      unsigned char *buf,
-                                      uintptr_t buf_len);
-
-char *msb_sandbox_handle_request_drain(uint64_t cancel_id,
-                                       const char *name,
-                                       unsigned char *buf,
-                                       uintptr_t buf_len);
-
-char *msb_sandbox_handle_wait_until_stopped(uint64_t cancel_id,
-                                            const char *name,
-                                            unsigned char *buf,
-                                            uintptr_t buf_len);
 
 char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
-char *msb_sandbox_stop(uint64_t cancel_id,
-                       Handle handle,
-                       uint64_t timeout_ms,
-                       unsigned char *buf,
-                       uintptr_t buf_len);
+char *msb_sandbox_stop(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
-char *msb_sandbox_request_stop(uint64_t cancel_id,
-                               Handle handle,
-                               unsigned char *buf,
-                               uintptr_t buf_len);
-
-char *msb_sandbox_kill(uint64_t cancel_id,
-                       Handle handle,
-                       uint64_t timeout_ms,
-                       unsigned char *buf,
-                       uintptr_t buf_len);
-
-char *msb_sandbox_request_kill(uint64_t cancel_id,
-                               Handle handle,
-                               unsigned char *buf,
-                               uintptr_t buf_len);
-
-char *msb_sandbox_request_drain(uint64_t cancel_id,
+/**
+ * Stop and wait for full shutdown. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_stop_and_wait(uint64_t cancel_id,
                                 Handle handle,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
-char *msb_sandbox_wait_until_stopped(uint64_t cancel_id,
-                                     Handle handle,
-                                     unsigned char *buf,
-                                     uintptr_t buf_len);
+/**
+ * Kill the sandbox immediately (SIGKILL on the VM process).
+ */
+char *msb_sandbox_kill(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Trigger graceful drain (SIGUSR1). Returns `{"ok":true}`.
+ */
+char *msb_sandbox_drain(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Wait for the sandbox process to exit. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_wait(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
  * Reports whether this handle owns the sandbox lifecycle (synchronous).
@@ -149,10 +120,7 @@ char *msb_sandbox_wait_until_stopped(uint64_t cancel_id,
  */
 char *msb_sandbox_owns_lifecycle(Handle handle, unsigned char *buf, uintptr_t buf_len);
 
-char *msb_sandbox_list(uint64_t cancel_id,
-                       const char *filter_json,
-                       unsigned char *buf,
-                       uintptr_t buf_len);
+char *msb_sandbox_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_logs(uint64_t cancel_id,
                        Handle handle,
@@ -188,10 +156,10 @@ char *msb_ssh_server_close(uint64_t cancel_id,
                            unsigned char *buf,
                            uintptr_t buf_len);
 
-char *msb_ssh_server_serve_connection(uint64_t cancel_id,
-                                      Handle server_handle,
-                                      unsigned char *buf,
-                                      uintptr_t buf_len);
+char *msb_ssh_server_serve_stdio(uint64_t cancel_id,
+                                 Handle server_handle,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
 
 char *msb_ssh_client_exec(uint64_t cancel_id,
                           Handle client_handle,
@@ -528,6 +496,16 @@ char *msb_sandbox_handle_metrics(uint64_t cancel_id,
                                  uintptr_t buf_len);
 
 /**
+ * Remove the sandbox's persisted filesystem + database state.
+ * The sandbox must be stopped. Consumes the live handle.
+ * Returns `{"ok":true}`.
+ */
+char *msb_sandbox_remove_persisted(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
+
+/**
  * Look up a volume by name and return its metadata.
  * Returns `{"name":"...","quota_mib":<int|null>,"used_bytes":<int>,
  *           "labels":{"k":"v",...},"created_at_unix":<int|null>}`.
@@ -559,7 +537,9 @@ char *msb_image_remove(uint64_t cancel_id,
                        unsigned char *buf,
                        uintptr_t buf_len);
 
-char *msb_image_prune(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+char *msb_image_gc_layers(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_image_gc(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_handle_snapshot(uint64_t cancel_id,
                                   const char *sandbox_name,
@@ -685,20 +665,6 @@ char *msb_agent_open_path(uint64_t cancel_id,
                           const char *path,
                           uint64_t timeout_ms,
                           Handle *out_handle);
-
-/**
- * Resolve the host-side path of a sandbox's agentd relay socket by name.
- *
- * Synchronous; touches no Rust-side handle state and does not connect. Writes
- * `{"path":"..."}` to `buf`. The Go SDK exposes this so a caller can dial
- * agentd over a raw byte transport (e.g. a transparent relay) instead of the
- * frame-protocol client returned by `msb_agent_open_*`.
- *
- * # Safety
- * `name` must be a valid null-terminated C string; `buf`/`buf_len` follow the
- * shared `run` output-buffer contract.
- */
-char *msb_agent_socket_path(const char *name, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_agent_request(uint64_t cancel_id,
                         Handle agent_handle,

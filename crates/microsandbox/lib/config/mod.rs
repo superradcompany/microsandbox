@@ -1,7 +1,14 @@
-//! Global configuration for the microsandbox library.
+//! Configuration schema for the microsandbox library.
 //!
-//! Configuration is loaded from `~/.microsandbox/config.json` on first access.
-//! All fields have sensible defaults — a missing config file is equivalent to `{}`.
+//! [`LocalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
+//! It is owned by [`LocalBackend`](crate::backend::LocalBackend); accessors
+//! live on the backend, not on a process-wide static. See D6.7 Layer 2a in
+//! `planning/microsandbox/design/api/local-cloud-backend.md`.
+//!
+//! Layer 1 process-wide knobs ([`set_sdk_msb_path`],
+//! [`set_sdk_libkrunfw_path`]) stay in this module — they are documented as
+//! process-singleton-by-physics (one dylib per process address space,
+//! one resolved `msb` binary).
 
 use std::{
     collections::HashMap,
@@ -22,10 +29,10 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 /// Default number of vCPUs per sandbox.
-const DEFAULT_CPUS: u8 = 1;
+pub(crate) const DEFAULT_CPUS: u8 = 1;
 
 /// Default guest memory in MiB.
-const DEFAULT_MEMORY_MIB: u32 = 512;
+pub(crate) const DEFAULT_MEMORY_MIB: u32 = 512;
 
 /// Default database max connections.
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
@@ -63,14 +70,33 @@ pub(crate) mod metrics_interval_serde {
 const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 
 //--------------------------------------------------------------------------------------------------
+// Statics: Layer 1 (process-level)
+//--------------------------------------------------------------------------------------------------
+
+/// SDK-provided path to the bundled `msb` binary. Set via [`set_sdk_msb_path`]
+/// by FFI bindings that ship a binary inside their language package and need
+/// an in-process channel that doesn't fight user env. Tier 2 of the
+/// resolution ladder (below `MSB_PATH` env, above config + filesystem
+/// fallbacks).
+static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// SDK-provided path to the bundled `libkrunfw` dylib. Set via
+/// [`set_sdk_libkrunfw_path`]. Tier 2 of the libkrunfw resolution ladder.
+static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Global configuration for the microsandbox library.
+/// Configuration owned by a [`LocalBackend`](crate::backend::LocalBackend).
+///
+/// Built from `~/.microsandbox/config.json` by default, or programmatically
+/// via [`LocalBackend::builder`](crate::backend::LocalBackend::builder).
+/// Bound to one backend instance — not a process-wide singleton.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
-pub struct GlobalConfig {
+pub struct LocalConfig {
     /// Root directory for all microsandbox data.
     pub home: Option<PathBuf>,
 
@@ -112,7 +138,7 @@ pub struct GlobalConfig {
 pub struct MetricsConfig {
     /// Number of slots reserved in the metrics shared-memory segment.
     /// A value of `0` (the default) falls back to the built-in default at
-    /// read time via [`GlobalConfig::metrics_registry_capacity`]. The
+    /// read time via [`LocalConfig::metrics_registry_capacity`]. The
     /// derived `Default` therefore avoids pinning serialized configs to a
     /// particular release's default capacity.
     pub capacity: u32,
@@ -285,10 +311,7 @@ struct KeyringRegistryCredential {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-static CONFIG: OnceLock<GlobalConfig> = OnceLock::new();
-static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-impl GlobalConfig {
+impl LocalConfig {
     /// Get the resolved home directory.
     pub fn home(&self) -> PathBuf {
         self.home.clone().unwrap_or_else(resolve_default_home)
@@ -311,10 +334,6 @@ impl GlobalConfig {
     }
 
     /// Resolve the `snapshots` directory.
-    ///
-    /// Snapshot artifacts are stored under this directory by name. The
-    /// directory is the source of truth; the local DB index is just a
-    /// cache rebuildable from a directory walk.
     pub fn snapshots_dir(&self) -> PathBuf {
         self.paths
             .snapshots
@@ -419,7 +438,7 @@ impl GlobalConfig {
     ///
     /// Resolution order:
     /// 1. OS keyring (interactive CLI login, when the `keyring` feature is enabled)
-    /// 2. `registries.<hostname>.auth` in global config
+    /// 2. `registries.<hostname>.auth` in this config
     /// 3. Docker credential store/config
     /// 4. Anonymous
     ///
@@ -617,28 +636,29 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
     servers
 }
 
-/// Get the global configuration (lazy-loaded from disk on first call).
-pub fn config() -> &'static GlobalConfig {
-    CONFIG.get_or_init(|| load_config().unwrap_or_default())
-}
-
-/// Resolve the path to the persisted global config file.
+/// Resolve the path to the persisted local config file.
 pub fn config_path() -> PathBuf {
+    // Honour MSB_CONFIG_PATH if set — same env var the SDK config loader
+    // checks. The LocalConfig and the SdkConfig live in the same JSON
+    // document, so both layers must agree on the path.
+    if let Ok(p) = std::env::var("MSB_CONFIG_PATH") {
+        return PathBuf::from(p);
+    }
     resolve_default_home().join(microsandbox_utils::CONFIG_FILENAME)
 }
 
 /// Load the persisted config file or return the default config if it does not exist.
-pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
+pub fn load_persisted_config_or_default() -> MicrosandboxResult<LocalConfig> {
     let path = config_path();
     if !path.exists() {
-        return Ok(GlobalConfig::default());
+        return Ok(LocalConfig::default());
     }
 
     read_config_from(&path)
 }
 
-/// Persist the provided global config to disk as pretty JSON.
-pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
+/// Persist the provided local config to disk as pretty JSON.
+pub fn save_persisted_config(config: &LocalConfig) -> MicrosandboxResult<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -677,15 +697,6 @@ pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
     remove_registry_keyring_auth(hostname).map_err(MicrosandboxError::Custom)
 }
 
-/// Override the global configuration programmatically.
-///
-/// Must be called before the first call to [`config()`]. Returns `Err` with the
-/// provided config if the global has already been initialized.
-#[allow(clippy::result_large_err)]
-pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
-    CONFIG.set(config)
-}
-
 /// Set the `msb` binary path resolved by an SDK package.
 ///
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
@@ -695,19 +706,19 @@ pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
     let _ = SDK_MSB_PATH.set(path.into());
 }
 
-/// Resolve the path to the `msb` binary.
+/// Resolve the path to the `msb` binary against the supplied [`LocalConfig`].
 ///
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
 /// 2. SDK-provided runtime path
-/// 3. `config().paths.msb`
+/// 3. `config.paths.msb`
 /// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
 /// 5. `~/.microsandbox/bin/msb`
 /// 6. `which::which("msb")`
-pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
+pub fn resolve_msb_path(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
     let env_msb = std::env::var("MSB_PATH").ok();
     let sdk_msb = SDK_MSB_PATH.get().cloned();
-    let config_msb = config().paths.msb.clone();
+    let config_msb = config.paths.msb.clone();
 
     let debug_probe = || -> Option<PathBuf> {
         // Only probe workspace-local dev builds in debug builds to prevent
@@ -733,7 +744,7 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     };
 
     let home_probe = || -> Option<PathBuf> {
-        let home_bin = config()
+        let home_bin = config
             .home()
             .join(microsandbox_utils::BIN_SUBDIR)
             .join(microsandbox_utils::MSB_BINARY);
@@ -793,15 +804,49 @@ fn resolve_msb_path_from(
     ))
 }
 
-/// Resolve the path to `libkrunfw`.
+/// Set the `libkrunfw` path resolved by an SDK package (e.g. one that ships a
+/// bundled libkrunfw dylib inside its language-package wheel/npm-package).
 ///
-/// Resolution order:
-/// 1. `config().paths.libkrunfw`
-/// 2. A sibling of the resolved `msb` binary (for `build/msb`)
-/// 3. `../lib/` next to the resolved `msb` binary (for installed layouts)
-/// 4. `{home}/lib/libkrunfw.{so,dylib}`
-pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
-    if let Some(path) = &config().paths.libkrunfw {
+/// Set-once: subsequent calls are ignored. Sits at tier 2 of
+/// [`resolve_libkrunfw_path`] — below user env (`MSB_LIBKRUNFW_PATH`) so a user
+/// override always wins, above the config + filesystem fallbacks.
+///
+/// Mirrors [`set_sdk_msb_path`]; both share the same precedence shape.
+pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
+    let _ = SDK_LIBKRUNFW_PATH.set(path.into());
+}
+
+/// Resolve the path to `libkrunfw` against the supplied [`LocalConfig`].
+///
+/// Resolution order (highest first):
+/// 1. `MSB_LIBKRUNFW_PATH` environment variable (user-facing override).
+/// 2. SDK-provided runtime path (set via [`set_sdk_libkrunfw_path`], used by
+///    FFI bindings that ship a bundled dylib).
+/// 3. `config.paths.libkrunfw`.
+/// 4. A sibling of the resolved `msb` binary (for `build/msb`).
+/// 5. `../lib/` next to the resolved `msb` binary (for installed layouts).
+/// 6. `{home}/lib/libkrunfw.{so,dylib}`.
+pub fn resolve_libkrunfw_path(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
+    if let Ok(env_path) = std::env::var("MSB_LIBKRUNFW_PATH") {
+        let path = PathBuf::from(env_path);
+        if path.is_file() {
+            tracing::debug!(path = %path.display(), source = "MSB_LIBKRUNFW_PATH env", "resolved libkrunfw");
+            return Ok(path);
+        }
+        return Err(MicrosandboxError::LibkrunfwNotFound(format!(
+            "MSB_LIBKRUNFW_PATH points to non-file: {}",
+            path.display()
+        )));
+    }
+    if let Some(sdk_path) = SDK_LIBKRUNFW_PATH.get() {
+        if sdk_path.is_file() {
+            tracing::debug!(path = %sdk_path.display(), source = "SDK runtime path", "resolved libkrunfw");
+            return Ok(sdk_path.clone());
+        }
+        // SDK path set but missing — fall through to config + fallbacks rather than error.
+        tracing::warn!(path = %sdk_path.display(), "SDK_LIBKRUNFW_PATH points to non-file; falling through to config + filesystem fallbacks");
+    }
+    if let Some(path) = &config.paths.libkrunfw {
         if path.is_file() {
             return Ok(path.clone());
         }
@@ -817,13 +862,13 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
         "linux"
     };
     let filename = microsandbox_utils::libkrunfw_filename(os);
-    let home_fallback = config()
+    let home_fallback = config
         .home()
         .join(microsandbox_utils::LIB_SUBDIR)
         .join(&filename);
 
     let mut candidates = Vec::new();
-    if let Ok(msb_path) = resolve_msb_path() {
+    if let Ok(msb_path) = resolve_msb_path(config) {
         candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
     }
     candidates.push(home_fallback);
@@ -901,7 +946,7 @@ fn dedupe_strings(values: &mut Vec<String>) {
     *values = deduped;
 }
 
-fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
+fn read_config_from(path: &Path) -> MicrosandboxResult<LocalConfig> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
     })?;
@@ -917,18 +962,6 @@ fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
 /// Resolve the default home directory (`~/.microsandbox`, or `$MSB_HOME` if set).
 fn resolve_default_home() -> PathBuf {
     microsandbox_utils::resolve_home()
-}
-
-/// Load config from the default config file path.
-fn load_config() -> Option<GlobalConfig> {
-    let path = config_path();
-    load_config_from(&path)
-}
-
-/// Load config from a specific file path.
-fn load_config_from(path: &Path) -> Option<GlobalConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
 }
 
 #[cfg(all(
@@ -1032,9 +1065,9 @@ fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
 fn keyring_unavailable_message(hostname: &str) -> String {
     #[cfg(not(feature = "keyring"))]
     {
-        return format!(
+        format!(
             "secure OS credential storage is disabled; enable the `keyring` feature to use it for `{hostname}`"
-        );
+        )
     }
 
     #[cfg(all(
@@ -1056,7 +1089,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let cfg = GlobalConfig::default();
+        let cfg = LocalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
@@ -1073,7 +1106,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_empty_json() {
-        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
     }
@@ -1081,7 +1114,7 @@ mod tests {
     #[test]
     fn test_deserialize_partial_json() {
         let json = r#"{"sandbox_defaults": {"cpus": 4}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
     }
@@ -1089,7 +1122,7 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_missing_uses_default() {
         let json = r#"{"sandbox_defaults": {}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -1099,14 +1132,14 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_zero_disables() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_deserialize_metrics_interval_positive() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 2500}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(2500)
@@ -1115,20 +1148,20 @@ mod tests {
 
     #[test]
     fn test_serialize_metrics_interval_disabled_round_trips() {
-        let mut cfg = GlobalConfig::default();
+        let mut cfg = LocalConfig::default();
         cfg.sandbox_defaults.metrics_sample_interval_ms = None;
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(
             json.contains("\"metrics_sample_interval_ms\":0"),
             "expected `0` serialization, got: {json}"
         );
-        let round: GlobalConfig = serde_json::from_str(&json).unwrap();
+        let round: LocalConfig = serde_json::from_str(&json).unwrap();
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_metrics_capacity_default_uses_crate_default() {
-        let cfg = GlobalConfig::default();
+        let cfg = LocalConfig::default();
         assert_eq!(
             cfg.metrics_registry_capacity(),
             microsandbox_metrics::default_capacity()
@@ -1138,7 +1171,7 @@ mod tests {
     #[test]
     fn test_metrics_capacity_zero_falls_back_to_default() {
         let json = r#"{"metrics": {"capacity": 0}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 0);
         assert_eq!(
             cfg.metrics_registry_capacity(),
@@ -1149,58 +1182,28 @@ mod tests {
     #[test]
     fn test_metrics_capacity_explicit_value_overrides_default() {
         let json = r#"{"metrics": {"capacity": 2048}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 2048);
         assert_eq!(cfg.metrics_registry_capacity(), 2048);
     }
 
     #[test]
-    fn test_metrics_registry_names_follow_abi_version() {
-        let cfg = GlobalConfig {
-            home: Some(PathBuf::from("/tmp/msb-home-cascade")),
-            ..Default::default()
-        };
-
-        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 2);
-        assert_eq!(
-            cfg.metrics_registry_shm_name(),
-            microsandbox_utils::metrics_registry_shm_name(
-                &cfg.home(),
-                microsandbox_metrics::REGISTRY_ABI_VERSION,
-            )
-        );
-        assert!(cfg.metrics_registry_shm_name().ends_with("-v2"));
-        let registry_name_path = cfg.metrics_registry_name_path();
-        assert_eq!(
-            registry_name_path.file_name().and_then(|s| s.to_str()),
-            Some("registry-v2.name")
-        );
-        assert_eq!(
-            registry_name_path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some(microsandbox_utils::METRICS_RUN_SUBDIR)
-        );
-    }
-
-    #[test]
     fn test_deserialize_disable_metrics_sample_default_false() {
-        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_disable_metrics_sample_true() {
         let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_log_level() {
         let json = r#"{"log_level":"debug"}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.log_level, Some(LogLevel::Debug));
     }
 
@@ -1213,7 +1216,7 @@ mod tests {
                 "busy_timeout_secs": 12
             }
         }"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.database.max_connections, 9);
         assert_eq!(cfg.database.connect_timeout_secs, 7);
         assert_eq!(cfg.database.busy_timeout_secs, 12);
@@ -1221,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_home_resolution() {
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             home: Some(PathBuf::from("/custom/home")),
             ..Default::default()
         };
@@ -1230,7 +1233,7 @@ mod tests {
 
     #[test]
     fn test_sandboxes_dir_override() {
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             paths: PathsConfig {
                 sandboxes: Some(PathBuf::from("/custom/sandboxes")),
                 ..Default::default()
@@ -1242,8 +1245,8 @@ mod tests {
 
     #[test]
     fn test_load_config_from_missing_file() {
-        let result = load_config_from(Path::new("/nonexistent/config.json"));
-        assert!(result.is_none());
+        let result = read_config_from(Path::new("/nonexistent/config.json"));
+        assert!(result.is_err());
     }
 
     /// Helper to build a `RegistriesConfig` from a list of `(hostname, RegistryEntry)` pairs.
@@ -1272,7 +1275,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg
             .registries
             .hosts
@@ -1292,7 +1295,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.json");
 
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1364,7 +1367,7 @@ mod tests {
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::write(secret_dir.join("ghcr-token"), "secret-token\n").unwrap();
 
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             home: Some(temp.path().to_path_buf()),
             paths: PathsConfig {
                 secrets: Some(temp.path().to_path_buf()),
@@ -1397,7 +1400,7 @@ mod tests {
 
     #[test]
     fn test_resolve_configured_registry_auth_rejects_multiple_sources() {
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1419,29 +1422,6 @@ mod tests {
                 .to_string()
                 .contains("entry defines multiple credential sources")
         );
-    }
-
-    #[cfg(not(feature = "keyring"))]
-    #[test]
-    fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
-        let cfg = GlobalConfig {
-            registries: registries(vec![(
-                "ghcr.io",
-                RegistryEntry {
-                    auth: Some(RegistryAuthEntry {
-                        username: "user".to_string(),
-                        store: Some(RegistryCredentialStore::Keyring),
-                        password_env: None,
-                        secret_name: None,
-                    }),
-                    ..Default::default()
-                },
-            )]),
-            ..Default::default()
-        };
-
-        let error = cfg.resolve_configured_registry_auth("ghcr.io").unwrap_err();
-        assert!(error.to_string().contains("enable the `keyring` feature"));
     }
 
     #[test]
@@ -1519,7 +1499,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg.registries.hosts.get("localhost:5050").unwrap();
         assert!(entry.insecure);
         assert!(entry.auth.is_none());
@@ -1533,7 +1513,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -1557,7 +1537,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -1572,7 +1552,7 @@ mod tests {
     #[test]
     fn test_deserialize_empty_registries() {
         let json = r#"{"registries": {}}"#;
-        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.registries.hosts.is_empty());
         assert!(cfg.registries.ca_certs.is_none());
     }
@@ -1584,7 +1564,7 @@ mod tests {
         let pem_data = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
         std::fs::write(&pem_path, pem_data).unwrap();
 
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(pem_path),
                 ..Default::default()
@@ -1599,7 +1579,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_missing_file_errors() {
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(PathBuf::from("/nonexistent/ca.pem")),
                 ..Default::default()
@@ -1613,14 +1593,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_none_returns_empty() {
-        let cfg = GlobalConfig::default();
+        let cfg = LocalConfig::default();
         let certs = cfg.resolve_ca_certs().await.unwrap();
         assert!(certs.is_empty());
     }
 
     #[test]
     fn test_insecure_registries() {
-        let cfg = GlobalConfig {
+        let cfg = LocalConfig {
             registries: registries(vec![
                 (
                     "localhost:5050",

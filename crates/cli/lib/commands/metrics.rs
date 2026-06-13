@@ -43,7 +43,9 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut metrics = all_sandbox_metrics()
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let mut metrics = all_sandbox_metrics(local)
         .await?
         .into_iter()
         .collect::<Vec<(String, SandboxMetrics)>>();
