@@ -5,6 +5,7 @@
 //! channel pair (connected to the smoltcp socket in the poll loop) and the
 //! real server.
 
+use std::borrow::Cow;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -157,9 +158,11 @@ async fn tcp_proxy_task(
 
     // Replay the buffered first flight — run through secrets handler first.
     if !initial_buf.is_empty() {
-        let out = match secrets_handler.as_mut() {
+        let out: Cow<[u8]> = match secrets_handler.as_mut() {
             Some(h) => match h.substitute(&initial_buf) {
-                Ok(cow) => cow.into_owned(),
+                // Borrow the input when nothing was substituted; only a chunk
+                // that actually carries a placeholder is reallocated.
+                Ok(cow) => cow,
                 Err(action) => {
                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
                     if matches!(action, ViolationAction::BlockAndTerminate) {
@@ -168,7 +171,7 @@ async fn tcp_proxy_task(
                     return Ok(());
                 }
             },
-            None => initial_buf,
+            None => Cow::Borrowed(&initial_buf),
         };
         if !out.is_empty() {
             if let Err(e) = server_tx.write_all(&out).await {
@@ -194,9 +197,11 @@ async fn tcp_proxy_task(
             data = from_smoltcp.recv() => {
                 match data {
                     Some(bytes) => {
-                        let out = match secrets_handler.as_mut() {
+                        // No handler (no secrets / TLS) is the common path: forward
+                        // the chunk borrowed, with no per-chunk allocation or copy.
+                        let out: Cow<[u8]> = match secrets_handler.as_mut() {
                             Some(h) => match h.substitute(&bytes) {
-                                Ok(cow) => cow.into_owned(),
+                                Ok(cow) => cow,
                                 Err(action) => {
                                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
                                     if matches!(action, ViolationAction::BlockAndTerminate) {
@@ -205,7 +210,7 @@ async fn tcp_proxy_task(
                                     break;
                                 }
                             },
-                            None => bytes.to_vec(),
+                            None => Cow::Borrowed(&bytes),
                         };
                         if !out.is_empty() {
                             if let Err(e) = server_tx.write_all(&out).await {
