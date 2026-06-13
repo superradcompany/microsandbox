@@ -33,7 +33,7 @@ See the [volumes guide](/sandboxes/volumes).
 
 **Unified sandbox lifecycle APIs**
 
-`stop` and `kill` now wait for the sandbox to reach the requested state across the Rust, TypeScript, Python, and Go SDKs, with timeout-aware variants and a new `wait_until_stopped` / `waitUntilStopped` / `WaitUntilStopped` helper for observing sandbox-domain stopped state. Request-only behavior is still available through explicit methods for fire-and-return callers. Scoped filesystem and SSH helpers are renamed to operation groups (`SandboxFsOps`, `SandboxSshOps`, and language-idiomatic variants), and SSH helper methods are now `open_client`, `prepare_server`, and `serve_connection`. This is a breaking SDK source change; the CLI is unaffected.
+`stop` and `kill` now wait for the sandbox to reach the requested state across the Rust, TypeScript, Python, and Go SDKs. Timeout-aware variants and a new `wait_until_stopped` / `waitUntilStopped` / `WaitUntilStopped` helper let you observe sandbox-domain stopped state. Request-only behavior is still available through explicit methods for fire-and-return callers. Scoped filesystem and SSH helpers are renamed to operation groups (`SandboxFsOps`, `SandboxSshOps`, and language-idiomatic variants), and SSH helper methods are now `open_client`, `prepare_server`, and `serve_connection`. This is a breaking SDK source change; the CLI is unaffected.
 
 ```python
 result = await sandbox.stop(timeout=30)
@@ -58,7 +58,7 @@ See the [sandbox commands reference](/cli/sandbox-commands).
 **Other features**
 
 - **Raw agentd socket path.** `AgentClient::socket_path(name)` in Rust, `AgentClient.socketPath(name)` in TypeScript, `AgentClient.socket_path(name)` in Python, and `microsandbox.AgentSocketPath(name)` in Go return a sandbox's `agentd` relay socket path without connecting, so callers that splice raw bytes to the socket no longer have to open the framed client first. The C FFI gains `msb_agent_socket_path`. See the [Python agent client reference](/sdk/python/agent-client).
-- **Richer secret violation logs.** `block-and-log` and `block-and-terminate` actions now emit structured warnings and errors with the secret env var, placeholder, request context, match location, protocol, SNI, host, method, redacted path, and original guest destination, including for body-continuation chunks on long-lived TLS connections. `block` continues to be silent. See the [TLS networking guide](/networking/tls).
+- **Richer secret violation logs.** `block-and-log` and `block-and-terminate` actions now emit structured warnings and errors with the secret env var, placeholder, request context, match location, protocol, SNI, host, method, redacted path, and original guest destination. Body-continuation chunks on long-lived TLS connections carry the same context. `block` continues to be silent. See the [TLS networking guide](/networking/tls).
 - **Cleaner installer.** The CLI installer no longer edits shell startup files. It places runtime files under `$HOME/.microsandbox` (or `$MSB_HOME`), exposes `msb` and `microsandbox` through `~/.local/bin` symlinks, prints a PATH hint only when `~/.local/bin` is missing, and refreshes those links from `msb self update`. Existing non-symlink command paths are left alone instead of being overwritten. See the [quickstart](/getting-started/quickstart).
 - **Global log level for sandbox runs.** Global log flags now flow into the sandbox runtime when `msb run` or `msb create` does not pass `--log-level`, so `msb -v run ...` actually raises sandbox verbosity instead of being ignored.
 
