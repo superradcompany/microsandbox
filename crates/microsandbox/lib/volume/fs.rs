@@ -182,6 +182,7 @@ impl<'a> VolumeFs<'a> {
     /// Remove a directory recursively.
     pub async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()> {
         let full = self.resolve(path)?;
+        self.ensure_not_volume_root(&full, "remove_dir")?;
         tokio::fs::remove_dir_all(&full).await?;
         Ok(())
     }
@@ -297,6 +298,24 @@ impl VolumeFs<'_> {
         }
 
         Ok(canonical)
+    }
+
+    fn ensure_not_volume_root(&self, path: &Path, operation: &str) -> MicrosandboxResult<()> {
+        let root = self.root_path();
+        let canon_root = if root.exists() {
+            root.canonicalize()
+                .map_err(|e| MicrosandboxError::SandboxFs(format!("resolve root: {e}")))?
+        } else {
+            root.to_path_buf()
+        };
+
+        if path == canon_root {
+            return Err(MicrosandboxError::SandboxFs(format!(
+                "{operation} cannot target the volume root"
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -420,5 +439,58 @@ fn std_metadata_to_fs(meta: &std::fs::Metadata) -> FsMetadata {
         accessed: std_accessed(meta),
         modified: std_modified(meta),
         created: std_created(meta),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remove_dir_rejects_slash_volume_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = VolumeFs::from_path(temp.path().to_path_buf());
+        fs.write("nested/file.txt", b"data").await.unwrap();
+
+        let err = fs.remove_dir("/").await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("volume root"),
+            "unexpected error: {err}"
+        );
+        assert!(temp.path().is_dir());
+        assert!(temp.path().join("nested/file.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn remove_dir_rejects_empty_volume_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = VolumeFs::from_path(temp.path().to_path_buf());
+        fs.write("nested/file.txt", b"data").await.unwrap();
+
+        let err = fs.remove_dir("").await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("volume root"),
+            "unexpected error: {err}"
+        );
+        assert!(temp.path().is_dir());
+        assert!(temp.path().join("nested/file.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn remove_dir_removes_child_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = VolumeFs::from_path(temp.path().to_path_buf());
+        fs.write("nested/file.txt", b"data").await.unwrap();
+
+        fs.remove_dir("nested").await.unwrap();
+
+        assert!(temp.path().is_dir());
+        assert!(!temp.path().join("nested").exists());
     }
 }
