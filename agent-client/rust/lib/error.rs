@@ -38,10 +38,6 @@ pub enum AgentClientError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A WebSocket transport error occurred.
-    #[error("websocket: {0}")]
-    WebSocket(String),
-
     /// A wire-protocol error (framing, CBOR, oversize frame).
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),

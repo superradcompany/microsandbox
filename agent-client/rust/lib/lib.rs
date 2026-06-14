@@ -5,7 +5,9 @@
 //! SDK crates remain responsible for sandbox lifecycle and name resolution.
 //!
 //! No transport is enabled by default. Enable `uds` for local microsandbox relay
-//! sockets or `websocket` for relay endpoints exposed over WebSocket.
+//! sockets, or `stream` to drive the client over any `AsyncRead + AsyncWrite`
+//! byte stream (e.g. a caller-owned, pre-authenticated transport adapted to
+//! bytes).
 
 #![warn(missing_docs)]
 
