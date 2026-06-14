@@ -811,7 +811,7 @@ fn build_vm(
                 .balloon_stats_interval(balloon_stats_interval);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
-                m.split_irqchip(true)
+                m.nested_virt(true).split_irqchip(true)
             }
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
             {
