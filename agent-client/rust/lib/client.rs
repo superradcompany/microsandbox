@@ -19,21 +19,21 @@
 //!   primitives over [`Message`]; the SDK serializes payloads with CBOR.
 
 use std::collections::HashMap;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use std::future::Future;
 #[cfg(feature = "uds")]
 use std::path::Path;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicU32};
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use std::time::Duration;
 
 #[cfg(feature = "websocket")]
 use futures_util::{SinkExt, StreamExt};
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use microsandbox_protocol::message::FLAG_TERMINAL;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use microsandbox_protocol::{
     codec::{self, RawFrame},
@@ -41,11 +41,13 @@ use microsandbox_protocol::{
     message::{Message, MessageType, PROTOCOL_VERSION},
 };
 use serde::Serialize;
+#[cfg(feature = "stream")]
+use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "uds")]
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 use tokio::time::Instant;
 #[cfg(feature = "websocket")]
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
@@ -57,10 +59,10 @@ use super::error::{AgentClientError, AgentClientResult};
 //--------------------------------------------------------------------------------------------------
 
 /// Default handshake timeout used by [`AgentClient::connect`].
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 const REQUEST_QUEUE_CAPACITY: usize = 1;
 const STREAM_QUEUE_CAPACITY: usize = 1024;
@@ -70,7 +72,7 @@ const MAX_WEBSOCKET_BUFFER_SIZE: usize = MAX_FRAME_SIZE as usize + 12;
 const LEGACY_PROTOCOL_VERSION: u8 = 1;
 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
 // compatibility for versions before 0.5 is no longer supported.
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 const LEGACY_RELAY_ID_RANGE_STEP: u32 = u32::MAX / 16;
 
 //--------------------------------------------------------------------------------------------------
@@ -121,7 +123,7 @@ pub struct AgentClient {
     ready: Ready,
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 struct AgentHandshake {
     id_min: u32,
     id_max: u32,
@@ -131,13 +133,13 @@ struct AgentHandshake {
     ready: Ready,
 }
 
-#[cfg_attr(not(any(feature = "uds", feature = "websocket")), allow(dead_code))]
+#[cfg_attr(not(any(feature = "stream", feature = "websocket")), allow(dead_code))]
 struct WriterCommand {
     frame: RawFrame,
     ack: oneshot::Sender<AgentClientResult<()>>,
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 trait HandshakeReader {
     fn read_exact_handshake<'a>(
         &'a mut self,
@@ -199,8 +201,54 @@ impl AgentClient {
                     path: sock_path.to_path_buf(),
                     source,
                 })?;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
 
-        let (mut reader, writer) = stream.into_split();
+    /// Connect over an arbitrary byte-stream transport using the default 10s
+    /// handshake timeout.
+    ///
+    /// The stream must be a transparent pipe to the agent relay: the relay's
+    /// `[id_min][id_max]` + `core.ready` prologue and the framed protocol that
+    /// follows flow over it verbatim. This is the injection point for
+    /// caller-owned transports — e.g. a pre-authenticated WebSocket adapted to
+    /// bytes — so the caller owns the dial and its credentials and this crate
+    /// stays transport- (and dependency-) agnostic.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream<S>(stream: S) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_stream_with_timeout(stream, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Connect over an arbitrary byte-stream transport using an explicit
+    /// handshake timeout.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_timeout<S>(
+        stream: S,
+        timeout: Duration,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let deadline = Instant::now() + timeout;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
+
+    /// Connect over an arbitrary byte-stream transport with an explicit
+    /// handshake deadline.
+    ///
+    /// `deadline` bounds both handshake reads so an accepted-but-stalled
+    /// transport cannot block this call indefinitely.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_deadline<S>(
+        stream: S,
+        deadline: Instant,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (mut reader, writer) = tokio::io::split(stream);
         let handshake = perform_handshake(&mut reader, deadline).await?;
 
         tracing::info!(
@@ -224,7 +272,7 @@ impl AgentClient {
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
-        let writer_handle = tokio::spawn(uds_writer_loop(writer, writer_rx));
+        let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx));
 
         Ok(Self {
             writer: writer_tx,
@@ -537,7 +585,7 @@ impl AgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 async fn perform_handshake<R>(
     reader: &mut R,
     deadline: Instant,
@@ -630,7 +678,7 @@ fn first_request_id(id_min: u32) -> u32 {
     id_min.max(1)
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 fn ensure_usable_id_range(id_min: u32, id_max: u32) -> AgentClientResult<()> {
     if usable_id_count(id_min, id_max) == 0 {
         return Err(AgentClientError::Handshake(format!(
@@ -644,7 +692,7 @@ fn usable_id_count(id_min: u32, id_max: u32) -> u32 {
     id_max.saturating_sub(first_request_id(id_min))
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 fn looks_like_legacy_relay_handshake(id_min: u32, id_max: u32) -> bool {
     // TODO(upgrade-0.6): Remove in 0.6.x or later once pre-0.5 relay
     // handshakes are no longer accepted.
@@ -659,7 +707,7 @@ fn looks_like_legacy_relay_handshake(id_min: u32, id_max: u32) -> bool {
         && (id_min == 0 || id_min >= id_max)
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 async fn read_raw_frame_after_len_prefix<R>(
     reader: &mut R,
     len_buf: [u8; 4],
@@ -697,7 +745,7 @@ where
     Ok(RawFrame { id, flags, body })
 }
 
-#[cfg(feature = "uds")]
+#[cfg(feature = "stream")]
 impl<R> HandshakeReader for R
 where
     R: tokio::io::AsyncRead + Unpin + Send,
@@ -725,14 +773,14 @@ where
     }
 }
 
-#[cfg(feature = "uds")]
-async fn uds_writer_loop(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<WriterCommand>,
-) {
+#[cfg(feature = "stream")]
+async fn stream_writer_loop<W>(mut writer: W, mut rx: mpsc::Receiver<WriterCommand>)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     while let Some(command) = rx.recv().await {
         if let Err(e) = codec::write_raw_frame(&mut writer, &command.frame).await {
-            tracing::debug!("agent client: UDS writer error: {e}");
+            tracing::debug!("agent client: stream writer error: {e}");
             let _ = command.ack.send(Err(AgentClientError::Protocol(e)));
             break;
         }
@@ -742,7 +790,7 @@ async fn uds_writer_loop(
 
 /// Background task that reads frames from the relay and dispatches them to
 /// pending channels by correlation ID. Operates on raw frames — no CBOR.
-#[cfg(feature = "uds")]
+#[cfg(feature = "stream")]
 async fn reader_loop<R>(mut reader: R, pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -939,7 +987,7 @@ where
     }
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(any(feature = "stream", feature = "websocket"))]
 async fn dispatch_frame(
     frame: RawFrame,
     pending: &Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
@@ -1268,6 +1316,84 @@ mod tests {
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
         assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn connect_stream_handshakes_and_streams_exec() {
+        use microsandbox_protocol::exec::{ExecExited, ExecRequest, ExecStdout};
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+            agent_version: "stream-test".to_string(),
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            // Relay handshake: [id_min][id_max] then the core.ready frame.
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
+                .await
+                .unwrap();
+
+            // One exec stream echoed back: stdout, then a terminal exited.
+            let request = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let stdout = Message::with_payload(
+                MessageType::ExecStdout,
+                request.id,
+                &ExecStdout {
+                    data: b"hi".to_vec(),
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &stdout).await.unwrap();
+            let exited =
+                Message::with_payload(MessageType::ExecExited, request.id, &ExecExited { code: 0 })
+                    .unwrap();
+            codec::write_message(&mut server_io, &exited).await.unwrap();
+        });
+
+        let client = AgentClient::connect_stream_with_deadline(
+            client_io,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        assert_eq!(client.agent_version(), "stream-test");
+        assert!(client.supports(MessageType::ExecRequest));
+
+        let request = ExecRequest {
+            cmd: "echo".into(),
+            args: vec!["hi".into()],
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let (_id, mut rx) = client
+            .stream(MessageType::ExecRequest, &request)
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.t, MessageType::ExecStdout);
+        let out: ExecStdout = first.payload().unwrap();
+        assert_eq!(out.data, b"hi");
+
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.t, MessageType::ExecExited);
+        let exit: ExecExited = second.payload().unwrap();
+        assert_eq!(exit.code, 0);
     }
 
     #[cfg(feature = "websocket")]
