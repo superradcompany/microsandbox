@@ -24,7 +24,7 @@ import (
 // embedded FFI library and the downloaded msb+libkrunfw artefacts are
 // both pinned to this version. Bump when cutting a new SDK release so
 // it matches published binaries.
-const sdkVersion = "0.5.6"
+const sdkVersion = "0.5.7"
 
 // libkrunfwABI is the major SONAME version of libkrunfw that msb links
 // against.

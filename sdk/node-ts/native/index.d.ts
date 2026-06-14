@@ -370,6 +370,8 @@ export declare class MountBuilder {
   bind(host: string): this
   /** Mount a named volume created via `Volume.builder(name).create()`. */
   named(name: string): this
+  /** Mount a named volume with explicit existence behavior. */
+  namedWith(name: string, mode?: string | undefined | null, kind?: string | undefined | null, sizeMib?: number | undefined | null, quotaMib?: number | undefined | null): this
   /** Mount an in-memory tmpfs at the guest path. */
   tmpfs(): this
   /** Mount a host disk image file as a virtio-blk device. */
