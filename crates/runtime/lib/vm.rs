@@ -795,6 +795,9 @@ fn build_vm(
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
+    let balloon_stats_interval = config
+        .metrics_sample_interval_ms
+        .map(|interval_ms| Duration::from_millis(interval_ms.get()));
     let mut bind_identity_map = BindIdentityMapRegistration {
         handle: None,
         mount_count: 0,
@@ -802,7 +805,10 @@ fn build_vm(
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
-            let m = m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize);
+            let m = m
+                .vcpus(vm.vcpus)
+                .memory_mib(vm.memory_mib as usize)
+                .balloon_stats_interval(balloon_stats_interval);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
