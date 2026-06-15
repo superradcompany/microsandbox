@@ -1107,6 +1107,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -1129,6 +1130,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -1205,6 +1207,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         );
 
         let rendered = args

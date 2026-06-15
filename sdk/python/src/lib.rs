@@ -52,6 +52,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<exec::PyExecSink>()?;
     m.add_class::<agent::PyAgentClient>()?;
     m.add_class::<fs::PySandboxFsOps>()?;
+    m.add("SandboxFsOps", m.getattr("SandboxFs")?)?;
     m.add_class::<fs::PyFsReadStream>()?;
     m.add_class::<fs::PyFsWriteSink>()?;
     m.add_class::<image::PyImage>()?;
