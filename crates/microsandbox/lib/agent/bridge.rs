@@ -269,12 +269,6 @@ impl AgentBridge {
         }
     }
 
-    /// Test-only accessor: how many streams are open.
-    #[cfg(test)]
-    pub(crate) async fn open_stream_count(&self) -> usize {
-        self.streams.lock().await.len()
-    }
-
     fn inner(&self) -> AgentClientResult<Arc<AgentClient>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentClientError::Closed);

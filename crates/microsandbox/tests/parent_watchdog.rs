@@ -48,12 +48,12 @@ async fn wait_for_status(name: &str, expected: SandboxStatus, timeout: Duration)
 
     loop {
         match Sandbox::get(name).await {
-            Ok(handle) if handle.status() == expected => return handle,
+            Ok(handle) if handle.status_snapshot() == expected => return handle,
             Ok(handle) => {
                 assert!(
                     Instant::now() < deadline,
                     "sandbox `{name}` stayed {:?}; expected {expected:?}",
-                    handle.status()
+                    handle.status_snapshot()
                 );
             }
             Err(err) => {

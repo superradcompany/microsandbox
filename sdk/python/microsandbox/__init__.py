@@ -77,8 +77,8 @@ from microsandbox.errors import (
     SandboxStillRunningError,
     SecretViolationError,
     TlsError,
-    UnsupportedOperationError,
     UnsupportedError,
+    UnsupportedOperationError,
     VolumeNotFoundError,
 )
 from microsandbox.events import (

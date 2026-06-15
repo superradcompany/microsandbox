@@ -160,7 +160,7 @@ async fn shutdown_via_signal_path_terminates_guest() {
     let status = Sandbox::get(name)
         .await
         .expect("get stopped sandbox")
-        .status();
+        .status_snapshot();
     let _ = Sandbox::remove(name).await;
 
     assert_eq!(status, SandboxStatus::Stopped);
