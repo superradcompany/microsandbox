@@ -19,6 +19,7 @@ use super::sni;
 use super::state::TlsState;
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::proxy::connect_upstream;
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
@@ -37,13 +38,15 @@ const RELAY_BUF_SIZE: usize = 16384;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-struct TlsProxyContext {
-    guest_dst: SocketAddr,
-    connect_dst: SocketAddr,
-    shared: Arc<SharedState>,
-    tls_state: Arc<TlsState>,
-    network_policy: Arc<NetworkPolicy>,
-    proxy_connect: Arc<ProxyConnectState>,
+pub(crate) struct TlsProxyContext {
+    pub(crate) guest_dst: SocketAddr,
+    pub(crate) connect_dst: SocketAddr,
+    pub(crate) shared: Arc<SharedState>,
+    pub(crate) tls_state: Arc<TlsState>,
+    pub(crate) network_policy: Arc<NetworkPolicy>,
+    pub(crate) proxy_connect: Arc<ProxyConnectState>,
+    /// Pre-connected upstream; when `Some`, skips dialing `connect_dst`.
+    pub(crate) upstream_stream: Option<TcpStream>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -74,19 +77,21 @@ pub fn spawn_tls_proxy(
             tls_state,
             network_policy,
             proxy_connect,
+            upstream_stream: None,
         };
 
-        if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp).await {
+        if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp, Vec::new()).await {
             tracing::debug!(dst = %connect_dst, guest_dst = %guest_dst, error = %e, "TLS proxy task ended");
         }
     });
 }
 
 /// Core TLS proxy task.
-async fn tls_proxy_task(
+pub(crate) async fn tls_proxy_task(
     context: TlsProxyContext,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
+    tls_initial_buf: Vec<u8>,
 ) -> io::Result<()> {
     let TlsProxyContext {
         guest_dst,
@@ -95,13 +100,14 @@ async fn tls_proxy_task(
         tls_state,
         network_policy,
         proxy_connect,
+        upstream_stream,
     } = context;
 
-    // Phase 0: Buffer initial data to extract SNI from ClientHello.
-    // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
+    // Buffer initial data to extract SNI from ClientHello. Timeout prevents a
+    // slow/malicious guest from holding a proxy slot indefinitely.
     let sni_name = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        extract_sni_from_channel(&mut from_smoltcp),
+        extract_sni_from_channel(&mut from_smoltcp, tls_initial_buf),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SNI extraction timed out"))?;
@@ -137,6 +143,7 @@ async fn tls_proxy_task(
             to_smoltcp,
             shared,
             proxy_connect,
+            upstream_stream,
         )
         .await
     } else {
@@ -151,6 +158,7 @@ async fn tls_proxy_task(
             shared,
             tls_state,
             proxy_connect,
+            upstream_stream,
         )
         .await
     }
@@ -164,17 +172,11 @@ async fn bypass_relay(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     proxy_connect: Arc<ProxyConnectState>,
+    upstream_stream: Option<TcpStream>,
 ) -> io::Result<()> {
-    let mut server = match TcpStream::connect(dst).await {
-        Ok(server) => {
-            proxy_connect.mark_connected();
-            server
-        }
-        Err(e) => {
-            proxy_connect.mark_upstream_connect_failed();
-            shared.proxy_wake.wake();
-            return Err(e);
-        }
+    let mut server = match upstream_stream {
+        Some(s) => s,
+        None => connect_upstream(dst, &proxy_connect, &shared).await?,
     };
     server.write_all(&initial_buf).await?;
 
@@ -209,7 +211,7 @@ async fn bypass_relay(
 
 /// Intercept mode: MITM with guest-facing rustls + server-facing tokio_rustls.
 #[allow(clippy::too_many_arguments)]
-async fn intercept_relay(
+pub(crate) async fn intercept_relay(
     guest_dst: SocketAddr,
     connect_dst: SocketAddr,
     sni_name: &str,
@@ -219,6 +221,7 @@ async fn intercept_relay(
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
+    upstream_stream: Option<TcpStream>,
 ) -> io::Result<()> {
     let mut secrets_handler =
         SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared)
@@ -272,16 +275,9 @@ async fn intercept_relay(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
 
     // Connect to real server with TLS.
-    let server_stream = match TcpStream::connect(connect_dst).await {
-        Ok(stream) => {
-            proxy_connect.mark_connected();
-            stream
-        }
-        Err(e) => {
-            proxy_connect.mark_upstream_connect_failed();
-            shared.proxy_wake.wake();
-            return Err(e);
-        }
+    let server_stream = match upstream_stream {
+        Some(s) => s,
+        None => connect_upstream(connect_dst, &proxy_connect, &shared).await?,
     };
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -357,11 +353,26 @@ async fn intercept_relay(
 }
 
 /// Buffer channel data until a complete ClientHello with SNI is received.
-async fn extract_sni_from_channel(
+///
+/// `seed` carries bytes already read from the channel before this call
+/// (e.g. bytes trailing a CONNECT request). Pass an empty `Vec` when no
+/// bytes have been pre-consumed.
+pub(crate) async fn extract_sni_from_channel(
     from_smoltcp: &mut mpsc::Receiver<Bytes>,
+    seed: Vec<u8>,
 ) -> io::Result<(String, Vec<u8>)> {
-    let mut initial_buf = Vec::with_capacity(CLIENT_HELLO_BUF_SIZE);
+    let mut initial_buf = seed;
+    initial_buf.reserve(CLIENT_HELLO_BUF_SIZE.saturating_sub(initial_buf.len()));
     loop {
+        if let Some(name) = sni::extract_sni(&initial_buf) {
+            return Ok((name, initial_buf));
+        }
+        if initial_buf.len() >= CLIENT_HELLO_BUF_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ClientHello too large or no SNI found",
+            ));
+        }
         let data = from_smoltcp
             .recv()
             .await

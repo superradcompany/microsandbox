@@ -23,7 +23,9 @@ use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
 };
 use crate::shared::SharedState;
+use crate::tls::proxy::{TlsProxyContext, tls_proxy_task};
 use crate::tls::sni;
+use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -31,6 +33,9 @@ use crate::tls::sni;
 
 /// Buffer size for reading from the real server.
 const SERVER_READ_BUF_SIZE: usize = 16384;
+
+/// Max bytes buffered while reading the proxy's CONNECT response headers.
+const CONNECT_RESP_LIMIT: usize = 8192;
 
 /// Max bytes to buffer while peeking for the ClientHello's SNI.
 const PEEK_BUF_SIZE: usize = 16384;
@@ -42,6 +47,25 @@ const PEEK_BUDGET: Duration = Duration::from_secs(5);
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Dial `dst` and update proxy state; wakes the poll thread on failure.
+pub(crate) async fn connect_upstream(
+    dst: SocketAddr,
+    proxy_connect: &ProxyConnectState,
+    shared: &SharedState,
+) -> io::Result<TcpStream> {
+    match TcpStream::connect(dst).await {
+        Ok(s) => {
+            proxy_connect.mark_connected();
+            Ok(s)
+        }
+        Err(e) => {
+            proxy_connect.mark_upstream_connect_failed();
+            shared.proxy_wake.wake();
+            Err(e)
+        }
+    }
+}
 
 /// Spawn a TCP proxy task for a newly established connection.
 ///
@@ -63,6 +87,7 @@ pub fn spawn_tcp_proxy(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
     secrets: Arc<SecretsConfig>,
+    tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) {
     handle.spawn(async move {
@@ -74,6 +99,7 @@ pub fn spawn_tcp_proxy(
             shared,
             network_policy,
             secrets,
+            tls_state,
             proxy_connect,
         )
         .await
@@ -94,6 +120,7 @@ async fn tcp_proxy_task(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
     secrets: Arc<SecretsConfig>,
+    tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) -> io::Result<()> {
     // Pre-connect peek is only for domain policy: the hostname has to be known
@@ -101,7 +128,7 @@ async fn tcp_proxy_task(
     // *not* gate the connect, so they no longer force a peek here — that work is
     // deferred to `classify_first_flight` after the socket is open, where it can
     // run without stalling server-first protocols (see below).
-    let (initial_buf, sni) = if network_policy.has_domain_rules() {
+    let (mut initial_buf, sni) = if network_policy.has_domain_rules() {
         peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
     } else {
         (Vec::new(), None)
@@ -139,21 +166,33 @@ async fn tcp_proxy_task(
         }
     }
 
+    // Peek for HTTP CONNECT before dialing upstream; hand off if detected.
+    if let Some(tls_state) = tls_state {
+        if initial_buf.is_empty() {
+            let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+            initial_buf = peeked;
+        }
+        if initial_buf.starts_with(b"CONNECT ") {
+            return handle_connect_tunnel(
+                guest_dst,
+                connect_dst,
+                &initial_buf,
+                from_smoltcp,
+                to_smoltcp,
+                shared,
+                network_policy,
+                tls_state,
+                proxy_connect,
+            )
+            .await;
+        }
+    }
+
     // Connect upstream *before* finishing the secrets-side classification. A
     // server-first protocol (SSH, SMTP, a database) sends nothing until it has
     // seen the server's banner; with the socket already open we can relay that
     // banner while we wait, instead of burning the peek budget pre-connect.
-    let stream = match TcpStream::connect(connect_dst).await {
-        Ok(stream) => {
-            proxy_connect.mark_connected();
-            stream
-        }
-        Err(e) => {
-            proxy_connect.mark_upstream_connect_failed();
-            shared.proxy_wake.wake();
-            return Err(e);
-        }
-    };
+    let stream = connect_upstream(connect_dst, &proxy_connect, &shared).await?;
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Finish classifying the first flight (TLS vs plain HTTP) and, for
@@ -283,6 +322,118 @@ async fn tcp_proxy_task(
     }
 
     Ok(())
+}
+
+/// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,
+/// then hand the established stream to `tls_proxy_task` for TLS MITM.
+///
+/// `guest_dst` is what the guest dialed; `proxy_dst` is the rewritten
+/// loopback address the gateway actually connects to.
+#[allow(clippy::too_many_arguments)]
+async fn handle_connect_tunnel(
+    guest_dst: SocketAddr,
+    proxy_dst: SocketAddr,
+    connect_req: &[u8],
+    from_smoltcp: mpsc::Receiver<Bytes>,
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+    network_policy: Arc<NetworkPolicy>,
+    tls_state: Arc<TlsState>,
+    proxy_connect: Arc<ProxyConnectState>,
+) -> io::Result<()> {
+    if !is_valid_connect_request(connect_req) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed CONNECT request line",
+        ));
+    }
+
+    // Dial the proxy and forward the CONNECT request so it opens the tunnel.
+    let mut proxy_stream = connect_upstream(proxy_dst, &proxy_connect, &shared).await?;
+    proxy_stream.write_all(connect_req).await?;
+    proxy_stream.flush().await?;
+
+    let mut proxy_resp = Vec::with_capacity(256);
+    let mut buf = [0u8; 4096];
+    let header_end = loop {
+        let n = proxy_stream.read(&mut buf).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "proxy closed before sending CONNECT response",
+            ));
+        }
+        proxy_resp.extend_from_slice(&buf[..n]);
+        if let Some(end) = headers_end(&proxy_resp) {
+            break end;
+        }
+        if proxy_resp.len() > CONNECT_RESP_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy CONNECT response too large",
+            ));
+        }
+    };
+
+    if !proxy_resp[..header_end].windows(3).any(|w| w == b"200") {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "proxy rejected CONNECT",
+        ));
+    }
+
+    if to_smoltcp
+        .send(Bytes::copy_from_slice(&proxy_resp[..header_end]))
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+    shared.proxy_wake.wake();
+
+    let mut tls_seed = body_after_headers(connect_req).to_vec();
+    tls_seed.extend_from_slice(&proxy_resp[header_end..]);
+
+    tls_proxy_task(
+        TlsProxyContext {
+            guest_dst,
+            connect_dst: proxy_dst,
+            shared,
+            tls_state,
+            network_policy,
+            proxy_connect,
+            upstream_stream: Some(proxy_stream),
+        },
+        from_smoltcp,
+        to_smoltcp,
+        tls_seed,
+    )
+    .await
+}
+
+/// Returns the byte offset just past the `\r\n\r\n` header terminator, or `None`.
+fn headers_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Returns the slice after the `\r\n\r\n` header terminator, or empty if not found.
+fn body_after_headers(buf: &[u8]) -> &[u8] {
+    headers_end(buf).map_or(&[], |end| &buf[end..])
+}
+
+/// Returns `true` if `buf` starts with a valid `CONNECT host:port HTTP/x.y` request line.
+fn is_valid_connect_request(buf: &[u8]) -> bool {
+    let Some(line) = buf.split(|&b| b == b'\n').next() else {
+        return false;
+    };
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let mut parts = line.split_ascii_whitespace();
+    parts
+        .next()
+        .is_some_and(|m| m.eq_ignore_ascii_case("CONNECT"))
+        && parts.next().is_some()
 }
 
 /// Extract the `Host:` header value from an already-buffered HTTP header block.
@@ -942,6 +1093,7 @@ mod tests {
             Arc::new(shared),
             policy,
             secrets,
+            None,
             proxy_connect,
         )
         .await
@@ -981,6 +1133,7 @@ mod tests {
             Arc::new(SharedState::new(4)),
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
+            None,
             proxy_connect,
         )
         .await
@@ -1049,6 +1202,7 @@ mod tests {
             Arc::new(shared),
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
+            None,
             proxy_connect,
         )
         .await
@@ -1148,6 +1302,7 @@ mod tests {
             Arc::new(SharedState::new(4)),
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
+            None,
             proxy_connect,
         )
         .await
