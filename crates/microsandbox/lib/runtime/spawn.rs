@@ -6,6 +6,8 @@
 //! internally.
 
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +15,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt::Write,
+    os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -28,8 +31,8 @@ use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
-    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
-    HANDOFF_INIT_SEP_STR,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
+    ENV_USER, HANDOFF_INIT_SEP_STR,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -39,7 +42,10 @@ use crate::{
     config,
     db::entity::volume as volume_entity,
     runtime::handle::{MetricsReservationCleanup, ProcessHandle},
-    sandbox::{DiskImageFormat, NamedVolumeMode, Rlimit, RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{
+        DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, Rlimit, RootfsSource,
+        SandboxConfig, StatVirtualization, VolumeMount,
+    },
     volume::{
         VolumeConfig, VolumeKind, provision_volume_path, validate_volume_config,
         validate_volume_name,
@@ -49,6 +55,9 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 
@@ -67,6 +76,11 @@ struct MetricsReservation {
     shm_name: String,
     slot: u32,
     generation: u64,
+}
+
+struct ParentWatchdogPipe {
+    read_fd: OwnedFd,
+    write_fd: OwnedFd,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -154,6 +168,16 @@ pub async fn spawn_sandbox(
     } else {
         None
     };
+    let parent_watchdog = match mode {
+        SpawnMode::Attached => match create_parent_watchdog_pipe() {
+            Ok(pipe) => Some(pipe),
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        },
+        SpawnMode::Detached => None,
+    };
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
@@ -169,12 +193,43 @@ pub async fn spawn_sandbox(
         &libkrunfw_path,
         &staged_file_mounts,
         metrics_reservation.as_ref(),
+        parent_watchdog
+            .as_ref()
+            .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
+
+    if let Some(pipe) = parent_watchdog.as_ref() {
+        let read_fd = pipe.read_fd.as_raw_fd();
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(read_fd, microsandbox_runtime::vm::PARENT_WATCH_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if read_fd != microsandbox_runtime::vm::PARENT_WATCH_FD && libc::close(read_fd) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(microsandbox_runtime::vm::PARENT_WATCH_FD, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(
+                    microsandbox_runtime::vm::PARENT_WATCH_FD,
+                    libc::F_SETFD,
+                    flags & !libc::FD_CLOEXEC,
+                ) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     if mode == SpawnMode::Detached {
         // Detached sandboxes outlive the creating CLI process, so the
@@ -185,6 +240,8 @@ pub async fn spawn_sandbox(
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
+
+    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn the sandbox process.
     let mut child = match cmd.spawn() {
@@ -264,7 +321,7 @@ pub async fn spawn_sandbox(
         child,
         file_mounts_staging,
         Vec::new(),
-        None,
+        parent_watchdog.map(|pipe| pipe.write_fd),
         metrics_reservation.as_ref().map(|reservation| {
             MetricsReservationCleanup::new(
                 reservation.shm_name.clone(),
@@ -313,6 +370,56 @@ fn reserve_metrics_slot(
     }
 }
 
+fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
+    let mut fds = [0; 2];
+    let rc = create_cloexec_pipe(&mut fds);
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        set_cloexec(&read_fd, true)?;
+        set_cloexec(&write_fd, true)?;
+    }
+
+    Ok(ParentWatchdogPipe { read_fd, write_fd })
+}
+
+#[cfg(target_os = "linux")]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+    unsafe { libc::pipe(fds.as_mut_ptr()) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_cloexec(fd: &OwnedFd, enabled: bool) -> MicrosandboxResult<()> {
+    let current = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if current < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let mut next = current;
+    if enabled {
+        next |= libc::FD_CLOEXEC;
+    } else {
+        next &= !libc::FD_CLOEXEC;
+    }
+
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, next) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
+}
+
 fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&MetricsReservation>) {
     let Some(reservation) = reservation else {
         return;
@@ -326,6 +433,48 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     };
     if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
         tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    SIGCHLD_ALT_STACK_INIT
+        .get_or_try_init(|| async {
+            install_tokio_sigchld_handler()?;
+            patch_sigchld_handler_uses_alt_stack();
+            Ok::<(), MicrosandboxError>(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let _ = Box::leak(Box::new(signal));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn patch_sigchld_handler_uses_alt_stack() {
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return;
+        }
+
+        let mut action = action.assume_init();
+        if action.sa_flags & libc::SA_ONSTACK != 0 {
+            return;
+        }
+
+        action.sa_flags |= libc::SA_ONSTACK;
+        let _ = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
     }
 }
 
@@ -601,19 +750,21 @@ fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
     guest: &str,
     host_display: &impl std::fmt::Display,
-    readonly: bool,
+    options: MountOptions,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
-    if readonly {
-        arg.push_str(":ro");
-    }
+    let mut opts = mount_option_tokens(options);
+    append_policy_options(&mut opts, stat_virtualization, host_permissions);
+    append_option_block(&mut arg, opts);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
 }
 
 /// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
-fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool) {
+fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, options: MountOptions) {
     if !dir_mounts_val.is_empty() {
         dir_mounts_val.push(';');
     }
@@ -621,17 +772,22 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
     dir_mounts_val.push_str(&tag);
     dir_mounts_val.push(':');
     dir_mounts_val.push_str(guest);
-    if readonly {
-        dir_mounts_val.push_str(":ro");
-    }
+    append_option_block(dir_mounts_val, mount_option_tokens(options));
 }
 
 /// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
-fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Path, readonly: bool) {
+fn push_file_mount_arg(
+    args: &mut Vec<OsString>,
+    tag: &str,
+    file_mount_dir: &Path,
+    options: MountOptions,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
-    if readonly {
-        arg.push_str(":ro");
-    }
+    let mut opts = mount_option_tokens(options);
+    append_policy_options(&mut opts, stat_virtualization, host_permissions);
+    append_option_block(&mut arg, opts);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
 }
@@ -642,23 +798,23 @@ fn push_disk_mount_arg(
     id: &str,
     host_display: &impl std::fmt::Display,
     format: &DiskImageFormat,
-    readonly: bool,
+    options: MountOptions,
 ) {
     let mut arg = format!("{id}:{host_display}:{}", format.as_str());
-    if readonly {
+    if options.readonly {
         arg.push_str(":ro");
     }
     args.push(OsString::from("--disk"));
     args.push(OsString::from(arg));
 }
 
-/// Append a `id:guest_path[:fstype][:ro]` entry to the `MSB_DISK_MOUNTS` env var value.
+/// Append a `id:guest_path[:opts]` entry to the `MSB_DISK_MOUNTS` env var value.
 fn push_disk_mounts_spec(
     disk_mounts_val: &mut String,
     id: &str,
     guest: &str,
     fstype: Option<&str>,
-    readonly: bool,
+    options: MountOptions,
 ) {
     if !disk_mounts_val.is_empty() {
         disk_mounts_val.push(';');
@@ -666,13 +822,11 @@ fn push_disk_mounts_spec(
     disk_mounts_val.push_str(id);
     disk_mounts_val.push(':');
     disk_mounts_val.push_str(guest);
-    disk_mounts_val.push(':');
+    let mut opts = mount_option_tokens(options);
     if let Some(fs) = fstype {
-        disk_mounts_val.push_str(fs);
+        opts.push(format!("fstype={fs}"));
     }
-    if readonly {
-        disk_mounts_val.push_str(":ro");
-    }
+    append_option_block(disk_mounts_val, opts);
 }
 
 /// Append a `tag:filename:guest_path[:ro]` entry to the `MSB_FILE_MOUNTS` env var value.
@@ -681,7 +835,7 @@ fn push_file_mounts_spec(
     tag: &str,
     filename: &str,
     guest: &str,
-    readonly: bool,
+    options: MountOptions,
 ) {
     if !file_mounts_val.is_empty() {
         file_mounts_val.push(';');
@@ -691,9 +845,48 @@ fn push_file_mounts_spec(
     file_mounts_val.push_str(filename);
     file_mounts_val.push(':');
     file_mounts_val.push_str(guest);
-    if readonly {
-        file_mounts_val.push_str(":ro");
+    append_option_block(file_mounts_val, mount_option_tokens(options));
+}
+
+fn mount_option_tokens(options: MountOptions) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if options.readonly {
+        tokens.push("ro".to_string());
     }
+    if options.noexec {
+        tokens.push("noexec".to_string());
+    }
+    if options.nosuid {
+        tokens.push("nosuid".to_string());
+    }
+    if options.nodev {
+        tokens.push("nodev".to_string());
+    }
+    tokens
+}
+
+fn append_policy_options(
+    opts: &mut Vec<String>,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => opts.push("stat-virt=relaxed".to_string()),
+        StatVirtualization::Off => opts.push("stat-virt=off".to_string()),
+    }
+    match host_permissions {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => opts.push("host-perms=mirror".to_string()),
+    }
+}
+
+fn append_option_block(spec: &mut String, opts: Vec<String>) {
+    if opts.is_empty() {
+        return;
+    }
+    spec.push(':');
+    spec.push_str(&opts.join(","));
 }
 
 /// Encodes sandbox-wide rlimits for the guest init environment.
@@ -771,6 +964,7 @@ fn sandbox_cli_args(
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
     metrics_reservation: Option<&MetricsReservation>,
+    parent_watch_fd: Option<i32>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -792,6 +986,10 @@ fn sandbox_cli_args(
     args.push(runtime_dir.as_os_str().to_os_string());
     args.push(OsString::from("--agent-sock"));
     args.push(agent_sock_path.as_os_str().to_os_string());
+    if let Some(fd) = parent_watch_fd {
+        args.push(OsString::from("--parent-watch-fd"));
+        args.push(OsString::from(fd.to_string()));
+    }
 
     let sp = &config.policy;
     if let Some(max_dur) = sp.max_duration_secs {
@@ -893,34 +1091,49 @@ fn sandbox_cli_args(
                 host,
                 guest,
                 options,
-                stat_virtualization: _,
-                host_permissions: _,
+                stat_virtualization,
+                host_permissions,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
-                    push_file_mount_arg(&mut args, tag, file_mount_dir, options.readonly);
-                    push_file_mounts_spec(
-                        &mut file_mounts_val,
+                    push_file_mount_arg(
+                        &mut args,
                         tag,
-                        filename,
-                        guest,
-                        options.readonly,
+                        file_mount_dir,
+                        *options,
+                        *stat_virtualization,
+                        *host_permissions,
                     );
+                    push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *options);
                 } else {
-                    push_dir_mount_arg(&mut args, guest, &host.display(), options.readonly);
-                    push_dir_mounts_spec(&mut dir_mounts_val, guest, options.readonly);
+                    push_dir_mount_arg(
+                        &mut args,
+                        guest,
+                        &host.display(),
+                        *options,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
+                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
                 }
             }
             VolumeMount::Named {
                 name,
                 guest,
                 options,
-                stat_virtualization: _,
-                host_permissions: _,
+                stat_virtualization,
+                host_permissions,
                 create: _,
             } => {
                 let vol_path = local.volume_path(name);
-                push_dir_mount_arg(&mut args, guest, &vol_path.display(), options.readonly);
-                push_dir_mounts_spec(&mut dir_mounts_val, guest, options.readonly);
+                push_dir_mount_arg(
+                    &mut args,
+                    guest,
+                    &vol_path.display(),
+                    *options,
+                    *stat_virtualization,
+                    *host_permissions,
+                );
+                push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
             }
             VolumeMount::Tmpfs {
                 guest,
@@ -931,12 +1144,12 @@ fn sandbox_cli_args(
                     tmpfs_val.push(';');
                 }
                 tmpfs_val.push_str(guest);
+                let mut opts = Vec::new();
                 if let Some(s) = size_mib {
-                    tmpfs_val.push_str(&format!(",size={s}"));
+                    opts.push(format!("size={s}"));
                 }
-                if options.readonly {
-                    tmpfs_val.push_str(",ro");
-                }
+                opts.extend(mount_option_tokens(*options));
+                append_option_block(&mut tmpfs_val, opts);
             }
             VolumeMount::DiskImage {
                 host,
@@ -946,13 +1159,13 @@ fn sandbox_cli_args(
                 options,
             } => {
                 let id = guest_mount_tag(guest);
-                push_disk_mount_arg(&mut args, &id, &host.display(), format, options.readonly);
+                push_disk_mount_arg(&mut args, &id, &host.display(), format, *options);
                 push_disk_mounts_spec(
                     &mut disk_mounts_val,
                     &id,
                     guest,
                     fstype.as_deref(),
-                    options.readonly,
+                    *options,
                 );
             }
         }
@@ -1016,6 +1229,16 @@ fn sandbox_cli_args(
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={user}", ENV_USER)));
     }
+
+    args.push(OsString::from("--env"));
+    args.push(OsString::from(format!(
+        "{}={}",
+        ENV_SECURITY_PROFILE,
+        match config.security_profile {
+            crate::sandbox::SecurityProfile::Default => "default",
+            crate::sandbox::SecurityProfile::Restricted => "restricted",
+        }
+    )));
 
     // Hostname: explicit value or fall back to sandbox name.
     {
@@ -1108,6 +1331,7 @@ mod tests {
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
             None,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -1130,6 +1354,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
             None,
         )
         .iter()
@@ -1207,6 +1432,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
             None,
         );
 
@@ -1399,7 +1625,7 @@ mod tests {
 
         let rendered = render_args(&config);
 
-        assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256;/var/tmp".to_string()));
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp:size=256;/var/tmp".to_string()));
     }
 
     #[tokio::test]
@@ -1413,7 +1639,7 @@ mod tests {
 
         let rendered = render_args(&config);
 
-        assert!(rendered.contains(&"MSB_TMPFS=/seed,size=64,ro".to_string()));
+        assert!(rendered.contains(&"MSB_TMPFS=/seed:size=64,ro".to_string()));
     }
 
     #[tokio::test]
@@ -1434,7 +1660,7 @@ mod tests {
 
         let rendered = render_args(&config);
 
-        assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256".to_string()));
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp:size=256".to_string()));
     }
 
     #[tokio::test]
@@ -1506,7 +1732,9 @@ mod tests {
     async fn test_sandbox_cli_args_file_mount_generates_correct_args() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .volume("/guest/config.txt", |m| m.bind("/host/config.txt"))
+            .volume("/guest/config.txt", |m| {
+                m.bind("/host/config.txt").readonly().noexec()
+            })
             .build()
             .await
             .unwrap();
@@ -1524,17 +1752,12 @@ mod tests {
         let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
 
         // File mount should use staging dir in --mount.
-        assert!(
-            rendered
-                .windows(2)
-                .any(|pair| pair[0] == "--mount"
-                    && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd")
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd:ro,noexec"));
         // MSB_FILE_MOUNTS should contain the spec.
-        assert!(
-            rendered
-                .contains(&"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt".to_string())
-        );
+        assert!(rendered.contains(
+            &"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt:ro,noexec".to_string()
+        ));
         // MSB_DIR_MOUNTS should NOT contain the file mount.
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_DIR_MOUNTS=")));
     }
@@ -1603,7 +1826,7 @@ mod tests {
         );
 
         // MSB_DISK_MOUNTS env entry carries the guest path and fstype.
-        let expected_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:ext4");
+        let expected_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
         assert!(rendered.contains(&expected_env));
     }
 
@@ -1616,7 +1839,7 @@ mod tests {
         let host_clone = host.clone();
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .volume("/seed", |m| m.disk(host_clone).readonly())
+            .volume("/seed", |m| m.disk(host_clone).readonly().noexec())
             .build()
             .await
             .unwrap();
@@ -1627,8 +1850,7 @@ mod tests {
         assert!(rendered.windows(2).any(
             |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:{}:raw:ro", host.display())
         ));
-        // No fstype → empty middle field, ro trailing.
-        assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed::ro")));
+        assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed:ro,noexec")));
     }
 
     #[tokio::test]
