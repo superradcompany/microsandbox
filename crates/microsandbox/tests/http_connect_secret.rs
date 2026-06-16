@@ -343,7 +343,7 @@ echo "status=$?"
 
     let stdout = out.stdout().unwrap_or_default();
     assert!(
-        !stdout.ends_with("status=0"),
+        !stdout.trim_end().ends_with("status=0"),
         "expected curl to fail when secret host does not match tunnel target; got: {stdout:?}"
     );
 
