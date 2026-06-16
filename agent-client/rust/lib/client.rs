@@ -4,8 +4,9 @@
 //! During connection, the relay assigns a non-overlapping correlation ID range
 //! and sends the cached `core.ready` payload so the client can begin issuing
 //! commands immediately. Unix domain sockets are available with the `uds`
-//! feature, and WebSocket connections are available with the `websocket`
-//! feature.
+//! feature; the `stream` feature drives the client over any
+//! `AsyncRead + AsyncWrite` byte stream (e.g. a caller-owned, pre-authenticated
+//! transport adapted to bytes).
 //!
 //! Two API tiers share one socket and one reader task:
 //!
@@ -19,21 +20,19 @@
 //!   primitives over [`Message`]; the SDK serializes payloads with CBOR.
 
 use std::collections::HashMap;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use std::future::Future;
 #[cfg(feature = "uds")]
 use std::path::Path;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicU32};
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use std::time::Duration;
 
-#[cfg(feature = "websocket")]
-use futures_util::{SinkExt, StreamExt};
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use microsandbox_protocol::message::FLAG_TERMINAL;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use microsandbox_protocol::{
     codec::{self, RawFrame},
@@ -41,14 +40,14 @@ use microsandbox_protocol::{
     message::{Message, MessageType, PROTOCOL_VERSION},
 };
 use serde::Serialize;
+#[cfg(feature = "stream")]
+use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "uds")]
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 use tokio::time::Instant;
-#[cfg(feature = "websocket")]
-use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 use super::error::{AgentClientError, AgentClientResult};
 
@@ -57,20 +56,18 @@ use super::error::{AgentClientError, AgentClientResult};
 //--------------------------------------------------------------------------------------------------
 
 /// Default handshake timeout used by [`AgentClient::connect`].
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 const REQUEST_QUEUE_CAPACITY: usize = 1;
 const STREAM_QUEUE_CAPACITY: usize = 1024;
-#[cfg(feature = "websocket")]
-const MAX_WEBSOCKET_BUFFER_SIZE: usize = MAX_FRAME_SIZE as usize + 12;
 
 const LEGACY_PROTOCOL_VERSION: u8 = 1;
 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
 // compatibility for versions before 0.5 is no longer supported.
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 const LEGACY_RELAY_ID_RANGE_STEP: u32 = u32::MAX / 16;
 
 //--------------------------------------------------------------------------------------------------
@@ -121,7 +118,7 @@ pub struct AgentClient {
     ready: Ready,
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 struct AgentHandshake {
     id_min: u32,
     id_max: u32,
@@ -131,13 +128,13 @@ struct AgentHandshake {
     ready: Ready,
 }
 
-#[cfg_attr(not(any(feature = "uds", feature = "websocket")), allow(dead_code))]
+#[cfg_attr(not(feature = "stream"), allow(dead_code))]
 struct WriterCommand {
     frame: RawFrame,
     ack: oneshot::Sender<AgentClientResult<()>>,
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 trait HandshakeReader {
     fn read_exact_handshake<'a>(
         &'a mut self,
@@ -199,8 +196,54 @@ impl AgentClient {
                     path: sock_path.to_path_buf(),
                     source,
                 })?;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
 
-        let (mut reader, writer) = stream.into_split();
+    /// Connect over an arbitrary byte-stream transport using the default 10s
+    /// handshake timeout.
+    ///
+    /// The stream must be a transparent pipe to the agent relay: the relay's
+    /// `[id_min][id_max]` + `core.ready` prologue and the framed protocol that
+    /// follows flow over it verbatim. This is the injection point for
+    /// caller-owned transports — e.g. a pre-authenticated WebSocket adapted to
+    /// bytes — so the caller owns the dial and its credentials and this crate
+    /// stays transport- (and dependency-) agnostic.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream<S>(stream: S) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_stream_with_timeout(stream, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Connect over an arbitrary byte-stream transport using an explicit
+    /// handshake timeout.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_timeout<S>(
+        stream: S,
+        timeout: Duration,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let deadline = Instant::now() + timeout;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
+
+    /// Connect over an arbitrary byte-stream transport with an explicit
+    /// handshake deadline.
+    ///
+    /// `deadline` bounds both handshake reads so an accepted-but-stalled
+    /// transport cannot block this call indefinitely.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_deadline<S>(
+        stream: S,
+        deadline: Instant,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (mut reader, writer) = tokio::io::split(stream);
         let handshake = perform_handshake(&mut reader, deadline).await?;
 
         tracing::info!(
@@ -224,67 +267,7 @@ impl AgentClient {
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
-        let writer_handle = tokio::spawn(uds_writer_loop(writer, writer_rx));
-
-        Ok(Self {
-            writer: writer_tx,
-            next_id: AtomicU32::new(first_request_id(handshake.id_min)),
-            id_min: handshake.id_min,
-            id_max: handshake.id_max,
-            protocol: handshake.protocol,
-            negotiated_version: handshake.negotiated_version,
-            pending,
-            reader_handle,
-            writer_handle,
-            ready_body: handshake.ready_body,
-            ready: handshake.ready,
-        })
-    }
-
-    /// Connect to an agent relay over WebSocket using the default 10s
-    /// handshake timeout.
-    #[cfg(feature = "websocket")]
-    pub async fn connect_websocket(url: &str) -> AgentClientResult<Self> {
-        Self::connect_websocket_with_timeout(url, DEFAULT_HANDSHAKE_TIMEOUT).await
-    }
-
-    /// Connect to an agent relay over WebSocket using an explicit handshake
-    /// timeout.
-    #[cfg(feature = "websocket")]
-    pub async fn connect_websocket_with_timeout(
-        url: &str,
-        timeout: Duration,
-    ) -> AgentClientResult<Self> {
-        let deadline = Instant::now() + timeout;
-        Self::connect_websocket_with_deadline(url, deadline).await
-    }
-
-    /// Connect to an agent relay over WebSocket with an explicit handshake
-    /// deadline.
-    #[cfg(feature = "websocket")]
-    pub async fn connect_websocket_with_deadline(
-        url: &str,
-        deadline: Instant,
-    ) -> AgentClientResult<Self> {
-        let (stream, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .map_err(|e| AgentClientError::WebSocket(format!("connect {url}: {e}")))?;
-        let (writer, reader) = stream.split();
-        let mut reader = WebSocketByteReader::new(reader);
-        let handshake = perform_handshake(&mut reader, deadline).await?;
-        if handshake.protocol == AgentProtocol::LegacyV1 {
-            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-            // compatibility for versions before 0.5 is no longer supported.
-            tracing::warn!(
-                "agent client: connected to a sandbox started before microsandbox 0.5; exec compatibility is temporary and filesystem/SFTP require stop/start"
-            );
-        }
-
-        let pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
-        let reader_handle = tokio::spawn(websocket_reader_loop(reader, Arc::clone(&pending)));
-        let writer_handle = tokio::spawn(websocket_writer_loop(writer, writer_rx));
+        let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx));
 
         Ok(Self {
             writer: writer_tx,
@@ -537,7 +520,7 @@ impl AgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 async fn perform_handshake<R>(
     reader: &mut R,
     deadline: Instant,
@@ -630,7 +613,7 @@ fn first_request_id(id_min: u32) -> u32 {
     id_min.max(1)
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 fn ensure_usable_id_range(id_min: u32, id_max: u32) -> AgentClientResult<()> {
     if usable_id_count(id_min, id_max) == 0 {
         return Err(AgentClientError::Handshake(format!(
@@ -644,7 +627,7 @@ fn usable_id_count(id_min: u32, id_max: u32) -> u32 {
     id_max.saturating_sub(first_request_id(id_min))
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 fn looks_like_legacy_relay_handshake(id_min: u32, id_max: u32) -> bool {
     // TODO(upgrade-0.6): Remove in 0.6.x or later once pre-0.5 relay
     // handshakes are no longer accepted.
@@ -659,7 +642,7 @@ fn looks_like_legacy_relay_handshake(id_min: u32, id_max: u32) -> bool {
         && (id_min == 0 || id_min >= id_max)
 }
 
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 async fn read_raw_frame_after_len_prefix<R>(
     reader: &mut R,
     len_buf: [u8; 4],
@@ -697,7 +680,7 @@ where
     Ok(RawFrame { id, flags, body })
 }
 
-#[cfg(feature = "uds")]
+#[cfg(feature = "stream")]
 impl<R> HandshakeReader for R
 where
     R: tokio::io::AsyncRead + Unpin + Send,
@@ -725,14 +708,14 @@ where
     }
 }
 
-#[cfg(feature = "uds")]
-async fn uds_writer_loop(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<WriterCommand>,
-) {
+#[cfg(feature = "stream")]
+async fn stream_writer_loop<W>(mut writer: W, mut rx: mpsc::Receiver<WriterCommand>)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     while let Some(command) = rx.recv().await {
         if let Err(e) = codec::write_raw_frame(&mut writer, &command.frame).await {
-            tracing::debug!("agent client: UDS writer error: {e}");
+            tracing::debug!("agent client: stream writer error: {e}");
             let _ = command.ack.send(Err(AgentClientError::Protocol(e)));
             break;
         }
@@ -742,7 +725,7 @@ async fn uds_writer_loop(
 
 /// Background task that reads frames from the relay and dispatches them to
 /// pending channels by correlation ID. Operates on raw frames — no CBOR.
-#[cfg(feature = "uds")]
+#[cfg(feature = "stream")]
 async fn reader_loop<R>(mut reader: R, pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -764,182 +747,7 @@ where
     map.clear();
 }
 
-#[cfg(feature = "websocket")]
-struct WebSocketByteReader<S> {
-    stream: S,
-    buffer: Vec<u8>,
-    cursor: usize,
-}
-
-#[cfg(feature = "websocket")]
-impl<S> WebSocketByteReader<S>
-where
-    S: futures_util::Stream<Item = Result<WebSocketMessage, tokio_tungstenite::tungstenite::Error>>
-        + Unpin
-        + Send,
-{
-    fn new(stream: S) -> Self {
-        Self {
-            stream,
-            buffer: Vec::new(),
-            cursor: 0,
-        }
-    }
-
-    async fn read_exact(&mut self, out: &mut [u8]) -> AgentClientResult<()> {
-        while self.available_bytes() < out.len() {
-            let Some(message) = self.stream.next().await else {
-                return Err(AgentClientError::WebSocket(
-                    "websocket closed before enough bytes were available".to_string(),
-                ));
-            };
-            match message.map_err(|e| AgentClientError::WebSocket(e.to_string()))? {
-                WebSocketMessage::Binary(bytes) => {
-                    if self.available_bytes() + bytes.len() > MAX_WEBSOCKET_BUFFER_SIZE {
-                        return Err(AgentClientError::WebSocket(format!(
-                            "websocket buffer exceeded maximum size: {} bytes (max {MAX_WEBSOCKET_BUFFER_SIZE})",
-                            self.available_bytes() + bytes.len()
-                        )));
-                    }
-                    self.compact_consumed();
-                    self.buffer.extend_from_slice(&bytes);
-                }
-                WebSocketMessage::Close(_) => {
-                    return Err(AgentClientError::WebSocket(
-                        "websocket closed before enough bytes were available".to_string(),
-                    ));
-                }
-                WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => {}
-                WebSocketMessage::Text(_) | WebSocketMessage::Frame(_) => {
-                    return Err(AgentClientError::WebSocket(
-                        "websocket message is not binary".to_string(),
-                    ));
-                }
-            }
-        }
-
-        out.copy_from_slice(&self.buffer[self.cursor..self.cursor + out.len()]);
-        self.cursor += out.len();
-        self.compact_consumed();
-        Ok(())
-    }
-
-    fn available_bytes(&self) -> usize {
-        self.buffer.len().saturating_sub(self.cursor)
-    }
-
-    fn compact_consumed(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        if self.cursor == self.buffer.len() {
-            self.buffer.clear();
-        } else {
-            self.buffer.drain(..self.cursor);
-        }
-        self.cursor = 0;
-    }
-
-    async fn read_raw_frame(&mut self) -> AgentClientResult<RawFrame> {
-        let mut len_buf = [0u8; 4];
-        self.read_exact(&mut len_buf).await?;
-        let frame_len = u32::from_be_bytes(len_buf);
-        if frame_len > MAX_FRAME_SIZE {
-            return Err(AgentClientError::Protocol(
-                microsandbox_protocol::ProtocolError::FrameTooLarge {
-                    size: frame_len,
-                    max: MAX_FRAME_SIZE,
-                },
-            ));
-        }
-        if frame_len < FRAME_HEADER_SIZE as u32 {
-            return Err(AgentClientError::Protocol(
-                microsandbox_protocol::ProtocolError::FrameTooShort {
-                    size: frame_len,
-                    min: FRAME_HEADER_SIZE as u32,
-                },
-            ));
-        }
-
-        let mut payload = vec![0u8; frame_len as usize];
-        self.read_exact(&mut payload).await?;
-        let id = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-        let flags = payload[4];
-        let body = payload[FRAME_HEADER_SIZE..].to_vec();
-        Ok(RawFrame { id, flags, body })
-    }
-}
-
-#[cfg(feature = "websocket")]
-impl<S> HandshakeReader for WebSocketByteReader<S>
-where
-    S: futures_util::Stream<Item = Result<WebSocketMessage, tokio_tungstenite::tungstenite::Error>>
-        + Unpin
-        + Send,
-{
-    fn read_exact_handshake<'a>(
-        &'a mut self,
-        out: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<()>> + Send + 'a>> {
-        Box::pin(async move { self.read_exact(out).await })
-    }
-
-    fn read_frame_handshake<'a>(
-        &'a mut self,
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<RawFrame>> + Send + 'a>> {
-        Box::pin(async move { self.read_raw_frame().await })
-    }
-}
-
-#[cfg(feature = "websocket")]
-async fn websocket_reader_loop<S>(
-    mut reader: WebSocketByteReader<S>,
-    pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
-) where
-    S: futures_util::Stream<Item = Result<WebSocketMessage, tokio_tungstenite::tungstenite::Error>>
-        + Unpin
-        + Send,
-{
-    loop {
-        let frame = match reader.read_raw_frame().await {
-            Ok(frame) => frame,
-            Err(e) => {
-                tracing::debug!("agent client: websocket reader EOF or error: {e}");
-                break;
-            }
-        };
-
-        dispatch_frame(frame, &pending).await;
-    }
-
-    let mut map = pending.lock().await;
-    map.clear();
-}
-
-#[cfg(feature = "websocket")]
-async fn websocket_writer_loop<S>(mut writer: S, mut rx: mpsc::Receiver<WriterCommand>)
-where
-    S: futures_util::Sink<WebSocketMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    while let Some(command) = rx.recv().await {
-        let mut buf = Vec::new();
-        if let Err(e) = codec::encode_raw_to_buf(&command.frame, &mut buf) {
-            tracing::debug!("agent client: websocket encode error: {e}");
-            let _ = command.ack.send(Err(AgentClientError::Protocol(e)));
-            break;
-        }
-        if let Err(e) = writer.send(WebSocketMessage::Binary(buf.into())).await {
-            tracing::debug!("agent client: websocket writer error: {e}");
-            let _ = command
-                .ack
-                .send(Err(AgentClientError::WebSocket(e.to_string())));
-            break;
-        }
-        let _ = command.ack.send(Ok(()));
-    }
-}
-
-#[cfg(any(feature = "uds", feature = "websocket"))]
+#[cfg(feature = "stream")]
 async fn dispatch_frame(
     frame: RawFrame,
     pending: &Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
@@ -1000,21 +808,17 @@ fn encode_message_body<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "uds", feature = "websocket"))]
+    #[cfg(feature = "uds")]
     use microsandbox_protocol::core::Ready;
-    #[cfg(any(feature = "uds", feature = "websocket"))]
+    #[cfg(feature = "uds")]
     use microsandbox_protocol::exec::ExecRequest;
-    #[cfg(feature = "websocket")]
-    use microsandbox_protocol::fs::{FsOp, FsRequest, FsResponse};
     #[cfg(feature = "uds")]
     use microsandbox_protocol::message::PROTOCOL_VERSION;
     #[cfg(feature = "uds")]
     use tokio::io::AsyncWriteExt;
-    #[cfg(feature = "websocket")]
-    use tokio::net::TcpListener;
     #[cfg(feature = "uds")]
     use tokio::net::UnixListener;
-    #[cfg(any(feature = "uds", feature = "websocket"))]
+    #[cfg(feature = "uds")]
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1270,150 +1074,60 @@ mod tests {
         assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
     }
 
-    #[cfg(feature = "websocket")]
+    #[cfg(feature = "stream")]
     #[tokio::test]
-    async fn websocket_connects_and_completes_request() {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::accept_async;
-        use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+    async fn connect_stream_handshakes_and_streams_exec() {
+        use microsandbox_protocol::exec::{ExecExited, ExecRequest, ExecStdout};
+        use tokio::io::AsyncWriteExt;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let ready = Ready {
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
-            agent_version: "ws-test".to_string(),
+            agent_version: "stream-test".to_string(),
         };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
 
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut ws = accept_async(stream).await.unwrap();
-
-            let mut range = Vec::new();
-            range.extend_from_slice(&1u32.to_be_bytes());
-            range.extend_from_slice(&1024u32.to_be_bytes());
-            ws.send(WebSocketMessage::Binary(range.into()))
+            // Relay handshake: [id_min][id_max] then the core.ready frame.
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
                 .await
                 .unwrap();
 
-            let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
-            let mut ready_packet = Vec::new();
-            codec::encode_to_buf(&ready_msg, &mut ready_packet).unwrap();
-            ws.send(WebSocketMessage::Binary(ready_packet.into()))
-                .await
-                .unwrap();
-
-            let request_packet = loop {
-                match ws.next().await.unwrap().unwrap() {
-                    WebSocketMessage::Binary(bytes) => break bytes.to_vec(),
-                    _ => continue,
-                }
-            };
-            let mut request_buf = request_packet;
-            let request = codec::try_decode_raw_from_buf(&mut request_buf)
-                .unwrap()
-                .unwrap();
-            let request_msg = codec::raw_frame_to_message(request.clone()).unwrap();
-            assert_eq!(request_msg.t, MessageType::FsRequest);
-
-            let response = Message::with_payload(
-                MessageType::FsResponse,
+            // One exec stream echoed back: stdout, then a terminal exited.
+            let request = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let stdout = Message::with_payload(
+                MessageType::ExecStdout,
                 request.id,
-                &FsResponse {
-                    ok: true,
-                    error: None,
-                    data: None,
+                &ExecStdout {
+                    data: b"hi".to_vec(),
                 },
             )
             .unwrap();
-            let mut response_packet = Vec::new();
-            codec::encode_to_buf(&response, &mut response_packet).unwrap();
-            ws.send(WebSocketMessage::Binary(response_packet.into()))
-                .await
-                .unwrap();
+            codec::write_message(&mut server_io, &stdout).await.unwrap();
+            let exited =
+                Message::with_payload(MessageType::ExecExited, request.id, &ExecExited { code: 0 })
+                    .unwrap();
+            codec::write_message(&mut server_io, &exited).await.unwrap();
         });
 
-        let client = AgentClient::connect_websocket(&format!("ws://{addr}"))
-            .await
-            .unwrap();
-        assert_eq!(client.agent_version(), "ws-test");
+        let client = AgentClient::connect_stream_with_deadline(
+            client_io,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
 
-        let response = client
-            .request(
-                MessageType::FsRequest,
-                &FsRequest {
-                    op: FsOp::Stat {
-                        path: "/tmp".to_string(),
-                        follow_symlink: true,
-                    },
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.t, MessageType::FsResponse);
-        let payload: FsResponse = response.payload().unwrap();
-        assert!(payload.ok);
-    }
-
-    #[cfg(feature = "websocket")]
-    #[tokio::test]
-    async fn websocket_accepts_legacy_relay_handshake() {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::accept_async;
-        use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let ready = Ready {
-            boot_time_ns: 11,
-            init_time_ns: 22,
-            ready_time_ns: 33,
-            agent_version: "legacy-ws-test".to_string(),
-        };
-        let id_offset = 268_435_455u32;
-        let (frame_tx, frame_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut ws = accept_async(stream).await.unwrap();
-
-            ws.send(WebSocketMessage::Binary(
-                id_offset.to_be_bytes().to_vec().into(),
-            ))
-            .await
-            .unwrap();
-
-            let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
-            let mut ready_packet = Vec::new();
-            codec::encode_to_buf(&ready_msg, &mut ready_packet).unwrap();
-            ws.send(WebSocketMessage::Binary(ready_packet.into()))
-                .await
-                .unwrap();
-
-            let request_packet = loop {
-                match ws.next().await.unwrap().unwrap() {
-                    WebSocketMessage::Binary(bytes) => break bytes.to_vec(),
-                    _ => continue,
-                }
-            };
-            let mut request_buf = request_packet;
-            let request = codec::try_decode_raw_from_buf(&mut request_buf)
-                .unwrap()
-                .unwrap();
-            frame_tx.send(request).unwrap();
-        });
-
-        let client = AgentClient::connect_websocket(&format!("ws://{addr}"))
-            .await
-            .unwrap();
-        assert_eq!(client.protocol(), AgentProtocol::LegacyV1);
-        assert_eq!(client.negotiated_version(), LEGACY_PROTOCOL_VERSION);
-        assert_eq!(client.agent_version(), "legacy-ws-test");
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        assert_eq!(client.agent_version(), "stream-test");
+        assert!(client.supports(MessageType::ExecRequest));
 
         let request = ExecRequest {
-            cmd: "/bin/true".into(),
-            args: Vec::new(),
+            cmd: "echo".into(),
+            args: vec!["hi".into()],
             env: Vec::new(),
             cwd: None,
             user: None,
@@ -1422,17 +1136,20 @@ mod tests {
             cols: 80,
             rlimits: Vec::new(),
         };
-        let (id, _rx) = client
+        let (_id, mut rx) = client
             .stream(MessageType::ExecRequest, &request)
             .await
             .unwrap();
-        let frame = frame_rx.await.unwrap();
-        let message = codec::raw_frame_to_message(frame).unwrap();
 
-        assert_eq!(id, id_offset + 1);
-        assert_eq!(message.id, id_offset + 1);
-        assert_eq!(message.v, LEGACY_PROTOCOL_VERSION);
-        assert_eq!(message.t, MessageType::ExecRequest);
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.t, MessageType::ExecStdout);
+        let out: ExecStdout = first.payload().unwrap();
+        assert_eq!(out.data, b"hi");
+
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.t, MessageType::ExecExited);
+        let exit: ExecExited = second.payload().unwrap();
+        assert_eq!(exit.code, 0);
     }
 }
 

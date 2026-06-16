@@ -5243,6 +5243,29 @@ pub unsafe extern "C" fn msb_agent_open_path(
     }
 }
 
+/// Resolve the host-side path of a sandbox's agentd relay socket by name.
+///
+/// Synchronous; touches no Rust-side handle state and does not connect. Writes
+/// `{"path":"..."}` to `buf`. The Go SDK exposes this so a caller can dial
+/// agentd over a raw byte transport (e.g. a transparent relay) instead of the
+/// frame-protocol client returned by `msb_agent_open_*`.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string; `buf`/`buf_len` follow the
+/// shared `run` output-buffer contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_socket_path(
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let path = microsandbox::runtime::agent_socket_path(&name).map_err(FfiError::from)?;
+        Ok(serde_json::json!({ "path": path.to_string_lossy() }).to_string())
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_agent_request(
     cancel_id: u64,

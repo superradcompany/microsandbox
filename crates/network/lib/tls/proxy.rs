@@ -8,7 +8,6 @@
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use rustls::pki_types::ServerName;
@@ -18,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
+use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
@@ -43,7 +43,7 @@ struct TlsProxyContext {
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
-    upstream_connected: Arc<AtomicBool>,
+    proxy_connect: Arc<ProxyConnectState>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -52,9 +52,8 @@ struct TlsProxyContext {
 
 /// Spawn a TLS proxy task for a connection to an intercepted port.
 ///
-/// See [`crate::proxy::spawn_tcp_proxy`] for the `upstream_connected`
-/// contract — this task flips the flag after its upstream
-/// `TcpStream::connect` succeeds (in either bypass or intercept mode).
+/// See [`crate::proxy::spawn_tcp_proxy`] for the `proxy_connect`
+/// contract.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tls_proxy(
     handle: &tokio::runtime::Handle,
@@ -65,7 +64,7 @@ pub fn spawn_tls_proxy(
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
-    upstream_connected: Arc<AtomicBool>,
+    proxy_connect: Arc<ProxyConnectState>,
 ) {
     handle.spawn(async move {
         let context = TlsProxyContext {
@@ -74,7 +73,7 @@ pub fn spawn_tls_proxy(
             shared,
             tls_state,
             network_policy,
-            upstream_connected,
+            proxy_connect,
         };
 
         if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp).await {
@@ -95,7 +94,7 @@ async fn tls_proxy_task(
         shared,
         tls_state,
         network_policy,
-        upstream_connected,
+        proxy_connect,
     } = context;
 
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
@@ -124,6 +123,8 @@ async fn tls_proxy_task(
             dst = %guest_dst,
             "TLS egress denied by domain policy",
         );
+        proxy_connect.mark_policy_denied();
+        shared.proxy_wake.wake();
         return Ok(());
     }
 
@@ -135,7 +136,7 @@ async fn tls_proxy_task(
             from_smoltcp,
             to_smoltcp,
             shared,
-            upstream_connected,
+            proxy_connect,
         )
         .await
     } else {
@@ -149,7 +150,7 @@ async fn tls_proxy_task(
             to_smoltcp,
             shared,
             tls_state,
-            upstream_connected,
+            proxy_connect,
         )
         .await
     }
@@ -162,10 +163,19 @@ async fn bypass_relay(
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
-    upstream_connected: Arc<AtomicBool>,
+    proxy_connect: Arc<ProxyConnectState>,
 ) -> io::Result<()> {
-    let mut server = TcpStream::connect(dst).await?;
-    upstream_connected.store(true, Ordering::Release);
+    let mut server = match TcpStream::connect(dst).await {
+        Ok(server) => {
+            proxy_connect.mark_connected();
+            server
+        }
+        Err(e) => {
+            proxy_connect.mark_upstream_connect_failed();
+            shared.proxy_wake.wake();
+            return Err(e);
+        }
+    };
     server.write_all(&initial_buf).await?;
 
     let (mut server_rx, mut server_tx) = server.into_split();
@@ -208,7 +218,7 @@ async fn intercept_relay(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
-    upstream_connected: Arc<AtomicBool>,
+    proxy_connect: Arc<ProxyConnectState>,
 ) -> io::Result<()> {
     let mut secrets_handler =
         SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared)
@@ -262,8 +272,17 @@ async fn intercept_relay(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
 
     // Connect to real server with TLS.
-    let server_stream = TcpStream::connect(connect_dst).await?;
-    upstream_connected.store(true, Ordering::Release);
+    let server_stream = match TcpStream::connect(connect_dst).await {
+        Ok(stream) => {
+            proxy_connect.mark_connected();
+            stream
+        }
+        Err(e) => {
+            proxy_connect.mark_upstream_connect_failed();
+            shared.proxy_wake.wake();
+            return Err(e);
+        }
+    };
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut server_tls = tls_state

@@ -89,6 +89,18 @@ impl AgentClient {
         })
     }
 
+    /// Resolve a sandbox's agentd relay socket path without connecting.
+    ///
+    /// Returns the same path `connectSandbox` would dial, so a caller can talk
+    /// to agentd over a raw byte transport instead of this frame client. The
+    /// sandbox need not be running. Sandbox names are limited to 128 UTF-8
+    /// bytes.
+    #[napi(js_name = "socketPath")]
+    pub fn socket_path(name: String) -> Result<String> {
+        let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_napi_error)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     /// Send one frame and await a single response frame.
     ///
     /// Use for request/response RPCs that produce exactly one terminal

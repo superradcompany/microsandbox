@@ -10,18 +10,19 @@ Use this crate when you already have an agent relay endpoint and want direct pro
 
 ```toml
 [dependencies]
-microsandbox-agent-client = "0.5.6"
-microsandbox-protocol = "0.5.6"
+microsandbox-agent-client = "0.5.7"
+microsandbox-protocol = "0.5.7"
 ```
 
 The crate is transport-agnostic by default. Enable exactly the transport adapter you need:
 
 ```toml
 # Local microsandbox relay sockets.
-microsandbox-agent-client = { version = "0.5.6", features = ["uds"] }
+microsandbox-agent-client = { version = "0.5.7", features = ["uds"] }
 
-# WebSocket relay endpoints.
-microsandbox-agent-client = { version = "0.5.6", features = ["websocket"] }
+# Any caller-owned byte-stream transport (e.g. a pre-authenticated WebSocket
+# adapted to bytes).
+microsandbox-agent-client = { version = "0.5.7", features = ["stream"] }
 ```
 
 The high-level `microsandbox` SDK enables `uds` explicitly because local sandboxes are reached through Unix domain sockets.
@@ -93,27 +94,31 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## WebSocket Example
+## Byte-Stream Example
 
-Enable the `websocket` feature:
+Enable the `stream` feature:
 
 ```toml
-microsandbox-agent-client = { version = "0.5.6", features = ["websocket"] }
+microsandbox-agent-client = { version = "0.5.7", features = ["stream"] }
 ```
 
-Then connect to a relay endpoint:
+Drive the client over any `AsyncRead + AsyncWrite` — the caller owns the dial and any authentication, then hands over the connected stream:
 
 ```rust
 use microsandbox_agent_client::AgentClient;
+use tokio::io::{AsyncRead, AsyncWrite};
 
-async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    let client = AgentClient::connect_websocket("wss://relay.example.com/agent").await?;
+async fn example<S>(stream: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let client = AgentClient::connect_stream(stream).await?;
     println!("agent version: {}", client.agent_version());
     Ok(())
 }
 ```
 
-The WebSocket transport uses `tokio-tungstenite`. Each protocol frame is sent as one binary WebSocket message. Incoming binary messages may contain any number of bytes; the client buffers them and decodes complete protocol packets.
+`connect_stream` runs the relay handshake on the stream and treats it as a transparent byte pipe: protocol frames are length-prefixed, so the transport need not preserve message boundaries. This is the seam for transports the crate doesn't ship — e.g. a pre-authenticated WebSocket adapted to bytes.
 
 ## Typed And Raw APIs
 
@@ -164,8 +169,8 @@ async fn example(
 
 | Feature | Default | Description |
 | --- | --- | --- |
-| `uds` | no | Enables Unix domain socket connections with `AgentClient::connect*`. |
-| `websocket` | no | Enables `AgentClient::connect_websocket*` using `tokio-tungstenite`. |
+| `stream` | no | Enables `AgentClient::connect_stream*` over any `AsyncRead + AsyncWrite` byte stream. |
+| `uds` | no | Enables Unix domain socket connections with `AgentClient::connect*` (implies `stream`). |
 
 ## Validation
 
@@ -173,6 +178,6 @@ Useful focused checks:
 
 ```bash
 cargo check -p microsandbox-agent-client --no-default-features
+cargo test -p microsandbox-agent-client --features stream
 cargo test -p microsandbox-agent-client --features uds
-cargo test -p microsandbox-agent-client --features websocket
 ```

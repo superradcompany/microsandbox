@@ -12,20 +12,21 @@ path = "lib/lib.rs"
 
 [features]
 default = []
-uds = []
-websocket = ["dep:futures-util", "dep:tokio-tungstenite"]
+# Generic byte-stream transport: drive the client over any
+# `AsyncRead + AsyncWrite` (e.g. a caller-owned, pre-authenticated WebSocket
+# adapted to bytes). No extra dependencies.
+stream = []
+# Unix domain socket transport. Builds on the generic byte-stream path.
+uds = ["stream"]
 
 [dependencies]
 ciborium.workspace = true
-futures-util = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "sync"] }
-tokio-tungstenite = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
-tokio-tungstenite.workspace = true

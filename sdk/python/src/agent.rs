@@ -68,6 +68,15 @@ impl PyAgentClient {
         })
     }
 
+    /// Resolve a sandbox's agentd relay socket path without connecting.
+    ///
+    /// Sandbox names are limited to 128 UTF-8 bytes.
+    #[staticmethod]
+    fn socket_path(name: String) -> PyResult<String> {
+        let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_py_err)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     /// Send one frame and await a single response frame.
     fn request<'py>(
         &self,

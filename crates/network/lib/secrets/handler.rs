@@ -470,7 +470,7 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
-        Self::new_inner(config, sni, tls_intercepted, None)
+        Self::new_inner(config, sni, tls_intercepted, None, false)
     }
 
     /// Create a handler for a TLS-intercepted connection.
@@ -488,7 +488,40 @@ impl SecretsHandler {
             sni,
             true,
             Some(SecretHostIdentity { guest_ip, shared }),
+            false,
         )
+    }
+
+    /// Create a handler for a plain-HTTP (non-TLS) connection.
+    ///
+    /// Only substitutes secrets that have opted in with `require_tls_identity(false)`.
+    /// Host matching and DNS-cache binding are still enforced.
+    pub fn new_plain_http(
+        config: &SecretsConfig,
+        host: &str,
+        guest_ip: IpAddr,
+        shared: &SharedState,
+    ) -> Self {
+        Self::new_inner(
+            config,
+            host,
+            false,
+            Some(SecretHostIdentity { guest_ip, shared }),
+            false,
+        )
+    }
+
+    /// Handler for a plain-HTTP connection with no usable Host header.
+    ///
+    /// The host can't be proven, so secrets are blocked unless every one is
+    /// host-agnostic (`HostPattern::Any`) — only then is substitution safe.
+    pub fn new_plain_http_invalid_host(config: &SecretsConfig) -> Self {
+        let host_scoped = config
+            .secrets
+            .iter()
+            .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any));
+
+        Self::new_inner(config, "", false, None, host_scoped)
     }
 
     fn new_inner(
@@ -496,6 +529,7 @@ impl SecretsHandler {
         sni: &str,
         tls_intercepted: bool,
         identity: Option<SecretHostIdentity<'_>>,
+        force_ineligible: bool,
     ) -> Self {
         let enforce_http_authority = identity.is_some();
         let mut eligible_for_substitution = Vec::new();
@@ -512,7 +546,8 @@ impl SecretsHandler {
                 secret.placeholder.len().min(MAX_SECRET_PLACEHOLDER_BYTES),
             ));
 
-            let host_allowed = secret_host_allowed(secret, sni, identity.as_ref());
+            let host_allowed =
+                !force_ineligible && secret_host_allowed(secret, sni, identity.as_ref());
 
             // If the SNI matches an allowed host for this secret, add it to the
             // eligible list for substitution, and skip violation checks for this secret.
@@ -2026,7 +2061,7 @@ fn http2_request_summary(headers: &str) -> RequestSummary {
     summary
 }
 
-fn looks_like_http_request_prefix(data: &[u8]) -> bool {
+pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
     if data.is_empty() || b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".starts_with(data) {
         return true;
     }
@@ -2040,7 +2075,7 @@ fn looks_like_http_request_prefix(data: &[u8]) -> bool {
     !method.is_empty() && method.iter().copied().all(is_http_token_byte)
 }
 
-fn first_line_is_not_http_request(data: &[u8]) -> bool {
+pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
     let Some(line_end) = data.windows(2).position(|window| window == b"\r\n") else {
         return false;
     };
@@ -3653,6 +3688,97 @@ mod tests {
                 .unwrap()
                 .contains("$KEY")
         );
+    }
+
+    #[test]
+    fn new_plain_http_blocks_require_tls_identity_secrets() {
+        // new_plain_http must NOT substitute require_tls_identity=true secrets
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let shared = SharedState::new(4);
+        let ip = Ipv4Addr::new(1, 2, 3, 4);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut handler =
+            SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        // require_tls_identity=true (default) — placeholder must NOT be substituted
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("$KEY")
+        );
+    }
+
+    #[test]
+    fn new_plain_http_substitutes_when_tls_identity_not_required() {
+        // new_plain_http MUST substitute secrets with require_tls_identity=false
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let shared = SharedState::new(4);
+        let ip = Ipv4Addr::new(1, 2, 3, 4);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut handler =
+            SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn new_plain_http_invalid_host_blocks_host_bound_secret() {
+        // Host could not be proven: a host-bound secret must not be substituted,
+        // and its placeholder must not leak unchanged to the server.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        // on_violation is Block, so the placeholder is blocked, not forwarded.
+        assert!(handler.substitute(input).is_err());
+    }
+
+    #[test]
+    fn new_plain_http_invalid_host_substitutes_when_all_secrets_any() {
+        // When every secret allows HostPattern::Any the host is irrelevant, so
+        // substitution is allowed even with no provable host.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        secret.allowed_hosts = vec![HostPattern::Any];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn new_plain_http_invalid_host_blocks_any_secret_when_mixed() {
+        // The all-Any exception is all-or-nothing: a single host-bound secret
+        // alongside an Any secret makes every secret ineligible.
+        let mut any_secret = make_secret("$ANY", "any-value", "api.openai.com");
+        any_secret.require_tls_identity = false;
+        any_secret.allowed_hosts = vec![HostPattern::Any];
+        let mut bound_secret = make_secret("$BOUND", "bound-value", "api.openai.com");
+        bound_secret.require_tls_identity = false;
+        let config = make_config(vec![any_secret, bound_secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        // Even the Any secret's placeholder is now blocked, not substituted.
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $ANY\r\n\r\n";
+        assert!(handler.substitute(input).is_err());
     }
 
     #[test]

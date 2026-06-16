@@ -409,7 +409,7 @@ mod linux {
         unsafe {
             (*ifa).ifa_family = family;
             (*ifa).ifa_prefixlen = prefix_len;
-            (*ifa).ifa_flags = 0;
+            (*ifa).ifa_flags = if is_ipv4 { 0 } else { libc::IFA_F_NODAD as u8 };
             (*ifa).ifa_index = ifindex;
             (*ifa).ifa_scope = libc::RT_SCOPE_UNIVERSE;
         }
