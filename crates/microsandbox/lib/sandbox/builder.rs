@@ -1020,6 +1020,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
+    use crate::backend::{LocalBackend, with_backend};
     use crate::sandbox::{MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
@@ -1027,6 +1028,7 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+    use tempfile::Builder as TempDirBuilder;
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
@@ -1043,12 +1045,24 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_builder_accepts_128_byte_sandbox_name() {
-        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
-        let config = SandboxBuilder::new(name.clone())
-            .image("alpine")
+        let temp = TempDirBuilder::new()
+            .prefix("msb")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path())
             .build()
             .await
             .unwrap();
+        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
+        let config = with_backend(backend, async {
+            SandboxBuilder::new(name.clone())
+                .image("alpine")
+                .build()
+                .await
+                .unwrap()
+        })
+        .await;
 
         assert_eq!(config.name, name);
     }
