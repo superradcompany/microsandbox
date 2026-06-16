@@ -595,7 +595,20 @@ jobs:
       # setup-bun downloads a zipped release; unzip isn't preinstalled on
       # the self-hosted runner.
       - name: Install unzip
-        run: sudo apt-get update && sudo apt-get install -y unzip
+        run: |
+          if command -v unzip >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          for attempt in {1..10}; do
+            if sudo apt-get update && sudo apt-get install -y unzip; then
+              exit 0
+            fi
+            echo "apt-get install unzip failed on attempt ${attempt}; retrying..."
+            sleep 10
+          done
+
+          exit 1
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
