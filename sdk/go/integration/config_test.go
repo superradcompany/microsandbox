@@ -273,7 +273,7 @@ func TestWithPullPolicyRoundTrip(t *testing.T) {
 	} {
 		t.Run(string(p), func(t *testing.T) {
 			ctx := integrationCtx(t)
-			name := "go-sdk-pull-" + t.Name()
+			name := "go-sdk-pull-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 			sb, err := microsandbox.CreateSandbox(ctx, name,
 				microsandbox.WithImage(goIntegrationImage),
 				microsandbox.WithPullPolicy(p),

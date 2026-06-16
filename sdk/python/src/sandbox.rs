@@ -236,6 +236,36 @@ impl PySandbox {
         })
     }
 
+    /// List sandboxes matching the given labels.
+    #[staticmethod]
+    #[pyo3(signature = (*, labels = None))]
+    fn list_with<'py>(
+        py: Python<'py>,
+        labels: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handles = match labels {
+                Some(labels) if !labels.is_empty() => {
+                    let filter = labels.into_iter().fold(
+                        microsandbox::sandbox::SandboxFilter::new(),
+                        |filter, (key, value)| filter.label(key, value),
+                    );
+                    microsandbox::sandbox::Sandbox::list_with(filter)
+                        .await
+                        .map_err(to_py_err)?
+                }
+                _ => microsandbox::sandbox::Sandbox::list()
+                    .await
+                    .map_err(to_py_err)?,
+            };
+            let py_handles: Vec<PySandboxHandle> = handles
+                .into_iter()
+                .map(PySandboxHandle::from_rust)
+                .collect();
+            Ok(py_handles)
+        })
+    }
+
     /// Remove a stopped sandbox.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
@@ -609,7 +639,10 @@ impl PySandbox {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            sandbox.stop().await.map_err(to_py_err)?;
+            let handle = microsandbox::sandbox::Sandbox::get(sandbox.name())
+                .await
+                .map_err(to_py_err)?;
+            handle.stop().await.map_err(to_py_err)?;
             Ok(())
         })
     }

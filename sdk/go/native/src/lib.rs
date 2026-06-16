@@ -916,6 +916,8 @@ struct SandboxCreateOpts {
     /// replacing an existing sandbox. `Some(0)` skips SIGTERM. `None`
     /// uses the Rust SDK default when `replace` is set.
     replace_with_timeout_ms: Option<u64>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
     /// User-workload entrypoint override (separate from `init`, which is
     /// guest PID 1). Sent across as an array of strings.
     #[serde(default)]
@@ -1814,6 +1816,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
+            }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
             }
             // Top-level ports.
             for (host, guest) in &opts.ports {

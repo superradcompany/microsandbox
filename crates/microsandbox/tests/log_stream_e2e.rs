@@ -22,6 +22,12 @@ use test_utils::msb_test;
 
 const ALPINE: &str = "mirror.gcr.io/library/alpine";
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    Sandbox::remove(name).await.expect("remove");
+}
+
 /// Snapshot path: after exec returns, the relay tap should have
 /// flushed the session's stdout into `exec.log`, and `read_logs`
 /// should surface it with `source = Stdout` and a real `session_id`.
@@ -49,8 +55,7 @@ async fn logs_captures_exec_stdout_from_running_sandbox() {
         .await
         .expect("read logs");
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     let matched: Vec<_> = entries.iter().filter(|e| contains(e, marker)).collect();
     assert!(
@@ -120,8 +125,7 @@ async fn log_stream_follow_catches_live_writes() {
     .await
     .expect("marker arrived within timeout");
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     assert_eq!(found.source, LogSource::Stdout);
 }
@@ -179,8 +183,7 @@ async fn log_stream_resume_from_cursor_excludes_replayed_entries() {
         .await
         .expect("drain resumed stream");
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     let saw_a = resumed.iter().any(|e| contains(e, marker_a));
     let saw_b = resumed.iter().any(|e| contains(e, marker_b));

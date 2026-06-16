@@ -124,6 +124,26 @@ impl Sandbox {
         Ok(handles.iter().map(sandbox_handle_to_info).collect())
     }
 
+    /// List sandboxes matching a filter.
+    #[napi(js_name = "listWith")]
+    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<SandboxInfo>> {
+        let handles = match filter.labels {
+            Some(labels) if !labels.is_empty() => {
+                let filter = labels.into_iter().fold(
+                    microsandbox::sandbox::SandboxFilter::new(),
+                    |filter, (key, value)| filter.label(key, value),
+                );
+                microsandbox::sandbox::Sandbox::list_with(filter)
+                    .await
+                    .map_err(to_napi_error)?
+            }
+            _ => microsandbox::sandbox::Sandbox::list()
+                .await
+                .map_err(to_napi_error)?,
+        };
+        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+    }
+
     /// Remove a stopped sandbox from the database.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
