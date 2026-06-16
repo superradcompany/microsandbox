@@ -562,21 +562,33 @@ pub(crate) mod local {
         local: &LocalBackend,
         name: &str,
     ) -> MicrosandboxResult<AgentClient> {
-        let sock_path = local
-            .sandboxes_dir()
-            .join(name)
-            .join("runtime")
-            .join("agent.sock");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        tokio::time::timeout(
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-            AgentClient::connect(&sock_path),
-        )
-        .await
-        .map_err(|_| {
-            MicrosandboxError::Runtime(format!("timed out connecting to agent for {name:?}"))
-        })?
-        .map_err(Into::into)
+        connect_agent_with_timeout(local, name, std::time::Duration::from_secs(10)).await
+    }
+
+    pub(crate) async fn connect_agent_with_timeout(
+        local: &LocalBackend,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<AgentClient> {
+        let mut last_error = None;
+
+        for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(local, name) {
+            if !sock_path.exists() {
+                continue;
+            }
+
+            match AgentClient::connect_with_timeout(&sock_path, timeout).await {
+                Ok(client) => return Ok(client),
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        match last_error {
+            Some(error) => Err(error.into()),
+            None => Err(MicrosandboxError::Runtime(format!(
+                "no agent socket found for sandbox {name:?}"
+            ))),
+        }
     }
 
     async fn open_file(

@@ -751,11 +751,11 @@ pub(crate) async fn remove_local(
 
 /// Local lifecycle: stop a sandbox by name.
 ///
-/// Prefers the agent UDS at `sandboxes_dir/<name>/runtime/agent.sock`:
-/// connects, sends `MessageType::Shutdown`, and lets agentd run an in-guest
-/// `sync()` + `reboot(RB_POWER_OFF)` so ext4 unmounts cleanly (no journal
-/// replay on next boot). Falls back to SIGTERM via PID if the socket is
-/// unreachable (agentd wedged, sandbox just transitioning, etc.).
+/// Tries the configured agent relay socket candidates, connects, sends
+/// `MessageType::Shutdown`, and lets agentd run an in-guest `sync()` +
+/// `reboot(RB_POWER_OFF)` so ext4 unmounts cleanly (no journal replay on next
+/// boot). Falls back to SIGTERM via PID if the socket is unreachable (agentd
+/// wedged, sandbox just transitioning, etc.).
 ///
 /// No-op when the sandbox isn't in Running/Draining.
 pub(crate) async fn stop_local(
@@ -777,46 +777,26 @@ pub(crate) async fn stop_local(
     // Try the clean-shutdown path: connect to the agent relay UDS and send
     // `core.shutdown`. agentd runs `sync()` + `reboot(RB_POWER_OFF)` so
     // block-root filesystems unmount cleanly.
-    let sock_path = local_backend
-        .sandboxes_dir()
-        .join(name)
-        .join("runtime")
-        .join("agent.sock");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    match tokio::time::timeout(
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
-        AgentClient::connect(&sock_path),
+    match fs::local::connect_agent_with_timeout(
+        local_backend,
+        name,
+        std::time::Duration::from_secs(5),
     )
     .await
     {
-        Ok(Ok(client)) => {
+        Ok(client) => {
             client.send(0, MessageType::Shutdown, &()).await?;
             Ok(())
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             // Graceful degradation: agent UDS unreachable (socket missing,
             // ECONNREFUSED, handshake timeout). Fall back to SIGTERM via PID
             // so we still attempt a stop — at the cost of skipping the
             // in-guest sync(). The reaper updates DB status on PID exit.
             tracing::warn!(
                 sandbox = %name,
-                sock = %sock_path.display(),
                 error = %e,
                 "stop_local: agent UDS unreachable; falling back to SIGTERM",
-            );
-            if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
-                nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                )?;
-            }
-            Ok(())
-        }
-        Err(_) => {
-            tracing::warn!(
-                sandbox = %name,
-                sock = %sock_path.display(),
-                "stop_local: agent UDS timed out; falling back to SIGTERM",
             );
             if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
                 nix::sys::signal::kill(

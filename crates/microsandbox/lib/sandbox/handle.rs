@@ -12,7 +12,6 @@ use sea_orm::EntityTrait;
 
 use crate::{
     MicrosandboxResult,
-    agent::AgentClient,
     backend::{
         Backend, CloudSandbox, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
     },
@@ -328,20 +327,12 @@ impl SandboxHandle {
                     feature: "SandboxHandle::connect on cloud".into(),
                     available_when: "when cloud attach lands".into(),
                 })?;
-        let sock_path = local_backend
-            .sandboxes_dir()
-            .join(&self.name)
-            .join("runtime")
-            .join("agent.sock");
-
-        let client = tokio::time::timeout(timeout, AgentClient::connect(&sock_path))
-            .await
-            .map_err(|_| {
-                crate::MicrosandboxError::Runtime(format!(
-                    "timed out connecting to sandbox '{}' agent",
-                    self.name
-                ))
-            })??;
+        let client = crate::sandbox::fs::local::connect_agent_with_timeout(
+            local_backend,
+            &self.name,
+            timeout,
+        )
+        .await?;
         let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
 
         Ok(Sandbox::from_local(

@@ -551,9 +551,38 @@ async fn ensure_named_volumes(
 
 /// Return agent relay socket paths in preferred connection order.
 pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
+    let (run_dir, sandboxes_dir) = crate::backend::default_backend()
+        .as_local()
+        .map(|local| (local.config().run_dir(), local.config().sandboxes_dir()))
+        .unwrap_or_else(|| {
+            let home = microsandbox_utils::resolve_home();
+            (
+                home.join(microsandbox_utils::RUN_SUBDIR),
+                home.join(microsandbox_utils::SANDBOXES_SUBDIR),
+            )
+        });
+    sandbox_agent_socket_path_candidates_with_roots(&run_dir, &sandboxes_dir, name)
+}
+
+pub(crate) fn sandbox_agent_socket_path_candidates_for(
+    local: &LocalBackend,
+    name: &str,
+) -> [PathBuf; 2] {
+    sandbox_agent_socket_path_candidates_with_roots(
+        &local.config().run_dir(),
+        &local.config().sandboxes_dir(),
+        name,
+    )
+}
+
+fn sandbox_agent_socket_path_candidates_with_roots(
+    run_dir: &Path,
+    sandboxes_dir: &Path,
+    name: &str,
+) -> [PathBuf; 2] {
     [
-        sandbox_agent_socket_path(name),
-        legacy_sandbox_agent_socket_path(name),
+        sandbox_agent_socket_path(run_dir, name),
+        legacy_sandbox_agent_socket_path(sandboxes_dir, name),
     ]
 }
 
@@ -579,7 +608,7 @@ pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResul
     )))
 }
 
-fn sandbox_agent_socket_path(name: &str) -> PathBuf {
+fn sandbox_agent_socket_path(run_dir: &Path, name: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     let digest = hasher.finalize();
@@ -590,21 +619,11 @@ fn sandbox_agent_socket_path(name: &str) -> PathBuf {
     }
     filename.push_str(".sock");
 
-    let base = crate::backend::default_backend()
-        .as_local()
-        .map(|local| local.config().run_dir())
-        .unwrap_or_else(|| microsandbox_utils::resolve_home().join(microsandbox_utils::RUN_SUBDIR));
-    base.join("agent").join(filename)
+    run_dir.join("agent").join(filename)
 }
 
-fn legacy_sandbox_agent_socket_path(name: &str) -> PathBuf {
-    let base = crate::backend::default_backend()
-        .as_local()
-        .map(|local| local.config().sandboxes_dir())
-        .unwrap_or_else(|| {
-            microsandbox_utils::resolve_home().join(microsandbox_utils::SANDBOXES_SUBDIR)
-        });
-    base.join(name).join("runtime").join("agent.sock")
+fn legacy_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
+    sandboxes_dir.join(name).join("runtime").join("agent.sock")
 }
 
 #[cfg(unix)]
@@ -1305,6 +1324,7 @@ mod tests {
             SandboxConfig,
         },
     };
+    use tempfile::tempdir;
 
     //----------------------------------------------------------------------------------------------
     // Functions: Helpers
@@ -1408,6 +1428,27 @@ mod tests {
             rendered
                 .windows(2)
                 .any(|pair| pair == ["--agent-sock", "/tmp/agent.sock"])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("msb-home");
+        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+
+        let [hashed, legacy] =
+            super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
+
+        assert!(hashed.starts_with(backend.config().run_dir().join("agent")));
+        assert_eq!(
+            legacy,
+            backend
+                .config()
+                .sandboxes_dir()
+                .join("sdk-socket-test")
+                .join("runtime")
+                .join("agent.sock")
         );
     }
 
