@@ -204,6 +204,8 @@ async fn create_sandbox(name: &str) -> Sandbox {
 }
 
 async fn cleanup(sandbox: Sandbox, name: &str) {
-    sandbox.stop().await.expect("stop sandbox");
+    drop(sandbox);
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    handle.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 }

@@ -12,6 +12,16 @@ use test_utils::msb_test;
 const IMAGE: &str = "mirror.gcr.io/library/alpine";
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -34,8 +44,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     assert_no_new_privs(&default, "0").await;
     assert_cap_sys_admin(&default, true).await;
     assert_mount_tmpfs(&default, true).await;
-    default.stop().await.expect("stop default");
-    let _ = Sandbox::remove(default_name).await;
+    stop_and_remove(default_name).await;
 
     let restricted = Sandbox::builder(restricted_name)
         .image(IMAGE)
@@ -57,13 +66,8 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     )
     .await;
     assert_mount_tmpfs(&restricted, false).await;
-    restricted.stop().await.expect("stop restricted");
-    let _ = Sandbox::remove(restricted_name).await;
+    stop_and_remove(restricted_name).await;
 }
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
 
 async fn assert_no_new_privs(sandbox: &Sandbox, expected: &str) {
     let out = sandbox

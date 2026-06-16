@@ -66,6 +66,12 @@ async fn boot_with_test_init(name: &str, init_bin: &Path) -> Sandbox {
         .expect("create sandbox with handoff")
 }
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -85,8 +91,7 @@ async fn pid_1_is_handed_off_to_test_init() {
         .expect("read /proc/1/comm");
     let comm = out.stdout().expect("utf8").trim().to_owned();
 
-    sb.stop().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 
     assert_eq!(
         comm, "test-init",
@@ -130,8 +135,7 @@ async fn exec_session_parent_is_pid_1_post_handoff() {
         .parse()
         .expect("agentd PPid is u32");
 
-    sb.stop().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 
     assert_eq!(
         agentd_ppid, 1,
@@ -156,10 +160,12 @@ async fn shutdown_via_signal_path_terminates_guest() {
     // PID-1 branch will fail (we're not PID 1), so the signal-based
     // path runs. Should still complete within the host's normal
     // shutdown timeout.
-    sb.stop().await.expect("stop");
-    let status = Sandbox::get(name)
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    handle.stop().await.expect("stop");
+    let status = handle
+        .refresh()
         .await
-        .expect("get stopped sandbox")
+        .expect("refresh stopped sandbox")
         .status_snapshot();
     let _ = Sandbox::remove(name).await;
 
