@@ -1810,7 +1810,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
                 return Err(FfiError::invalid_argument(
-                    "oci_upper_size_mib is not valid when booting from a snapshot",
+                    "disk_size is not valid when booting from a snapshot",
                 ));
             }
             if let Some(img) = opts.image {
@@ -1821,7 +1821,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 }
             }
             if let Some(size_mib) = opts.oci_upper_size_mib {
-                builder = builder.oci_upper_size(size_mib);
+                builder = builder.disk_size(size_mib);
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);

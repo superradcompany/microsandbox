@@ -1381,7 +1381,7 @@ type SandboxListFilter struct {
 type CreateOptions struct {
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
-	OCIUpperSizeMiB      *uint32              `json:"oci_upper_size_mib,omitempty"`
+	DiskSizeMiB          *uint32              `json:"oci_upper_size_mib,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`

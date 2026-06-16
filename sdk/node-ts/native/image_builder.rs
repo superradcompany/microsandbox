@@ -11,8 +11,8 @@ use microsandbox::sandbox::ImageBuilder as RustImageBuilder;
 
 /// Fluent builder for an explicit rootfs image source.
 ///
-/// Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
-/// or `Sandbox.builder(...).imageWith((i) => i.oci(...).upperSize(...))`.
+/// Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`.
+/// The writable disk size is set at the sandbox level via `.diskSize(...)`.
 /// Standalone use is rare; `.image("python:3.12")` and `.image("./ubuntu.qcow2")`
 /// resolve the common cases automatically.
 #[napi(js_name = "ImageBuilder")]
@@ -38,14 +38,6 @@ impl JsImageBuilder {
     pub fn oci(&mut self, reference: String) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.oci(reference));
-        self
-    }
-
-    /// Set the writable overlay upper size for an OCI rootfs, in MiB.
-    #[napi(js_name = "upperSize")]
-    pub fn upper_size(&mut self, size_mib: u32) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.upper_size(size_mib));
         self
     }
 

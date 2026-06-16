@@ -127,6 +127,7 @@ export interface NapiSandboxBuilderSetters {
   imageWith(configure: (b: any) => any): this;
   cpus(n: number): this;
   memory(mib: number): this;
+  diskSize(sizeMib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -1008,7 +1009,6 @@ export interface NapiRegistryConfigBuilder {
 
 export interface NapiImageBuilder {
   oci(reference: string): this;
-  upperSize(sizeMiB: number): this;
   disk(path: string): this;
   fstype(fstype: string): this;
 }

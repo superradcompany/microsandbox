@@ -119,6 +119,15 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Writable disk size (the OCI `upper.ext4` overlay) in MiB. Only valid for
+    /// an OCI-image rootfs.
+    #[napi(js_name = "diskSize")]
+    pub fn disk_size(&mut self, size_mib: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.disk_size(Mebibytes::from(size_mib)));
+        self
+    }
+
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.
     #[napi(js_name = "logLevel")]
     pub fn log_level(&mut self, level: String) -> Result<&Self> {

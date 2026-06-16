@@ -85,14 +85,10 @@ pub struct PyImagePruneReport {
 impl PyImage {
     /// Create an OCI rootfs image source.
     #[staticmethod]
-    #[pyo3(signature = (reference, *, upper_size_mib = None))]
-    fn oci(py: Python<'_>, reference: String, upper_size_mib: Option<u32>) -> PyResult<PyObject> {
+    fn oci(py: Python<'_>, reference: String) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("_type", "oci")?;
         kwargs.set_item("_reference", reference)?;
-        if let Some(upper_size_mib) = upper_size_mib {
-            kwargs.set_item("_upper_size_mib", upper_size_mib)?;
-        }
         Ok(image_source_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 

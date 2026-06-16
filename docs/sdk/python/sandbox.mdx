@@ -23,7 +23,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | Name | Type | Description |
 |------|------|-------------|
 | name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
 | snapshot | `str \| os.PathLike` | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | Virtual CPUs (default `1`) |
 | memory | `int` | Guest memory in MiB (default `512`) |
@@ -923,7 +923,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| ImageSource` | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| image | `str \| ImageSource` | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
 | snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |

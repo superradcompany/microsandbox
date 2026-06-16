@@ -114,9 +114,12 @@ impl SandboxBuilder {
     /// Set the root filesystem image using a builder closure.
     ///
     /// ```ignore
-    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// .image_with(|i| i.oci("python:3.12"))
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
+    ///
+    /// The writable disk size is set separately at the sandbox level via
+    /// [`disk_size`](Self::disk_size).
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
         match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.image = rootfs,
@@ -129,12 +132,13 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the writable overlay upper size for an OCI rootfs.
+    /// Set the writable disk size (the OCI `upper.ext4` overlay) for the
+    /// sandbox.
     ///
-    /// Prefer [`image_with`](Self::image_with) when configuring the image and
-    /// upper together. This method exists for call sites, such as CLIs, where
-    /// the image reference and its options are parsed separately.
-    pub fn oci_upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+    /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt)
+    /// helper, mirroring [`memory`](Self::memory). Only valid for an OCI-image
+    /// rootfs; rejected for bind/disk rootfs and when booting from a snapshot.
+    pub fn disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
         let size_mib = size.into().as_u32();
         match &mut self.config.image {
             RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
@@ -143,14 +147,14 @@ impl SandboxBuilder {
             RootfsSource::Oci(_) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "oci_upper_size() requires an OCI image to be set first".into(),
+                        "disk_size() requires an OCI image to be set first".into(),
                     ));
                 }
             }
             _ => {
                 if self.build_error.is_none() {
                     self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "oci_upper_size() is only valid for OCI images".into(),
+                        "disk_size() is only valid for OCI images".into(),
                     ));
                 }
             }
@@ -1046,9 +1050,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_image_with_oci_upper_size() {
+    async fn test_builder_disk_size() {
         let config = SandboxBuilder::new("test")
-            .image_with(|i| i.oci("alpine").upper_size(8192u32))
+            .image("alpine")
+            .disk_size(8192u32)
             .build()
             .await
             .unwrap();
@@ -1074,10 +1079,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_oci_upper_size_rejects_bind_rootfs() {
+    async fn test_builder_disk_size_rejects_bind_rootfs() {
         let err = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .oci_upper_size(8192u32)
+            .disk_size(8192u32)
             .build()
             .await
             .unwrap_err();
@@ -1101,9 +1106,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_from_snapshot_rejects_explicit_oci_upper_size() {
+    async fn test_builder_from_snapshot_rejects_explicit_disk_size() {
         let err = SandboxBuilder::new("test")
-            .image_with(|i| i.oci("").upper_size(8192u32))
+            .image("alpine")
+            .disk_size(8192u32)
             .from_snapshot("/tmp/missing-snapshot")
             .build()
             .await

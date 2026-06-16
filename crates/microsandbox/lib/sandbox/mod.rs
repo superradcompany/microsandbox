@@ -2208,7 +2208,7 @@ fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
             }
             if oci.upper_size_mib == Some(0) {
                 return Err(MicrosandboxError::InvalidConfig(
-                    "oci upper_size must be greater than 0".into(),
+                    "disk_size must be greater than 0".into(),
                 ));
             }
         }
