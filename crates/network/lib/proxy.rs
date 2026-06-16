@@ -349,7 +349,14 @@ async fn handle_connect_tunnel(
     }
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
-    let mut proxy_stream = connect_upstream(proxy_dst, &proxy_connect, &shared).await?;
+    let mut proxy_stream = match TcpStream::connect(proxy_dst).await {
+        Ok(s) => s,
+        Err(e) => {
+            proxy_connect.mark_upstream_connect_failed();
+            shared.proxy_wake.wake();
+            return Err(e);
+        }
+    };
     proxy_stream.write_all(connect_req).await?;
     proxy_stream.flush().await?;
 
@@ -375,12 +382,17 @@ async fn handle_connect_tunnel(
         }
     };
 
-    if !proxy_resp[..header_end].windows(3).any(|w| w == b"200") {
+    let status_line = proxy_resp[..header_end]
+        .split(|&b| b == b'\n')
+        .next()
+        .unwrap_or(&[]);
+    if !status_line.windows(4).any(|w| w == b" 200") {
         return Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "proxy rejected CONNECT",
         ));
     }
+    proxy_connect.mark_connected();
 
     if to_smoltcp
         .send(Bytes::copy_from_slice(&proxy_resp[..header_end]))
