@@ -486,7 +486,7 @@ mod tests {
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
 
-        // All 12 tables should be present.
+        // All migrated tables should be present.
         let rows = conn
             .query_all(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
@@ -508,9 +508,11 @@ mod tests {
             "manifest_layer",
             "run",
             "sandbox",
+            "sandbox_labels",
             "sandbox_rootfs",
             "snapshot_index",
             "volume",
+            "volume_attach",
         ];
 
         assert_eq!(table_names, expected);
