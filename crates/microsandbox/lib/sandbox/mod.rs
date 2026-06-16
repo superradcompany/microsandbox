@@ -664,9 +664,10 @@ async fn create_inner_local(
     mode: SpawnMode,
 ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
     let (mut handle, agent_sock_path) = spawn_sandbox(local, &config, sandbox_id, mode).await?;
+    let log_dir = local.sandboxes_dir().join(&config.name).join("logs");
 
     // Wait for the relay socket to become available.
-    let client = wait_for_relay(&agent_sock_path, &mut handle, &config.name).await?;
+    let client = wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.name).await?;
 
     if let Ok(ready) = client.ready() {
         tracing::info!(
@@ -1463,6 +1464,7 @@ impl Sandbox {
 /// or a timeout is reached.
 async fn wait_for_relay(
     sock_path: &std::path::Path,
+    log_dir: &std::path::Path,
     handle: &mut ProcessHandle,
     sandbox_name: &str,
 ) -> MicrosandboxResult<AgentClient> {
@@ -1475,11 +1477,6 @@ async fn wait_for_relay(
     let max_backoff = std::time::Duration::from_millis(10);
     let mut backoff = std::time::Duration::from_millis(1);
     let mut attempts = 0u32;
-
-    let log_dir = sock_path
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("logs"));
 
     loop {
         attempts += 1;
@@ -1494,9 +1491,7 @@ async fn wait_for_relay(
                 // The relay is up — clear any stale boot-error.json from
                 // a previous failed attempt so it cannot misattribute a
                 // future crash.
-                if let Some(ref dir) = log_dir {
-                    let _ = microsandbox_runtime::boot_error::BootError::delete(dir);
-                }
+                let _ = microsandbox_runtime::boot_error::BootError::delete(log_dir);
                 return Ok(client);
             }
             Ok(Err(_)) | Err(_) if tokio::time::Instant::now() < deadline => {
@@ -1507,7 +1502,7 @@ async fn wait_for_relay(
 
                     // Prefer the structured boot-error record if the
                     // sandbox got far enough to write one.
-                    if let Some(boot_err) = read_boot_error(log_dir.as_deref()) {
+                    if let Some(boot_err) = read_boot_error(log_dir) {
                         return Err(crate::MicrosandboxError::BootStart {
                             name: sandbox_name.to_string(),
                             err: boot_err,
@@ -1545,7 +1540,7 @@ async fn wait_for_relay(
                     error = %e,
                     "wait_for_relay: agent connection failed"
                 );
-                if let Some(boot_err) = read_boot_error(log_dir.as_deref()) {
+                if let Some(boot_err) = read_boot_error(log_dir) {
                     return Err(crate::MicrosandboxError::BootStart {
                         name: sandbox_name.to_string(),
                         err: boot_err,
@@ -1565,7 +1560,7 @@ async fn wait_for_relay(
                 // and never produced the handshake bytes). Prefer that
                 // typed record over the raw IO/timeout error so the CLI
                 // can render the styled boot-error block.
-                if let Some(boot_err) = read_boot_error(log_dir.as_deref()) {
+                if let Some(boot_err) = read_boot_error(log_dir) {
                     return Err(crate::MicrosandboxError::BootStart {
                         name: sandbox_name.to_string(),
                         err: boot_err,
@@ -1585,10 +1580,9 @@ async fn wait_for_relay(
 /// the contents cannot be deserialized — callers fall back to a raw
 /// error in those cases.
 fn read_boot_error(
-    log_dir: Option<&std::path::Path>,
+    log_dir: &std::path::Path,
 ) -> Option<microsandbox_runtime::boot_error::BootError> {
-    let dir = log_dir?;
-    microsandbox_runtime::boot_error::BootError::read(dir)
+    microsandbox_runtime::boot_error::BootError::read(log_dir)
         .ok()
         .flatten()
 }
