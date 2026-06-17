@@ -18,6 +18,8 @@ pub struct PySandboxSshOps {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
 
+pub type PySandboxSsh = PySandboxSshOps;
+
 /// Output from an SSH exec request.
 #[pyclass(name = "SshOutput")]
 pub struct PySshOutput {

@@ -73,7 +73,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
         let json = serde_json::json!({
             "name": handle.name(),
-            "status": format!("{:?}", handle.status()),
+            "status": format!("{:?}", handle.status_snapshot()),
             "config": config,
             "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
@@ -82,7 +82,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = format!("{:?}", handle.status());
+    let status = format!("{:?}", handle.status_snapshot());
 
     ui::detail_kv("Name", handle.name());
     ui::detail_kv("Status", &ui::format_status(&status));

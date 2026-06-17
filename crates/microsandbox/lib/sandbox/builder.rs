@@ -1,7 +1,5 @@
 //! Fluent builder for [`SandboxConfig`].
 
-#[cfg(feature = "net")]
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,6 +8,8 @@ use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
 use microsandbox_network::config::{PortProtocol, PublishedPort};
+#[cfg(feature = "net")]
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
@@ -367,19 +367,6 @@ impl SandboxBuilder {
         self
     }
 
-    /// Override the libkrunfw shared library for this sandbox.
-    ///
-    /// By default, microsandbox resolves libkrunfw via the global config or
-    /// finds it next to the `msb` binary. Use this to point at a specific
-    /// libkrunfw build — for example, an unreleased firmware during
-    /// development.
-    ///
-    /// The path is validated at [`build`](Self::build) time.
-    pub fn libkrunfw_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.libkrunfw_path = Some(path.into());
-        self
-    }
-
     /// Set the user identity inside the sandbox (e.g., `"1000"`, `"appuser"`, `"1000:1000"`).
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.config.user = Some(user.into());
@@ -585,10 +572,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Attach a label (`key`/`value`) to the sandbox for attribution. Labels
-    /// are surfaced as attributes on the sandbox's metrics, letting backends
-    /// build per-user or per-tenant views. Can be called multiple times; the
-    /// last value for a given key wins.
+    /// Attach a label (`key`/`value`) to the sandbox for attribution.
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.labels.insert(key.into(), value.into());
         self
@@ -673,11 +657,7 @@ impl SandboxBuilder {
     /// .volume("/data", |m| m.bind("/host/data"))
     /// .volume("/config", |m| m.bind("/host/config").readonly())
     /// .volume("/cache", |m| m.named("my-cache"))
-    /// .volume("/tmp", |m| m.named_with("my-sandbox-tmp", |v| v.create()))
-    /// .volume("/scratch", |m| m
-    ///     .named_with("my-sandbox-scratch", |v| v.ensure_exists().quota(1024).label("owner", "team"))
-    ///     .readonly())
-    /// .volume("/tmpfs", |m| m.tmpfs().size(100))
+    /// .volume("/tmp", |m| m.tmpfs().size(100))
     /// ```
     pub fn volume(
         mut self,
@@ -757,9 +737,9 @@ impl SandboxBuilder {
     /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
     /// manifest is opened here and its pinned image reference, manifest
     /// digest, and upper-layer source path are populated onto the config.
+    /// Backend-owned defaults are applied when the config is created, not here.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.resolve_pending().await?;
-        self.config.apply_rootfs_defaults();
         self.validate()?;
         Ok(self.config)
     }
@@ -797,13 +777,17 @@ impl SandboxBuilder {
 
     /// Create the sandbox. Boots the VM with agentd ready.
     pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
-        let mode = if self.detached {
-            crate::runtime::SpawnMode::Detached
-        } else {
-            crate::runtime::SpawnMode::Attached
-        };
+        if self.detached {
+            return self.create_detached().await;
+        }
         let config = self.build().await?;
-        super::Sandbox::create_with_mode(config, mode, None).await
+        super::Sandbox::create(config).await
+    }
+
+    /// Create the sandbox for detached/background use.
+    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
+        let config = self.build().await?;
+        super::Sandbox::create_detached(config).await
     }
 
     /// Create the sandbox with pull progress reporting.
@@ -822,15 +806,62 @@ impl SandboxBuilder {
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let mode = if self.detached {
-            crate::runtime::SpawnMode::Detached
-        } else {
-            crate::runtime::SpawnMode::Attached
-        };
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
             let config = self.build().await?;
-            super::Sandbox::create_with_mode(config, mode, Some(sender)).await
+            let backend = crate::backend::default_backend();
+            match backend.kind() {
+                crate::backend::BackendKind::Local => {
+                    crate::sandbox::create_local(
+                        backend,
+                        config,
+                        crate::runtime::SpawnMode::Attached,
+                        Some(sender),
+                    )
+                    .await
+                }
+                crate::backend::BackendKind::Cloud => {
+                    drop(sender);
+                    backend
+                        .sandboxes()
+                        .create(backend.clone(), config, true)
+                        .await
+                }
+            }
+        });
+        Ok((handle, task))
+    }
+
+    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
+    /// mode so the sandbox survives after the creating process exits.
+    pub fn create_detached_with_pull_progress(
+        self,
+    ) -> crate::MicrosandboxResult<(
+        PullProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        let (handle, sender) = microsandbox_image::progress_channel();
+        let task = tokio::spawn(async move {
+            let config = self.build().await?;
+            let backend = crate::backend::default_backend();
+            match backend.kind() {
+                crate::backend::BackendKind::Local => {
+                    crate::sandbox::create_local(
+                        backend,
+                        config,
+                        crate::runtime::SpawnMode::Detached,
+                        Some(sender),
+                    )
+                    .await
+                }
+                crate::backend::BackendKind::Cloud => {
+                    drop(sender);
+                    backend
+                        .sandboxes()
+                        .create_detached(backend.clone(), config)
+                        .await
+                }
+            }
         });
         Ok((handle, task))
     }
@@ -849,33 +880,7 @@ impl SandboxBuilder {
             ));
         }
         super::validate_sandbox_name_for_runtime(&self.config.name)?;
-
-        if let Some(hostname) = &self.config.hostname {
-            if hostname.is_empty() {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "hostname must not be empty".into(),
-                ));
-            }
-            let len = hostname.len();
-            if len > super::MAX_HOSTNAME_BYTES {
-                return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                    "hostname is too long: {len} bytes (max {})",
-                    super::MAX_HOSTNAME_BYTES
-                )));
-            }
-        }
-
-        if self.config.cpus == 0 {
-            return Err(crate::MicrosandboxError::InvalidConfig(
-                "cpus must be greater than 0".into(),
-            ));
-        }
-
-        if self.config.memory_mib == 0 {
-            return Err(crate::MicrosandboxError::InvalidConfig(
-                "memory must be greater than 0".into(),
-            ));
-        }
+        super::validate_hostname(self.config.hostname.as_deref())?;
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
@@ -897,15 +902,6 @@ impl SandboxBuilder {
             _ => {}
         }
 
-        if let Some(path) = &self.config.libkrunfw_path
-            && !path.is_file()
-        {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "libkrunfw_path does not exist: {}",
-                path.display()
-            )));
-        }
-
         for rlimit in &self.config.rlimits {
             if rlimit.soft > rlimit.hard {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -919,6 +915,7 @@ impl SandboxBuilder {
 
         super::types::validate_volume_mounts(&self.config.mounts)?;
         super::validate_env(&self.config.env)?;
+        super::validate_labels(&self.config.labels)?;
 
         if let Some(spec) = &self.config.init {
             super::init::validate(spec)?;
@@ -961,6 +958,48 @@ impl SandboxBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum length of a sandbox name.
+/// Must stay in sync with msb-cloud's `MAX_SANDBOX_NAME_LEN` in `msb-api/src/validators/sandbox.rs`.
+const MAX_SANDBOX_NAME_LEN: usize = 128;
+
+/// Validate that a sandbox name is safe: alphanumeric / dot / hyphen / underscore,
+/// 1..=128 chars, must start alphanumeric.
+///
+/// **Must stay in sync with msb-cloud's `validate_sandbox_name`.** The rule lives
+/// in two places; if it changes here, change it there too.
+pub fn validate_sandbox_name(name: &str) -> MicrosandboxResult<()> {
+    if name.is_empty() {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "sandbox name must not be empty".into(),
+        ));
+    }
+    if name.len() > MAX_SANDBOX_NAME_LEN {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "sandbox name must be at most {MAX_SANDBOX_NAME_LEN} characters: got {}",
+            name.len()
+        )));
+    }
+    let first_alphanumeric = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    let charset_ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+
+    if !first_alphanumeric || !charset_ok {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "sandbox name must start with an alphanumeric and contain only \
+             alphanumeric, dots, hyphens, and underscores: {name}"
+        )));
+    }
+    Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -983,15 +1022,15 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
-    use crate::sandbox::{
-        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NamedVolumeMode, RlimitResource,
-    };
+    use crate::backend::{LocalBackend, with_backend};
+    use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+    use tempfile::Builder as TempDirBuilder;
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
@@ -1008,12 +1047,24 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_builder_accepts_128_byte_sandbox_name() {
-        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
-        let config = SandboxBuilder::new(name.clone())
-            .image("alpine")
+        let temp = TempDirBuilder::new()
+            .prefix("msb")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path())
             .build()
             .await
             .unwrap();
+        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
+        let config = with_backend(backend, async {
+            SandboxBuilder::new(name.clone())
+                .image("alpine")
+                .build()
+                .await
+                .unwrap()
+        })
+        .await;
 
         assert_eq!(config.name, name);
     }
@@ -1029,7 +1080,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "invalid config: sandbox name is too long: 129 bytes (max 128)"
+            "invalid config: sandbox name must be at most 128 characters: got 129"
         );
     }
 
@@ -1077,36 +1128,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_rejects_zero_cpus() {
-        let err = SandboxBuilder::new("test")
-            .image("alpine")
-            .cpus(0)
-            .build()
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            "invalid config: cpus must be greater than 0"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_builder_rejects_zero_memory() {
-        let err = SandboxBuilder::new("test")
-            .image("alpine")
-            .memory(0u32)
-            .build()
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            "invalid config: memory must be greater than 0"
-        );
-    }
-
-    #[tokio::test]
     async fn test_builder_image_with_oci_upper_size() {
         let config = SandboxBuilder::new("test")
             .image_with(|i| i.oci("alpine").upper_size(8192u32))
@@ -1124,14 +1145,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_image_applies_default_oci_upper_size() {
+    async fn test_builder_leaves_backend_oci_upper_default_unmaterialized() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .build()
             .await
             .unwrap();
 
-        assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+        assert_eq!(config.image.oci_upper_size_mib(), None);
     }
 
     #[tokio::test]
@@ -1392,18 +1413,6 @@ mod tests {
         assert!(err.to_string().contains("env_var must not contain NUL"));
     }
 
-    #[tokio::test]
-    async fn test_builder_rejects_reserved_msb_env_key() {
-        let err = SandboxBuilder::new("test")
-            .image("alpine")
-            .env("MSB_SECURITY_PROFILE", "default")
-            .build()
-            .await
-            .unwrap_err();
-
-        assert!(err.to_string().contains("uses the reserved MSB_ prefix"));
-    }
-
     //----------------------------------------------------------------------------------------------
     // DiskImage host-path validation
     //----------------------------------------------------------------------------------------------
@@ -1519,97 +1528,79 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_named_with_create_registers_create_metadata_on_mount() {
-        let config = SandboxBuilder::new("sb")
-            .image("alpine")
-            .volume("/tmp", |m| m.named_with("sb-tmp", |v| v.create()))
-            .build()
-            .await
-            .unwrap();
+    //----------------------------------------------------------------------------------------------
+    // Sandbox name validation
+    //----------------------------------------------------------------------------------------------
 
-        assert_eq!(config.mounts.len(), 1);
-        match &config.mounts[0] {
-            super::VolumeMount::Named {
-                name,
-                guest,
-                create,
-                ..
-            } => {
-                assert_eq!(name, "sb-tmp");
-                assert_eq!(guest, "/tmp");
-                let create = create.as_ref().unwrap();
-                assert_eq!(create.mode, NamedVolumeMode::Create);
-                assert_eq!(create.name, "sb-tmp");
-            }
-            _ => panic!("expected Named mount"),
+    use super::{MAX_SANDBOX_NAME_LEN, validate_sandbox_name};
+
+    #[test]
+    fn sandbox_name_accepts_typical() {
+        for name in [
+            "foo",
+            "foo-bar",
+            "foo.bar",
+            "foo_bar",
+            "FooBar",
+            "abc123",
+            "a",
+            "0",
+            "agent-1",
+            "my.app_2026",
+        ] {
+            assert!(
+                validate_sandbox_name(name).is_ok(),
+                "expected {name:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_name_rejects_empty() {
+        assert!(validate_sandbox_name("").is_err());
+    }
+
+    #[test]
+    fn sandbox_name_rejects_too_long() {
+        let long = "a".repeat(MAX_SANDBOX_NAME_LEN + 1);
+        assert!(validate_sandbox_name(&long).is_err());
+    }
+
+    #[test]
+    fn sandbox_name_accepts_at_max_length() {
+        let max = "a".repeat(MAX_SANDBOX_NAME_LEN);
+        assert!(validate_sandbox_name(&max).is_ok());
+    }
+
+    #[test]
+    fn sandbox_name_rejects_disallowed_chars() {
+        for name in [
+            "foo bar", "foo/bar", "foo:bar", "foo!", "foo@bar", "foo#1", "✨",
+        ] {
+            assert!(
+                validate_sandbox_name(name).is_err(),
+                "expected {name:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_name_rejects_non_alphanumeric_start() {
+        for name in [".foo", "-foo", "_foo"] {
+            assert!(
+                validate_sandbox_name(name).is_err(),
+                "expected {name:?} to be rejected (non-alphanumeric start)"
+            );
         }
     }
 
     #[tokio::test]
-    async fn test_named_with_ensure_exists_carries_quota_and_labels() {
-        let config = SandboxBuilder::new("sb")
+    async fn builder_validate_rejects_bad_name() {
+        let err = SandboxBuilder::new("bad name!")
             .image("alpine")
-            .volume("/scratch", |m| {
-                m.named_with("sb-scratch", |v| {
-                    v.ensure_exists().quota(1024u32).label("owner", "my-team")
-                })
-                .readonly()
-            })
             .build()
             .await
-            .unwrap();
-
-        match &config.mounts[0] {
-            super::VolumeMount::Named {
-                create, options, ..
-            } => {
-                let create = create.as_ref().unwrap();
-                assert_eq!(create.mode, NamedVolumeMode::EnsureExists);
-                assert_eq!(create.name, "sb-scratch");
-                assert_eq!(create.quota_mib, Some(1024));
-                assert_eq!(
-                    create.labels,
-                    vec![("owner".to_string(), "my-team".to_string())]
-                );
-                assert!(options.readonly);
-            }
-            _ => panic!("expected Named mount"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_named_with_name_override() {
-        let config = SandboxBuilder::new("sb")
-            .image("alpine")
-            .volume("/tmp", |m| {
-                m.named_with("initial", |v| v.create().name("overridden"))
-            })
-            .build()
-            .await
-            .unwrap();
-
-        match &config.mounts[0] {
-            super::VolumeMount::Named { name, create, .. } => {
-                assert_eq!(name, "overridden");
-                assert_eq!(create.as_ref().unwrap().name, "overridden");
-            }
-            _ => panic!("expected Named mount"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_named_with_metadata_is_cleared_when_mount_kind_changes() {
-        let config = SandboxBuilder::new("sb")
-            .image("alpine")
-            .volume("/tmp", |m| m.named_with("stale", |v| v.create()).tmpfs())
-            .build()
-            .await
-            .unwrap();
-
-        match &config.mounts[0] {
-            super::VolumeMount::Tmpfs { guest, .. } => assert_eq!(guest, "/tmp"),
-            _ => panic!("expected Tmpfs mount"),
-        }
+            .unwrap_err();
+        assert!(err.to_string().contains("alphanumeric"), "got: {err}");
     }
 }

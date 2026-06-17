@@ -5,7 +5,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use microsandbox::config;
 
 use crate::ui;
 
@@ -167,7 +166,12 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
 /// Resolve the bin directory for installed aliases.
 fn resolve_bin_dir() -> PathBuf {
-    config::config().home().join("bin")
+    let backend = microsandbox::backend::default_backend();
+    let home = match backend.as_local() {
+        Some(local) => local.config().home(),
+        None => microsandbox_utils::resolve_home(),
+    };
+    home.join("bin")
 }
 
 /// Validate that an alias name is safe to use as a filename in the bin directory.

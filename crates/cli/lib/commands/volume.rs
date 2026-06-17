@@ -223,8 +223,9 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
             .join(", ")
     };
 
-    let volumes_dir = microsandbox::config::config().volumes_dir();
-    let path = volumes_dir.join(handle.name());
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let path = local.volume_path(handle.name());
 
     ui::detail_kv("Name", handle.name());
     ui::detail_kv("Kind", handle.kind().as_str());

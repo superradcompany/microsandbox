@@ -13,6 +13,12 @@
 use microsandbox::Sandbox;
 use test_utils::msb_test;
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("failed to stop");
+    Sandbox::remove(name).await.expect("failed to remove");
+}
+
 /// Covers the default TLS-interception path:
 /// - Node.js fetch over TLS 1.3: guards against a past deadlock where
 ///   application data piggybacked on the TLS Finished message was never
@@ -65,8 +71,7 @@ async fn tls_intercept_handshake() {
         wget.stderr().unwrap_or_default()
     );
 
-    sandbox.stop().await.expect("failed to stop");
-    Sandbox::remove(name).await.expect("failed to remove");
+    stop_and_remove(name).await;
 }
 
 /// Verify TLS bypass domains skip interception and still connect.
@@ -103,6 +108,5 @@ async fn tls_bypass_domain_connects() {
         output.stderr().unwrap_or_default()
     );
 
-    sandbox.stop().await.expect("failed to stop");
-    Sandbox::remove(name).await.expect("failed to remove");
+    stop_and_remove(name).await;
 }

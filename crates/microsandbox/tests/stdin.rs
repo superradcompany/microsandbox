@@ -12,6 +12,12 @@ use test_utils::msb_test;
 
 const ONE_MIB: usize = 1024 * 1024;
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    Sandbox::remove(name).await.expect("remove");
+}
+
 /// Realistic large-payload test: reader (`cat`) starts immediately and
 /// drains in parallel with the host write. Whether the guest pipe ever
 /// fills (and trips EAGAIN) depends on scheduling, but the payload is
@@ -42,8 +48,7 @@ async fn stdin_bytes_writes_payload_larger_than_pipe_capacity() {
         .await
         .expect("write stdin payload");
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     assert!(
         output.status().success,
@@ -87,8 +92,7 @@ async fn stdin_bytes_waits_for_slow_reader() {
         .await
         .expect("write stdin payload");
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     assert!(
         output.status().success,
@@ -165,8 +169,7 @@ async fn stdin_pipe_streams_chunks_in_order() {
         }
     }
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     assert_eq!(exit_code, Some(0), "guest command exited non-zero");
     let stdout_text = String::from_utf8(stdout).expect("stdout is utf8");
@@ -228,8 +231,7 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
         }
     }
 
-    sandbox.stop().await.expect("stop");
-    Sandbox::remove(name).await.expect("remove");
+    stop_and_remove(name).await;
 
     assert_eq!(exit_code, Some(0), "guest command exited non-zero");
 

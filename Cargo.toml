@@ -17,6 +17,7 @@ members = [
     "crates/test-macros",
     "crates/test-utils",
     "crates/utils",
+    "examples/rust/cloud-backend",
     "examples/rust/fs-read-stream",
     "examples/rust/init-handoff",
     "examples/rust/logs-read",

@@ -302,7 +302,7 @@ sandbox = await Sandbox.create(
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Python process after the returned handle is detached:
+Sandboxes in detached mode survive the Python process. The returned sandbox can still issue operations by name, but it does not own the host process lifecycle:
 
 ```python
 # Create in detached mode.
@@ -311,11 +311,10 @@ sandbox = await Sandbox.create(
     image="python",
     detached=True,
 )
-await sandbox.detach()
 
 # Later, from another process:
 handle = await Sandbox.get("background")
-reconnected = await handle.open_client()
+reconnected = await handle.connect()
 output = await reconnected.shell("echo reconnected")
 ```
 

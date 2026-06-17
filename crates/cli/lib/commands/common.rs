@@ -1,14 +1,45 @@
 //! Common sandbox configuration flags shared between commands.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 use microsandbox::VolumeKind;
+use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     DiskImageFormat, MountBuilder, Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile,
 };
 
 use crate::ui;
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Backend resolution
+//--------------------------------------------------------------------------------------------------
+
+/// Resolve the process-wide local backend exactly once at the CLI entry point.
+///
+/// CLI commands always operate against the active default backend. Returns
+/// an `Arc<dyn Backend>` plus a borrow of the `LocalBackend` inside it so
+/// callers can dispatch through either the trait or the local-only APIs.
+/// Errors when the resolved default backend isn't a local one (e.g. when
+/// the user has installed a cloud profile but is running a local-only
+/// command).
+pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
+    let backend = microsandbox::backend::default_backend();
+    if backend.as_local().is_none() {
+        anyhow::bail!(
+            "this command requires a local backend, but the active default is a cloud backend"
+        );
+    }
+    Ok(backend)
+}
+
+/// Borrow the `LocalBackend` inside the resolved default backend, or error.
+pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBackend> {
+    backend
+        .as_local()
+        .ok_or_else(|| anyhow::anyhow!("this command requires a local backend"))
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -161,7 +192,7 @@ pub struct SandboxOpts {
     #[arg(long = "init-env", value_name = "KEY=VALUE", requires = "init")]
     pub init_env: Vec<String>,
 
-    /// Set the guest hostname (defaults to sandbox name).
+    /// Set the guest hostname (defaults to a sandbox-name-derived hostname).
     #[arg(short = 'H', long)]
     pub hostname: Option<String>,
 

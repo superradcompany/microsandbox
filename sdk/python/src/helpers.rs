@@ -179,9 +179,9 @@ pub fn sandbox_builder_from_args(
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
     }
-    if let Some(libkrunfw_path) = extract_opt::<String>(kwargs, "libkrunfw_path")? {
-        builder = builder.libkrunfw_path(libkrunfw_path);
-    }
+    // `libkrunfw_path` is a process-level concern (one dylib per process
+    // address space), not a per-sandbox builder kwarg. Users set it once via
+    // `microsandbox.set_libkrunfw_path(...)` or the `MSB_LIBKRUNFW_PATH` env var.
     if let Some(user) = extract_opt::<String>(kwargs, "user")? {
         builder = builder.user(user);
     }
@@ -1341,6 +1341,9 @@ fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
     if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
         std::path::PathBuf::from(s)
     } else {
-        microsandbox::config::config().snapshots_dir().join(s)
+        microsandbox::backend::default_backend()
+            .as_local()
+            .map(|local| local.snapshots_dir().join(s))
+            .unwrap_or_else(|| std::path::PathBuf::from(s))
     }
 }

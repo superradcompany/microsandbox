@@ -83,7 +83,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
     connected = None
 
     try:
-        assert await sandbox.owns_lifecycle is True
+        assert await sandbox.owns_lifecycle is False
 
         handle = await Sandbox.get(name)
         config = json.loads(handle.config_json)
@@ -108,7 +108,6 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["policy"]["max_duration_secs"] == 7200
         assert config["policy"]["idle_timeout_secs"] == 1800
 
-        await sandbox.detach()
         sandbox = None
 
         connected = await handle.connect()

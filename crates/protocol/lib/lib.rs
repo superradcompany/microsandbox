@@ -255,7 +255,7 @@ pub const ENV_USER: &str = "MSB_USER";
 /// - `MSB_HOSTNAME=worker-01`
 ///
 /// agentd calls `sethostname()` and adds the name to `/etc/hosts`.
-/// Defaults to the sandbox name when not explicitly set.
+/// Defaults to a sandbox-name-derived hostname when not explicitly set.
 pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 
 /// Environment variable carrying the DNS name the guest uses to reach

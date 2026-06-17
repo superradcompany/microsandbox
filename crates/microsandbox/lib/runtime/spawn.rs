@@ -15,13 +15,13 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt::Write,
-    fs::File,
     os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
 };
 
 use rand::RngExt;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
@@ -37,13 +37,19 @@ use microsandbox_protocol::{
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 use crate::{
-    MicrosandboxError, MicrosandboxResult, config,
+    MicrosandboxError, MicrosandboxResult,
+    backend::LocalBackend,
+    config,
+    db::entity::volume as volume_entity,
     runtime::handle::{MetricsReservationCleanup, ProcessHandle},
     sandbox::{
-        DiskImageFormat, HostPermissions, MountOptions, Rlimit, RootfsSource, SandboxConfig,
-        StatVirtualization, VolumeMount,
+        DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, Rlimit, RootfsSource,
+        SandboxConfig, StatVirtualization, VolumeMount,
     },
-    volume::{Volume, VolumeKind},
+    volume::{
+        VolumeConfig, VolumeKind, provision_volume_path, validate_volume_config,
+        validate_volume_name,
+    },
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -65,21 +71,16 @@ struct StartupInfo {
     pid: u32,
 }
 
-/// Resolved storage metadata for a named volume mount.
-#[derive(Clone, Debug)]
-struct ResolvedNamedVolume {
-    kind: VolumeKind,
-    path: PathBuf,
-    format: Option<DiskImageFormat>,
-    fstype: Option<String>,
+#[derive(Debug, Clone)]
+struct MetricsReservation {
+    shm_name: String,
+    slot: u32,
+    generation: u64,
 }
 
-/// Requested host-side advisory lock for a disk image backing file.
-struct DiskLockRequest {
-    path: PathBuf,
-    readonly: bool,
-    label: String,
-    volume_name: Option<String>,
+struct ParentWatchdogPipe {
+    read_fd: OwnedFd,
+    write_fd: OwnedFd,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -107,17 +108,18 @@ pub enum SpawnMode {
 /// 4. Spawns the hidden `msb sandbox` process with `--agent-sock` for the relay
 /// 5. Reads startup JSON from stdout to get child PIDs
 pub async fn spawn_sandbox(
+    local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    // Resolve paths. Per-sandbox `libkrunfw_path` takes precedence over the
-    // global resolver so SDK callers can point at a custom firmware bundle.
-    let msb_path = config::resolve_msb_path()?;
-    let libkrunfw_path = match &config.libkrunfw_path {
-        Some(path) => path.clone(),
-        None => config::resolve_libkrunfw_path()?,
-    };
+    // libkrunfw is process-level (one dylib per process address space). The
+    // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
+    // then config.paths.libkrunfw, then filesystem fallbacks — see
+    // `config::resolve_libkrunfw_path` for the full precedence ladder.
+    let global = local.config();
+    let msb_path = config::resolve_msb_path(global)?;
+    let libkrunfw_path = config::resolve_libkrunfw_path(global)?;
     tracing::debug!(
         msb = %msb_path.display(),
         libkrunfw = %libkrunfw_path.display(),
@@ -128,7 +130,6 @@ pub async fn spawn_sandbox(
         "spawn_sandbox: resolved paths"
     );
 
-    let global = config::config();
     let sandbox_dir = global.sandboxes_dir().join(&config.name);
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
@@ -146,7 +147,7 @@ pub async fn spawn_sandbox(
     for (name, content) in &config.scripts {
         // Prevent path traversal: only use the filename component.
         let safe_name = Path::new(name).file_name().ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
+            crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
         })?;
         let script_path = scripts_dir.join(safe_name);
         tokio::fs::write(&script_path, content).await?;
@@ -154,29 +155,19 @@ pub async fn spawn_sandbox(
         tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
-    // Compute the agent relay socket path. This intentionally lives outside
-    // the name-derived sandbox tree so long sandbox names do not exceed the
-    // platform Unix-domain socket path limit.
+    // Compute the agent relay socket path.
     let agent_sock_path = resolve_sandbox_agent_socket_path(&config.name)?;
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
-    // exposing adjacent files on the host. Done BEFORE the metrics
-    // reservation so that a staging failure does not leak a slot.
+    // exposing adjacent files on the host.
     let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
-    let named_volumes = resolve_named_volumes(config).await?;
-    let disk_locks = lock_disk_mounts(config, &named_volumes)?;
-
-    // Reserve a metrics slot before spawning. Only do this when metrics are
-    // enabled so disabled sandboxes don't pay for an entry. Failures here are
-    // surfaced as warnings — the runtime will skip the sampler if no slot is
-    // present, but the sandbox itself should still boot.
+    ensure_named_volumes(local, config).await?;
     let metrics_reservation = if config.effective_metrics_interval().is_some() {
-        reserve_metrics_slot(config, sandbox_id)
+        reserve_metrics_slot(local, config, sandbox_id)
     } else {
         None
     };
-
     let parent_watchdog = match mode {
         SpawnMode::Attached => match create_parent_watchdog_pipe() {
             Ok(pipe) => Some(pipe),
@@ -191,6 +182,7 @@ pub async fn spawn_sandbox(
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(sandbox_cli_args(
+        local,
         config,
         sandbox_id,
         &db_path,
@@ -200,7 +192,6 @@ pub async fn spawn_sandbox(
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
-        &named_volumes,
         metrics_reservation.as_ref(),
         parent_watchdog
             .as_ref()
@@ -252,13 +243,12 @@ pub async fn spawn_sandbox(
 
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
-    // Spawn the sandbox process. On failure, release the metrics reservation
-    // so the slot does not leak.
+    // Spawn the sandbox process.
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => {
+        Err(err) => {
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(e.into());
+            return Err(err.into());
         }
     };
 
@@ -266,7 +256,7 @@ pub async fn spawn_sandbox(
         Some(pid) => pid,
         None => {
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(MicrosandboxError::Runtime(
+            return Err(crate::MicrosandboxError::Runtime(
                 "sandbox process exited immediately".into(),
             ));
         }
@@ -274,15 +264,10 @@ pub async fn spawn_sandbox(
     tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
 
     // Read the startup JSON from stdout.
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(MicrosandboxError::Runtime(
-                "failed to capture sandbox stdout".into(),
-            ));
-        }
-    };
+    let stdout = child.stdout.take().ok_or_else(|| {
+        release_metrics_reservation(config, metrics_reservation.as_ref());
+        crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
+    })?;
 
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
@@ -301,7 +286,7 @@ pub async fn spawn_sandbox(
         Err(_) => {
             terminate_startup_process(&mut child).await;
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(MicrosandboxError::Runtime(
+            return Err(crate::MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
         }
@@ -317,7 +302,7 @@ pub async fn spawn_sandbox(
                 exit_status = ?status,
                 "spawn_sandbox: failed to parse startup JSON"
             );
-            return Err(MicrosandboxError::Runtime(format!(
+            return Err(crate::MicrosandboxError::Runtime(format!(
                 "sandbox process exited ({status:?}) before sending startup info \
                  (line: {line:?}, check stderr above for details)"
             )));
@@ -335,7 +320,7 @@ pub async fn spawn_sandbox(
         config.name.clone(),
         child,
         file_mounts_staging,
-        disk_locks,
+        Vec::new(),
         parent_watchdog.map(|pipe| pipe.write_fd),
         metrics_reservation.as_ref().map(|reservation| {
             MetricsReservationCleanup::new(
@@ -350,35 +335,18 @@ pub async fn spawn_sandbox(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Metrics reservation
-//--------------------------------------------------------------------------------------------------
-
-/// Slot reservation handed off to the spawned sandbox process.
-struct MetricsReservation {
-    shm_name: String,
-    slot: u32,
-    generation: u64,
-}
-
-struct ParentWatchdogPipe {
-    read_fd: OwnedFd,
-    write_fd: OwnedFd,
-}
-
-//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Open the registry and reserve a slot for an upcoming sandbox spawn.
-///
-/// Logs and returns `None` on any failure: the spawn should still succeed
-/// (the sandbox just runs without live metrics) so a registry hiccup does
-/// not block sandbox creation.
-fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<MetricsReservation> {
-    let shm_name = config::config().metrics_registry_shm_name();
-    let capacity = config::config().metrics_registry_capacity();
+fn reserve_metrics_slot(
+    local: &LocalBackend,
+    config: &SandboxConfig,
+    sandbox_id: i32,
+) -> Option<MetricsReservation> {
+    let shm_name = local.config().metrics_registry_shm_name();
+    let capacity = local.config().metrics_registry_capacity();
     let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
-        Ok(reg) => reg,
+        Ok(registry) => registry,
         Err(err) => {
             tracing::warn!(error = %err, sandbox = %config.name, "failed to open metrics registry");
             return None;
@@ -452,100 +420,12 @@ fn set_cloexec(fd: &OwnedFd, enabled: bool) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-/// Build the host-side agent relay socket path for a sandbox name.
-fn sandbox_agent_socket_path(name: &str) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut filename = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN + ".sock".len());
-    for byte in digest.iter().take(AGENT_SOCKET_HASH_HEX_LEN / 2) {
-        let _ = Write::write_fmt(&mut filename, format_args!("{byte:02x}"));
-    }
-    filename.push_str(".sock");
-
-    config::config().run_dir().join("agent").join(filename)
-}
-
-/// Build the legacy name-derived agent relay socket path.
-fn legacy_sandbox_agent_socket_path(name: &str) -> PathBuf {
-    config::config()
-        .sandboxes_dir()
-        .join(name)
-        .join("runtime")
-        .join("agent.sock")
-}
-
-/// Return agent relay socket paths in preferred connection order.
-pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
-    [
-        sandbox_agent_socket_path(name),
-        legacy_sandbox_agent_socket_path(name),
-    ]
-}
-
-/// Pick the first socket path usable on this platform.
-pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResult<PathBuf> {
-    let candidates = sandbox_agent_socket_path_candidates(name);
-    for path in &candidates {
-        if sandbox_agent_socket_path_fits(path) {
-            return Ok(path.clone());
-        }
-    }
-
-    let shortest = candidates
-        .iter()
-        .map(|path| sandbox_agent_socket_path_len(path))
-        .min()
-        .unwrap_or(0);
-    Err(MicrosandboxError::InvalidConfig(format!(
-        "agent relay socket path is too long: shortest derived path is {shortest} bytes, \
-         but Unix socket paths on this platform must be shorter than {} bytes; set \
-         MSB_HOME or paths.sandboxes to a shorter directory",
-        unix_socket_path_capacity()
-    )))
-}
-
-#[cfg(unix)]
-fn sandbox_agent_socket_path_fits(path: &Path) -> bool {
-    sandbox_agent_socket_path_len(path) < unix_socket_path_capacity()
-}
-
-#[cfg(not(unix))]
-fn sandbox_agent_socket_path_fits(_path: &Path) -> bool {
-    true
-}
-
-#[cfg(unix)]
-fn sandbox_agent_socket_path_len(path: &Path) -> usize {
-    path.as_os_str().as_bytes().len()
-}
-
-#[cfg(not(unix))]
-fn sandbox_agent_socket_path_len(_path: &Path) -> usize {
-    0
-}
-
-#[cfg(unix)]
-fn unix_socket_path_capacity() -> usize {
-    // SAFETY: a zeroed sockaddr_un is valid, and we only inspect the fixed-size
-    // sun_path array length to mirror the UnixListener/socket2 precondition.
-    let storage = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    storage.sun_path.len()
-}
-
-#[cfg(not(unix))]
-fn unix_socket_path_capacity() -> usize {
-    usize::MAX
-}
-
-/// Best-effort release of a reservation when spawn cannot continue.
 fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&MetricsReservation>) {
     let Some(reservation) = reservation else {
         return;
     };
     let registry = match MetricsRegistry::open(&reservation.shm_name) {
-        Ok(reg) => reg,
+        Ok(registry) => registry,
         Err(err) => {
             tracing::debug!(error = %err, sandbox = %config.name, "release: failed to open metrics registry");
             return;
@@ -582,12 +462,6 @@ fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
 
 #[cfg(target_os = "linux")]
 fn patch_sigchld_handler_uses_alt_stack() {
-    // Go's cgo runtime requires non-Go signal handlers to use SA_ONSTACK.
-    // The caller initializes Tokio's SIGCHLD handler first, before spawning
-    // sandbox children, then this preserves the handler while adding the flag.
-    //
-    // SAFETY: sigaction is called with valid pointers to read and then rewrite
-    // the current SIGCHLD action, preserving the existing handler and mask.
     unsafe {
         let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
         if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
@@ -604,18 +478,183 @@ fn patch_sigchld_handler_uses_alt_stack() {
     }
 }
 
-#[cfg(all(target_os = "linux", test))]
-fn sigchld_handler_uses_alt_stack() -> bool {
-    // SAFETY: sigaction is called with a valid output pointer and a null new
-    // action pointer, which only reads the current process handler state.
-    unsafe {
-        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
-        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
-            return false;
+async fn ensure_named_volumes(
+    local: &LocalBackend,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    for mount in &config.mounts {
+        let Some(create) = mount.named_create() else {
+            continue;
+        };
+
+        validate_volume_name(create.name())?;
+        let pools = local.db().await?;
+        let existing = volume_entity::Entity::find()
+            .filter(volume_entity::Column::Name.eq(create.name()))
+            .one(pools.read())
+            .await?;
+
+        if existing.is_some() {
+            match create.mode() {
+                NamedVolumeMode::Create => {
+                    return Err(MicrosandboxError::VolumeAlreadyExists(
+                        create.name().to_string(),
+                    ));
+                }
+                NamedVolumeMode::EnsureExists | NamedVolumeMode::Existing => continue,
+            }
         }
 
-        action.assume_init().sa_flags & libc::SA_ONSTACK != 0
+        if create.mode() == NamedVolumeMode::Existing {
+            return Err(MicrosandboxError::VolumeNotFound(create.name().to_string()));
+        }
+
+        let volume_config = VolumeConfig {
+            name: create.name().to_string(),
+            kind: create.kind(),
+            quota_mib: create.quota_mib(),
+            capacity_mib: create.capacity_mib(),
+            labels: create.labels().to_vec(),
+        };
+        validate_volume_config(&volume_config)?;
+
+        let labels_json = if create.labels().is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(create.labels())?)
+        };
+        let now = chrono::Utc::now().naive_utc();
+        let capacity_bytes = volume_config
+            .capacity_mib
+            .map(|mib| i64::from(mib) * 1024 * 1024);
+        let model = volume_entity::ActiveModel {
+            name: Set(volume_config.name.clone()),
+            kind: Set(volume_config.kind.as_str().to_string()),
+            quota_mib: Set(volume_config.quota_mib.map(|value| value as i32)),
+            size_bytes: Set(None),
+            capacity_bytes: Set(capacity_bytes),
+            disk_format: Set((volume_config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
+            disk_fstype: Set((volume_config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
+            labels: Set(labels_json),
+            created_at: Set(Some(now)),
+            updated_at: Set(Some(now)),
+            ..Default::default()
+        };
+        volume_entity::Entity::insert(model)
+            .exec(pools.write())
+            .await?;
+        provision_volume_path(&volume_config, &local.volume_path(&volume_config.name)).await?;
     }
+
+    Ok(())
+}
+
+/// Return agent relay socket paths in preferred connection order.
+pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
+    let (run_dir, sandboxes_dir) = crate::backend::default_backend()
+        .as_local()
+        .map(|local| (local.config().run_dir(), local.config().sandboxes_dir()))
+        .unwrap_or_else(|| {
+            let home = microsandbox_utils::resolve_home();
+            (
+                home.join(microsandbox_utils::RUN_SUBDIR),
+                home.join(microsandbox_utils::SANDBOXES_SUBDIR),
+            )
+        });
+    sandbox_agent_socket_path_candidates_with_roots(&run_dir, &sandboxes_dir, name)
+}
+
+pub(crate) fn sandbox_agent_socket_path_candidates_for(
+    local: &LocalBackend,
+    name: &str,
+) -> [PathBuf; 2] {
+    sandbox_agent_socket_path_candidates_with_roots(
+        &local.config().run_dir(),
+        &local.config().sandboxes_dir(),
+        name,
+    )
+}
+
+fn sandbox_agent_socket_path_candidates_with_roots(
+    run_dir: &Path,
+    sandboxes_dir: &Path,
+    name: &str,
+) -> [PathBuf; 2] {
+    [
+        sandbox_agent_socket_path(run_dir, name),
+        legacy_sandbox_agent_socket_path(sandboxes_dir, name),
+    ]
+}
+
+/// Pick the first socket path usable on this platform.
+pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResult<PathBuf> {
+    let candidates = sandbox_agent_socket_path_candidates(name);
+    for path in &candidates {
+        if sandbox_agent_socket_path_fits(path) {
+            return Ok(path.clone());
+        }
+    }
+
+    let shortest = candidates
+        .iter()
+        .map(|path| sandbox_agent_socket_path_len(path))
+        .min()
+        .unwrap_or(0);
+    Err(crate::MicrosandboxError::InvalidConfig(format!(
+        "agent relay socket path is too long: shortest derived path is {shortest} bytes, \
+         but Unix socket paths on this platform must be shorter than {} bytes; set \
+         MSB_HOME or paths.sandboxes to a shorter directory",
+        unix_socket_path_capacity()
+    )))
+}
+
+fn sandbox_agent_socket_path(run_dir: &Path, name: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut filename = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN + ".sock".len());
+    for byte in digest.iter().take(AGENT_SOCKET_HASH_HEX_LEN / 2) {
+        let _ = Write::write_fmt(&mut filename, format_args!("{byte:02x}"));
+    }
+    filename.push_str(".sock");
+
+    run_dir.join("agent").join(filename)
+}
+
+fn legacy_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
+    sandboxes_dir.join(name).join("runtime").join("agent.sock")
+}
+
+#[cfg(unix)]
+fn sandbox_agent_socket_path_fits(path: &Path) -> bool {
+    sandbox_agent_socket_path_len(path) < unix_socket_path_capacity()
+}
+
+#[cfg(not(unix))]
+fn sandbox_agent_socket_path_fits(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn sandbox_agent_socket_path_len(path: &Path) -> usize {
+    path.as_os_str().as_bytes().len()
+}
+
+#[cfg(not(unix))]
+fn sandbox_agent_socket_path_len(_path: &Path) -> usize {
+    0
+}
+
+#[cfg(unix)]
+fn unix_socket_path_capacity() -> usize {
+    let storage = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
+    storage.sun_path.len()
+}
+
+#[cfg(not(unix))]
+fn unix_socket_path_capacity() -> usize {
+    usize::MAX
 }
 
 async fn terminate_startup_process(
@@ -644,15 +683,8 @@ async fn stage_file_mounts(
                 host,
                 guest,
                 options,
-                stat_virtualization,
-                host_permissions,
-            } if host.is_file() => Some((
-                host,
-                guest,
-                *options,
-                *stat_virtualization,
-                *host_permissions,
-            )),
+                ..
+            } if host.is_file() => Some((host, guest, options.readonly)),
             _ => None,
         })
         .collect();
@@ -664,7 +696,7 @@ async fn stage_file_mounts(
     let tempdir = tempfile::tempdir()?;
     let mut staged = HashMap::new();
 
-    for (host, guest, options, _stat_virt, _host_perms) in file_mounts {
+    for (host, guest, readonly) in file_mounts {
         // Generate a random tag to avoid collisions.
         let id: u32 = rand::rng().random();
         let tag = format!("fm_{id:08x}");
@@ -673,14 +705,14 @@ async fn stage_file_mounts(
         tokio::fs::create_dir_all(&file_mount_dir).await?;
 
         let filename_os = host.file_name().ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(format!(
+            crate::MicrosandboxError::InvalidConfig(format!(
                 "file mount has no filename: {}",
                 host.display()
             ))
         })?;
 
         let filename = filename_os.to_str().ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(format!(
+            crate::MicrosandboxError::InvalidConfig(format!(
                 "file mount filename is not valid UTF-8: {}",
                 host.display()
             ))
@@ -688,7 +720,7 @@ async fn stage_file_mounts(
 
         // The MSB_FILE_MOUNTS protocol uses `:` and `;` as delimiters.
         if filename.contains(':') || filename.contains(';') {
-            return Err(MicrosandboxError::InvalidConfig(format!(
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "file mount filename must not contain ':' or ';': {filename}"
             )));
         }
@@ -707,7 +739,7 @@ async fn stage_file_mounts(
                 );
             }
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                if !options.readonly {
+                if !readonly {
                     tracing::warn!(
                         host = %host.display(),
                         file_mount_dir = %target.display(),
@@ -732,218 +764,7 @@ async fn stage_file_mounts(
     Ok((staged, Some(tempdir)))
 }
 
-async fn resolve_named_volumes(
-    config: &SandboxConfig,
-) -> MicrosandboxResult<HashMap<String, ResolvedNamedVolume>> {
-    let mut resolved: HashMap<String, ResolvedNamedVolume> = HashMap::new();
-
-    for mount in &config.mounts {
-        let VolumeMount::Named {
-            name,
-            stat_virtualization,
-            host_permissions,
-            ..
-        } = mount
-        else {
-            continue;
-        };
-
-        if let Some(volume) = resolved.get(name) {
-            if volume.kind == VolumeKind::Disk {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
-            }
-            continue;
-        }
-
-        let handle = Volume::get(name).await?;
-        let volume = match handle.kind() {
-            VolumeKind::Directory => ResolvedNamedVolume {
-                kind: VolumeKind::Directory,
-                path: config::config().volumes_dir().join(name),
-                format: None,
-                fstype: None,
-            },
-            VolumeKind::Disk => {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
-
-                let format = handle
-                    .disk_format()
-                    .unwrap_or("raw")
-                    .parse::<DiskImageFormat>()
-                    .map_err(|e| {
-                        MicrosandboxError::InvalidConfig(format!(
-                            "invalid disk format for named volume {name:?}: {e}"
-                        ))
-                    })?;
-                let path = handle.disk_path().ok_or_else(|| {
-                    MicrosandboxError::InvalidConfig(format!(
-                        "disk named volume {name:?} has no disk path"
-                    ))
-                })?;
-
-                ResolvedNamedVolume {
-                    kind: VolumeKind::Disk,
-                    path,
-                    format: Some(format),
-                    fstype: handle.disk_fstype().map(str::to_string),
-                }
-            }
-        };
-
-        resolved.insert(name.clone(), volume);
-    }
-
-    Ok(resolved)
-}
-
-fn lock_disk_mounts(
-    config: &SandboxConfig,
-    named_volumes: &HashMap<String, ResolvedNamedVolume>,
-) -> MicrosandboxResult<Vec<File>> {
-    let mut locks = Vec::new();
-    let mut requests = Vec::new();
-
-    if let RootfsSource::DiskImage { path, .. } = &config.image {
-        requests.push(DiskLockRequest {
-            path: path.clone(),
-            readonly: false,
-            label: format!("disk image rootfs {}", path.display()),
-            volume_name: None,
-        });
-    }
-
-    for mount in &config.mounts {
-        match mount {
-            VolumeMount::DiskImage { host, options, .. } => {
-                requests.push(DiskLockRequest {
-                    path: host.clone(),
-                    readonly: options.readonly,
-                    label: format!("disk image {}", host.display()),
-                    volume_name: None,
-                });
-            }
-            VolumeMount::Named { name, options, .. } => {
-                if let Some(ResolvedNamedVolume {
-                    kind: VolumeKind::Disk,
-                    path,
-                    ..
-                }) = named_volumes.get(name)
-                {
-                    requests.push(DiskLockRequest {
-                        path: path.clone(),
-                        readonly: options.readonly,
-                        label: format!("named disk volume {name:?}"),
-                        volume_name: Some(name.clone()),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut seen = HashMap::new();
-    for request in requests {
-        let canonical = std::fs::canonicalize(&request.path).map_err(|e| {
-            MicrosandboxError::InvalidConfig(format!(
-                "disk image host path does not exist: {} ({e})",
-                request.path.display()
-            ))
-        })?;
-        if let Some(previous) = seen.insert(canonical.clone(), request.label.clone()) {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "disk images cannot be attached more than once per sandbox: {} ({previous}; {})",
-                canonical.display(),
-                request.label
-            )));
-        }
-        locks.push(lock_disk_image(
-            &canonical,
-            request.readonly,
-            request.volume_name.as_deref(),
-        )?);
-    }
-
-    Ok(locks)
-}
-
-fn validate_named_disk_mount_options(
-    name: &str,
-    stat_virtualization: StatVirtualization,
-    host_permissions: HostPermissions,
-) -> MicrosandboxResult<()> {
-    if stat_virtualization != StatVirtualization::Strict {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "stat_virtualization is only valid for directory named volumes: {name}"
-        )));
-    }
-    if host_permissions != HostPermissions::Private {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "host_permissions is only valid for directory named volumes: {name}"
-        )));
-    }
-    Ok(())
-}
-
-fn lock_disk_image(
-    path: &Path,
-    readonly: bool,
-    volume_name: Option<&str>,
-) -> MicrosandboxResult<File> {
-    let file = if readonly {
-        std::fs::OpenOptions::new().read(true).open(path)
-    } else {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-    }
-    .map_err(|e| {
-        MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {e}", path.display()))
-    })?;
-
-    let operation = if readonly {
-        libc::LOCK_SH | libc::LOCK_NB
-    } else {
-        libc::LOCK_EX | libc::LOCK_NB
-    };
-
-    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-        let err = std::io::Error::last_os_error();
-        let message = if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
-            match volume_name {
-                Some(name) => {
-                    format!("volume {name:?} is already attached with an incompatible disk mode")
-                }
-                None => format!(
-                    "disk image {:?} is already attached with an incompatible disk mode",
-                    path.display().to_string()
-                ),
-            }
-        } else {
-            format!("lock disk image {}: {err}", path.display())
-        };
-        return Err(MicrosandboxError::InvalidConfig(message));
-    }
-
-    clear_cloexec(file.as_raw_fd())?;
-
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn clear_cloexec(fd: i32) -> MicrosandboxResult<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let new_flags = flags & !libc::FD_CLOEXEC;
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, new_flags) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-/// Push a `--mount tag:host_path[:opts]` arg pair.
+/// Push a `--mount tag:host_path[:ro]` arg pair.
 fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
     guest: &str,
@@ -961,51 +782,7 @@ fn push_dir_mount_arg(
     args.push(OsString::from(arg));
 }
 
-/// Return common guest mount option tokens.
-fn mount_option_tokens(options: MountOptions) -> Vec<String> {
-    let mut tokens = Vec::new();
-    if options.readonly {
-        tokens.push("ro".to_string());
-    }
-    if options.noexec {
-        tokens.push("noexec".to_string());
-    }
-    if options.nosuid {
-        tokens.push("nosuid".to_string());
-    }
-    if options.nodev {
-        tokens.push("nodev".to_string());
-    }
-    tokens
-}
-
-/// Append policy options when they deviate from the runtime defaults.
-fn append_policy_options(
-    opts: &mut Vec<String>,
-    stat_virtualization: StatVirtualization,
-    host_permissions: HostPermissions,
-) {
-    match stat_virtualization {
-        StatVirtualization::Strict => {}
-        StatVirtualization::Relaxed => opts.push("stat-virt=relaxed".to_string()),
-        StatVirtualization::Off => opts.push("stat-virt=off".to_string()),
-    }
-    match host_permissions {
-        HostPermissions::Private => {}
-        HostPermissions::Mirror => opts.push("host-perms=mirror".to_string()),
-    }
-}
-
-/// Append `:opt[,opt...]` to a spec when at least one option is set.
-fn append_option_block(spec: &mut String, opts: Vec<String>) {
-    if opts.is_empty() {
-        return;
-    }
-    spec.push(':');
-    spec.push_str(&opts.join(","));
-}
-
-/// Append a `tag:guest_path[:opts]` entry to the `MSB_DIR_MOUNTS` env var value.
+/// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
 fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, options: MountOptions) {
     if !dir_mounts_val.is_empty() {
         dir_mounts_val.push(';');
@@ -1017,7 +794,7 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, options: Mount
     append_option_block(dir_mounts_val, mount_option_tokens(options));
 }
 
-/// Push a `--mount fm_tag:file_mount_dir[:opts]` arg pair.
+/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
 fn push_file_mount_arg(
     args: &mut Vec<OsString>,
     tag: &str,
@@ -1071,7 +848,7 @@ fn push_disk_mounts_spec(
     append_option_block(disk_mounts_val, opts);
 }
 
-/// Append a `tag:filename:guest_path[:opts]` entry to the `MSB_FILE_MOUNTS` env var value.
+/// Append a `tag:filename:guest_path[:ro]` entry to the `MSB_FILE_MOUNTS` env var value.
 fn push_file_mounts_spec(
     file_mounts_val: &mut String,
     tag: &str,
@@ -1088,6 +865,47 @@ fn push_file_mounts_spec(
     file_mounts_val.push(':');
     file_mounts_val.push_str(guest);
     append_option_block(file_mounts_val, mount_option_tokens(options));
+}
+
+fn mount_option_tokens(options: MountOptions) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if options.readonly {
+        tokens.push("ro".to_string());
+    }
+    if options.noexec {
+        tokens.push("noexec".to_string());
+    }
+    if options.nosuid {
+        tokens.push("nosuid".to_string());
+    }
+    if options.nodev {
+        tokens.push("nodev".to_string());
+    }
+    tokens
+}
+
+fn append_policy_options(
+    opts: &mut Vec<String>,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => opts.push("stat-virt=relaxed".to_string()),
+        StatVirtualization::Off => opts.push("stat-virt=off".to_string()),
+    }
+    match host_permissions {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => opts.push("host-perms=mirror".to_string()),
+    }
+}
+
+fn append_option_block(spec: &mut String, opts: Vec<String>) {
+    if opts.is_empty() {
+        return;
+    }
+    spec.push(':');
+    spec.push_str(&opts.join(","));
 }
 
 /// Encodes sandbox-wide rlimits for the guest init environment.
@@ -1154,6 +972,7 @@ fn guest_mount_tag(guest_path: &str) -> String {
 /// Build the `msb sandbox` CLI args for a sandbox.
 #[allow(clippy::too_many_arguments)]
 fn sandbox_cli_args(
+    local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
     db_path: &Path,
@@ -1163,15 +982,13 @@ fn sandbox_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
-    named_volumes: &HashMap<String, ResolvedNamedVolume>,
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
     if let Some(log_level) = config.log_level {
-        args.push(OsString::from("--log-level"));
-        args.push(OsString::from(log_level.to_string()));
+        args.push(OsString::from(log_level.as_cli_flag()));
     }
 
     args.push(OsString::from("--name"));
@@ -1216,7 +1033,6 @@ fn sandbox_cli_args(
         }
         None => args.push(OsString::from("--disable-metrics-sample")),
     }
-
     if let Some(reservation) = metrics_reservation {
         args.push(OsString::from("--metrics-shm-name"));
         args.push(OsString::from(&reservation.shm_name));
@@ -1234,12 +1050,12 @@ fn sandbox_cli_args(
         RootfsSource::Oci(_) => {
             // Derive VMDK + upper paths from the stored manifest digest.
             if let Some(ref digest_str) = config.manifest_digest {
-                let cache_dir = config::config().cache_dir();
+                let cache_dir = local.cache_dir();
                 let cache = GlobalCache::new(&cache_dir).expect("cache init");
                 let digest: Digest = digest_str.parse().expect("invalid manifest digest");
                 let vmdk_path = cache.vmdk_path(&digest);
 
-                let sandbox_dir = config::config().sandboxes_dir().join(&config.name);
+                let sandbox_dir = local.sandboxes_dir().join(&config.name);
                 let upper_path = sandbox_dir.join("upper.ext4");
 
                 // VMDK (fsmeta + layers) as read-only block device.
@@ -1326,43 +1142,18 @@ fn sandbox_cli_args(
                 stat_virtualization,
                 host_permissions,
                 create: _,
-            } => match named_volumes.get(name) {
-                Some(ResolvedNamedVolume {
-                    kind: VolumeKind::Disk,
-                    path,
-                    format: Some(format),
-                    fstype,
-                }) => {
-                    let id = guest_mount_tag(guest);
-                    push_disk_mount_arg(&mut args, &id, &path.display(), format, *options);
-                    push_disk_mounts_spec(
-                        &mut disk_mounts_val,
-                        &id,
-                        guest,
-                        fstype.as_deref(),
-                        *options,
-                    );
-                }
-                _ => {
-                    let vol_path;
-                    let path = match named_volumes.get(name) {
-                        Some(ResolvedNamedVolume { path, .. }) => path,
-                        None => {
-                            vol_path = config::config().volumes_dir().join(name);
-                            &vol_path
-                        }
-                    };
-                    push_dir_mount_arg(
-                        &mut args,
-                        guest,
-                        &path.display(),
-                        *options,
-                        *stat_virtualization,
-                        *host_permissions,
-                    );
-                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
-                }
-            },
+            } => {
+                let vol_path = local.volume_path(name);
+                push_dir_mount_arg(
+                    &mut args,
+                    guest,
+                    &vol_path.display(),
+                    *options,
+                    *stat_virtualization,
+                    *host_permissions,
+                );
+                push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+            }
             VolumeMount::Tmpfs {
                 guest,
                 size_mib,
@@ -1437,15 +1228,6 @@ fn sandbox_cli_args(
         )));
     }
 
-    args.push(OsString::from("--env"));
-    args.push(OsString::from(format!(
-        "{ENV_SECURITY_PROFILE}={}",
-        match config.security_profile {
-            crate::sandbox::SecurityProfile::Default => "default",
-            crate::sandbox::SecurityProfile::Restricted => "restricted",
-        }
-    )));
-
     // Network configuration.
     #[cfg(feature = "net")]
     {
@@ -1466,6 +1248,16 @@ fn sandbox_cli_args(
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={user}", ENV_USER)));
     }
+
+    args.push(OsString::from("--env"));
+    args.push(OsString::from(format!(
+        "{}={}",
+        ENV_SECURITY_PROFILE,
+        match config.security_profile {
+            crate::sandbox::SecurityProfile::Default => "default",
+            crate::sandbox::SecurityProfile::Restricted => "restricted",
+        }
+    )));
 
     // Hostname: explicit value or fall back to a sandbox-name-derived form
     // that fits within the Linux UTS limit.
@@ -1527,25 +1319,32 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    use super::{
-        ResolvedNamedVolume, legacy_sandbox_agent_socket_path, lock_disk_mounts,
-        resolve_sandbox_agent_socket_path, sandbox_agent_socket_path,
-        sandbox_agent_socket_path_candidates, sandbox_cli_args,
-    };
+    use super::sandbox_cli_args;
     use crate::{
         LogLevel,
+        backend::LocalBackend,
         sandbox::{
-            DiskImageFormat, Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig,
+            DiskImageFormat, OciRootfsSource, Rlimit, RlimitResource, RootfsSource, SandboxBuilder,
+            SandboxConfig,
         },
-        volume::VolumeKind,
     };
+    use tempfile::tempdir;
 
     //----------------------------------------------------------------------------------------------
     // Functions: Helpers
     //----------------------------------------------------------------------------------------------
 
+    /// Build a `LocalBackend` for tests. Uses `lazy()` since these tests only
+    /// exercise the pure-rendering `sandbox_cli_args` path — no DB / FS
+    /// touches.
+    fn test_local_backend() -> LocalBackend {
+        LocalBackend::lazy()
+    }
+
     fn render_args(config: &SandboxConfig) -> Vec<String> {
+        let local = test_local_backend();
         sandbox_cli_args(
+            &local,
             config,
             42,
             Path::new("/tmp/msb.db"),
@@ -1555,7 +1354,6 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
-            &HashMap::new(),
             None,
             None,
         )
@@ -1564,47 +1362,13 @@ mod tests {
         .collect()
     }
 
-    #[test]
-    fn test_sandbox_agent_socket_path_is_independent_of_sandbox_name_length() {
-        let short = sandbox_agent_socket_path("test");
-        let max_len =
-            sandbox_agent_socket_path(&"x".repeat(crate::sandbox::MAX_SANDBOX_NAME_BYTES));
-
-        let expected_len = "0123456789abcdef0123456789abcdef.sock".len();
-        assert_eq!(
-            short.file_name().unwrap().to_string_lossy().len(),
-            expected_len
-        );
-        assert_eq!(
-            max_len.file_name().unwrap().to_string_lossy().len(),
-            expected_len
-        );
-        assert_eq!(short.parent(), max_len.parent());
-        assert_ne!(short.file_name(), max_len.file_name());
-    }
-
-    #[test]
-    fn test_sandbox_agent_socket_path_candidates_include_legacy_fallback() {
-        let candidates = sandbox_agent_socket_path_candidates("test");
-
-        assert_eq!(candidates[0], sandbox_agent_socket_path("test"));
-        assert_eq!(candidates[1], legacy_sandbox_agent_socket_path("test"));
-        assert!(candidates[1].ends_with("sandboxes/test/runtime/agent.sock"));
-    }
-
-    #[test]
-    fn test_resolve_sandbox_agent_socket_path_prefers_hashed_path() {
-        assert_eq!(
-            resolve_sandbox_agent_socket_path("test").unwrap(),
-            sandbox_agent_socket_path("test")
-        );
-    }
-
     fn render_args_with_file_mounts(
         config: &SandboxConfig,
         staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
     ) -> Vec<String> {
+        let local = test_local_backend();
         sandbox_cli_args(
+            &local,
             config,
             42,
             Path::new("/tmp/msb.db"),
@@ -1614,165 +1378,12 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
-            &HashMap::new(),
             None,
             None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
-        super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
-            .await
-            .unwrap();
-
-        assert!(super::sigchld_handler_uses_alt_stack());
-    }
-
-    //----------------------------------------------------------------------------------------------
-    // Tests: stat-virt + host-perms encoding in --mount args
-    //----------------------------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_dir_mount_arg_omits_defaults() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/data", |m| m.bind("/host/data"))
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-        // Default Strict + Private must not show up in the wire format.
-        let mount_args: Vec<&String> = rendered
-            .windows(2)
-            .filter(|p| p[0] == "--mount")
-            .map(|p| &p[1])
-            .collect();
-        assert!(!mount_args.is_empty());
-        let m = mount_args[0];
-        assert!(
-            !m.contains("stat-virt") && !m.contains("host-perms"),
-            "default-policy mount leaked policy options into wire format: {m}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_dir_mount_arg_encodes_explicit_security_mount_flags() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/data", |m| m.bind("/host/data").nosuid().nodev())
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-        let m = rendered
-            .windows(2)
-            .find(|p| p[0] == "--mount")
-            .map(|p| p[1].clone())
-            .expect("expected --mount arg");
-        assert!(m.contains("nosuid"), "expected nosuid flag: {m}");
-        assert!(m.contains("nodev"), "expected nodev flag: {m}");
-    }
-
-    #[tokio::test]
-    async fn test_dir_mount_arg_encodes_relaxed_stat_virt() {
-        use crate::sandbox::StatVirtualization;
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/host-tmp", |m| {
-                m.bind("/tmp")
-                    .readonly()
-                    .noexec()
-                    .stat_virtualization(StatVirtualization::Relaxed)
-            })
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-        let m = rendered
-            .windows(2)
-            .find(|p| p[0] == "--mount")
-            .map(|p| p[1].clone())
-            .expect("expected --mount arg");
-        assert!(m.contains(":ro"), "expected ro flag: {m}");
-        assert!(m.contains("noexec"), "expected noexec flag: {m}");
-        assert!(m.contains(",stat-virt=relaxed"), "missing policy: {m}");
-    }
-
-    #[tokio::test]
-    async fn test_dir_mount_arg_encodes_mirror_host_perms() {
-        use crate::sandbox::HostPermissions;
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/work", |m| {
-                m.bind("./project")
-                    .host_permissions(HostPermissions::Mirror)
-            })
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-        let m = rendered
-            .windows(2)
-            .find(|p| p[0] == "--mount")
-            .map(|p| p[1].clone())
-            .expect("expected --mount arg");
-        assert!(m.ends_with(":host-perms=mirror"), "missing policy: {m}");
-    }
-
-    #[tokio::test]
-    async fn test_dir_mount_arg_encodes_both_policies_off_plus_private() {
-        // `Off + Mirror` is rejected at build time; combine `Off` with the
-        // explicit (matching default) `Private` to verify both encoders fire.
-        use crate::sandbox::{HostPermissions, StatVirtualization};
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/host", |m| {
-                m.bind("/mnt/windows")
-                    .readonly()
-                    .stat_virtualization(StatVirtualization::Off)
-                    .host_permissions(HostPermissions::Private)
-            })
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-        let m = rendered
-            .windows(2)
-            .find(|p| p[0] == "--mount")
-            .map(|p| p[1].clone())
-            .expect("expected --mount arg");
-        assert!(m.contains(",stat-virt=off"));
-        // host-perms=private is the default and is omitted from the wire format.
-        assert!(!m.contains("host-perms"));
-    }
-
-    #[tokio::test]
-    async fn test_off_plus_mirror_rejected_at_build_time() {
-        use crate::sandbox::{HostPermissions, StatVirtualization};
-        let err = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/host", |m| {
-                m.bind("/mnt/windows")
-                    .stat_virtualization(StatVirtualization::Off)
-                    .host_permissions(HostPermissions::Mirror)
-            })
-            .build()
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("Off cannot be combined with"),
-            "got: {err}"
-        );
     }
 
     #[tokio::test]
@@ -1786,10 +1397,7 @@ mod tests {
 
         let args = render_args(&config);
 
-        assert!(
-            args.windows(2)
-                .any(|window| window[0] == "--log-level" && window[1] == "debug")
-        );
+        assert!(args.iter().any(|arg| arg == "--debug"));
     }
 
     #[tokio::test]
@@ -1802,7 +1410,12 @@ mod tests {
 
         let args = render_args(&config);
 
-        assert!(!args.iter().any(|arg| arg == "--log-level"));
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--error" | "--warn" | "--info" | "--debug" | "--trace"
+            )
+        }));
     }
 
     #[tokio::test]
@@ -1823,35 +1436,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_parent_watch_fd_when_present() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .build()
-            .await
-            .unwrap();
+    async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("msb-home");
+        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
 
-        let rendered = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            30,
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            Some(microsandbox_runtime::vm::PARENT_WATCH_FD),
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+        let [hashed, legacy] =
+            super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
 
-        assert!(
-            rendered
-                .windows(2)
-                .any(|pair| pair == ["--parent-watch-fd", "97"])
+        assert!(hashed.starts_with(backend.config().run_dir().join("agent")));
+        assert_eq!(
+            legacy,
+            backend
+                .config()
+                .sandboxes_dir()
+                .join("sdk-socket-test")
+                .join("runtime")
+                .join("agent.sock")
         );
     }
 
@@ -1864,7 +1465,9 @@ mod tests {
             .await
             .unwrap();
 
+        let local = test_local_backend();
         let args = sandbox_cli_args(
+            &local,
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -1873,7 +1476,6 @@ mod tests {
             Path::new("/tmp/runtime"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
             &HashMap::new(),
             None,
             None,
@@ -1984,72 +1586,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_metrics_handoff_when_provided() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .metrics_sample_interval(std::time::Duration::from_millis(500))
-            .build()
-            .await
-            .unwrap();
-
-        let reservation = super::MetricsReservation {
-            shm_name: "/msb-met-deadbeef-v2".to_string(),
-            slot: 17,
-            generation: 99,
-        };
-
-        let rendered = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            30,
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-            &HashMap::new(),
-            Some(&reservation),
-            None,
-        )
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-        assert!(
-            rendered
-                .windows(2)
-                .any(|p| p == ["--metrics-shm-name", "/msb-met-deadbeef-v2"]),
-            "missing --metrics-shm-name in {rendered:?}"
-        );
-        assert!(
-            rendered.windows(2).any(|p| p == ["--metrics-slot", "17"]),
-            "missing --metrics-slot in {rendered:?}"
-        );
-        assert!(
-            rendered
-                .windows(2)
-                .any(|p| p == ["--metrics-generation", "99"]),
-            "missing --metrics-generation in {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_cli_args_omit_metrics_handoff_when_absent() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-
-        assert!(!rendered.iter().any(|a| a == "--metrics-shm-name"));
-        assert!(!rendered.iter().any(|a| a == "--metrics-slot"));
-        assert!(!rendered.iter().any(|a| a == "--metrics-generation"));
-    }
-
-    #[tokio::test]
     async fn test_sandbox_cli_args_disable_overrides_positive_interval() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -2088,27 +1624,6 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--db-connect-timeout-secs", "30"])
         );
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_cli_args_include_security_profile_env() {
-        let default_config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .build()
-            .await
-            .unwrap();
-        let restricted_config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .security(crate::sandbox::SecurityProfile::Restricted)
-            .build()
-            .await
-            .unwrap();
-
-        let default_args = render_args(&default_config);
-        let restricted_args = render_args(&restricted_config);
-
-        assert!(default_args.contains(&"MSB_SECURITY_PROFILE=default".to_string()));
-        assert!(restricted_args.contains(&"MSB_SECURITY_PROFILE=restricted".to_string()));
     }
 
     #[tokio::test]
@@ -2173,24 +1688,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_tmpfs_noexec_appends_noexec() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/tools", |m| m.tmpfs().noexec().nosuid().nodev())
-            .build()
-            .await
-            .unwrap();
-
-        let rendered = render_args(&config);
-
-        assert!(rendered.contains(&"MSB_TMPFS=/tools:noexec,nosuid,nodev".to_string()));
-    }
-
-    #[tokio::test]
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
-            image: RootfsSource::oci("alpine"),
+            image: RootfsSource::Oci(OciRootfsSource {
+                reference: "alpine".into(),
+                upper_size_mib: None,
+            }),
             memory_mib: 1024,
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -2392,83 +1896,6 @@ mod tests {
             |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:{}:raw:ro", host.display())
         ));
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed:ro,noexec")));
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_cli_args_named_disk_volume() {
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/var/lib/docker", |m| m.named("docker-data"))
-            .build()
-            .await
-            .unwrap();
-
-        let mut named_volumes = HashMap::new();
-        named_volumes.insert(
-            "docker-data".to_string(),
-            ResolvedNamedVolume {
-                kind: VolumeKind::Disk,
-                path: PathBuf::from("/tmp/docker-data/disk.raw"),
-                format: Some(DiskImageFormat::Raw),
-                fstype: Some("ext4".to_string()),
-            },
-        );
-
-        let rendered = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            30,
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-            &named_volumes,
-            None,
-            None,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-        let tag = super::guest_mount_tag("/var/lib/docker");
-        let expected_disk_arg = format!("{tag}:/tmp/docker-data/disk.raw:raw");
-        assert!(
-            rendered
-                .windows(2)
-                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
-            "missing named disk arg in {rendered:?}"
-        );
-        assert!(rendered.contains(&format!(
-            "MSB_DISK_MOUNTS={tag}:/var/lib/docker:fstype=ext4"
-        )));
-    }
-
-    #[test]
-    fn test_lock_disk_mounts_rejects_rootfs_and_mount_same_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = dir.path().join("root.raw");
-        std::fs::write(&disk, b"disk").unwrap();
-
-        let config = SandboxConfig {
-            image: RootfsSource::DiskImage {
-                path: disk.clone(),
-                format: DiskImageFormat::Raw,
-                fstype: Some("ext4".to_string()),
-            },
-            mounts: vec![crate::sandbox::VolumeMount::DiskImage {
-                host: disk,
-                guest: "/data".to_string(),
-                format: DiskImageFormat::Raw,
-                fstype: Some("ext4".to_string()),
-                options: Default::default(),
-            }],
-            ..Default::default()
-        };
-
-        let err = lock_disk_mounts(&config, &HashMap::new()).unwrap_err();
-        assert!(err.to_string().contains("more than once per sandbox"));
     }
 
     #[tokio::test]

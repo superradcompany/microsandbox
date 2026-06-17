@@ -1,10 +1,12 @@
 export type MicrosandboxErrorCode =
   | "io"
   | "http"
+  | "cloudHttp"
   | "libkrunfwNotFound"
   | "database"
   | "invalidConfig"
   | "sandboxNotFound"
+  | "sandboxAlreadyExists"
   | "sandboxStillRunning"
   | "runtime"
   | "json"
@@ -22,6 +24,7 @@ export type MicrosandboxErrorCode =
   | "metricsDisabled"
   | "metricsUnavailable"
   | "unsupportedOperation"
+  | "unsupported"
   | "custom";
 
 export class MicrosandboxError extends Error {
@@ -46,6 +49,12 @@ export class HttpError extends MicrosandboxError {
   }
 }
 
+export class CloudHttpError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("cloudHttp", message, options);
+  }
+}
+
 export class LibkrunfwNotFoundError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("libkrunfwNotFound", message, options);
@@ -67,6 +76,12 @@ export class InvalidConfigError extends MicrosandboxError {
 export class SandboxNotFoundError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("sandboxNotFound", message, options);
+  }
+}
+
+export class SandboxAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxAlreadyExists", message, options);
   }
 }
 
@@ -172,6 +187,12 @@ export class MetricsUnavailableError extends MicrosandboxError {
 export class UnsupportedOperationError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("unsupportedOperation", message, options);
+  }
+}
+
+export class UnsupportedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("unsupported", message, options);
   }
 }
 

@@ -13,15 +13,16 @@ use microsandbox_image::snapshot::MANIFEST_FILENAME;
 use tokio::io::BufReader;
 use tokio_tar::{Archive, Builder};
 
+use crate::backend::LocalBackend;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Snapshot, SnapshotHandle, store};
+use super::{SnapshotHandle, store};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Options for [`Snapshot::export`].
+/// Options for [`super::Snapshot::export`].
 #[derive(Debug, Clone, Default)]
 pub struct ExportOpts {
     /// Walk parent chain and include each ancestor in the archive.
@@ -40,13 +41,14 @@ pub struct ExportOpts {
 /// Bundle a snapshot artifact (and optionally its ancestors / image
 /// cache) into an archive at `out`.
 pub(super) async fn export_snapshot(
+    local: &LocalBackend,
     name_or_path: &str,
     out: &Path,
     opts: ExportOpts,
 ) -> MicrosandboxResult<()> {
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via parent_digest.
-    let head = Snapshot::open(name_or_path).await?;
+    let head = store::open_snapshot(local, name_or_path).await?;
     head.verify().await?;
     let mut dirs: Vec<(PathBuf, String)> = Vec::new();
     let head_prefix = digest_prefix(head.digest());
@@ -55,8 +57,9 @@ pub(super) async fn export_snapshot(
     if opts.with_parents {
         let mut current = head.manifest().parent.clone();
         while let Some(parent_digest) = current {
-            let parent_path = resolve_parent_artifact(&parent_digest).await?;
-            let parent = Snapshot::open(parent_path.to_string_lossy().as_ref()).await?;
+            let parent_path = resolve_parent_artifact(local, &parent_digest).await?;
+            let parent =
+                store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
             parent.verify().await?;
             let prefix = digest_prefix(parent.digest());
             dirs.push((parent.path().to_path_buf(), prefix));
@@ -67,7 +70,7 @@ pub(super) async fn export_snapshot(
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
     if opts.with_image {
-        let cache_dir = crate::config::config().cache_dir();
+        let cache_dir = local.cache_dir();
         let img_digest_str = head.manifest().image.manifest_digest.clone();
         let img_digest: microsandbox_image::Digest = img_digest_str
             .parse()
@@ -137,15 +140,16 @@ pub(super) async fn export_snapshot(
 /// dir). Image-cache entries (`cache/...`) are routed into the global
 /// cache. Returns a handle for the head (last-listed) snapshot.
 pub(super) async fn import_snapshot(
+    local: &LocalBackend,
     archive: &Path,
     dest: Option<&Path>,
 ) -> MicrosandboxResult<SnapshotHandle> {
     let snapshots_dir = match dest {
         Some(d) => d.to_path_buf(),
-        None => crate::config::config().snapshots_dir(),
+        None => local.snapshots_dir(),
     };
     tokio::fs::create_dir_all(&snapshots_dir).await?;
-    let cache_dir = crate::config::config().cache_dir();
+    let cache_dir = local.cache_dir();
 
     // Stream rather than slurp — archives carry the full upper layer and are
     // routinely multi-GB.
@@ -173,11 +177,11 @@ pub(super) async fn import_snapshot(
     let head_path = head_dir.ok_or_else(|| {
         MicrosandboxError::Custom("archive contained no snapshot manifest".into())
     })?;
-    let snap = Snapshot::open(head_path.to_string_lossy().as_ref()).await?;
+    let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
     snap.verify().await?;
 
     // Index this and any sibling artifacts that landed in the dest dir.
-    let _ = Snapshot::reindex(&snapshots_dir).await;
+    let _ = store::reindex_dir(local, &snapshots_dir).await;
 
     let format = match snap.manifest().format {
         microsandbox_image::snapshot::SnapshotFormat::Raw => super::SnapshotFormat::Raw,
@@ -331,8 +335,11 @@ fn file_name_str(p: &Path) -> MicrosandboxResult<String> {
         })
 }
 
-async fn resolve_parent_artifact(parent_digest: &str) -> MicrosandboxResult<PathBuf> {
-    if let Some(handle) = store::lookup_by_digest(parent_digest).await? {
+async fn resolve_parent_artifact(
+    local: &LocalBackend,
+    parent_digest: &str,
+) -> MicrosandboxResult<PathBuf> {
+    if let Some(handle) = store::lookup_by_digest(local, parent_digest).await? {
         return Ok(handle.artifact_path);
     }
     Err(MicrosandboxError::SnapshotNotFound(format!(
