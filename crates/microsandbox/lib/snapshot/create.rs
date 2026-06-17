@@ -95,6 +95,15 @@ pub(super) async fn create_snapshot(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
 
+    let dst_upper_for_sync = dst_upper.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let f = std::fs::File::open(&dst_upper_for_sync)?;
+        f.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
+
     let integrity = if record_integrity {
         Some(super::verify::compute_sparse_integrity(&dst_upper).await?)
     } else {

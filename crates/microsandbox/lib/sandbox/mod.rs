@@ -677,10 +677,17 @@ async fn create_inner_local(
             "sandbox ready",
         );
     }
+    let handle = if matches!(mode, SpawnMode::Detached) {
+        handle.disarm();
+        None
+    } else {
+        Some(Arc::new(Mutex::new(handle)))
+    };
+
     Ok((
         crate::backend::SandboxLocalState {
             db_id: sandbox_id,
-            handle: Some(Arc::new(Mutex::new(handle))),
+            handle,
             client: Arc::new(client),
         },
         config,
@@ -844,14 +851,14 @@ pub(crate) async fn kill_local(
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(50);
         while start.elapsed() < timeout {
-            if pids.iter().all(|pid| !pid_is_alive(*pid)) {
+            if pids.iter().all(|pid| pid_is_dead_or_reaped(*pid)) {
                 break;
             }
             tokio::time::sleep(poll_interval).await;
         }
     }
 
-    let all_dead = pids.is_empty() || pids.iter().all(|pid| !pid_is_alive(*pid));
+    let all_dead = pids.is_empty() || pids.iter().all(|pid| pid_is_dead_or_reaped(*pid));
     if all_dead {
         let db = local_backend.db().await?.write();
         if let Err(e) = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await {
@@ -1901,6 +1908,16 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
         std::io::Error::last_os_error().raw_os_error(),
         Some(code) if code == libc::EPERM
     )
+}
+
+fn pid_is_dead_or_reaped(pid: i32) -> bool {
+    let mut status = 0;
+    let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if result == pid {
+        return true;
+    }
+
+    !pid_is_alive(pid)
 }
 
 /// Pull an OCI image and return the pull result.
