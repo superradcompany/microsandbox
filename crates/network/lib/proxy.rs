@@ -649,61 +649,8 @@ fn sanitize_connect_headers<'a>(
         return Ok(Cow::Borrowed(header_bytes));
     }
 
-    let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
-    match handler.substitute(header_bytes) {
-        Ok(headers) => Ok(headers),
-        Err(action) => {
-            let Some(stripped) = strip_placeholder_header_lines(header_bytes, secrets) else {
-                return Err(action);
-            };
-            let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
-            handler
-                .substitute(&stripped)
-                .map(|headers| Cow::Owned(headers.into_owned()))
-        }
-    }
-}
-
-fn strip_placeholder_header_lines(headers: &[u8], secrets: &SecretsConfig) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(headers.len());
-    let mut cursor = 0;
-    let mut first_line = true;
-    let mut stripped = false;
-
-    while cursor < headers.len() {
-        let Some(relative_end) = headers[cursor..].windows(2).position(|w| w == b"\r\n") else {
-            out.extend_from_slice(&headers[cursor..]);
-            break;
-        };
-        let line_end = cursor + relative_end;
-        let line = &headers[cursor..line_end];
-        let line_with_crlf = &headers[cursor..line_end + 2];
-        cursor = line_end + 2;
-
-        if first_line || line.is_empty() || !line_contains_secret_placeholder(line, secrets) {
-            out.extend_from_slice(line_with_crlf);
-        } else {
-            stripped = true;
-        }
-        first_line = false;
-    }
-
-    stripped.then_some(out)
-}
-
-fn line_contains_secret_placeholder(line: &[u8], secrets: &SecretsConfig) -> bool {
-    secrets.secrets.iter().any(|secret| {
-        !secret.placeholder.is_empty() && contains_bytes(line, secret.placeholder.as_bytes())
-    })
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    let mut handler = SecretsHandler::new_plain_http_untrusted_metadata(secrets);
+    handler.substitute(header_bytes)
 }
 
 /// Returns the byte offset just past the `\r\n\r\n` header terminator, or `None`.
@@ -1536,15 +1483,40 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_connect_headers_strips_placeholder_metadata_header() {
+    fn sanitize_connect_headers_blocks_placeholder_metadata_header_by_default() {
         let secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
         let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\nUser-Agent: curl\r\n\r\n";
 
-        let sanitized = sanitize_connect_headers(headers, &secrets).unwrap();
+        assert_eq!(
+            sanitize_connect_headers(headers, &secrets),
+            Err(ViolationAction::BlockAndLog)
+        );
+    }
+
+    #[test]
+    fn sanitize_connect_headers_respects_block_and_terminate() {
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.on_violation = ViolationAction::BlockAndTerminate;
+        let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\n\r\n";
 
         assert_eq!(
-            sanitized.as_ref(),
-            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nUser-Agent: curl\r\n\r\n"
+            sanitize_connect_headers(headers, &secrets),
+            Err(ViolationAction::BlockAndTerminate)
+        );
+    }
+
+    #[test]
+    fn sanitize_connect_headers_respects_explicit_passthrough() {
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.on_violation = ViolationAction::Passthrough(vec![HostPattern::Any]);
+        let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\n\r\n";
+
+        let sanitized = sanitize_connect_headers(headers, &secrets).unwrap();
+
+        assert_eq!(sanitized.as_ref(), headers);
+        assert!(
+            !String::from_utf8_lossy(sanitized.as_ref()).contains("real-secret-value"),
+            "passthrough must never substitute real secrets into CONNECT metadata"
         );
     }
 

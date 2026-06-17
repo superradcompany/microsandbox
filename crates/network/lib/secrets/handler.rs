@@ -527,6 +527,15 @@ impl SecretsHandler {
         Self::new_inner(config, "", false, None, host_scoped)
     }
 
+    /// Handler for HTTP metadata that must never receive substituted secrets.
+    ///
+    /// This is used for proxy-owned CONNECT headers. Placeholders there are
+    /// treated as violations according to their configured action unless a
+    /// passthrough policy explicitly allows forwarding the placeholder.
+    pub(crate) fn new_plain_http_untrusted_metadata(config: &SecretsConfig) -> Self {
+        Self::new_inner(config, "", false, None, true)
+    }
+
     fn new_inner(
         config: &SecretsConfig,
         sni: &str,
