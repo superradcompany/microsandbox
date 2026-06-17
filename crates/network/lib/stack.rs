@@ -525,6 +525,7 @@ pub fn smoltcp_poll_loop(
                 shared.clone(),
                 network_policy.clone(),
                 secrets.clone(),
+                tls_state.clone(),
                 conn.proxy_connect,
             );
         }
