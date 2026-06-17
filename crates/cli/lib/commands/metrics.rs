@@ -43,7 +43,9 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut metrics = all_sandbox_metrics()
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let mut metrics = all_sandbox_metrics(local)
         .await?
         .into_iter()
         .collect::<Vec<(String, SandboxMetrics)>>();
@@ -109,7 +111,10 @@ fn metrics_json(name: &str, metrics: &SandboxMetrics) -> serde_json::Value {
         "name": name,
         "timestamp": metrics.timestamp.to_rfc3339(),
         "cpu_percent": metrics.cpu_percent,
+        "vcpu_time_ns": metrics.vcpu_time_ns,
         "memory_bytes": metrics.memory_bytes,
+        "memory_available_bytes": metrics.memory_available_bytes,
+        "memory_host_resident_bytes": metrics.memory_host_resident_bytes,
         "memory_limit_bytes": metrics.memory_limit_bytes,
         "disk_read_bytes": metrics.disk_read_bytes,
         "disk_write_bytes": metrics.disk_write_bytes,

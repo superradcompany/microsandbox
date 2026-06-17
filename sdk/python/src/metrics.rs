@@ -17,7 +17,13 @@ pub struct PySandboxMetrics {
     #[pyo3(get)]
     pub cpu_percent: f64,
     #[pyo3(get)]
+    pub vcpu_time_ns: u64,
+    #[pyo3(get)]
     pub memory_bytes: u64,
+    #[pyo3(get)]
+    pub memory_available_bytes: Option<u64>,
+    #[pyo3(get)]
+    pub memory_host_resident_bytes: Option<u64>,
     #[pyo3(get)]
     pub memory_limit_bytes: u64,
     #[pyo3(get)]
@@ -92,7 +98,10 @@ impl PyMetricsStream {
 pub fn convert_metrics(m: &microsandbox::sandbox::SandboxMetrics) -> PySandboxMetrics {
     PySandboxMetrics {
         cpu_percent: m.cpu_percent as f64,
+        vcpu_time_ns: m.vcpu_time_ns,
         memory_bytes: m.memory_bytes,
+        memory_available_bytes: m.memory_available_bytes,
+        memory_host_resident_bytes: m.memory_host_resident_bytes,
         memory_limit_bytes: m.memory_limit_bytes,
         disk_read_bytes: m.disk_read_bytes,
         disk_write_bytes: m.disk_write_bytes,
@@ -107,7 +116,14 @@ pub fn convert_metrics(m: &microsandbox::sandbox::SandboxMetrics) -> PySandboxMe
 #[pyfunction]
 pub fn all_sandbox_metrics<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let metrics = microsandbox::sandbox::all_sandbox_metrics()
+        let backend = microsandbox::backend::default_backend();
+        let local = backend.as_local().ok_or_else(|| {
+            to_py_err(microsandbox::MicrosandboxError::Unsupported {
+                feature: "all_sandbox_metrics requires a local backend".into(),
+                available_when: "when cloud metrics land".into(),
+            })
+        })?;
+        let metrics = microsandbox::sandbox::all_sandbox_metrics(local)
             .await
             .map_err(to_py_err)?;
         let result: std::collections::HashMap<String, PySandboxMetrics> = metrics

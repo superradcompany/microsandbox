@@ -138,6 +138,13 @@ struct CollectorOpts {
     #[arg(long, value_parser = humantime::parse_duration, default_value = "30s")]
     export_timeout: Duration,
 
+    /// Stop emitting a sandbox once its most recent sample is older than this.
+    /// Guards against a stopped sandbox whose shm slot was never released (the
+    /// runtime was killed before releasing it) being re-exported forever with a
+    /// frozen value. `0s` disables. Accepts `30s`, `1m`, etc.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "30s")]
+    max_sample_age: Duration,
+
     /// `MSB_HOME` directory. Defaults to `$MSB_HOME` if set, otherwise
     /// `~/.microsandbox`. Used to derive the shm registry name and locate the
     /// catalog DB for labels.
@@ -261,6 +268,7 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
+        .max_sample_age(Some(args.collector.max_sample_age))
         .register(exporter);
     if let Some(source) = label_source(&args.collector)? {
         builder = builder.enrich_labels(Arc::new(source));
@@ -291,6 +299,7 @@ async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
         .export_timeout(args.collector.export_timeout)
+        .max_sample_age(Some(args.collector.max_sample_age))
         .register(exporter);
     if let Some(source) = label_source(&args.collector)? {
         builder = builder.enrich_labels(Arc::new(source));
@@ -356,16 +365,11 @@ fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBu
 }
 
 /// Derive the shm registry name from the resolved `MSB_HOME`.
-///
-/// Mirrors `microsandbox::config::Config::metrics_registry_shm_name`:
-/// `{METRICS_SHM_PREFIX}-{stable_hash(home)}-v1`.
 fn resolve_registry_name(msb_home: Option<&std::path::Path>) -> anyhow::Result<String> {
     let home = resolve_msb_home(msb_home)?;
-    let home_hash = microsandbox_utils::stable_hash_path(&home);
-    Ok(format!(
-        "{prefix}-{hash}-v1",
-        prefix = microsandbox_utils::METRICS_SHM_PREFIX,
-        hash = home_hash,
+    Ok(microsandbox_utils::metrics_registry_shm_name(
+        &home,
+        microsandbox_metrics::REGISTRY_ABI_VERSION,
     ))
 }
 
@@ -423,4 +427,27 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
         return Err(format!("empty key in {s:?}"));
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_registry_name_follows_abi_version() {
+        let home = std::path::Path::new("/tmp/msb-metrics-home");
+
+        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 2);
+        assert_eq!(
+            resolve_registry_name(Some(home)).unwrap(),
+            microsandbox_utils::metrics_registry_shm_name(
+                home,
+                microsandbox_metrics::REGISTRY_ABI_VERSION,
+            )
+        );
+    }
 }

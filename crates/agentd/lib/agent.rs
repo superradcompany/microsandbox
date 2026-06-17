@@ -8,19 +8,21 @@ use std::{env, ptr};
 
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, InitAck, InitResolved, Ready, RelayClientDisconnected, ResolvedUser,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected,
+    ResolvedUser,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
     ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
 };
 use microsandbox_protocol::fs::{FsData, FsRequest};
+use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 
@@ -28,7 +30,9 @@ use crate::config::AgentdConfig;
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::serial::AGENT_PORT_NAME;
-use crate::session::{ExecSession, SessionOutput, resolve_default_user};
+use crate::session::{
+    ExecSession, RawActivity, RawSessionCompletion, SessionOutput, resolve_default_user,
+};
 use crate::tcp::TcpSession;
 use crate::{clock, fs, heartbeat, serial};
 
@@ -62,6 +66,60 @@ struct AgentState {
     read_sessions: HashMap<u32, FsReadSession>,
     tcp_sessions: HashMap<u32, TcpSession>,
     fs: FsState,
+}
+
+struct ActivityTracker {
+    activity_seq: u64,
+    counters: ActivityCounters,
+}
+
+#[derive(Clone)]
+struct HeartbeatSnapshot {
+    activity_seq: u64,
+    active_exec_sessions: u32,
+    active_fs_streams: u32,
+    active_tcp_streams: u32,
+    counters: ActivityCounters,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ActivityTracker {
+    fn new() -> Self {
+        Self {
+            activity_seq: 0,
+            counters: ActivityCounters::default(),
+        }
+    }
+
+    fn record_host_message(&mut self) {
+        self.touch();
+        self.counters.host_messages = self.counters.host_messages.saturating_add(1);
+    }
+
+    fn record_guest_message(&mut self) {
+        self.touch();
+        self.counters.guest_messages = self.counters.guest_messages.saturating_add(1);
+    }
+
+    fn add_exec_output_bytes(&mut self, len: usize) {
+        self.counters.exec_output_bytes =
+            self.counters.exec_output_bytes.saturating_add(len as u64);
+    }
+
+    fn add_fs_bytes(&mut self, len: usize) {
+        self.counters.fs_bytes = self.counters.fs_bytes.saturating_add(len as u64);
+    }
+
+    fn add_tcp_bytes(&mut self, len: usize) {
+        self.counters.tcp_bytes = self.counters.tcp_bytes.saturating_add(len as u64);
+    }
+
+    fn touch(&mut self) {
+        self.activity_seq = self.activity_seq.saturating_add(1);
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -99,9 +157,10 @@ pub async fn run(
     // Channel for session output events.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
 
-    // Heartbeat state.
-    let mut last_activity = Utc::now();
-    let mut heartbeat_timer = time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    // Heartbeat/activity state.
+    let mut activity = ActivityTracker::new();
+    let (heartbeat_tx, heartbeat_rx) = watch::channel(heartbeat_snapshot(&state, &activity));
+    let heartbeat_task = tokio::spawn(heartbeat_writer_task(heartbeat_rx));
 
     // Send core.ready with boot timing data.
     let ready_time_ns = clock::boottime_ns();
@@ -145,21 +204,67 @@ pub async fn run(
                                 ));
                             }
 
-                            // Try to parse complete messages.
-                            while let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
-                                .map_err(|e| AgentdError::ExecSession(format!("decode: {e}")))?
+                            // Try to parse complete frames. Recoverable
+                            // message-level failures are reported on the same
+                            // correlation ID with `core.error`; unrecoverable
+                            // frame-level failures still close the agent loop.
+                            while let Some(frame) = codec::try_decode_raw_from_buf(&mut serial_in_buf)
+                                .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
                             {
-                                if message_refreshes_idle_timer(&msg.t) {
-                                    last_activity = Utc::now();
+                                let id = frame.id;
+                                let msg = match codec::raw_frame_to_message(frame) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        return Err(AgentdError::ExecSession(format!(
+                                            "decode message for id {id}: {e}"
+                                        )));
+                                    }
+                                };
+
+                                if msg.flags != msg.t.flags() {
+                                    let out_before = serial_out_buf.len();
+                                    encode_core_error_if_supported(
+                                        &msg,
+                                        msg.id,
+                                        CoreErrorKind::InvalidFlags,
+                                        format!(
+                                            "invalid flags for {}: got {}, expected {}",
+                                            msg.t.as_str(),
+                                            msg.flags,
+                                            msg.t.flags()
+                                        ),
+                                        Some(msg.t.as_str().to_string()),
+                                        &mut serial_out_buf,
+                                    )?;
+                                    record_encoded_guest_messages(
+                                        &serial_out_buf,
+                                        out_before,
+                                        &mut activity,
+                                    );
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    continue;
                                 }
 
+                                if message_refreshes_idle_timer(&msg.t) {
+                                    activity.record_host_message();
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                }
+
+                                let out_before = serial_out_buf.len();
                                 handle_message(
                                     msg,
                                     &mut state,
+                                    &mut activity,
                                     &session_tx,
                                     &mut serial_out_buf,
                                     config,
                                 ).await?;
+                                record_encoded_guest_messages(
+                                    &serial_out_buf,
+                                    out_before,
+                                    &mut activity,
+                                );
+                                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
                             }
 
                             // Flush any outgoing messages.
@@ -178,16 +283,22 @@ pub async fn run(
             Some((id, output)) = session_rx.recv() => {
                 match output {
                     SessionOutput::Stdout(data) => {
+                        let len = data.len();
                         let msg = Message::with_payload(MessageType::ExecStdout, id, &ExecStdout { data })
                             .map_err(|e| AgentdError::ExecSession(format!("encode stdout: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode stdout frame: {e}")))?;
+                        activity.record_guest_message();
+                        activity.add_exec_output_bytes(len);
                     }
                     SessionOutput::Stderr(data) => {
+                        let len = data.len();
                         let msg = Message::with_payload(MessageType::ExecStderr, id, &ExecStderr { data })
                             .map_err(|e| AgentdError::ExecSession(format!("encode stderr: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode stderr frame: {e}")))?;
+                        activity.record_guest_message();
+                        activity.add_exec_output_bytes(len);
                     }
                     SessionOutput::Exited(code) => {
                         let msg = Message::with_payload(MessageType::ExecExited, id, &ExecExited { code })
@@ -195,31 +306,30 @@ pub async fn run(
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited frame: {e}")))?;
                         state.sessions.remove(&id);
+                        activity.record_guest_message();
                     }
-                    SessionOutput::Raw(frame_bytes) => {
-                        remove_completed_fs_read(&frame_bytes, &mut state.read_sessions);
-                        remove_completed_tcp_session(&frame_bytes, &mut state.tcp_sessions);
+                    SessionOutput::Raw(output) => {
+                        apply_raw_activity(output.activity, &mut activity);
+                        complete_raw_session(
+                            id,
+                            output.completion,
+                            &mut state.read_sessions,
+                            &mut state.tcp_sessions,
+                        );
                         // Pre-encoded frame — write directly to output buffer.
-                        serial_out_buf.extend_from_slice(&frame_bytes);
+                        serial_out_buf.extend_from_slice(&output.frame);
                     }
                 }
+                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
 
                 if !serial_out_buf.is_empty() {
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
             }
-
-            // Heartbeat tick.
-            _ = heartbeat_timer.tick() => {
-                if heartbeat::heartbeat_dir_exists() {
-                    let _ = heartbeat::write_heartbeat(
-                        state.sessions.len() as u32,
-                        last_activity,
-                    ).await;
-                }
-            }
         }
     }
+
+    heartbeat_task.abort();
 
     Ok(())
 }
@@ -265,15 +375,16 @@ pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> Agen
 async fn handle_message(
     msg: Message,
     state: &mut AgentState,
+    activity: &mut ActivityTracker,
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::ExecRequest => {
-            let mut req: ExecRequest = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
+            let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
+                return Ok(());
+            };
             prepend_scripts_to_path(&mut req);
             match ExecSession::spawn(
                 msg.id,
@@ -321,9 +432,9 @@ async fn handle_message(
         }
 
         MessageType::ExecStdin => {
-            let stdin: ExecStdin = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode stdin: {e}")))?;
+            let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get_mut(&msg.id) {
                 if stdin.data.is_empty() {
                     // Empty data signals EOF — close stdin.
@@ -344,27 +455,27 @@ async fn handle_message(
         }
 
         MessageType::ExecResize => {
-            let resize: ExecResize = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode resize: {e}")))?;
+            let Some(resize) = decode_payload_or_core_error::<ExecResize>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.resize(resize.rows, resize.cols);
             }
         }
 
         MessageType::ExecSignal => {
-            let signal: ExecSignal = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode signal: {e}")))?;
+            let Some(signal) = decode_payload_or_core_error::<ExecSignal>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.send_signal(signal.signal);
             }
         }
 
         MessageType::FsRequest => {
-            let req: FsRequest = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode fs request: {e}")))?;
+            let Some(req) = decode_payload_or_core_error::<FsRequest>(&msg, out_buf)? else {
+                return Ok(());
+            };
             match fs::handle_fs_request(msg.id, req, &mut state.fs, out_buf, session_tx).await {
                 Ok(Some(FsStreamSession::Read(rs))) => {
                     state.read_sessions.insert(msg.id, rs);
@@ -380,16 +491,19 @@ async fn handle_message(
         }
 
         MessageType::FsData => {
-            let data: FsData = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode fs data: {e}")))?;
+            let Some(data) = decode_payload_or_core_error::<FsData>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            let len = data.data.len();
             if let Some(session) = state.write_sessions.get_mut(&msg.id) {
                 match fs::handle_fs_data(msg.id, data, session, out_buf).await {
                     Ok(true) => {
                         // Session complete — remove it.
                         state.write_sessions.remove(&msg.id);
                     }
-                    Ok(false) => {}
+                    Ok(false) => {
+                        activity.add_fs_bytes(len);
+                    }
                     Err(e) => {
                         eprintln!("fs data error for {}: {e}", msg.id);
                         state.write_sessions.remove(&msg.id);
@@ -410,9 +524,9 @@ async fn handle_message(
         }
 
         MessageType::TcpConnect => {
-            let req: TcpConnect = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp connect: {e}")))?;
+            let Some(req) = decode_payload_or_core_error::<TcpConnect>(&msg, out_buf)? else {
+                return Ok(());
+            };
             // The connect runs inside the session task; the agent loop never
             // blocks on it. Success or failure arrives later as a tcp frame.
             let session = TcpSession::open(msg.id, req, session_tx);
@@ -420,13 +534,16 @@ async fn handle_message(
         }
 
         MessageType::TcpData => {
-            let data: TcpData = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp data: {e}")))?;
+            let Some(data) = decode_payload_or_core_error::<TcpData>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            let len = data.data.len();
             if let Some(session) = state.tcp_sessions.get(&msg.id) {
                 if let Err(e) = session.write_data(data.data).await {
                     state.tcp_sessions.remove(&msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
+                } else {
+                    activity.add_tcp_bytes(len);
                 }
             } else {
                 encode_tcp_failed(msg.id, format!("unknown TCP session: {}", msg.id), out_buf)?;
@@ -434,9 +551,9 @@ async fn handle_message(
         }
 
         MessageType::TcpEof => {
-            let _: TcpEof = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp eof: {e}")))?;
+            let Some(_) = decode_payload_or_core_error::<TcpEof>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.tcp_sessions.get(&msg.id)
                 && let Err(e) = session.close_write().await
             {
@@ -446,18 +563,20 @@ async fn handle_message(
         }
 
         MessageType::TcpClose => {
-            let _: TcpClose = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode tcp close: {e}")))?;
+            let Some(_) = decode_payload_or_core_error::<TcpClose>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Some(session) = state.tcp_sessions.remove(&msg.id) {
                 session.close();
             }
         }
 
         MessageType::RelayClientDisconnected => {
-            let disconnected: RelayClientDisconnected = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode relay disconnect: {e}")))?;
+            let Some(disconnected) =
+                decode_payload_or_core_error::<RelayClientDisconnected>(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
             state
                 .fs
                 .close_owner_range(disconnected.id_start, disconnected.id_end_exclusive);
@@ -478,9 +597,9 @@ async fn handle_message(
         }
 
         MessageType::ClockSync => {
-            let sync: ClockSync = msg
-                .payload()
-                .map_err(|e| AgentdError::ExecSession(format!("decode clock sync: {e}")))?;
+            let Some(sync) = decode_payload_or_core_error::<ClockSync>(&msg, out_buf)? else {
+                return Ok(());
+            };
             if let Err(e) = clock::sync_realtime_unix_nanos(sync.unix_time_nanos) {
                 eprintln!("clock: failed to sync realtime clock: {e}");
             }
@@ -526,23 +645,105 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(t, MessageType::ClockSync)
 }
 
-fn remove_completed_fs_read(frame_bytes: &[u8], read_sessions: &mut HashMap<u32, FsReadSession>) {
-    let mut buf = frame_bytes.to_vec();
-    let Ok(Some(msg)) = codec::try_decode_from_buf(&mut buf) else {
-        return;
-    };
-    if msg.t == MessageType::FsResponse {
-        read_sessions.remove(&msg.id);
+async fn heartbeat_writer_task(snapshot_rx: watch::Receiver<HeartbeatSnapshot>) {
+    let mut heartbeat_seq = 0u64;
+    let mut last_activity_seq = snapshot_rx.borrow().activity_seq;
+    let mut last_activity = Utc::now();
+    let mut heartbeat_timer = time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+
+    loop {
+        heartbeat_timer.tick().await;
+        if !heartbeat::heartbeat_dir_exists() {
+            continue;
+        }
+
+        heartbeat_seq = heartbeat_seq.saturating_add(1);
+        let snapshot = snapshot_rx.borrow().clone();
+        let timestamp = Utc::now();
+        if snapshot.activity_seq != last_activity_seq {
+            last_activity_seq = snapshot.activity_seq;
+            last_activity = timestamp;
+        }
+        let heartbeat = Heartbeat {
+            heartbeat_seq,
+            activity_seq: snapshot.activity_seq,
+            timestamp,
+            last_activity,
+            active_exec_sessions: snapshot.active_exec_sessions,
+            active_fs_streams: snapshot.active_fs_streams,
+            active_tcp_streams: snapshot.active_tcp_streams,
+            activity_counters: snapshot.counters,
+        };
+        let _ = heartbeat::write_heartbeat(&heartbeat).await;
     }
 }
 
-fn remove_completed_tcp_session(frame_bytes: &[u8], tcp_sessions: &mut HashMap<u32, TcpSession>) {
-    let mut buf = frame_bytes.to_vec();
-    let Ok(Some(msg)) = codec::try_decode_from_buf(&mut buf) else {
-        return;
-    };
-    if matches!(msg.t, MessageType::TcpClosed | MessageType::TcpFailed) {
-        tcp_sessions.remove(&msg.id);
+fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> HeartbeatSnapshot {
+    HeartbeatSnapshot {
+        activity_seq: activity.activity_seq,
+        active_exec_sessions: state.sessions.len() as u32,
+        active_fs_streams: state
+            .read_sessions
+            .len()
+            .saturating_add(state.write_sessions.len()) as u32,
+        active_tcp_streams: state.tcp_sessions.len() as u32,
+        counters: activity.counters,
+    }
+}
+
+fn publish_heartbeat_snapshot(
+    heartbeat_tx: &watch::Sender<HeartbeatSnapshot>,
+    state: &AgentState,
+    activity: &ActivityTracker,
+) {
+    let _ = heartbeat_tx.send(heartbeat_snapshot(state, activity));
+}
+
+fn record_encoded_guest_messages(out_buf: &[u8], start: usize, activity: &mut ActivityTracker) {
+    let mut offset = start;
+    while offset + 4 <= out_buf.len() {
+        let frame_len = u32::from_be_bytes([
+            out_buf[offset],
+            out_buf[offset + 1],
+            out_buf[offset + 2],
+            out_buf[offset + 3],
+        ]) as usize;
+        let total = 4usize.saturating_add(frame_len);
+        if offset.saturating_add(total) > out_buf.len() {
+            break;
+        }
+
+        activity.record_guest_message();
+        offset += total;
+    }
+}
+
+fn apply_raw_activity(raw: RawActivity, activity: &mut ActivityTracker) {
+    if raw.guest_message {
+        activity.record_guest_message();
+    }
+    if raw.fs_bytes > 0 {
+        activity.add_fs_bytes(raw.fs_bytes);
+    }
+    if raw.tcp_bytes > 0 {
+        activity.add_tcp_bytes(raw.tcp_bytes);
+    }
+}
+
+fn complete_raw_session(
+    id: u32,
+    completion: Option<RawSessionCompletion>,
+    read_sessions: &mut HashMap<u32, FsReadSession>,
+    tcp_sessions: &mut HashMap<u32, TcpSession>,
+) {
+    match completion {
+        Some(RawSessionCompletion::FsRead) => {
+            read_sessions.remove(&id);
+        }
+        Some(RawSessionCompletion::Tcp) => {
+            tcp_sessions.remove(&id);
+        }
+        None => {}
     }
 }
 
@@ -586,6 +787,66 @@ fn encode_tcp_failed(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdRes
     codec::encode_to_buf(&reply, out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode tcp failed frame: {e}")))?;
     Ok(())
+}
+
+fn encode_core_error_if_supported(
+    source: &Message,
+    id: u32,
+    kind: CoreErrorKind,
+    message: String,
+    offending_type: Option<String>,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    if !MessageType::CoreError.is_available_at(source.v) {
+        return Err(AgentdError::ExecSession(format!(
+            "cannot send core.error to protocol generation {}",
+            source.v
+        )));
+    }
+
+    encode_core_error(id, kind, message, offending_type, out_buf)
+}
+
+fn encode_core_error(
+    id: u32,
+    kind: CoreErrorKind,
+    message: String,
+    offending_type: Option<String>,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    let reply = Message::with_payload(
+        MessageType::CoreError,
+        id,
+        &CoreError {
+            kind,
+            message,
+            offending_type,
+        },
+    )
+    .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|e| AgentdError::ExecSession(format!("encode core error frame: {e}")))?;
+    Ok(())
+}
+
+fn decode_payload_or_core_error<T>(msg: &Message, out_buf: &mut Vec<u8>) -> AgentdResult<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match msg.payload::<T>() {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) => {
+            encode_core_error_if_supported(
+                msg,
+                msg.id,
+                CoreErrorKind::InvalidPayload,
+                format!("decode payload for {}: {error}", msg.t.as_str()),
+                Some(msg.t.as_str().to_string()),
+                out_buf,
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// Build an `ExecStdinError` payload from a failed `write_stdin` result.
@@ -840,4 +1101,45 @@ fn remount_root_readonly() -> AgentdResult<()> {
     }
 
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_encoded_guest_messages_counts_only_appended_frames() {
+        let mut out_buf = Vec::new();
+        let existing =
+            Message::with_payload(MessageType::ExecStarted, 1, &ExecStarted { pid: 123 }).unwrap();
+        codec::encode_to_buf(&existing, &mut out_buf).unwrap();
+        let start = out_buf.len();
+
+        let appended =
+            Message::with_payload(MessageType::ExecStarted, 2, &ExecStarted { pid: 456 }).unwrap();
+        codec::encode_to_buf(&appended, &mut out_buf).unwrap();
+
+        let mut activity = ActivityTracker::new();
+        record_encoded_guest_messages(&out_buf, start, &mut activity);
+
+        assert_eq!(activity.activity_seq, 1);
+        assert_eq!(activity.counters.guest_messages, 1);
+    }
+
+    #[test]
+    fn apply_raw_activity_updates_guest_and_byte_counters() {
+        let mut activity = ActivityTracker::new();
+
+        apply_raw_activity(RawActivity::fs_bytes(42), &mut activity);
+        apply_raw_activity(RawActivity::tcp_bytes(7), &mut activity);
+
+        assert_eq!(activity.activity_seq, 2);
+        assert_eq!(activity.counters.guest_messages, 2);
+        assert_eq!(activity.counters.fs_bytes, 42);
+        assert_eq!(activity.counters.tcp_bytes, 7);
+    }
 }

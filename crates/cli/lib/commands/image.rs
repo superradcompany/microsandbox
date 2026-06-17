@@ -1,6 +1,6 @@
 //! `msb image` command — manage OCI images.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
@@ -51,6 +51,9 @@ pub enum ImageCommands {
     /// Delete one or more cached images.
     #[command(visible_alias = "rm")]
     Remove(ImageRemoveArgs),
+
+    /// Remove cached images not used by sandboxes.
+    Prune(ImagePruneArgs),
 }
 
 /// Arguments for `msb image list`.
@@ -137,6 +140,22 @@ pub struct ImageRemoveArgs {
     pub quiet: bool,
 }
 
+/// Arguments for `msb image prune`.
+#[derive(Debug, Args)]
+pub struct ImagePruneArgs {
+    /// Do not prompt for confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    /// Output format (json).
+    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
+    pub format: Option<String>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -160,6 +179,7 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
         ImageCommands::Load(args) => run_load(args).await,
         ImageCommands::Save(args) => run_save(args).await,
         ImageCommands::Remove(args) => run_remove(args).await,
+        ImageCommands::Prune(args) => run_prune(args).await,
     }
 }
 
@@ -187,8 +207,10 @@ async fn run_pull_inner(
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    let global = microsandbox::config::config();
-    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let global = local.config();
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
         .parse()
@@ -199,7 +221,7 @@ async fn run_pull_inner(
     if let Some((result, metadata)) =
         microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
     {
-        if let Err(e) = Image::persist(&reference, metadata).await {
+        if let Err(e) = Image::persist(local, &reference, metadata).await {
             tracing::warn!(error = %e, "failed to persist image metadata to database");
         }
 
@@ -289,10 +311,10 @@ async fn run_pull_inner(
     }
 
     // Persist to database.
-    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
     match cache.read_image_metadata(&image_ref) {
         Ok(Some(metadata)) => {
-            if let Err(e) = Image::persist(&reference, metadata).await {
+            if let Err(e) = Image::persist(local, &reference, metadata).await {
                 tracing::warn!(error = %e, "failed to persist image metadata to database");
             }
         }
@@ -342,8 +364,9 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
         return Ok(());
     }
 
-    let global = microsandbox::config::config();
-    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
     let image_ref: microsandbox_image::Reference = reference
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
@@ -355,7 +378,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
     if let Some((_, metadata)) =
         microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
     {
-        if let Err(e) = Image::persist(reference, metadata).await {
+        if let Err(e) = Image::persist(local, reference, metadata).await {
             tracing::warn!(error = %e, "failed to persist image metadata to database");
         }
         return Ok(());
@@ -374,7 +397,9 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
 
 /// Execute `msb image list` / `msb images`.
 pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
-    let images = Image::list().await?;
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let images = Image::list(local).await?;
 
     if args.format.as_deref() == Some("json") {
         let entries: Vec<serde_json::Value> = images
@@ -433,7 +458,9 @@ pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image inspect`.
 pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
-    let detail = Image::inspect(&args.reference).await?;
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let detail = Image::inspect(local, &args.reference).await?;
 
     if args.format.as_deref() == Some("json") {
         let layers_json: Vec<serde_json::Value> = detail
@@ -524,7 +551,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
         ui::detail_kv_indent("User", config.user.as_deref().unwrap_or("-"));
 
         if !config.env.is_empty() {
-            println!("  {}", style("Env:").cyan());
+            println!("  {}", style("Env:").dim());
             for var in &config.env {
                 println!("    {var}");
             }
@@ -555,8 +582,9 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image load` / `msb load`.
 pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
-    let global = microsandbox::config::config();
-    let cache_dir = global.cache_dir();
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let cache_dir = local.cache_dir();
     let temp_input;
     let input_path = if let Some(path) = args.input.as_ref() {
         path
@@ -579,7 +607,7 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     .await?;
 
     for image in &loaded {
-        Image::persist(&image.reference, image.metadata.clone()).await?;
+        Image::persist(local, &image.reference, image.metadata.clone()).await?;
     }
 
     if !args.quiet {
@@ -598,8 +626,9 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image save` / `msb save`.
 pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
-    let global = microsandbox::config::config();
-    let cache_dir = global.cache_dir();
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let cache_dir = local.cache_dir();
     let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
     let mut requests = Vec::with_capacity(args.references.len());
 
@@ -664,6 +693,8 @@ pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image rm` / `msb rmi`.
 pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
     let mut failed = false;
 
     for reference in &args.references {
@@ -673,7 +704,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
             ui::Spinner::start("Removing", reference)
         };
 
-        match Image::remove(reference, args.force).await {
+        match Image::remove(local, reference, args.force).await {
             Ok(()) => {
                 spinner.finish_success("Removed");
             }
@@ -694,6 +725,78 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Execute `msb image prune`.
+pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+
+    if !args.yes {
+        if !io::stdin().is_terminal() {
+            anyhow::bail!("non-interactive terminal; use --yes to prune cached images");
+        }
+
+        eprint!("Remove all cached images not used by sandboxes? [y/N] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            if !args.quiet {
+                eprintln!("Aborted.");
+            }
+            return Ok(());
+        }
+    }
+
+    let report = Image::prune(local).await?;
+
+    if args.format.as_deref() == Some("json") {
+        let json = serde_json::json!({
+            "image_refs_removed": report.image_refs_removed,
+            "manifests_removed": report.manifests_removed,
+            "layers_removed": report.layers_removed,
+            "fsmeta_removed": report.fsmeta_removed,
+            "vmdk_removed": report.vmdk_removed,
+            "bytes_reclaimed": report.bytes_reclaimed,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    if args.quiet {
+        return Ok(());
+    }
+
+    if report.image_refs_removed == 0
+        && report.manifests_removed == 0
+        && report.layers_removed == 0
+        && report.fsmeta_removed == 0
+        && report.vmdk_removed == 0
+    {
+        eprintln!("Nothing to prune.");
+        return Ok(());
+    }
+
+    ui::success("Pruned", "image cache");
+    ui::detail_kv_indent("Image refs", &report.image_refs_removed.to_string());
+    ui::detail_kv_indent("Manifests", &report.manifests_removed.to_string());
+    ui::detail_kv_indent("Layers", &report.layers_removed.to_string());
+
+    if report.fsmeta_removed > 0 {
+        ui::detail_kv_indent("Fsmeta", &report.fsmeta_removed.to_string());
+    }
+
+    if report.vmdk_removed > 0 {
+        ui::detail_kv_indent("VMDK", &report.vmdk_removed.to_string());
+    }
+
+    if let Some(bytes) = report.bytes_reclaimed {
+        ui::detail_kv_indent("Reclaimed", &format_bytes_u64(bytes));
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -701,6 +804,11 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
 /// Format bytes as a human-readable string.
 fn format_bytes(bytes: i64) -> String {
     microsandbox_utils::format::format_bytes(bytes.max(0) as u64)
+}
+
+/// Format bytes as a human-readable string.
+fn format_bytes_u64(bytes: u64) -> String {
+    microsandbox_utils::format::format_bytes(bytes)
 }
 
 /// Print the pull failure indicator line to stderr.

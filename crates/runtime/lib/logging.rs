@@ -1,6 +1,7 @@
 //! Log file management with rotation for capturing VM console output.
 
 use std::{
+    fmt,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -9,6 +10,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::RuntimeResult;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum number of rotated log files to keep.
+const MAX_ROTATED_FILES: u32 = 3;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -53,17 +61,21 @@ pub struct RotatingLog {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Maximum number of rotated log files to keep.
-const MAX_ROTATED_FILES: u32 = 3;
-
-//--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl LogLevel {
+    /// Return the lowercase string representation for this level.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
     /// Return the CLI flag corresponding to this level.
     pub const fn as_cli_flag(self) -> &'static str {
         match self {
@@ -157,6 +169,16 @@ impl RotatingLog {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -171,5 +193,14 @@ mod tests {
         assert_eq!(LogLevel::Info.as_cli_flag(), "--info");
         assert_eq!(LogLevel::Debug.as_cli_flag(), "--debug");
         assert_eq!(LogLevel::Trace.as_cli_flag(), "--trace");
+    }
+
+    #[test]
+    fn test_log_level_display_values() {
+        assert_eq!(LogLevel::Error.to_string(), "error");
+        assert_eq!(LogLevel::Warn.to_string(), "warn");
+        assert_eq!(LogLevel::Info.to_string(), "info");
+        assert_eq!(LogLevel::Debug.to_string(), "debug");
+        assert_eq!(LogLevel::Trace.to_string(), "trace");
     }
 }

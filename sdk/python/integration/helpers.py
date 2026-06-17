@@ -33,7 +33,7 @@ async def remove_sandbox(name: str) -> None:
 async def stop_and_remove_sandbox(name: str, sandbox: Any | None = None) -> None:
     if sandbox is not None:
         with suppress(Exception):
-            await sandbox.stop_and_wait()
+            await sandbox.stop()
     await remove_sandbox(name)
 
 

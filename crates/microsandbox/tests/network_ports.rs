@@ -21,6 +21,12 @@ const UDP_ECHO_READY_PATH: &str = "/tmp/udp-echo.ready";
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 #[msb_test]
 async fn udp_published_port_round_trips() {
     let name = "network-ports-udp";
@@ -96,8 +102,7 @@ async fn udp_published_port_round_trips() {
         String::new()
     };
 
-    sandbox.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 
     assert_eq!(
         received.as_deref(),

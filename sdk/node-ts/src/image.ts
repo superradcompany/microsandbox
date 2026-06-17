@@ -34,6 +34,15 @@ export interface ImageDetail {
   readonly layers: readonly ImageLayerDetail[];
 }
 
+export interface ImagePruneReport {
+  readonly imageRefsRemoved: number;
+  readonly manifestsRemoved: number;
+  readonly layersRemoved: number;
+  readonly fsmetaRemoved: number;
+  readonly vmdkRemoved: number;
+  readonly bytesReclaimed: number | null;
+}
+
 export class ImageHandle {
   readonly reference: string;
   readonly sizeBytes: number | null;
@@ -87,14 +96,17 @@ export class Image {
     await withMappedErrors(() => napi.imageRemove(reference, opts.force));
   }
 
-  /** Garbage-collect orphaned layers. Returns the count reclaimed. */
-  static async gcLayers(): Promise<number> {
-    return await withMappedErrors(() => napi.imageGcLayers());
-  }
-
-  /** Garbage-collect everything reclaimable. Returns the count reclaimed. */
-  static async gc(): Promise<number> {
-    return await withMappedErrors(() => napi.imageGc());
+  /** Remove cached image data that is not used by sandboxes. */
+  static async prune(): Promise<ImagePruneReport> {
+    const raw = await withMappedErrors(() => napi.imagePrune());
+    return {
+      imageRefsRemoved: raw.imageRefsRemoved,
+      manifestsRemoved: raw.manifestsRemoved,
+      layersRemoved: raw.layersRemoved,
+      fsmetaRemoved: raw.fsmetaRemoved,
+      vmdkRemoved: raw.vmdkRemoved,
+      bytesReclaimed: numOrNull(raw.bytesReclaimed),
+    };
   }
 }
 

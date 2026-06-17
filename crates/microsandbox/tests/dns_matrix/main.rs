@@ -44,6 +44,12 @@ const DENIED_RESOLVER: &str = "8.8.8.8";
 /// directly so DoT handshakes against MITM'd targets validate.
 const GUEST_TLS_CA: &str = "+tls-ca=/.msb/tls/ca.pem";
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -90,8 +96,7 @@ async fn dns_matrix_plain() {
         assert_scenario(&sb, scenario, cmd, *want).await;
     }
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// DoT matrix with TLS interception enabled: guest → gateway and
@@ -132,8 +137,7 @@ async fn dns_matrix_dot() {
         assert_scenario(&sb, scenario, cmd, *want).await;
     }
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 //--------------------------------------------------------------------------------------------------

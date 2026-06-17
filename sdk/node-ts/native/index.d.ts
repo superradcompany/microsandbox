@@ -17,6 +17,15 @@ export declare class AgentClient {
   /** Connect to an agentd relay socket by path. */
   static connect(path: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
   /**
+   * Resolve a sandbox's agentd relay socket path without connecting.
+   *
+   * Returns the same path `connectSandbox` would dial, so a caller can talk
+   * to agentd over a raw byte transport instead of this frame client. The
+   * sandbox need not be running. Sandbox names are limited to 128 UTF-8
+   * bytes.
+   */
+  static socketPath(name: string): string
+  /**
    * Send one frame and await a single response frame.
    *
    * Use for request/response RPCs that produce exactly one terminal
@@ -361,6 +370,8 @@ export declare class MountBuilder {
   bind(host: string): this
   /** Mount a named volume created via `Volume.builder(name).create()`. */
   named(name: string): this
+  /** Mount a named volume with explicit existence behavior. */
+  namedWith(name: string, mode?: string | undefined | null, kind?: string | undefined | null, sizeMib?: number | undefined | null, quotaMib?: number | undefined | null): this
   /** Mount an in-memory tmpfs at the guest path. */
   tmpfs(): this
   /** Mount a host disk image file as a virtio-blk device. */
@@ -755,12 +766,12 @@ export declare class Sandbox {
    */
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
-  static list(): Promise<Array<SandboxInfo>>
+  static list(): Promise<Array<JsSandboxHandle>>
   /**
    * List sandboxes filtered to those carrying all of the filter's labels
    * (AND-matched).
    */
-  static listWith(filter: SandboxListFilter): Promise<Array<SandboxInfo>>
+  static listWith(filter: SandboxListFilter): Promise<Array<JsSandboxHandle>>
   /**
    * Remove a stopped sandbox from the database.
    *
@@ -798,7 +809,7 @@ export declare class Sandbox {
   /** Execute a shell command with streaming I/O. */
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
-  fs(): SandboxFs
+  fs(): SandboxFsOps
   /** Connect a native in-process SSH client to this sandbox. */
   sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
   /** Prepare a reusable SSH server endpoint for this sandbox. */
@@ -820,20 +831,24 @@ export declare class Sandbox {
   attachWithBuilder(cmd: string, builder: AttachOptionsBuilder): Promise<number>
   /** Attach to the sandbox's default shell. */
   attachShell(): Promise<number>
-  /** Stop the sandbox gracefully (SIGTERM). */
+  /** Stop the sandbox gracefully and wait until stopped state is observed. */
   stop(): Promise<void>
-  /** Stop and wait for exit, returning the exit status. */
-  stopAndWait(): Promise<ExitStatus>
-  /** Kill the sandbox immediately (SIGKILL). */
+  /** Request graceful shutdown without waiting for stopped-state observation. */
+  requestStop(): Promise<void>
+  /** Stop the sandbox gracefully with an explicit timeout in milliseconds. */
+  stopWithTimeout(timeoutMs: number): Promise<void>
+  /** Force-kill the sandbox and wait until stopped state is observed. */
   kill(): Promise<void>
-  /** Graceful drain (SIGUSR1 — for load balancing). */
-  drain(): Promise<void>
-  /** Wait for the sandbox process to exit. */
-  wait(): Promise<ExitStatus>
+  /** Request force termination without waiting for stopped-state observation. */
+  requestKill(): Promise<void>
+  /** Force-kill the sandbox with an explicit observation timeout in milliseconds. */
+  killWithTimeout(timeoutMs: number): Promise<void>
+  /** Request graceful drain without waiting for completion. */
+  requestDrain(): Promise<void>
+  /** Wait until the sandbox is observed in a terminal non-running state. */
+  waitUntilStopped(): Promise<SandboxStopResult>
   /** Detach from the sandbox — it will continue running after this handle is dropped. */
   detach(): Promise<void>
-  /** Remove the persisted database record after stopping. */
-  removePersisted(): Promise<void>
   /**
    * Read captured output from `exec.log` for this sandbox.
    *
@@ -1024,7 +1039,7 @@ export declare class SandboxBuilder {
 export type JsSandboxBuilder = SandboxBuilder
 
 /** Filesystem operations on a running sandbox (via agent protocol). */
-export declare class SandboxFs {
+export declare class SandboxFsOps {
   /** Read a file as a Buffer. */
   read(path: string): Promise<Buffer>
   /** Read a file as a UTF-8 string. */
@@ -1056,7 +1071,7 @@ export declare class SandboxFs {
   /** Write a file with streaming. Returns a sink the caller writes to. */
   writeStream(path: string): Promise<FsWriteSink>
 }
-export type JsSandboxFs = SandboxFs
+export type JsSandboxFsOps = SandboxFsOps
 
 /**
  * A lightweight handle to a sandbox from the database.
@@ -1070,6 +1085,8 @@ export declare class SandboxHandle {
   get status(): string
   /** Raw config JSON string from the database. */
   get configJson(): string
+  /** Return a fresh handle for the same sandbox. */
+  refresh(): Promise<SandboxHandle>
   /** Creation timestamp as ms since Unix epoch. */
   get createdAt(): number | null
   /** Last update timestamp as ms since Unix epoch. */
@@ -1099,16 +1116,23 @@ export declare class SandboxHandle {
    * override with `stopWithTimeout(timeoutMs)`.
    */
   stop(): Promise<void>
+  /** Request graceful shutdown without waiting. */
+  requestStop(): Promise<void>
   /**
    * Stop the sandbox gracefully with an explicit timeout in
-   * milliseconds. If the sandbox is still running after this window,
-   * it is force-killed. `timeoutMs == 0` force-kills immediately.
-   * The call resolves successfully either way — it does not throw
-   * on timeout expiry.
+   * milliseconds before escalation.
    */
   stopWithTimeout(timeoutMs: number): Promise<void>
-  /** Kill the sandbox (SIGKILL). */
+  /** Force-kill the sandbox and wait until stopped state is observed. */
   kill(): Promise<void>
+  /** Request force termination without waiting. */
+  requestKill(): Promise<void>
+  /** Force-kill the sandbox with an explicit observation timeout in milliseconds. */
+  killWithTimeout(timeoutMs: number): Promise<void>
+  /** Request graceful drain without waiting for completion. */
+  requestDrain(): Promise<void>
+  /** Wait until the sandbox is observed in a terminal non-running state. */
+  waitUntilStopped(): Promise<SandboxStopResult>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>
   /**
@@ -1303,7 +1327,7 @@ export type JsSshClient = SshClient
 /** Reusable SSH server endpoint for a sandbox. */
 export declare class SshServer {
   /** Serve one SSH transport over this process's stdin/stdout. */
-  serveStdio(): Promise<void>
+  serveConnection(): Promise<void>
   /** Release this prepared server endpoint. */
   close(): Promise<void>
 }
@@ -1363,8 +1387,14 @@ export type JsVolume = Volume
 /** Fluent builder for a named persistent volume. */
 export declare class VolumeBuilder {
   constructor(name: string)
+  /** Create a directory-backed named volume. */
+  directory(): this
+  /** Create a raw ext4 disk-backed named volume. */
+  disk(): this
   /** Limit the volume's storage capacity (MiB). Omit for unlimited. */
   quota(mib: number): this
+  /** Set disk volume capacity in MiB. */
+  size(mib: number): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
   /** Snapshot the accumulated configuration. */
@@ -1419,7 +1449,11 @@ export type JsVolumeFsWriteSink = VolumeFsWriteSink
 export declare class VolumeHandle {
   get name(): string
   get quotaMib(): number | null
+  get kind(): string
   get usedBytes(): number
+  get capacityBytes(): number | null
+  get diskFormat(): string | null
+  get diskFstype(): string | null
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
@@ -1483,7 +1517,7 @@ export interface ExecOptions {
   rlimits: Array<Rlimit>
 }
 
-/** Process exit status. */
+/** Exit status for an executed command. */
 export interface ExitStatus {
   code: number
   success: boolean
@@ -1546,12 +1580,6 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
-/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
-export declare function imageGc(): Promise<number>
-
-/** Garbage-collect orphaned layers. Returns the number reclaimed. */
-export declare function imageGcLayers(): Promise<number>
-
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1582,6 +1610,19 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
+
+/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
+export declare function imagePrune(): Promise<ImagePruneReportJs>
+
+/** Summary of artifacts removed by `imagePrune`. */
+export interface ImagePruneReportJs {
+  imageRefsRemoved: number
+  manifestsRemoved: number
+  layersRemoved: number
+  fsmetaRemoved: number
+  vmdkRemoved: number
+  bytesReclaimed?: number
+}
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a
@@ -1817,17 +1858,6 @@ export interface Rlimit {
   hard: number
 }
 
-/** Lightweight handle info for a sandbox from the database. */
-export interface SandboxInfo {
-  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
-  name: string
-  /** "running", "stopped", "crashed", or "draining". */
-  status: string
-  configJson: string
-  createdAt?: number
-  updatedAt?: number
-}
-
 /**
  * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
  * (AND-matched). Omit or leave empty to match every sandbox.
@@ -1839,7 +1869,10 @@ export interface SandboxListFilter {
 /** Point-in-time resource metrics for a sandbox. */
 export interface SandboxMetrics {
   cpuPercent: number
+  vcpuTimeNs: number
   memoryBytes: number
+  memoryAvailableBytes?: number
+  memoryHostResidentBytes?: number
   memoryLimitBytes: number
   diskReadBytes: number
   diskWriteBytes: number
@@ -1849,6 +1882,16 @@ export interface SandboxMetrics {
   uptimeMs: number
   /** Timestamp as milliseconds since Unix epoch. */
   timestampMs: number
+}
+
+/** Result of observing a sandbox in a terminal state. */
+export interface SandboxStopResult {
+  name: string
+  status: string
+  exitCode?: number
+  signal?: number
+  observedAt: number
+  source?: string
 }
 
 /** A secret entry produced by `SecretBuilder.build()`. */
@@ -1941,7 +1984,7 @@ export interface SshAttachOptions {
   detachKeys?: string
 }
 
-/** Options accepted by `Sandbox.ssh().connect()`. */
+/** Options accepted by `Sandbox.ssh().openClient()`. */
 export interface SshClientOptions {
   user?: string
   term?: string
@@ -1960,7 +2003,7 @@ export interface SshOutput {
   stderr: Buffer
 }
 
-/** Options accepted by `Sandbox.ssh().server()`. */
+/** Options accepted by `Sandbox.ssh().prepareServer()`. */
 export interface SshServerOptions {
   hostKeyPath?: string
   authorizedKeysPath?: string
@@ -2002,15 +2045,21 @@ export interface TlsConfig {
 /** Built volume configuration produced by `VolumeBuilder.build()`. */
 export interface VolumeConfig {
   name: string
+  kind: string
   quotaMib?: number
+  capacityMib?: number
   labels: Record<string, string>
 }
 
 /** Volume handle info from the database. */
 export interface VolumeInfo {
   name: string
+  kind: string
   quotaMib?: number
   usedBytes: number
+  capacityBytes?: number
+  diskFormat?: string
+  diskFstype?: string
   labels: Record<string, string>
   createdAt?: number
 }

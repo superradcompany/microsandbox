@@ -1,13 +1,19 @@
 //! Sandbox metrics APIs backed by the shared-memory live registry.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream;
 use microsandbox_db::DbReadConnection;
 use microsandbox_metrics::{LiveMetric, MetricsRegistry};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{
+    MicrosandboxError, MicrosandboxResult,
+    backend::{Backend, LocalBackend, sandbox::MetricsStream},
+    db::entity::sandbox as sandbox_entity,
+};
 
 use super::{Sandbox, SandboxConfig};
 
@@ -20,8 +26,14 @@ use super::{Sandbox, SandboxConfig};
 pub struct SandboxMetrics {
     /// CPU usage as a percentage across all host CPUs.
     pub cpu_percent: f32,
+    /// Cumulative guest vCPU execution time across all vCPUs.
+    pub vcpu_time_ns: u64,
     /// Resident memory usage in bytes.
     pub memory_bytes: u64,
+    /// Guest-available memory in bytes when reported by the guest.
+    pub memory_available_bytes: Option<u64>,
+    /// Host-resident guest memory in bytes for capacity diagnostics.
+    pub memory_host_resident_bytes: Option<u64>,
     /// Configured guest memory limit in bytes.
     pub memory_limit_bytes: u64,
     /// Cumulative disk bytes read by the sandbox process.
@@ -47,59 +59,113 @@ impl Sandbox {
     ///
     /// Returns [`MicrosandboxError::MetricsDisabled`] when the sandbox
     /// was created with metrics sampling disabled
-    /// (`metrics_sample_interval_ms == None`).
+    /// (`metrics_sample_interval_ms == None`). **Local backend only** —
+    /// cloud routes return [`MicrosandboxError::Unsupported`].
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
-        if self.config.effective_metrics_interval().is_none() {
-            return Err(MicrosandboxError::MetricsDisabled(self.config.name.clone()));
-        }
-        let db = crate::db::init_global().await?.read();
-        metrics_for_sandbox(db, self.db_id, &self.config).await
+        self.backend()
+            .sandboxes()
+            .metrics(self.backend().clone(), self.name(), self.config())
+            .await
     }
 
-    /// Stream metrics snapshots at the requested interval.
+    /// Stream metrics snapshots at the requested interval. **Local backend only**.
+    /// Cloud routes yield a single [`MicrosandboxError::Unsupported`].
     pub fn metrics_stream(
         &self,
         interval: Duration,
     ) -> impl futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static {
-        use futures::StreamExt;
-
-        if self.config.effective_metrics_interval().is_none() {
-            let name = self.config.name.clone();
-            return stream::once(async move { Err(MicrosandboxError::MetricsDisabled(name)) })
-                .left_stream();
-        }
-
-        let db_id = self.db_id;
-        let config = self.config.clone();
-        let interval = if interval.is_zero() {
-            Duration::from_millis(1)
-        } else {
-            interval
-        };
-
-        stream::unfold(tokio::time::interval(interval), move |mut ticker| {
-            let config = config.clone();
-            async move {
-                ticker.tick().await;
-                let pools = crate::db::init_global().await;
-                let item = match pools {
-                    Ok(pools) => metrics_for_sandbox(pools.read(), db_id, &config).await,
-                    Err(err) => Err(err),
-                };
-                Some((item, ticker))
-            }
-        })
-        .right_stream()
+        self.backend().sandboxes().metrics_stream(
+            self.backend().clone(),
+            self.name().to_string(),
+            self.config().clone(),
+            interval,
+        )
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: backend-trait dispatch
+//--------------------------------------------------------------------------------------------------
+
+/// Local-backend metrics fetch keyed by sandbox name. Called from the
+/// [`SandboxBackend::metrics`](crate::backend::SandboxBackend::metrics) impl on
+/// [`LocalBackend`](crate::backend::LocalBackend).
+pub(crate) async fn local_metrics(
+    local: &LocalBackend,
+    name: &str,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<SandboxMetrics> {
+    if config.effective_metrics_interval().is_none() {
+        return Err(MicrosandboxError::MetricsDisabled(name.to_string()));
+    }
+    let pools = local.db().await?;
+    let model = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
+    metrics_for_sandbox(pools.read(), local, model.id, config).await
+}
+
+/// Local-backend streaming metrics. Called from the
+/// [`SandboxBackend::metrics_stream`](crate::backend::SandboxBackend::metrics_stream)
+/// impl on [`LocalBackend`](crate::backend::LocalBackend).
+pub(crate) fn local_metrics_stream(
+    backend: Arc<dyn Backend>,
+    name: String,
+    config: SandboxConfig,
+    interval: Duration,
+) -> MetricsStream {
+    if config.effective_metrics_interval().is_none() {
+        return Box::pin(stream::once(async move {
+            Err(MicrosandboxError::MetricsDisabled(name))
+        }));
+    }
+
+    let interval = if interval.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        interval
+    };
+
+    Box::pin(stream::unfold(
+        (tokio::time::interval(interval), backend, name, config),
+        move |(mut ticker, backend, name, config)| async move {
+            ticker.tick().await;
+            let item = match backend.as_local() {
+                Some(local) => match local.db().await {
+                    Ok(pools) => match sandbox_entity::Entity::find()
+                        .filter(sandbox_entity::Column::Name.eq(&name))
+                        .one(pools.read())
+                        .await
+                    {
+                        Ok(Some(model)) => {
+                            metrics_for_sandbox(pools.read(), local, model.id, &config).await
+                        }
+                        Ok(None) => Err(MicrosandboxError::SandboxNotFound(name.clone())),
+                        Err(e) => Err(e.into()),
+                    },
+                    Err(err) => Err(err),
+                },
+                None => Err(MicrosandboxError::Unsupported {
+                    feature: "Sandbox::metrics_stream on cloud".into(),
+                    available_when: "when cloud metrics land".into(),
+                }),
+            };
+            Some((item, (ticker, backend, name, config)))
+        },
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Get the latest metrics for every running sandbox at once.
-pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let Some(registry) = open_registry()? else {
+/// Get the latest metrics snapshot for every running sandbox.
+pub async fn all_sandbox_metrics(
+    local: &LocalBackend,
+) -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
+    let Some(registry) = open_registry(local)? else {
         return Ok(HashMap::new());
     };
 
@@ -115,6 +181,7 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
 
 pub(super) async fn metrics_for_sandbox(
     db: &DbReadConnection,
+    local: &LocalBackend,
     sandbox_id: i32,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<SandboxMetrics> {
@@ -126,15 +193,12 @@ pub(super) async fn metrics_for_sandbox(
             ))
         })?;
 
-    let registry = open_registry()?.ok_or_else(|| {
+    let registry = open_registry(local)?.ok_or_else(|| {
         MicrosandboxError::Custom(format!(
             "sandbox {sandbox_id} has no live metrics slot (registry unavailable)"
         ))
     })?;
 
-    // Run-id lookup only. Falling back to sandbox-id would surface a Stale
-    // slot from a prior run, since it carries the same sandbox_id — readers
-    // would observe prior-run counters attributed to the current run.
     let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? else {
         return Err(MicrosandboxError::Custom(format!(
             "sandbox {sandbox_id} has no live metrics slot"
@@ -144,8 +208,8 @@ pub(super) async fn metrics_for_sandbox(
     Ok(to_sandbox_metrics(&live, Some(config)))
 }
 
-fn open_registry() -> MicrosandboxResult<Option<MetricsRegistry>> {
-    let name = crate::config::config().metrics_registry_shm_name();
+fn open_registry(local: &LocalBackend) -> MicrosandboxResult<Option<MetricsRegistry>> {
+    let name = local.config().metrics_registry_shm_name();
     match MetricsRegistry::open(&name) {
         Ok(reg) => Ok(Some(reg)),
         Err(microsandbox_metrics::MetricsError::Io(ref e))
@@ -160,7 +224,10 @@ fn open_registry() -> MicrosandboxResult<Option<MetricsRegistry>> {
 fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: live.cpu_percent,
+        vcpu_time_ns: live.vcpu_time_ns,
         memory_bytes: live.memory_bytes,
+        memory_available_bytes: live.memory_available_bytes,
+        memory_host_resident_bytes: live.memory_host_resident_bytes,
         memory_limit_bytes: match (live.memory_limit_bytes, config) {
             (0, Some(config)) => memory_limit_bytes(config),
             (bytes, _) => bytes,

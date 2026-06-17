@@ -11,8 +11,12 @@ const READ_ONLY_MSG =
 export class VolumeHandle {
   private readonly inner: NapiVolumeHandle | NapiVolumeInfo;
   readonly name: string;
+  readonly kind: string;
   readonly quotaMib: number | null;
   readonly usedBytes: number;
+  readonly capacityBytes: number | null;
+  readonly diskFormat: string | null;
+  readonly diskFstype: string | null;
   readonly labels: ReadonlyArray<readonly [string, string]>;
   readonly createdAt: Date | null;
 
@@ -20,9 +24,16 @@ export class VolumeHandle {
   constructor(inner: NapiVolumeHandle | NapiVolumeInfo) {
     this.inner = inner;
     this.name = inner.name;
+    this.kind = inner.kind;
     this.quotaMib =
       typeof inner.quotaMib === "number" ? inner.quotaMib : null;
     this.usedBytes = inner.usedBytes;
+    this.capacityBytes =
+      typeof inner.capacityBytes === "number" ? inner.capacityBytes : null;
+    this.diskFormat =
+      typeof inner.diskFormat === "string" ? inner.diskFormat : null;
+    this.diskFstype =
+      typeof inner.diskFstype === "string" ? inner.diskFstype : null;
     this.labels = Object.entries(inner.labels);
     this.createdAt =
       typeof inner.createdAt === "number" ? new Date(inner.createdAt) : null;

@@ -761,12 +761,14 @@ async fn inbound_relay_task(
             data = to_host_rx.recv() => {
                 match data {
                     Some(bytes) => {
+                        // Wake as soon as recv frees channel capacity. Waiting
+                        // for write_all can stall the poll loop behind a slow
+                        // host client.
+                        shared.proxy_wake.wake();
                         if let Err(e) = tx.write_all(&bytes).await {
                             tracing::debug!(error = %e, "write to host client failed");
                             break;
                         }
-                        // Wake the poll loop so it can refill the channel from smoltcp.
-                        shared.proxy_wake.wake();
                     }
                     None => break,
                 }
@@ -863,6 +865,53 @@ mod tests {
         assert!(queue_inbound_connection(&tx, (), &shared).await);
         assert!(rx.try_recv().is_ok());
         assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
+    }
+
+    #[tokio::test]
+    async fn inbound_relay_wakes_when_to_host_channel_slot_is_freed() {
+        let shared = Arc::new(SharedState::new(4));
+        shared.proxy_wake.drain();
+
+        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(TcpStream::connect(addr));
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let client = client.await.unwrap().unwrap();
+
+        socket2::SockRef::from(&server_stream)
+            .set_send_buffer_size(4096)
+            .unwrap();
+
+        let (to_host_tx, to_host_rx) = mpsc::channel(1);
+        let (from_host_tx, _from_host_rx) = mpsc::channel(1);
+        let task = tokio::spawn(inbound_relay_task(
+            server_stream,
+            to_host_rx,
+            from_host_tx,
+            shared.clone(),
+        ));
+
+        to_host_tx
+            .send(Bytes::from(vec![b'a'; 64 * 1024 * 1024]))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            to_host_tx.send(Bytes::from_static(b"next")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
+
+        drop(client);
+        drop(to_host_tx);
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]

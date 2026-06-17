@@ -56,7 +56,8 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
         let mut sandboxes = Sandbox::list_with(common::label_filter(&args.label)).await?;
         if !args.all {
             sandboxes.retain(|s| {
-                s.status() == SandboxStatus::Running || s.status() == SandboxStatus::Draining
+                s.status_snapshot() == SandboxStatus::Running
+                    || s.status_snapshot() == SandboxStatus::Draining
             });
         }
         sandboxes.sort_by(|left, right| left.name().cmp(right.name()));
@@ -128,7 +129,7 @@ fn status_row(handle: &SandboxHandle) -> StatusRow {
         .as_ref()
         .map(format_ports)
         .unwrap_or_else(|| "-".to_string());
-    let status = format!("{:?}", handle.status());
+    let status = format!("{:?}", handle.status_snapshot());
 
     StatusRow {
         name: handle.name().to_string(),
@@ -141,7 +142,7 @@ fn status_row(handle: &SandboxHandle) -> StatusRow {
 
 fn status_json(handle: &SandboxHandle) -> serde_json::Value {
     let config = serde_json::from_str::<SandboxConfig>(handle.config_json()).ok();
-    let status = format!("{:?}", handle.status());
+    let status = format!("{:?}", handle.status_snapshot());
 
     serde_json::json!({
         "name": handle.name(),

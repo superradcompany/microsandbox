@@ -18,6 +18,17 @@ pub enum MicrosandboxError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// A cloud control-plane request failed with an HTTP status.
+    #[error("cloud HTTP {status}: {message}")]
+    CloudHttp {
+        /// HTTP status code returned by msb-cloud.
+        status: u16,
+        /// Machine-readable msb-cloud error code, when present.
+        code: Option<String>,
+        /// Human-readable msb-cloud error message.
+        message: String,
+    },
+
     /// The libkrunfw library was not found at the expected location.
     #[error("libkrunfw not found: {0}")]
     LibkrunfwNotFound(String),
@@ -96,7 +107,7 @@ pub enum MicrosandboxError {
 
     /// A filesystem operation failed inside the sandbox.
     #[error("sandbox fs error: {0}")]
-    SandboxFs(String),
+    SandboxFsOps(String),
 
     /// The requested image was not found.
     #[error("image not found: {0}")]
@@ -154,6 +165,10 @@ pub enum MicrosandboxError {
     #[error("metrics disabled for sandbox: {0}")]
     MetricsDisabled(String),
 
+    /// Live metrics are enabled but no valid guest sample is available yet.
+    #[error("metrics unavailable for sandbox: {0}")]
+    MetricsUnavailable(String),
+
     /// A log stream fell behind enough that the file it was reading
     /// rotated out of the on-disk retention window. The stream
     /// yields this error and ends; restart from
@@ -172,6 +187,16 @@ pub enum MicrosandboxError {
     /// Yielded once at stream start, then the stream ends.
     #[error("invalid log cursor: {0}")]
     InvalidCursor(String),
+
+    /// A backend does not support a requested SDK feature yet.
+    #[error("{feature} is not supported by this backend yet; available {available_when}")]
+    Unsupported {
+        /// Feature requested by the caller.
+        feature: String,
+        /// Human-readable note describing what unlocks support (e.g. "when cloud
+        /// volumes ship", "when the rlimits API lands on the cloud").
+        available_when: String,
+    },
 
     /// A custom error message.
     #[error("{0}")]

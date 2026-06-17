@@ -1,39 +1,52 @@
-//! SDK-side client for connecting to the sandbox agent relay.
+//! Client for connecting to a microsandbox agent relay.
 //!
-//! [`AgentClient`] communicates over a Unix domain socket to the sandbox's
-//! relay. During connection, the relay assigns a non-overlapping correlation ID
-//! range and sends the cached `core.ready` payload so the client can begin
-//! issuing commands immediately.
+//! [`AgentClient`] communicates with `agentd` through an agent relay transport.
+//! During connection, the relay assigns a non-overlapping correlation ID range
+//! and sends the cached `core.ready` payload so the client can begin issuing
+//! commands immediately. Unix domain sockets are available with the `uds`
+//! feature; the `stream` feature drives the client over any
+//! `AsyncRead + AsyncWrite` byte stream (e.g. a caller-owned, pre-authenticated
+//! transport adapted to bytes).
 //!
 //! Two API tiers share one socket and one reader task:
 //!
 //! - **Raw** ([`request_raw`](AgentClient::request_raw),
 //!   [`stream_raw`](AgentClient::stream_raw),
-//!   [`send_raw`](AgentClient::send_raw)) — exchange [`RawFrame`]s. The SDK
-//!   handles framing and correlation IDs; CBOR encoding/decoding is left to
-//!   the caller. Use this when wrapping the client for other languages.
+//!   [`send_raw`](AgentClient::send_raw)) — exchange [`RawFrame`]s. The client
+//!   handles framing and correlation IDs; CBOR encoding/decoding is left to the
+//!   caller. Use this when wrapping the client for other languages.
 //! - **Typed** ([`request`](AgentClient::request),
 //!   [`stream`](AgentClient::stream), [`send`](AgentClient::send)) — same
 //!   primitives over [`Message`]; the SDK serializes payloads with CBOR.
 
 use std::collections::HashMap;
+#[cfg(feature = "stream")]
+use std::future::Future;
+#[cfg(feature = "uds")]
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
-};
+#[cfg(feature = "stream")]
+use std::pin::Pin;
+use std::sync::{Arc, atomic::AtomicU32};
+#[cfg(feature = "stream")]
 use std::time::Duration;
 
+#[cfg(feature = "stream")]
+use microsandbox_protocol::message::FLAG_TERMINAL;
+#[cfg(feature = "stream")]
+use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use microsandbox_protocol::{
-    codec::{self, MAX_FRAME_SIZE, RawFrame},
+    codec::{self, RawFrame},
     core::Ready,
-    message::{FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType, PROTOCOL_VERSION},
+    message::{Message, MessageType, PROTOCOL_VERSION},
 };
 use serde::Serialize;
-use tokio::io::AsyncReadExt;
+#[cfg(feature = "stream")]
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "uds")]
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+#[cfg(feature = "stream")]
 use tokio::time::Instant;
 
 use super::error::{AgentClientError, AgentClientResult};
@@ -43,11 +56,18 @@ use super::error::{AgentClientError, AgentClientResult};
 //--------------------------------------------------------------------------------------------------
 
 /// Default handshake timeout used by [`AgentClient::connect`].
+#[cfg(feature = "stream")]
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(feature = "stream")]
+const WRITER_QUEUE_CAPACITY: usize = 1024;
+const REQUEST_QUEUE_CAPACITY: usize = 1;
+const STREAM_QUEUE_CAPACITY: usize = 1024;
+
+const LEGACY_PROTOCOL_VERSION: u8 = 1;
 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
 // compatibility for versions before 0.5 is no longer supported.
-const LEGACY_PROTOCOL_VERSION: u8 = 1;
+#[cfg(feature = "stream")]
 const LEGACY_RELAY_ID_RANGE_STEP: u32 = u32::MAX / 16;
 
 //--------------------------------------------------------------------------------------------------
@@ -71,8 +91,8 @@ pub enum AgentProtocol {
 ///
 /// See the module-level docs for an overview of the two API tiers.
 pub struct AgentClient {
-    /// Writer half of the Unix socket connection.
-    writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    /// Channel to the transport writer task.
+    writer: mpsc::Sender<WriterCommand>,
     /// Next correlation ID to allocate (starts at `id_min`).
     next_id: AtomicU32,
     /// Lower bound (inclusive) of the assigned ID range, used for wrap-around.
@@ -87,13 +107,43 @@ pub struct AgentClient {
     /// which selects the wire codec; see `VERSIONING.md`.
     negotiated_version: u8,
     /// Pending response channels keyed by correlation ID.
-    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
+    pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
     /// Background reader task handle.
     reader_handle: JoinHandle<()>,
+    /// Background writer task handle.
+    writer_handle: JoinHandle<()>,
     /// Cached `core.ready` frame body (raw CBOR bytes) from the relay handshake.
     ready_body: Vec<u8>,
     /// Decoded `core.ready` payload from the relay handshake.
     ready: Ready,
+}
+
+#[cfg(feature = "stream")]
+struct AgentHandshake {
+    id_min: u32,
+    id_max: u32,
+    protocol: AgentProtocol,
+    negotiated_version: u8,
+    ready_body: Vec<u8>,
+    ready: Ready,
+}
+
+#[cfg_attr(not(feature = "stream"), allow(dead_code))]
+struct WriterCommand {
+    frame: RawFrame,
+    ack: oneshot::Sender<AgentClientResult<()>>,
+}
+
+#[cfg(feature = "stream")]
+trait HandshakeReader {
+    fn read_exact_handshake<'a>(
+        &'a mut self,
+        out: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = AgentClientResult<()>> + Send + 'a>>;
+
+    fn read_frame_handshake<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = AgentClientResult<RawFrame>> + Send + 'a>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -110,14 +160,16 @@ impl AgentProtocol {
 }
 
 impl AgentClient {
-    /// Connect to the sandbox's agent relay socket using the default 10s
+    /// Connect to a Unix domain socket agent relay using the default 10s
     /// handshake timeout.
+    #[cfg(feature = "uds")]
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         Self::connect_with_timeout(sock_path, DEFAULT_HANDSHAKE_TIMEOUT).await
     }
 
-    /// Connect to the sandbox's agent relay socket using an explicit
+    /// Connect to a Unix domain socket agent relay using an explicit
     /// handshake timeout.
+    #[cfg(feature = "uds")]
     pub async fn connect_with_timeout(
         sock_path: impl AsRef<Path>,
         timeout: Duration,
@@ -131,6 +183,7 @@ impl AgentClient {
     /// `deadline` bounds both handshake reads. Without it, an accepted
     /// connection that stalls (e.g. a sandbox alive but wedged before
     /// writing the handshake bytes) would block this call indefinitely.
+    #[cfg(feature = "uds")]
     pub async fn connect_with_deadline(
         sock_path: impl AsRef<Path>,
         deadline: Instant,
@@ -143,95 +196,65 @@ impl AgentClient {
                     path: sock_path.to_path_buf(),
                     source,
                 })?;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
 
-        let (mut reader, writer) = stream.into_split();
+    /// Connect over an arbitrary byte-stream transport using the default 10s
+    /// handshake timeout.
+    ///
+    /// The stream must be a transparent pipe to the agent relay: the relay's
+    /// `[id_min][id_max]` + `core.ready` prologue and the framed protocol that
+    /// follows flow over it verbatim. This is the injection point for
+    /// caller-owned transports — e.g. a pre-authenticated WebSocket adapted to
+    /// bytes — so the caller owns the dial and its credentials and this crate
+    /// stays transport- (and dependency-) agnostic.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream<S>(stream: S) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_stream_with_timeout(stream, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
 
-        // Current handshake:
-        // [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
-        //
-        // Legacy pre-0.5 handshake:
-        // [id_offset: u32 BE][ready_frame_bytes...]
-        //
-        // Reading 8 bytes up-front lets us distinguish the two forms. For
-        // legacy relays, the second word is the ready-frame length prefix.
-        let mut range_buf = [0u8; 8];
-        tokio::time::timeout_at(deadline, reader.read_exact(&mut range_buf))
-            .await
-            .map_err(|_| {
-                AgentClientError::Handshake(
-                    "read id range: timed out before relay sent bytes".into(),
-                )
-            })?
-            .map_err(|e| AgentClientError::Handshake(format!("read id range: {e}")))?;
-        let id_start_or_offset = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
-        let id_max_or_frame_len = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
+    /// Connect over an arbitrary byte-stream transport using an explicit
+    /// handshake timeout.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_timeout<S>(
+        stream: S,
+        timeout: Duration,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let deadline = Instant::now() + timeout;
+        Self::connect_stream_with_deadline(stream, deadline).await
+    }
 
-        let legacy_handshake =
-            looks_like_legacy_relay_handshake(id_start_or_offset, id_max_or_frame_len);
-        let (id_min, id_max, ready_frame, protocol) = if legacy_handshake {
-            // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
-            // compatibility for versions before 0.5 is no longer supported.
-            let id_offset = id_start_or_offset;
-            let ready_frame = read_raw_frame_after_len_prefix(
-                &mut reader,
-                range_buf[4..8].try_into().unwrap(),
-                deadline,
-            )
-            .await?;
-            (
-                id_offset.saturating_add(1),
-                id_offset.saturating_add(LEGACY_RELAY_ID_RANGE_STEP),
-                ready_frame,
-                AgentProtocol::LegacyV1,
-            )
-        } else if id_start_or_offset >= id_max_or_frame_len {
-            return Err(AgentClientError::Handshake(format!(
-                "invalid relay id range: start={id_start_or_offset}, end={id_max_or_frame_len}"
-            )));
-        } else {
-            let ready_frame = tokio::time::timeout_at(deadline, codec::read_raw_frame(&mut reader))
-                .await
-                .map_err(|_| {
-                    AgentClientError::Handshake(
-                        "read ready frame: timed out before relay sent frame".into(),
-                    )
-                })?
-                .map_err(|e| AgentClientError::Handshake(format!("read ready frame: {e}")))?;
-            (
-                id_start_or_offset,
-                id_max_or_frame_len,
-                ready_frame,
-                AgentProtocol::Current,
-            )
-        };
-        let ready_msg = codec::raw_frame_to_message(ready_frame.clone())
-            .map_err(|e| AgentClientError::Handshake(format!("decode ready frame: {e}")))?;
-        if ready_msg.t != MessageType::Ready {
-            return Err(AgentClientError::Handshake(format!(
-                "expected core.ready frame, got {}",
-                ready_msg.t.as_str()
-            )));
-        }
-        let ready: Ready = ready_msg
-            .payload()
-            .map_err(|e| AgentClientError::Handshake(format!("decode ready payload: {e}")))?;
-
-        // The negotiated capability generation is the lower of what we speak and
-        // what the sandbox echoed in its ready frame (`ready_msg.v`). For the
-        // load-bearing case — a newer host meeting an older runtime — this is the
-        // runtime's generation, so the send gate withholds features it can't
-        // handle. The codec generation (`protocol`) is negotiated separately.
-        let negotiated_version = protocol.version().min(ready_msg.v);
+    /// Connect over an arbitrary byte-stream transport with an explicit
+    /// handshake deadline.
+    ///
+    /// `deadline` bounds both handshake reads so an accepted-but-stalled
+    /// transport cannot block this call indefinitely.
+    #[cfg(feature = "stream")]
+    pub async fn connect_stream_with_deadline<S>(
+        stream: S,
+        deadline: Instant,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (mut reader, writer) = tokio::io::split(stream);
+        let handshake = perform_handshake(&mut reader, deadline).await?;
 
         tracing::info!(
-            id_min,
-            id_max,
-            protocol = ?protocol,
-            ready_bytes = ready_frame.body.len(),
-            boot_time_ns = ready.boot_time_ns,
+            id_min = handshake.id_min,
+            id_max = handshake.id_max,
+            protocol = ?handshake.protocol,
+            ready_bytes = handshake.ready_body.len(),
+            boot_time_ns = handshake.ready.boot_time_ns,
             "agent client: connected to relay"
         );
-        if protocol == AgentProtocol::LegacyV1 {
+        if handshake.protocol == AgentProtocol::LegacyV1 {
             // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
             // compatibility for versions before 0.5 is no longer supported.
             tracing::warn!(
@@ -239,62 +262,26 @@ impl AgentClient {
             );
         }
 
-        let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>> =
+        let pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
-        let writer = Arc::new(Mutex::new(writer));
+        let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx));
 
         Ok(Self {
-            writer,
-            next_id: AtomicU32::new(first_request_id(id_min)),
-            id_min,
-            id_max,
-            protocol,
-            negotiated_version,
+            writer: writer_tx,
+            next_id: AtomicU32::new(first_request_id(handshake.id_min)),
+            id_min: handshake.id_min,
+            id_max: handshake.id_max,
+            protocol: handshake.protocol,
+            negotiated_version: handshake.negotiated_version,
             pending,
             reader_handle,
-            ready_body: ready_frame.body,
-            ready,
+            writer_handle,
+            ready_body: handshake.ready_body,
+            ready: handshake.ready,
         })
-    }
-
-    /// Resolve a sandbox name to its agent socket path and connect.
-    ///
-    /// The socket lives under the SDK's configured runtime directory at a
-    /// short, name-derived path. Sandbox names are limited to 128 UTF-8 bytes.
-    pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
-        Self::connect_sandbox_with_timeout(name, DEFAULT_HANDSHAKE_TIMEOUT).await
-    }
-
-    /// Resolve a sandbox name to its agent socket path and connect with an
-    /// explicit handshake timeout.
-    ///
-    /// Sandbox names are limited to 128 UTF-8 bytes.
-    pub async fn connect_sandbox_with_timeout(
-        name: &str,
-        timeout: Duration,
-    ) -> AgentClientResult<Self> {
-        if let Some(message) = crate::sandbox::sandbox_name_validation_message(name) {
-            return Err(AgentClientError::InvalidSandboxName(message));
-        }
-
-        let mut last_error = None;
-        for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
-            if !sock_path.exists() {
-                continue;
-            }
-
-            match Self::connect_with_timeout(&sock_path, timeout).await {
-                Ok(client) => return Ok(client),
-                Err(error) => last_error = Some(error),
-            }
-        }
-
-        match last_error {
-            Some(error) => Err(error),
-            None => Err(AgentClientError::SandboxNotFound(name.to_string())),
-        }
     }
 
     /// Close the connection. Drops the writer and aborts the reader task;
@@ -317,16 +304,17 @@ impl AgentClient {
     /// Use this for protocol RPCs that produce exactly one terminal response
     /// (e.g. `FsRequest` → `FsResponse`).
     pub async fn request_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<RawFrame> {
-        let id = self.alloc_id();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        self.pending.lock().await.insert(id, tx);
+        let (tx, mut rx) = mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let id = self.reserve_id(tx).await?;
 
-        if let Err(e) = self.write_frame(id, flags, &body).await {
+        if let Err(e) = self.write_frame_owned(id, flags, body).await {
             self.pending.lock().await.remove(&id);
             return Err(e);
         }
 
-        rx.recv().await.ok_or(AgentClientError::ReaderClosed(id))
+        let frame = rx.recv().await.ok_or(AgentClientError::ReaderClosed(id))?;
+        self.pending.lock().await.remove(&id);
+        Ok(frame)
     }
 
     /// Open a streaming raw session: alloc id, register a subscription,
@@ -340,12 +328,11 @@ impl AgentClient {
         &self,
         flags: u8,
         body: Vec<u8>,
-    ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<RawFrame>)> {
-        let id = self.alloc_id();
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.pending.lock().await.insert(id, tx);
+    ) -> AgentClientResult<(u32, mpsc::Receiver<RawFrame>)> {
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
+        let id = self.reserve_id(tx).await?;
 
-        if let Err(e) = self.write_frame(id, flags, &body).await {
+        if let Err(e) = self.write_frame_owned(id, flags, body).await {
             self.pending.lock().await.remove(&id);
             return Err(e);
         }
@@ -448,13 +435,13 @@ impl AgentClient {
         &self,
         t: MessageType,
         payload: &T,
-    ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<Message>)> {
+    ) -> AgentClientResult<(u32, mpsc::Receiver<Message>)> {
         self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         let (id, raw_rx) = self.stream_raw(flags, body).await?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
         tokio::spawn(decode_stream_task(raw_rx, tx));
         Ok((id, rx))
     }
@@ -469,7 +456,7 @@ impl AgentClient {
         self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
-        self.write_frame(id, flags, &body).await
+        self.write_frame_owned(id, flags, body).await
     }
 
     /// Decode the cached handshake `core.ready` payload.
@@ -483,35 +470,49 @@ impl AgentClient {
 //--------------------------------------------------------------------------------------------------
 
 impl AgentClient {
-    /// Allocate a unique correlation ID from the relay-assigned range.
+    /// Reserve a unique correlation ID from the relay-assigned range.
     ///
-    /// Wraps around within the assigned range if the counter overflows.
-    fn alloc_id(&self) -> u32 {
-        loop {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id != 0 && id >= self.id_min && id < self.id_max {
-                return id;
+    /// Wraps around within the assigned range and skips IDs that still have an
+    /// active pending request or stream.
+    async fn reserve_id(&self, tx: mpsc::Sender<RawFrame>) -> AgentClientResult<u32> {
+        let mut pending = self.pending.lock().await;
+        let attempts = usable_id_count(self.id_min, self.id_max);
+        for _ in 0..attempts {
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.next_id.load(std::sync::atomic::Ordering::Relaxed) >= self.id_max {
+                self.next_id.store(
+                    first_request_id(self.id_min),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
-            self.next_id
-                .store(first_request_id(self.id_min), Ordering::Relaxed);
+            if id == 0 || id < self.id_min || id >= self.id_max || pending.contains_key(&id) {
+                continue;
+            }
+            pending.insert(id, tx);
+            return Ok(id);
         }
+
+        Err(AgentClientError::IdRangeExhausted)
     }
 
     /// Write a single framed message to the socket.
     async fn write_frame(&self, id: u32, flags: u8, body: &[u8]) -> AgentClientResult<()> {
-        let mut buf = Vec::with_capacity(4 + 5 + body.len());
-        codec::encode_raw_to_buf(
-            &RawFrame {
-                id,
-                flags,
-                body: body.to_vec(),
-            },
-            &mut buf,
-        )?;
+        self.write_frame_owned(id, flags, body.to_vec()).await
+    }
 
-        let mut writer = self.writer.lock().await;
-        tokio::io::AsyncWriteExt::write_all(&mut *writer, &buf).await?;
-        Ok(())
+    /// Write a single framed message to the socket, taking ownership of the body.
+    async fn write_frame_owned(&self, id: u32, flags: u8, body: Vec<u8>) -> AgentClientResult<()> {
+        let (ack, written) = oneshot::channel();
+        self.writer
+            .send(WriterCommand {
+                frame: RawFrame { id, flags, body },
+                ack,
+            })
+            .await
+            .map_err(|_| AgentClientError::Closed)?;
+        written.await.map_err(|_| AgentClientError::Closed)?
     }
 }
 
@@ -519,25 +520,137 @@ impl AgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn looks_like_legacy_relay_handshake(_id_min: u32, id_max: u32) -> bool {
-    // TODO(upgrade-0.6): Remove in 0.6.x or later once pre-0.5 relay
-    // handshakes are no longer accepted.
-    // In the legacy relay handshake, the first 4 bytes are the id offset and
-    // the next 4 bytes are already the ready-frame length prefix. In the v2
-    // handshake, the second word is the exclusive upper id bound, which is far
-    // larger than any valid frame length.
-    id_max >= FRAME_HEADER_SIZE as u32 && id_max <= MAX_FRAME_SIZE
+#[cfg(feature = "stream")]
+async fn perform_handshake<R>(
+    reader: &mut R,
+    deadline: Instant,
+) -> AgentClientResult<AgentHandshake>
+where
+    R: HandshakeReader + ?Sized,
+{
+    // Current handshake:
+    // [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
+    //
+    // Legacy pre-0.5 handshake:
+    // [id_offset: u32 BE][ready_frame_bytes...]
+    //
+    // Reading 8 bytes up-front lets us distinguish the two forms. For legacy
+    // relays, the second word is the ready-frame length prefix.
+    let mut range_buf = [0u8; 8];
+    tokio::time::timeout_at(deadline, reader.read_exact_handshake(&mut range_buf))
+        .await
+        .map_err(|_| {
+            AgentClientError::Handshake("read id range: timed out before relay sent bytes".into())
+        })??;
+    let id_start_or_offset = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
+    let id_max_or_frame_len = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
+
+    let legacy_handshake =
+        looks_like_legacy_relay_handshake(id_start_or_offset, id_max_or_frame_len);
+    let (id_min, id_max, ready_frame, protocol) = if legacy_handshake {
+        let id_offset = id_start_or_offset;
+        let ready_frame =
+            read_raw_frame_after_len_prefix(reader, range_buf[4..8].try_into().unwrap(), deadline)
+                .await?;
+        (
+            id_offset.saturating_add(1),
+            id_offset.saturating_add(LEGACY_RELAY_ID_RANGE_STEP),
+            ready_frame,
+            AgentProtocol::LegacyV1,
+        )
+    } else if id_start_or_offset >= id_max_or_frame_len {
+        return Err(AgentClientError::Handshake(format!(
+            "invalid relay id range: start={id_start_or_offset}, end={id_max_or_frame_len}"
+        )));
+    } else {
+        let ready_frame = tokio::time::timeout_at(deadline, reader.read_frame_handshake())
+            .await
+            .map_err(|_| {
+                AgentClientError::Handshake(
+                    "read ready frame: timed out before relay sent frame".into(),
+                )
+            })?
+            .map_err(|e| AgentClientError::Handshake(format!("read ready frame: {e}")))?;
+        (
+            id_start_or_offset,
+            id_max_or_frame_len,
+            ready_frame,
+            AgentProtocol::Current,
+        )
+    };
+    ensure_usable_id_range(id_min, id_max)?;
+
+    let ready_msg = codec::raw_frame_to_message(ready_frame.clone())
+        .map_err(|e| AgentClientError::Handshake(format!("decode ready frame: {e}")))?;
+    if ready_msg.t != MessageType::Ready {
+        return Err(AgentClientError::Handshake(format!(
+            "expected core.ready frame, got {}",
+            ready_msg.t.as_str()
+        )));
+    }
+    let ready: Ready = ready_msg
+        .payload()
+        .map_err(|e| AgentClientError::Handshake(format!("decode ready payload: {e}")))?;
+
+    // The negotiated capability generation is the lower of what we speak and
+    // what the sandbox echoed in its ready frame (`ready_msg.v`). For the
+    // load-bearing case — a newer host meeting an older runtime — this is the
+    // runtime's generation, so the send gate withholds features it can't
+    // handle. The codec generation (`protocol`) is negotiated separately.
+    let negotiated_version = protocol.version().min(ready_msg.v);
+
+    Ok(AgentHandshake {
+        id_min,
+        id_max,
+        protocol,
+        negotiated_version,
+        ready_body: ready_frame.body,
+        ready,
+    })
 }
 
 fn first_request_id(id_min: u32) -> u32 {
     id_min.max(1)
 }
 
-async fn read_raw_frame_after_len_prefix<R: AsyncReadExt + Unpin>(
+#[cfg(feature = "stream")]
+fn ensure_usable_id_range(id_min: u32, id_max: u32) -> AgentClientResult<()> {
+    if usable_id_count(id_min, id_max) == 0 {
+        return Err(AgentClientError::Handshake(format!(
+            "relay id range contains no usable nonzero ids: start={id_min}, end={id_max}"
+        )));
+    }
+    Ok(())
+}
+
+fn usable_id_count(id_min: u32, id_max: u32) -> u32 {
+    id_max.saturating_sub(first_request_id(id_min))
+}
+
+#[cfg(feature = "stream")]
+fn looks_like_legacy_relay_handshake(id_min: u32, id_max: u32) -> bool {
+    // TODO(upgrade-0.6): Remove in 0.6.x or later once pre-0.5 relay
+    // handshakes are no longer accepted.
+    // In the legacy relay handshake, the first 4 bytes are the id offset and
+    // the next 4 bytes are already the ready-frame length prefix. In the v2
+    // handshake, the second word is the exclusive upper id bound, which is far
+    // larger than any valid frame length. Tiny current ranges are possible in
+    // tests, so prefer the current interpretation when the range is otherwise
+    // valid and starts at a nonzero id.
+    id_max >= FRAME_HEADER_SIZE as u32
+        && id_max <= MAX_FRAME_SIZE
+        && (id_min == 0 || id_min >= id_max)
+}
+
+#[cfg(feature = "stream")]
+async fn read_raw_frame_after_len_prefix<R>(
     reader: &mut R,
     len_buf: [u8; 4],
     deadline: Instant,
-) -> AgentClientResult<RawFrame> {
+) -> AgentClientResult<RawFrame>
+where
+    R: HandshakeReader + ?Sized,
+{
     let frame_len = u32::from_be_bytes(len_buf);
     if frame_len > MAX_FRAME_SIZE {
         return Err(AgentClientError::Handshake(format!(
@@ -551,7 +664,7 @@ async fn read_raw_frame_after_len_prefix<R: AsyncReadExt + Unpin>(
     }
 
     let mut data = vec![0u8; frame_len as usize];
-    tokio::time::timeout_at(deadline, reader.read_exact(&mut data))
+    tokio::time::timeout_at(deadline, reader.read_exact_handshake(&mut data))
         .await
         .map_err(|_| {
             AgentClientError::Handshake(
@@ -567,12 +680,56 @@ async fn read_raw_frame_after_len_prefix<R: AsyncReadExt + Unpin>(
     Ok(RawFrame { id, flags, body })
 }
 
+#[cfg(feature = "stream")]
+impl<R> HandshakeReader for R
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
+    fn read_exact_handshake<'a>(
+        &'a mut self,
+        out: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = AgentClientResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            tokio::io::AsyncReadExt::read_exact(self, out)
+                .await
+                .map(|_| ())
+                .map_err(|e| AgentClientError::Handshake(e.to_string()))
+        })
+    }
+
+    fn read_frame_handshake<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = AgentClientResult<RawFrame>> + Send + 'a>> {
+        Box::pin(async move {
+            codec::read_raw_frame(self)
+                .await
+                .map_err(AgentClientError::Protocol)
+        })
+    }
+}
+
+#[cfg(feature = "stream")]
+async fn stream_writer_loop<W>(mut writer: W, mut rx: mpsc::Receiver<WriterCommand>)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    while let Some(command) = rx.recv().await {
+        if let Err(e) = codec::write_raw_frame(&mut writer, &command.frame).await {
+            tracing::debug!("agent client: stream writer error: {e}");
+            let _ = command.ack.send(Err(AgentClientError::Protocol(e)));
+            break;
+        }
+        let _ = command.ack.send(Ok(()));
+    }
+}
+
 /// Background task that reads frames from the relay and dispatches them to
 /// pending channels by correlation ID. Operates on raw frames — no CBOR.
-async fn reader_loop(
-    mut reader: tokio::net::unix::OwnedReadHalf,
-    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
-) {
+#[cfg(feature = "stream")]
+async fn reader_loop<R>(mut reader: R, pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     loop {
         let frame = match codec::read_raw_frame(&mut reader).await {
             Ok(frame) => frame,
@@ -582,21 +739,7 @@ async fn reader_loop(
             }
         };
 
-        let id = frame.id;
-        let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
-
-        let mut map = pending.lock().await;
-        if let Some(tx) = map.get(&id) {
-            if tx.send(frame).is_err() {
-                // Receiver dropped — clean up.
-                map.remove(&id);
-            } else if is_terminal {
-                // Terminal frame delivered — remove subscription.
-                map.remove(&id);
-            }
-        } else {
-            tracing::trace!("agent client: no pending handler for id={id}");
-        }
+        dispatch_frame(frame, &pending).await;
     }
 
     // Reader exited — drop all senders so outstanding receivers wake up.
@@ -604,15 +747,37 @@ async fn reader_loop(
     map.clear();
 }
 
-/// Translate a stream of raw frames into typed messages.
-async fn decode_stream_task(
-    mut raw_rx: mpsc::UnboundedReceiver<RawFrame>,
-    tx: mpsc::UnboundedSender<Message>,
+#[cfg(feature = "stream")]
+async fn dispatch_frame(
+    frame: RawFrame,
+    pending: &Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
 ) {
+    let id = frame.id;
+    let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
+
+    let tx = {
+        let mut map = pending.lock().await;
+        let Some(tx) = map.get(&id).cloned() else {
+            tracing::trace!("agent client: no pending handler for id={id}");
+            return;
+        };
+        if is_terminal {
+            map.remove(&id);
+        }
+        tx
+    };
+
+    if tx.send(frame).await.is_err() {
+        pending.lock().await.remove(&id);
+    }
+}
+
+/// Translate a stream of raw frames into typed messages.
+async fn decode_stream_task(mut raw_rx: mpsc::Receiver<RawFrame>, tx: mpsc::Sender<Message>) {
     while let Some(frame) = raw_rx.recv().await {
         match codec::raw_frame_to_message(frame) {
             Ok(msg) => {
-                if tx.send(msg).is_err() {
+                if tx.send(msg).await.is_err() {
                     break;
                 }
             }
@@ -643,15 +808,22 @@ fn encode_message_body<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "uds")]
     use microsandbox_protocol::core::Ready;
+    #[cfg(feature = "uds")]
     use microsandbox_protocol::exec::ExecRequest;
+    #[cfg(feature = "uds")]
     use microsandbox_protocol::message::PROTOCOL_VERSION;
+    #[cfg(feature = "uds")]
     use tokio::io::AsyncWriteExt;
+    #[cfg(feature = "uds")]
     use tokio::net::UnixListener;
+    #[cfg(feature = "uds")]
     use tokio::sync::oneshot;
 
     use super::*;
 
+    #[cfg(feature = "uds")]
     #[tokio::test]
     async fn connect_decodes_ready_payload() {
         let temp = tempfile::tempdir().unwrap();
@@ -668,10 +840,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             socket.write_all(&1u32.to_be_bytes()).await.unwrap();
-            socket
-                .write_all(&microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP.to_be_bytes())
-                .await
-                .unwrap();
+            socket.write_all(&8u32.to_be_bytes()).await.unwrap();
             codec::write_message(&mut socket, &ready_msg).await.unwrap();
         });
 
@@ -695,6 +864,7 @@ mod tests {
         assert_eq!(raw_msg.t, MessageType::Ready);
     }
 
+    #[cfg(feature = "uds")]
     #[tokio::test]
     async fn connect_negotiates_down_to_older_guest_generation() {
         let temp = tempfile::tempdir().unwrap();
@@ -735,52 +905,14 @@ mod tests {
         assert!(!client.supports(MessageType::FsRequest));
     }
 
-    #[test]
-    fn version_compat_across_generations() {
-        use MessageType::{ExecRequest, FsRequest};
-        // (message type, peer generation, expected allowed). Generation 1 is the
-        // pre-0.5 legacy runtime (no filesystem); generation 2 introduced the
-        // Fs* types; generation 3 is current.
-        let cases = [
-            (ExecRequest, 1, true),
-            (ExecRequest, 2, true),
-            (ExecRequest, 3, true),
-            (FsRequest, 1, false),
-            (FsRequest, 2, true),
-            (FsRequest, 3, true),
-        ];
-        for (t, generation, allowed) in cases {
-            assert_eq!(
-                AgentClient::ensure_version_compat_for(t, generation).is_ok(),
-                allowed,
-                "{t:?} at generation {generation}"
-            );
-        }
-    }
-
-    #[test]
-    fn version_compat_rejection_is_typed() {
-        // Filesystem on the legacy (generation 1) runtime is rejected before any
-        // send, with the structured error whose message tells the user to restart.
-        let err =
-            AgentClient::ensure_version_compat_for(MessageType::FsRequest, LEGACY_PROTOCOL_VERSION)
-                .unwrap_err();
-        assert!(matches!(
-            err,
-            AgentClientError::UnsupportedOperation {
-                needs: 2,
-                peer: 1,
-                ..
-            }
-        ));
-    }
-
+    #[cfg(feature = "uds")]
     #[tokio::test]
     async fn connect_accepts_legacy_relay_handshake() {
         assert_accepts_legacy_relay_handshake(0).await;
         assert_accepts_legacy_relay_handshake(268_435_455).await;
     }
 
+    #[cfg(feature = "uds")]
     #[tokio::test]
     async fn legacy_relay_requests_use_v1_and_legacy_id_range() {
         let temp = tempfile::tempdir().unwrap();
@@ -833,6 +965,47 @@ mod tests {
         assert_eq!(message.t, MessageType::ExecRequest);
     }
 
+    #[test]
+    fn version_compat_across_generations() {
+        use MessageType::{ExecRequest, FsRequest};
+        // (message type, peer generation, expected allowed). Generation 1 is the
+        // pre-0.5 legacy runtime (no filesystem); generation 2 introduced the
+        // Fs* types; generation 5 is current.
+        let cases = [
+            (ExecRequest, 1, true),
+            (ExecRequest, 2, true),
+            (ExecRequest, 3, true),
+            (FsRequest, 1, false),
+            (FsRequest, 2, true),
+            (FsRequest, 3, true),
+        ];
+        for (t, generation, allowed) in cases {
+            assert_eq!(
+                AgentClient::ensure_version_compat_for(t, generation).is_ok(),
+                allowed,
+                "{t:?} at generation {generation}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_compat_rejection_is_typed() {
+        // Filesystem on the legacy (generation 1) runtime is rejected before any
+        // send, with the structured error whose message tells the user to restart.
+        let err =
+            AgentClient::ensure_version_compat_for(MessageType::FsRequest, LEGACY_PROTOCOL_VERSION)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            AgentClientError::UnsupportedOperation {
+                needs: 2,
+                peer: 1,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(feature = "uds")]
     #[tokio::test]
     async fn connect_preserves_current_peer_protocol_version() {
         let temp = tempfile::tempdir().unwrap();
@@ -869,6 +1042,7 @@ mod tests {
         assert!(!client.supports(MessageType::TcpConnect));
     }
 
+    #[cfg(feature = "uds")]
     async fn assert_accepts_legacy_relay_handshake(id_offset: u32) {
         let temp = tempfile::tempdir().unwrap();
         let sock_path = temp.path().join("agent.sock");
@@ -893,10 +1067,89 @@ mod tests {
                 .unwrap();
 
         assert_eq!(client.protocol(), AgentProtocol::LegacyV1);
+        assert_eq!(client.negotiated_version(), LEGACY_PROTOCOL_VERSION);
         let decoded = client.ready().unwrap();
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
         assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn connect_stream_handshakes_and_streams_exec() {
+        use microsandbox_protocol::exec::{ExecExited, ExecRequest, ExecStdout};
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+            agent_version: "stream-test".to_string(),
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            // Relay handshake: [id_min][id_max] then the core.ready frame.
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
+                .await
+                .unwrap();
+
+            // One exec stream echoed back: stdout, then a terminal exited.
+            let request = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let stdout = Message::with_payload(
+                MessageType::ExecStdout,
+                request.id,
+                &ExecStdout {
+                    data: b"hi".to_vec(),
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &stdout).await.unwrap();
+            let exited =
+                Message::with_payload(MessageType::ExecExited, request.id, &ExecExited { code: 0 })
+                    .unwrap();
+            codec::write_message(&mut server_io, &exited).await.unwrap();
+        });
+
+        let client = AgentClient::connect_stream_with_deadline(
+            client_io,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        assert_eq!(client.agent_version(), "stream-test");
+        assert!(client.supports(MessageType::ExecRequest));
+
+        let request = ExecRequest {
+            cmd: "echo".into(),
+            args: vec!["hi".into()],
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let (_id, mut rx) = client
+            .stream(MessageType::ExecRequest, &request)
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.t, MessageType::ExecStdout);
+        let out: ExecStdout = first.payload().unwrap();
+        assert_eq!(out.data, b"hi");
+
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.t, MessageType::ExecExited);
+        let exit: ExecExited = second.payload().unwrap();
+        assert_eq!(exit.code, 0);
     }
 }
 
@@ -907,5 +1160,6 @@ mod tests {
 impl Drop for AgentClient {
     fn drop(&mut self) {
         self.reader_handle.abort();
+        self.writer_handle.abort();
     }
 }

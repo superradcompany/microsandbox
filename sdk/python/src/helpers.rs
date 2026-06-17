@@ -179,9 +179,9 @@ pub fn sandbox_builder_from_args(
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
     }
-    if let Some(libkrunfw_path) = extract_opt::<String>(kwargs, "libkrunfw_path")? {
-        builder = builder.libkrunfw_path(libkrunfw_path);
-    }
+    // `libkrunfw_path` is a process-level concern (one dylib per process
+    // address space), not a per-sandbox builder kwarg. Users set it once via
+    // `microsandbox.set_libkrunfw_path(...)` or the `MSB_LIBKRUNFW_PATH` env var.
     if let Some(user) = extract_opt::<String>(kwargs, "user")? {
         builder = builder.user(user);
     }
@@ -480,8 +480,43 @@ fn apply_mount(
             m
         }))
     } else if let Some(vol_name) = extract_opt::<String>(mount, "named")? {
+        let named_mode =
+            extract_opt::<String>(mount, "named_mode")?.unwrap_or_else(|| "existing".to_string());
+        let named_kind =
+            extract_opt::<String>(mount, "named_kind")?.unwrap_or_else(|| "dir".to_string());
+        let size_mib = extract_opt::<u32>(mount, "size_mib")?;
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
+        if !matches!(named_mode.as_str(), "existing" | "create" | "ensure-exists") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid named volume mode: {named_mode}"
+            )));
+        }
+        if !matches!(named_kind.as_str(), "dir" | "directory" | "disk") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid named volume kind: {named_kind}"
+            )));
+        }
         Ok(builder.volume(&guest_path, |v| {
-            let mut m = v.named(&vol_name);
+            let mut m = v.named_with(&vol_name, |mut named| {
+                named = match named_mode.as_str() {
+                    "existing" => named.existing(),
+                    "create" => named.create(),
+                    "ensure-exists" => named.ensure_exists(),
+                    _ => unreachable!("validated named volume mode"),
+                };
+                named = match named_kind.as_str() {
+                    "dir" | "directory" => named.directory(),
+                    "disk" => named.disk(),
+                    _ => unreachable!("validated named volume kind"),
+                };
+                if let Some(size_mib) = size_mib {
+                    named = named.size(size_mib);
+                }
+                if let Some(quota_mib) = quota_mib {
+                    named = named.quota(quota_mib);
+                }
+                named
+            });
             if readonly {
                 m = m.readonly();
             }
@@ -1306,6 +1341,9 @@ fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
     if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
         std::path::PathBuf::from(s)
     } else {
-        microsandbox::config::config().snapshots_dir().join(s)
+        microsandbox::backend::default_backend()
+            .as_local()
+            .map(|local| local.snapshots_dir().join(s))
+            .unwrap_or_else(|| std::path::PathBuf::from(s))
     }
 }

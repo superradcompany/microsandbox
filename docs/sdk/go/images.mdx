@@ -63,23 +63,13 @@ Delete a cached image. When `force` is false, sandboxes still referencing the im
 
 ---
 
-#### Image.GCLayers()
+#### Image.Prune()
 
 ```go
-func (imageFactory) GCLayers(ctx context.Context) (uint32, error)
+func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error)
 ```
 
-Garbage-collect orphaned layers and return the count reclaimed.
-
----
-
-#### Image.GC()
-
-```go
-func (imageFactory) GC(ctx context.Context) (uint32, error)
-```
-
-Garbage-collect everything reclaimable from the image cache and return the count reclaimed.
+Remove cached image data that is not used by sandboxes and return a report with the number of image refs, manifests, layers, fsmeta files, VMDK files, and bytes reclaimed.
 
 ## ImageHandle
 

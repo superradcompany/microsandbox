@@ -36,6 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let back = sandbox.shell("cat /data/created.txt").await?;
     println!("{}", back.stdout()?);
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

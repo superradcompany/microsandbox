@@ -28,6 +28,17 @@ pub struct PySandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
 
+/// Result of observing a sandbox in a terminal non-running state.
+#[pyclass(name = "SandboxStopResult")]
+pub struct PySandboxStopResult {
+    name: String,
+    status: String,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    observed_at: f64,
+    source: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -60,6 +71,52 @@ impl PySandbox {
     }
 }
 
+impl PySandboxStopResult {
+    pub fn from_rust(inner: microsandbox::sandbox::SandboxStopResult) -> Self {
+        Self {
+            name: inner.name,
+            status: format!("{:?}", inner.status).to_lowercase(),
+            exit_code: inner.exit_code,
+            signal: inner.signal,
+            observed_at: inner.observed_at.timestamp_millis() as f64,
+            source: inner.source,
+        }
+    }
+}
+
+#[pymethods]
+impl PySandboxStopResult {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn status(&self) -> &str {
+        &self.status
+    }
+
+    #[getter]
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    #[getter]
+    fn signal(&self) -> Option<i32> {
+        self.signal
+    }
+
+    #[getter]
+    fn observed_at(&self) -> f64 {
+        self.observed_at
+    }
+
+    #[getter]
+    fn source(&self) -> Option<String> {
+        self.source.clone()
+    }
+}
+
 #[pymethods]
 impl PySandbox {
     //----------------------------------------------------------------------------------------------
@@ -83,11 +140,11 @@ impl PySandbox {
             .unwrap_or(false);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sb = builder
-                .detached(detached)
-                .create()
-                .await
-                .map_err(to_py_err)?;
+            let sb = if detached {
+                builder.create_detached().await.map_err(to_py_err)?
+            } else {
+                builder.create().await.map_err(to_py_err)?
+            };
             Ok(PySandbox::from_rust(sb))
         })
     }
@@ -136,10 +193,13 @@ impl PySandbox {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let _runtime_guard = runtime.enter();
 
-        let (progress, task) = builder
-            .detached(detached)
-            .create_with_pull_progress()
-            .map_err(to_py_err)?;
+        let (progress, task) = if detached {
+            builder
+                .create_detached_with_pull_progress()
+                .map_err(to_py_err)?
+        } else {
+            builder.create_with_pull_progress().map_err(to_py_err)?
+        };
 
         Ok(PyPullSession::new(progress, task))
     }
@@ -176,8 +236,7 @@ impl PySandbox {
         })
     }
 
-    /// List sandboxes filtered to those carrying all of the given `labels`
-    /// (AND-matched).
+    /// List sandboxes matching the given labels.
     #[staticmethod]
     #[pyo3(signature = (*, labels = None))]
     fn list_with<'py>(
@@ -185,11 +244,20 @@ impl PySandbox {
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let filter =
-                microsandbox::sandbox::SandboxFilter::new().labels(labels.unwrap_or_default());
-            let handles = microsandbox::sandbox::Sandbox::list_with(filter)
-                .await
-                .map_err(to_py_err)?;
+            let handles = match labels {
+                Some(labels) if !labels.is_empty() => {
+                    let filter = labels.into_iter().fold(
+                        microsandbox::sandbox::SandboxFilter::new(),
+                        |filter, (key, value)| filter.label(key, value),
+                    );
+                    microsandbox::sandbox::Sandbox::list_with(filter)
+                        .await
+                        .map_err(to_py_err)?
+                }
+                _ => microsandbox::sandbox::Sandbox::list()
+                    .await
+                    .map_err(to_py_err)?,
+            };
             let py_handles: Vec<PySandboxHandle> = handles
                 .into_iter()
                 .map(PySandboxHandle::from_rust)
@@ -235,7 +303,8 @@ impl PySandbox {
         })
     }
 
-    /// Get a filesystem handle. Extracts the AgentClient Arc — no lock per FS op.
+    /// Get a filesystem handle. Captures the backend Arc + name once — no
+    /// Sandbox mutex lock per FS op.
     #[getter]
     fn fs(&self) -> PyResult<PySandboxFs> {
         let guard = self
@@ -243,7 +312,10 @@ impl PySandbox {
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        Ok(PySandboxFs::from_client(sb.client_arc()))
+        Ok(PySandboxFs::from_backend(
+            sb.backend().clone(),
+            sb.name().to_string(),
+        ))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -567,7 +639,10 @@ impl PySandbox {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            sandbox.stop().await.map_err(to_py_err)?;
+            let handle = microsandbox::sandbox::Sandbox::get(sandbox.name())
+                .await
+                .map_err(to_py_err)?;
+            handle.stop().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -1334,6 +1409,18 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
             ..Default::default()
         },
     }
+}
+
+pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 {
+        return Err(PyValueError::new_err(
+            "timeout must be a non-negative finite number of seconds",
+        ));
+    }
+    Ok(Some(std::time::Duration::from_secs_f64(value)))
 }
 
 /// Pull progress event exposed to Python.

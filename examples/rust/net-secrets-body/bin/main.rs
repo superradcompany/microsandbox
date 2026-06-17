@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = sandbox::post_secret(&sb, HOSTNAME, &host_ip, PORT).await?;
     println!("[guest]  Server responded: {response}");
 
-    sb.stop_and_wait().await?;
+    sb.stop().await?;
     Sandbox::remove("net-secrets-body").await?;
 
     Ok(())

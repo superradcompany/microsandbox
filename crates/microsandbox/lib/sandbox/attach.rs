@@ -211,6 +211,212 @@ impl DetachKeys {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Module: local (free fn impls called by LocalBackend's SandboxBackend impl)
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) mod local {
+    //! Local attach impl: bridges the host TTY to a PTY exec session in the
+    //! named sandbox. Owns the host terminal's raw mode for the duration.
+
+    use std::os::fd::AsRawFd;
+    use std::sync::Arc;
+
+    use microsandbox_protocol::{
+        exec::{ExecExited, ExecResize, ExecStdin, ExecStdout},
+        message::MessageType,
+    };
+    use tokio::io::{AsyncWriteExt, unix::AsyncFd};
+
+    use crate::{
+        MicrosandboxResult,
+        backend::LocalBackend,
+        sandbox::{
+            AttachOptionsBuilder, SandboxConfig, build_exec_request,
+            open_nonblocking_terminal_input, read_from_fd, terminal_path_for_fd,
+        },
+    };
+
+    use super::DetachKeys;
+
+    pub(crate) async fn attach(
+        local: &LocalBackend,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts_builder: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = opts_builder.build()?;
+
+        let client = Arc::new(super::super::fs::local::connect_agent(local, name).await?);
+
+        let detach_keys = match &opts.detach_keys {
+            Some(spec) => DetachKeys::parse(spec)?,
+            None => DetachKeys::default_keys(),
+        };
+
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
+        let req = build_exec_request(
+            config,
+            cmd,
+            opts.args,
+            opts.cwd,
+            opts.user,
+            &opts.env,
+            &opts.rlimits,
+            true,
+            rows,
+            cols,
+        );
+        let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
+
+        crossterm::terminal::enable_raw_mode()
+            .map_err(|e| crate::MicrosandboxError::Terminal(e.to_string()))?;
+        let _raw_guard = scopeguard::guard((), |_| {
+            let _ = crossterm::terminal::disable_raw_mode();
+        });
+
+        let tty_input_path = terminal_path_for_fd(std::io::stdin().as_raw_fd())
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
+        let tty_input = open_nonblocking_terminal_input(&tty_input_path)
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
+        let stdin_async = AsyncFd::new(tty_input)
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
+
+        let mut stdout = tokio::io::stdout();
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                .map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
+
+        let mut exit_code: i32 = -1;
+        let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
+        let detach_seq = detach_keys.sequence();
+        let mut match_pos = 0usize;
+
+        loop {
+            tokio::select! {
+                result = stdin_async.readable() => {
+                    let mut guard = match result {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+
+                    let mut input_buf = [0u8; 1024];
+                    match guard.try_io(|inner| {
+                        read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
+                    }) {
+                        Ok(Ok(0)) => break,
+                        Ok(Ok(n)) => {
+                            let data = &input_buf[..n];
+
+                            let mut detached = false;
+                            for &b in data {
+                                if b == detach_seq[match_pos] {
+                                    match_pos += 1;
+                                    if match_pos == detach_seq.len() {
+                                        detached = true;
+                                        break;
+                                    }
+                                } else {
+                                    match_pos = 0;
+                                    if b == detach_seq[0] {
+                                        match_pos = 1;
+                                    }
+                                }
+                            }
+
+                            if detached {
+                                break;
+                            }
+
+                            let payload = ExecStdin { data: data.to_vec() };
+                            let _ = client.send(id, MessageType::ExecStdin, &payload).await;
+                        }
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(_)) => break,
+                        Err(_would_block) => continue,
+                    }
+                }
+
+                Some(msg) = rx.recv() => {
+                    let mut should_break = false;
+
+                    match msg.t {
+                        MessageType::ExecStdout => {
+                            if let Ok(out) = msg.payload::<ExecStdout>() {
+                                let _ = stdout.write_all(&out.data).await;
+                            }
+                        }
+                        MessageType::ExecExited => {
+                            if let Ok(exited) = msg.payload::<ExecExited>() {
+                                exit_code = exited.code;
+                            }
+                            should_break = true;
+                        }
+                        MessageType::ExecFailed => {
+                            if let Ok(failed) =
+                                msg.payload::<microsandbox_protocol::exec::ExecFailed>()
+                            {
+                                spawn_failure = Some(failed);
+                            }
+                            should_break = true;
+                        }
+                        _ => {}
+                    }
+
+                    if !should_break {
+                        while let Ok(next) = rx.try_recv() {
+                            match next.t {
+                                MessageType::ExecStdout => {
+                                    if let Ok(out) = next.payload::<ExecStdout>() {
+                                        let _ = stdout.write_all(&out.data).await;
+                                    }
+                                }
+                                MessageType::ExecExited => {
+                                    if let Ok(exited) = next.payload::<ExecExited>() {
+                                        exit_code = exited.code;
+                                    }
+                                    should_break = true;
+                                    break;
+                                }
+                                MessageType::ExecFailed => {
+                                    if let Ok(failed) = next
+                                        .payload::<microsandbox_protocol::exec::ExecFailed>()
+                                    {
+                                        spawn_failure = Some(failed);
+                                    }
+                                    should_break = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    let _ = stdout.flush().await;
+
+                    if should_break {
+                        break;
+                    }
+                }
+
+                _ = sigwinch.recv() => {
+                    if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
+                        let payload = ExecResize { rows: new_rows, cols: new_cols };
+                        let _ = client.send(id, MessageType::ExecResize, &payload).await;
+                    }
+                }
+            }
+        }
+
+        if let Some(failure) = spawn_failure {
+            return Err(crate::MicrosandboxError::ExecFailed(failure));
+        }
+        Ok(exit_code)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 

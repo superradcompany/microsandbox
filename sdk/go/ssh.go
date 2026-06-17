@@ -6,17 +6,17 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// SSH is the SSH namespace for a sandbox.
-type SSH struct {
+// SSH is the SSH operations for a sandbox.
+type SandboxSSHOps struct {
 	sandbox *Sandbox
 }
 
-// SSH returns the SSH namespace for this sandbox.
-func (s *Sandbox) SSH() *SSH {
-	return &SSH{sandbox: s}
+// SSH returns the SSH operations for this sandbox.
+func (s *Sandbox) SSH() *SandboxSSHOps {
+	return &SandboxSSHOps{sandbox: s}
 }
 
-// SSHClientOption configures SSH.Connect.
+// SSHClientOption configures SandboxSSHOps.OpenClient.
 type SSHClientOption func(*sshClientConfig)
 
 type sshClientConfig struct {
@@ -45,8 +45,8 @@ type SSHClient struct {
 	inner *ffi.SSHClient
 }
 
-// Connect connects a native in-process SSH client to this sandbox.
-func (ssh *SSH) Connect(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error) {
+// OpenClient opens a native in-process SSH client to this sandbox.
+func (ssh *SandboxSSHOps) OpenClient(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error) {
 	cfg := sshClientConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -209,7 +209,7 @@ func (sftp *SFTPClient) Close(ctx context.Context) error {
 	return wrapFFI(sftp.inner.Close(ctx))
 }
 
-// SSHServerOption configures SSH.Server.
+// SSHServerOption configures SandboxSSHOps.PrepareServer.
 type SSHServerOption func(*sshServerConfig)
 
 type sshServerConfig struct {
@@ -244,8 +244,8 @@ type SSHServer struct {
 	inner *ffi.SSHServer
 }
 
-// Server prepares a reusable SSH server endpoint for this sandbox.
-func (ssh *SSH) Server(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error) {
+// PrepareServer prepares a reusable SSH server endpoint for this sandbox.
+func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error) {
 	cfg := sshServerConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -268,7 +268,7 @@ func (srv *SSHServer) Close(ctx context.Context) error {
 	return wrapFFI(srv.inner.Close(ctx))
 }
 
-// ServeStdio serves one SSH transport over this process's stdin/stdout.
-func (srv *SSHServer) ServeStdio(ctx context.Context) error {
-	return wrapFFI(srv.inner.ServeStdio(ctx))
+// ServeConnection serves one SSH transport over this process's stdin/stdout.
+func (srv *SSHServer) ServeConnection(ctx context.Context) error {
+	return wrapFFI(srv.inner.ServeConnection(ctx))
 }

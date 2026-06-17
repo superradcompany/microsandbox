@@ -6,7 +6,18 @@ use napi_derive::napi;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Process exit status.
+/// Result of observing a sandbox in a terminal state.
+#[napi(object)]
+pub struct SandboxStopResult {
+    pub name: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub observed_at: f64,
+    pub source: Option<String>,
+}
+
+/// Exit status for an executed command.
 #[napi(object)]
 pub struct ExitStatus {
     pub code: i32,
@@ -16,8 +27,19 @@ pub struct ExitStatus {
 /// Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
 /// (AND-matched). Omit or leave empty to match every sandbox.
 #[napi(object)]
+#[allow(dead_code)]
 pub struct SandboxListFilter {
     pub labels: Option<HashMap<String, String>>,
+}
+
+/// Lightweight sandbox info returned by `Sandbox.list`.
+#[napi(object)]
+pub struct SandboxInfo {
+    pub name: String,
+    pub status: String,
+    pub config_json: String,
+    pub created_at: Option<f64>,
+    pub updated_at: Option<f64>,
 }
 
 /// One captured log entry from `exec.log`.
@@ -104,7 +126,7 @@ pub struct SshOutput {
     pub stderr: napi::bindgen_prelude::Buffer,
 }
 
-/// Options accepted by `Sandbox.ssh().connect()`.
+/// Options accepted by `Sandbox.ssh().openClient()`.
 #[napi(object)]
 pub struct SshClientOptions {
     pub user: Option<String>,
@@ -125,7 +147,7 @@ pub struct SshAttachOptions {
     pub detach_keys: Option<String>,
 }
 
-/// Options accepted by `Sandbox.ssh().server()`.
+/// Options accepted by `Sandbox.ssh().prepareServer()`.
 #[napi(object)]
 pub struct SshServerOptions {
     pub host_key_path: Option<String>,
@@ -161,7 +183,10 @@ pub struct FsMetadata {
 #[napi(object)]
 pub struct SandboxMetrics {
     pub cpu_percent: f64,
+    pub vcpu_time_ns: f64,
     pub memory_bytes: f64,
+    pub memory_available_bytes: Option<f64>,
+    pub memory_host_resident_bytes: Option<f64>,
     pub memory_limit_bytes: f64,
     pub disk_read_bytes: f64,
     pub disk_write_bytes: f64,
@@ -186,24 +211,16 @@ pub struct ExecEvent {
     pub code: Option<i32>,
 }
 
-/// Lightweight handle info for a sandbox from the database.
-#[napi(object)]
-pub struct SandboxInfo {
-    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
-    pub name: String,
-    /// "running", "stopped", "crashed", or "draining".
-    pub status: String,
-    pub config_json: String,
-    pub created_at: Option<f64>,
-    pub updated_at: Option<f64>,
-}
-
 /// Volume handle info from the database.
 #[napi(object)]
 pub struct VolumeInfo {
     pub name: String,
+    pub kind: String,
     pub quota_mib: Option<u32>,
     pub used_bytes: f64,
+    pub capacity_bytes: Option<f64>,
+    pub disk_format: Option<String>,
+    pub disk_fstype: Option<String>,
     pub labels: HashMap<String, String>,
     pub created_at: Option<f64>,
 }

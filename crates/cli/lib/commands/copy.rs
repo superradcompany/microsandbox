@@ -122,7 +122,7 @@ pub async fn run(args: CopyArgs) -> anyhow::Result<()> {
 }
 
 /// Copy a host path into a sandbox.
-async fn copy_local_to_sandbox(fs: &SandboxFs, src: &Path, dst: &str) -> anyhow::Result<()> {
+async fn copy_local_to_sandbox(fs: &SandboxFs<'_>, src: &Path, dst: &str) -> anyhow::Result<()> {
     let metadata = tokio::fs::symlink_metadata(src)
         .await
         .with_context(|| format!("stat {}", src.display()))?;
@@ -132,7 +132,7 @@ async fn copy_local_to_sandbox(fs: &SandboxFs, src: &Path, dst: &str) -> anyhow:
 }
 
 /// Copy a sandbox path to the host.
-async fn copy_sandbox_to_local(fs: &SandboxFs, src: &str, dst: &Path) -> anyhow::Result<()> {
+async fn copy_sandbox_to_local(fs: &SandboxFs<'_>, src: &str, dst: &Path) -> anyhow::Result<()> {
     let metadata = fs
         .stat_with_follow(src, false)
         .await
@@ -143,7 +143,7 @@ async fn copy_sandbox_to_local(fs: &SandboxFs, src: &str, dst: &Path) -> anyhow:
 }
 
 /// Copy a sandbox path within the same sandbox.
-async fn copy_sandbox_to_sandbox(fs: &SandboxFs, src: &str, dst: &str) -> anyhow::Result<()> {
+async fn copy_sandbox_to_sandbox(fs: &SandboxFs<'_>, src: &str, dst: &str) -> anyhow::Result<()> {
     let metadata = fs
         .stat_with_follow(src, false)
         .await
@@ -155,9 +155,9 @@ async fn copy_sandbox_to_sandbox(fs: &SandboxFs, src: &str, dst: &str) -> anyhow
 
 /// Copy a sandbox path into another sandbox.
 async fn copy_sandbox_to_other_sandbox(
-    src_fs: &SandboxFs,
+    src_fs: &SandboxFs<'_>,
     src: &str,
-    dst_fs: &SandboxFs,
+    dst_fs: &SandboxFs<'_>,
     dst: &str,
 ) -> anyhow::Result<()> {
     let metadata = src_fs
@@ -171,7 +171,7 @@ async fn copy_sandbox_to_other_sandbox(
 
 /// Recursively copy a host entry into a sandbox.
 fn copy_local_entry_to_sandbox<'a>(
-    fs: &'a SandboxFs,
+    fs: &'a SandboxFs<'a>,
     src: PathBuf,
     dst: String,
     metadata: std::fs::Metadata,
@@ -217,7 +217,7 @@ fn copy_local_entry_to_sandbox<'a>(
 
 /// Recursively copy a sandbox entry to the host.
 fn copy_sandbox_entry_to_local<'a>(
-    fs: &'a SandboxFs,
+    fs: &'a SandboxFs<'a>,
     src: String,
     dst: PathBuf,
     metadata: FsMetadata,
@@ -258,7 +258,7 @@ fn copy_sandbox_entry_to_local<'a>(
 
 /// Recursively copy a sandbox entry within the same sandbox.
 fn copy_sandbox_entry_to_sandbox<'a>(
-    fs: &'a SandboxFs,
+    fs: &'a SandboxFs<'a>,
     src: String,
     dst: String,
     metadata: FsMetadata,
@@ -296,9 +296,9 @@ fn copy_sandbox_entry_to_sandbox<'a>(
 
 /// Recursively copy a sandbox entry into another sandbox.
 fn copy_sandbox_entry_to_other_sandbox<'a>(
-    src_fs: &'a SandboxFs,
+    src_fs: &'a SandboxFs<'a>,
     src: String,
-    dst_fs: &'a SandboxFs,
+    dst_fs: &'a SandboxFs<'a>,
     dst: String,
     metadata: FsMetadata,
 ) -> BoxFuture<'a, anyhow::Result<()>> {
@@ -341,7 +341,11 @@ fn copy_sandbox_entry_to_other_sandbox<'a>(
 }
 
 /// Copy a host file into a sandbox using streaming I/O.
-async fn copy_local_file_to_sandbox(fs: &SandboxFs, src: &Path, dst: &str) -> anyhow::Result<()> {
+async fn copy_local_file_to_sandbox(
+    fs: &SandboxFs<'_>,
+    src: &Path,
+    dst: &str,
+) -> anyhow::Result<()> {
     let mut file = tokio::fs::File::open(src)
         .await
         .with_context(|| format!("open {}", src.display()))?;
@@ -361,7 +365,11 @@ async fn copy_local_file_to_sandbox(fs: &SandboxFs, src: &Path, dst: &str) -> an
 }
 
 /// Copy a sandbox file to the host using streaming I/O.
-async fn copy_sandbox_file_to_local(fs: &SandboxFs, src: &str, dst: &Path) -> anyhow::Result<()> {
+async fn copy_sandbox_file_to_local(
+    fs: &SandboxFs<'_>,
+    src: &str,
+    dst: &Path,
+) -> anyhow::Result<()> {
     let mut stream = fs.read_stream(src).await?;
     let mut file = tokio::fs::File::create(dst)
         .await
@@ -377,9 +385,9 @@ async fn copy_sandbox_file_to_local(fs: &SandboxFs, src: &str, dst: &Path) -> an
 
 /// Copy a sandbox file into another sandbox using streaming I/O.
 async fn copy_sandbox_file_to_sandbox(
-    src_fs: &SandboxFs,
+    src_fs: &SandboxFs<'_>,
     src: &str,
-    dst_fs: &SandboxFs,
+    dst_fs: &SandboxFs<'_>,
     dst: &str,
 ) -> anyhow::Result<()> {
     let mut stream = src_fs.read_stream(src).await?;
@@ -394,7 +402,11 @@ async fn copy_sandbox_file_to_sandbox(
 }
 
 /// Resolve a sandbox destination using cp-style "existing directory means copy into it" behavior.
-async fn sandbox_destination(fs: &SandboxFs, dst: &str, basename: &str) -> anyhow::Result<String> {
+async fn sandbox_destination(
+    fs: &SandboxFs<'_>,
+    dst: &str,
+    basename: &str,
+) -> anyhow::Result<String> {
     if dst.ends_with('/') {
         return Ok(guest_join(dst, basename));
     }
@@ -415,7 +427,7 @@ async fn local_destination(dst: &Path, basename: &str) -> anyhow::Result<PathBuf
 
 /// Set guest permission bits.
 async fn set_guest_mode(
-    fs: &SandboxFs,
+    fs: &SandboxFs<'_>,
     path: &str,
     mode: u32,
     follow_symlink: bool,

@@ -1,59 +1,54 @@
 //! Lightweight sandbox handle for metadata and signal-based lifecycle management.
-
-use sea_orm::EntityTrait;
+//!
+//! Per the SDK local-cloud parity plan (D6.4) `SandboxHandle` stays a single
+//! type regardless of backend. It carries an `Arc<dyn Backend>` plus a
+//! backend-private [`SandboxHandleInner`](crate::backend::SandboxHandleInner)
+//! enum. Users reach variant-specific data via [`SandboxHandle::local`] /
+//! [`SandboxHandle::cloud`].
 
 use std::sync::Arc;
 
+use sea_orm::EntityTrait;
+
 use crate::{
-    MicrosandboxResult, agent::AgentClient, db::entity::sandbox as sandbox_entity,
-    runtime::SpawnMode,
+    MicrosandboxResult,
+    backend::{
+        Backend, CloudSandbox, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
+    },
+    db::entity::sandbox as sandbox_entity,
 };
 
-use super::{Sandbox, SandboxConfig, SandboxStatus};
+use super::{Sandbox, SandboxConfig, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
 /// Default timeout for [`SandboxHandle::connect`].
-///
-/// If the sandbox doesn't respond in this window, `connect()` returns
-/// a typed error instead of blocking.
 pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Default timeout for [`SandboxHandle::stop`] before it force-kills.
-///
-/// Long enough to let the sandbox finish writing pending data on a
-/// healthy host, short enough that an unresponsive sandbox doesn't
-/// stall an interactive `msb stop`. Override per call with
-/// [`SandboxHandle::stop_with_timeout`].
-///
-/// Unlike [`DEFAULT_CONNECT_TIMEOUT`], expiry here does not produce
-/// an error — the sandbox is force-killed and the call returns
-/// successfully.
+/// Default timeout for [`SandboxHandle::stop`] before escalation.
 pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Default timeout for observing stopped state after force termination.
+pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// A lightweight handle to a sandbox from the database.
+/// A lightweight handle to a sandbox.
 ///
-/// Provides metadata access and signal-based lifecycle management (stop, kill)
-/// without requiring a live agent bridge. Obtained via [`Sandbox::get`] or
-/// [`Sandbox::list`].
+/// Provides metadata access and signal-based lifecycle management (stop, kill,
+/// remove) without requiring a live agent bridge. Obtained via
+/// [`Sandbox::get`] or [`Sandbox::list`].
 ///
 /// For full runtime capabilities (exec, shell, fs), call [`start`](SandboxHandle::start)
 /// to boot the sandbox and obtain a live [`Sandbox`] handle.
-#[derive(Debug)]
 pub struct SandboxHandle {
-    db_id: i32,
+    backend: Arc<dyn Backend>,
+    inner: SandboxHandleInner,
     name: String,
-    status: SandboxStatus,
-    config_json: String,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    pid: Option<i32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -61,156 +56,312 @@ pub struct SandboxHandle {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxHandle {
-    /// Create a handle from a database entity model and its resolved process PID.
-    pub(super) fn new(model: sandbox_entity::Model, pid: Option<i32>) -> Self {
+    /// Build a handle from a local sandbox DB row + active PID.
+    pub(crate) fn from_local_model(
+        backend: Arc<dyn Backend>,
+        model: sandbox_entity::Model,
+        pid: Option<i32>,
+    ) -> Self {
+        let name = model.name.clone();
         Self {
-            db_id: model.id,
-            name: model.name,
-            status: model.status,
-            config_json: model.config,
-            created_at: model.created_at.map(|dt| dt.and_utc()),
-            updated_at: model.updated_at.map(|dt| dt.and_utc()),
-            pid,
+            backend,
+            inner: SandboxHandleInner::Local(SandboxHandleLocalState {
+                db_id: model.id,
+                status: model.status,
+                config_json: model.config,
+                created_at: model.created_at.map(|dt| dt.and_utc()),
+                updated_at: model.updated_at.map(|dt| dt.and_utc()),
+                pid,
+            }),
+            name,
         }
     }
 
-    /// Unique name identifying this sandbox.
+    /// Build a handle from a [`CloudSandbox`] HTTP response.
     ///
-    /// Sandbox names are limited to 128 UTF-8 bytes.
+    /// Returns an error if `cloud.config` cannot be re-serialised to JSON for
+    /// the `config_json()` view. Silent fallback to an empty string here would
+    /// surface later as a confusing `serde_json::Error` ("EOF while parsing")
+    /// out of [`config()`](Self::config) / [`config_json()`](Self::config_json).
+    pub(crate) fn from_cloud(
+        backend: Arc<dyn Backend>,
+        cloud: CloudSandbox,
+    ) -> MicrosandboxResult<Self> {
+        let status = crate::backend::sandbox::cloud_status_to_sandbox_status(cloud.status);
+        let config_json = serde_json::to_string(&cloud.config)?;
+        let name = cloud.name.clone();
+        Ok(Self {
+            backend,
+            inner: SandboxHandleInner::Cloud(SandboxHandleCloudState {
+                id: cloud.id,
+                org_id: cloud.org_id,
+                status,
+                config_json,
+                created_at: Some(cloud.created_at),
+                started_at: cloud.started_at,
+                stopped_at: cloud.stopped_at,
+                last_error: cloud.last_error,
+            }),
+            name,
+        })
+    }
+
+    /// Unique name identifying this sandbox.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Snapshot of sandbox status from when this handle was created.
-    /// Not live — call [`Sandbox::get`] again for a fresh reading.
-    pub fn status(&self) -> SandboxStatus {
-        self.status
+    /// Which backend variant this handle is bound to.
+    pub fn backend_kind(&self) -> crate::backend::BackendKind {
+        self.backend.kind()
     }
 
-    /// The serialized sandbox configuration as stored in the database.
-    /// Use [`config()`](Self::config) for a deserialized version.
+    /// Local-only handle state. Returns `Some` for local-backed handles.
+    pub fn local(&self) -> Option<&SandboxHandleLocalState> {
+        match &self.inner {
+            SandboxHandleInner::Local(s) => Some(s),
+            SandboxHandleInner::Cloud(_) => None,
+        }
+    }
+
+    /// Cloud-only handle state. Returns `Some` for cloud-backed handles.
+    pub fn cloud(&self) -> Option<&SandboxHandleCloudState> {
+        match &self.inner {
+            SandboxHandleInner::Cloud(s) => Some(s),
+            SandboxHandleInner::Local(_) => None,
+        }
+    }
+
+    /// Snapshot of sandbox status captured when this handle was created.
+    ///
+    /// **Not live** — call [`Sandbox::status`](super::Sandbox::status) on the
+    /// live `Sandbox` (or re-fetch via [`Sandbox::get`](super::Sandbox::get))
+    /// for a fresh reading. The `_snapshot` suffix is deliberate to avoid
+    /// confusion with `Sandbox::status()` which is async + fetch-live.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let handle = Sandbox::get("agent-1").await?;
+    /// // Cheap, in-memory; reflects state at handle-creation time.
+    /// let snap = handle.status_snapshot();
+    ///
+    /// // For a fresh reading, drive through the live Sandbox:
+    /// let sb = handle.start().await?;
+    /// let live = sb.status().await?;
+    /// ```
+    pub fn status_snapshot(&self) -> SandboxStatus {
+        match &self.inner {
+            SandboxHandleInner::Local(s) => s.status,
+            SandboxHandleInner::Cloud(s) => s.status,
+        }
+    }
+
+    /// Snapshot of the cloud `last_error`, if any. Returns `None` for local
+    /// handles (local error reporting flows through the typed error stack).
+    pub fn last_error_snapshot(&self) -> Option<String> {
+        match &self.inner {
+            SandboxHandleInner::Cloud(s) => s.last_error.clone(),
+            SandboxHandleInner::Local(_) => None,
+        }
+    }
+
+    /// The serialized sandbox configuration as stored in the database (local)
+    /// or returned by msb-cloud (cloud). Use [`config()`](Self::config) for a
+    /// deserialized [`SandboxConfig`].
     pub fn config_json(&self) -> &str {
-        &self.config_json
+        match &self.inner {
+            SandboxHandleInner::Local(s) => &s.config_json,
+            SandboxHandleInner::Cloud(s) => &s.config_json,
+        }
     }
 
     /// Parse the stored configuration. Returns an error if the JSON
     /// is malformed (e.g., schema changed since the sandbox was created).
+    ///
+    /// For local handles this deserializes the persisted [`SandboxConfig`].
+    /// For cloud handles this returns an `Unsupported` error: the cloud wire
+    /// shape is [`CloudCreateSandboxRequest`](crate::backend::CloudCreateSandboxRequest),
+    /// not `SandboxConfig`. Use [`config_json`](Self::config_json) to read the
+    /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
-        Ok(serde_json::from_str(&self.config_json)?)
+        match &self.inner {
+            SandboxHandleInner::Local(s) => Ok(serde_json::from_str(&s.config_json)?),
+            SandboxHandleInner::Cloud(_) => Err(crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::config on cloud".into(),
+                available_when: "when SandboxConfig is the cloud wire shape".into(),
+            }),
+        }
+    }
+
+    /// Return a fresh handle for the same sandbox name.
+    pub async fn refresh(&self) -> MicrosandboxResult<SandboxHandle> {
+        self.backend
+            .sandboxes()
+            .get(self.backend.clone(), &self.name)
+            .await
     }
 
     /// When this sandbox was first created, if recorded.
     pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.created_at
+        match &self.inner {
+            SandboxHandleInner::Local(s) => s.created_at,
+            SandboxHandleInner::Cloud(s) => s.created_at,
+        }
     }
 
-    /// When this sandbox's database record was last modified.
+    /// Best-effort "last activity" timestamp.
+    ///
+    /// - Local: the database row's `updated_at` (modification time of the
+    ///   persisted record).
+    /// - Cloud: the most recent of `stopped_at` / `started_at` / `created_at`
+    ///   from the msb-cloud response. msb-cloud has no dedicated
+    ///   `updated_at` column, so this is synthesised on the client.
     pub fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.updated_at
+        match &self.inner {
+            SandboxHandleInner::Local(s) => s.updated_at,
+            SandboxHandleInner::Cloud(s) => s.stopped_at.or(s.started_at).or(s.created_at),
+        }
     }
 
     /// Read captured output from `exec.log` for this sandbox.
     ///
     /// Same backing data as [`Sandbox::logs`](super::Sandbox::logs).
-    /// Works without starting the sandbox.
+    /// Works without starting the sandbox. **Local handles only**.
     pub async fn logs(
         &self,
         opts: &crate::logs::LogOptions,
     ) -> MicrosandboxResult<Vec<crate::logs::LogEntry>> {
+        if self.backend.as_local().is_none() {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::logs on cloud".into(),
+                available_when: "when cloud logs land".into(),
+            });
+        }
         crate::logs::read_logs(&self.name, opts).await
     }
 
-    /// Stream captured output as it appears, with optional follow.
-    ///
-    /// Same backing data as [`Sandbox::log_stream`](super::Sandbox::log_stream).
-    /// Works without starting the sandbox; with `follow: true`, the
-    /// stream picks up new entries the moment they land in `exec.log`.
-    pub async fn log_stream(
-        &self,
-        opts: &crate::logs::LogStreamOptions,
-    ) -> MicrosandboxResult<
-        impl futures::Stream<Item = MicrosandboxResult<crate::logs::LogEntry>> + Send + 'static,
-    > {
-        crate::logs::log_stream(&self.name, opts).await
-    }
-
-    /// Get the latest metrics snapshot for this sandbox.
+    /// Get the latest metrics snapshot for this sandbox. **Local handles only**.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
-        // Skip the stale-status snapshot check on purpose: it can lag behind
-        // a sandbox that just crashed, and `metrics_for_sandbox` already
-        // returns a clear "no active run" error via `load_active_run`.
+        let local = self
+            .local()
+            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::metrics on cloud".into(),
+                available_when: "when cloud metrics land".into(),
+            })?;
+
+        if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "sandbox '{}' is not running (status: {:?})",
+                self.name, local.status
+            )));
+        }
+
         let config = self.config()?;
         if config.effective_metrics_interval().is_none() {
             return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 
-        let db = crate::db::init_global().await?.read();
-        super::metrics::metrics_for_sandbox(db, self.db_id, &config).await
+        let local_backend =
+            self.backend
+                .as_local()
+                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                    feature: "SandboxHandle::metrics on cloud".into(),
+                    available_when: "when cloud metrics land".into(),
+                })?;
+        let db = local_backend.db().await?.read();
+        super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
 
     /// Start this sandbox and return a live handle.
     ///
-    /// Boots the VM using the persisted configuration and pinned rootfs state.
-    /// The handle remains usable if start fails.
+    /// Boots the VM using the persisted configuration and pinned rootfs state
+    /// for local; routes through `POST /v1/sandboxes/by-name/:name/start` for
+    /// cloud. The handle remains usable if start fails.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
-        Sandbox::start_with_mode(&self.name, SpawnMode::Attached).await
+        self.backend
+            .sandboxes()
+            .start(self.backend.clone(), &self.name)
+            .await
     }
 
     /// Start this sandbox in detached/background mode.
     ///
     /// The handle remains usable if start fails.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
-        Sandbox::start_with_mode(&self.name, SpawnMode::Detached).await
+        self.backend
+            .sandboxes()
+            .start_detached(self.backend.clone(), &self.name)
+            .await
     }
 
-    /// Connect to a running sandbox.
-    ///
-    /// Returns a [`Sandbox`] handle that does not own the process
-    /// lifecycle — the sandbox keeps running after this handle is
-    /// dropped. Returns a typed error if the sandbox doesn't respond
-    /// within [`DEFAULT_CONNECT_TIMEOUT`]; use
-    /// [`connect_with_timeout`](Self::connect_with_timeout) to override.
+    /// Connect to a running sandbox via the agent relay socket. **Local
+    /// handles only** — cloud sandbox attach is HTTP/WS and not wired up in
+    /// this delegation.
     pub async fn connect(&self) -> MicrosandboxResult<Sandbox> {
         self.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT).await
     }
 
-    /// Connect with an explicit timeout.
-    ///
-    /// If the sandbox doesn't respond within `timeout`, the call
-    /// returns a typed error instead of blocking.
+    /// Connect to a running sandbox with an explicit agent handshake timeout.
     pub async fn connect_with_timeout(
         &self,
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<Sandbox> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+        let local = self
+            .local()
+            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::connect on cloud".into(),
+                available_when: "when cloud attach lands".into(),
+            })?;
+        if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
             return Err(crate::MicrosandboxError::Custom(format!(
                 "sandbox '{}' is not running (status: {:?})",
-                self.name, self.status
+                self.name, local.status
             )));
         }
 
-        let client = AgentClient::connect_sandbox_with_timeout(&self.name, timeout).await?;
-        let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
+        let local_backend =
+            self.backend
+                .as_local()
+                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                    feature: "SandboxHandle::connect on cloud".into(),
+                    available_when: "when cloud attach lands".into(),
+                })?;
+        let client = crate::sandbox::fs::local::connect_agent_with_timeout(
+            local_backend,
+            &self.name,
+            timeout,
+        )
+        .await?;
+        let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
 
-        Ok(Sandbox {
-            db_id: self.db_id,
+        Ok(Sandbox::from_local(
+            self.backend.clone(),
+            crate::backend::SandboxLocalState {
+                db_id: local.db_id,
+                handle: None,
+                client: Arc::new(client),
+            },
             config,
-            handle: None,
-            client: Arc::new(client),
-        })
+        ))
     }
 
     /// Snapshot this sandbox to a bare name under the default snapshots
     /// directory (`~/.microsandbox/snapshots/<name>/`).
     ///
     /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
-    /// an explicit filesystem destination, see
-    /// [`snapshot_to`](Self::snapshot_to).
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. **Local
+    /// handles only** — cloud snapshot semantics are deferred.
     pub async fn snapshot(
         &self,
         name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        if self.local().is_none() {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::snapshot on cloud".into(),
+                available_when: "when cloud snapshots land".into(),
+            });
+        }
         use super::super::snapshot::{Snapshot, SnapshotDestination};
         Snapshot::builder(&self.name)
             .destination(SnapshotDestination::Name(name.to_string()))
@@ -218,16 +369,17 @@ impl SandboxHandle {
             .await
     }
 
-    /// Snapshot this sandbox to an explicit filesystem path.
-    ///
-    /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
-    /// the common case of writing under the default snapshots
-    /// directory, see [`snapshot`](Self::snapshot).
+    /// Snapshot this sandbox to an explicit filesystem path. **Local handles only.**
     pub async fn snapshot_to(
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        if self.local().is_none() {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::snapshot_to on cloud".into(),
+                available_when: "when cloud snapshots land".into(),
+            });
+        }
         use super::super::snapshot::{Snapshot, SnapshotDestination};
         Snapshot::builder(&self.name)
             .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
@@ -235,179 +387,173 @@ impl SandboxHandle {
             .await
     }
 
-    /// Stop the sandbox gracefully, using [`DEFAULT_STOP_TIMEOUT`].
-    ///
-    /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost
-    /// across a later restart. Waits up to the default timeout for a
-    /// clean exit; if the sandbox is still running after that, it is
-    /// force-killed.
-    ///
-    /// Unlike [`connect_with_timeout`](Self::connect_with_timeout), an
-    /// expired timeout here does **not** return an error — it
-    /// transitions to a force-kill and the call still returns `Ok`.
-    /// Use [`stop_with_timeout`](Self::stop_with_timeout) to override
-    /// the budget for a single call.
+    /// Stop the sandbox gracefully using the default stop timeout.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout.
-    ///
-    /// `timeout` is the end-to-end deadline for a clean exit. If the
-    /// sandbox is still running when the deadline expires, it is
-    /// force-killed; the call returns `Ok` either way — it does not
-    /// surface a timeout error.
-    ///
-    /// - `timeout > 0`: ask the sandbox to shut down cleanly and wait
-    ///   up to `timeout`; force-kill anything still running afterward.
-    ///   Pending writes that exceed the budget may be lost.
-    /// - `timeout == Duration::ZERO`: force-kill immediately
-    ///   (equivalent to [`kill`](Self::kill)). Pending writes that the
-    ///   workload hasn't `fsync`'d may be lost — same durability as a
-    ///   sudden power loss on a physical machine.
+    /// Stop the sandbox gracefully with an explicit timeout before escalation.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status_snapshot()) {
             return Ok(());
         }
-
-        let pid = self.pid.filter(|pid| super::pid_is_alive(*pid));
-        // Tracks whether we issued a SIGKILL. After SIGKILL the process is
-        // guaranteed dead by kernel time; `pid_is_alive` still returns true
-        // during the zombie window before the parent's `waitpid`, so we
-        // can't rely on it to gate the DB update.
-        let mut sigkilled = false;
 
         if timeout.is_zero() {
-            // Skip graceful path — caller asked for immediate kill.
-            let pids = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-            if !pids.is_empty() {
-                sigkilled = true;
-                wait_for_exit(&pids, std::time::Duration::from_secs(5)).await;
-            }
-        } else {
-            let deadline = tokio::time::Instant::now() + timeout;
-            self.shutdown_via_agent_or_sigterm(deadline).await;
-
-            if let Some(pid) = pid {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                wait_for_exit(&[pid], remaining).await;
-                if super::pid_is_alive(pid) {
-                    tracing::warn!(
-                        sandbox = %self.name,
-                        timeout_secs = timeout.as_secs(),
-                        "graceful stop exceeded timeout, escalating to SIGKILL"
-                    );
-                    let _ = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-                    sigkilled = true;
-                    wait_for_exit(&[pid], std::time::Duration::from_secs(5)).await;
-                }
-            }
-        }
-
-        // Idempotent with the VMM exit observer (vm.rs build_vm): on a clean
-        // poweroff the observer already wrote Stopped; this just covers paths
-        // where the observer didn't get to run (e.g., SIGKILL escalation, or
-        // a sandbox owned by a foreign process). After SIGKILL we trust the
-        // kernel and don't poll the zombie window.
-        let all_dead = sigkilled || pid.map(|p| !super::pid_is_alive(p)).unwrap_or(true);
-        if all_dead {
-            let db = crate::db::init_global().await?.write();
-            if let Err(e) =
-                super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
-            {
-                tracing::warn!(sandbox = %self.name, error = %e, "failed to update sandbox status after stop");
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Send `core.shutdown` via the agent relay, with the handshake
-    /// bounded by the remaining time until `deadline` so a wedged relay
-    /// can't blow the stop budget. Falls back to SIGTERM on any
-    /// agent-side failure.
-    async fn shutdown_via_agent_or_sigterm(&self, deadline: tokio::time::Instant) {
-        let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match self.connect_with_timeout(budget).await {
-            Ok(sandbox) => {
-                if let Err(e) = sandbox.stop().await {
-                    tracing::warn!(
-                        sandbox = %self.name,
-                        error = %e,
-                        "agent shutdown send failed; falling back to SIGTERM"
-                    );
-                    let _ = signal_pid(self.pid, nix::sys::signal::Signal::SIGTERM);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    sandbox = %self.name,
-                    error = %e,
-                    "agent shutdown unavailable; falling back to SIGTERM"
-                );
-                let _ = signal_pid(self.pid, nix::sys::signal::Signal::SIGTERM);
-            }
-        }
-    }
-
-    /// Kill the sandbox immediately (SIGKILL).
-    ///
-    /// Waits for the process to exit (up to 5 seconds) and marks the
-    /// sandbox as `Stopped`.
-    ///
-    /// Pending writes that the workload hasn't `fsync`'d may be lost —
-    /// same durability semantics as a sudden power loss on a physical
-    /// machine. Use [`stop`](Self::stop) for graceful shutdown that
-    /// gives the workload a chance to flush.
-    pub async fn kill(&mut self) -> MicrosandboxResult<()> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+            current.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
             return Ok(());
         }
 
-        let pids = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
-
-        if !pids.is_empty() {
-            wait_for_exit(&pids, std::time::Duration::from_secs(5)).await;
+        current.request_stop().await?;
+        match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {}
         }
 
-        // Mark stopped if all processes are confirmed dead (or were already gone).
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| !super::pid_is_alive(*pid));
-
-        if all_dead {
-            let db = crate::db::init_global().await?.write();
-            if let Err(e) =
-                super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
-            {
-                tracing::warn!(sandbox = %self.name, error = %e, "failed to update sandbox status after kill");
+        tracing::warn!(
+            sandbox = %current.name,
+            timeout_secs = timeout.as_secs(),
+            "graceful stop exceeded timeout, escalating to kill"
+        );
+        current.request_kill().await?;
+        match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, current.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
             }
-            self.status = SandboxStatus::Stopped;
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                current.name
+            ))),
         }
-
-        Ok(())
     }
 
-    /// Remove this sandbox from the database and filesystem.
-    ///
-    /// The sandbox must be stopped first. Use [`stop`](SandboxHandle::stop) or
-    /// [`kill`](SandboxHandle::kill) to stop it before removing.
-    pub async fn remove(&self) -> MicrosandboxResult<()> {
-        if self.status == SandboxStatus::Running || self.status == SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                "cannot remove sandbox '{}': still running",
-                self.name
-            )));
+    /// Request graceful shutdown without waiting for observed stopped state.
+    pub async fn request_stop(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status_snapshot()) {
+            return Ok(());
         }
 
-        let pools = crate::db::init_global().await?;
+        current
+            .backend
+            .sandboxes()
+            .stop(current.backend.clone(), &current.name)
+            .await
+    }
 
-        super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
-        super::free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
-        sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(pools.write())
-            .await?;
+    /// Kill the sandbox immediately and wait until it is observed stopped.
+    pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await
+    }
 
-        Ok(())
+    /// Request force termination without waiting for observed stopped state.
+    pub async fn request_kill(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status_snapshot()) {
+            return Ok(());
+        }
+
+        current
+            .backend
+            .sandboxes()
+            .kill(current.backend.clone(), &current.name)
+            .await
+    }
+
+    /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
+    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status_snapshot()) {
+            return Ok(());
+        }
+
+        current.request_kill().await?;
+        match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                current.name
+            ))),
+        }
+    }
+
+    /// Request drain without waiting for observed stopped state.
+    pub async fn request_drain(&self) -> MicrosandboxResult<()> {
+        let current = self.refresh().await?;
+        if sandbox_status_is_terminal(current.status_snapshot()) {
+            return Ok(());
+        }
+
+        current
+            .backend
+            .sandboxes()
+            .drain(current.backend.clone(), &current.name)
+            .await
+    }
+
+    /// Wait until this sandbox is observed in a terminal non-running state.
+    pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        loop {
+            let current = self.refresh().await?;
+            let status = current.status_snapshot();
+            if sandbox_status_is_terminal(status) {
+                return Ok(SandboxStopResult {
+                    name: current.name,
+                    status,
+                    exit_code: None,
+                    signal: None,
+                    observed_at: chrono::Utc::now(),
+                    source: Some("refreshed backend state".to_string()),
+                });
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Remove this sandbox.
+    ///
+    /// The sandbox must be stopped first. Use [`stop`](Self::stop) or
+    /// [`kill`](Self::kill) to stop it before removing. Routes through the
+    /// backend trait so cloud handles hit `DELETE /v1/sandboxes/by-name/:name`.
+    pub async fn remove(&self) -> MicrosandboxResult<()> {
+        match &self.inner {
+            SandboxHandleInner::Local(local) => {
+                if local.status == SandboxStatus::Running || local.status == SandboxStatus::Draining
+                {
+                    return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                        "cannot remove sandbox '{}': still running",
+                        self.name
+                    )));
+                }
+
+                let local_backend = self.backend.as_local().ok_or_else(|| {
+                    crate::MicrosandboxError::Unsupported {
+                        feature: "SandboxHandle::remove on cloud".into(),
+                        available_when: "wired via Cloud variant".into(),
+                    }
+                })?;
+                let pools = local_backend.db().await?;
+
+                super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
+                sandbox_entity::Entity::delete_by_id(local.db_id)
+                    .exec(pools.write())
+                    .await?;
+
+                Ok(())
+            }
+            SandboxHandleInner::Cloud(_) => {
+                self.backend
+                    .sandboxes()
+                    .remove(self.backend.clone(), &self.name)
+                    .await
+            }
+        }
     }
 }
 
@@ -415,27 +561,20 @@ impl SandboxHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Send a signal to the sandbox process.
-///
-/// Returns the PIDs that were signalled.
-fn signal_pid(pid: Option<i32>, signal: nix::sys::signal::Signal) -> MicrosandboxResult<Vec<i32>> {
-    if let Some(pid) = pid.filter(|pid| super::pid_is_alive(*pid)) {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal)?;
-        return Ok(vec![pid]);
-    }
-
-    Ok(vec![])
+fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
+    matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)
 }
 
-/// Poll until all PIDs have exited or the timeout is reached.
-async fn wait_for_exit(pids: &[i32], timeout: std::time::Duration) {
-    let start = std::time::Instant::now();
-    let poll_interval = std::time::Duration::from_millis(50);
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
 
-    while start.elapsed() < timeout {
-        if pids.iter().all(|pid| !super::pid_is_alive(*pid)) {
-            return;
-        }
-        tokio::time::sleep(poll_interval).await;
+impl std::fmt::Debug for SandboxHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxHandle")
+            .field("name", &self.name)
+            .field("backend_kind", &self.backend.kind())
+            .field("status", &self.status_snapshot())
+            .finish()
     }
 }

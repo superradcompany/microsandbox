@@ -1,9 +1,6 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { metricsFromNapi } from "./internal/metrics.js";
-import type {
-  NapiSandboxHandle,
-  NapiSandboxInfo,
-} from "./internal/napi.js";
+import type { NapiSandboxConfig, NapiSandboxHandle } from "./internal/napi.js";
 import {
   LogEntry,
   LogStream,
@@ -18,11 +15,17 @@ import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { Snapshot } from "./snapshot.js";
 
-const READ_ONLY_MSG =
-  "SandboxHandle is read-only — fetch a live handle via Sandbox.get(name) for lifecycle methods.";
+export interface SandboxStopResult {
+  readonly name: string;
+  readonly status: SandboxStatus;
+  readonly exitCode: number | null;
+  readonly signal: number | null;
+  readonly observedAt: Date;
+  readonly source: string | null;
+}
 
 export class SandboxHandle {
-  private readonly inner: NapiSandboxHandle | NapiSandboxInfo;
+  private readonly inner: NapiSandboxHandle;
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly status: SandboxStatus;
@@ -31,7 +34,7 @@ export class SandboxHandle {
   readonly updatedAt: Date | null;
 
   /** @internal */
-  constructor(inner: NapiSandboxHandle | NapiSandboxInfo) {
+  constructor(inner: NapiSandboxHandle) {
     this.inner = inner;
     this.name = inner.name;
     this.status = inner.status as SandboxStatus;
@@ -42,29 +45,30 @@ export class SandboxHandle {
       typeof inner.updatedAt === "number" ? new Date(inner.updatedAt) : null;
   }
 
-  private requireLive(): NapiSandboxHandle {
-    if (!isHandle(this.inner)) throw new Error(READ_ONLY_MSG);
-    return this.inner;
+  config(): NapiSandboxConfig {
+    return remapKeysToCamel(JSON.parse(this.configJson)) as NapiSandboxConfig;
+  }
+
+  async refresh(): Promise<SandboxHandle> {
+    const raw = await withMappedErrors(() => this.inner.refresh());
+    return new SandboxHandle(raw);
   }
 
   /** Get point-in-time metrics. */
   async metrics(): Promise<SandboxMetrics> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.metrics());
+    const raw = await withMappedErrors(() => this.inner.metrics());
     return metricsFromNapi(raw);
   }
 
   /** Resume in attached mode. */
   async start(): Promise<Sandbox> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.start());
+    const raw = await withMappedErrors(() => this.inner.start());
     return new Sandbox(raw, this.name, true);
   }
 
   /** Resume in detached mode. */
   async startDetached(): Promise<Sandbox> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.startDetached());
+    const raw = await withMappedErrors(() => this.inner.startDetached());
     return new Sandbox(raw, this.name, false);
   }
 
@@ -74,8 +78,7 @@ export class SandboxHandle {
    * 10_000 ms; use `connectWithTimeout` to override.
    */
   async connect(): Promise<Sandbox> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.connect());
+    const raw = await withMappedErrors(() => this.inner.connect());
     return new Sandbox(raw, this.name, false);
   }
 
@@ -84,8 +87,9 @@ export class SandboxHandle {
    * if the sandbox doesn't respond in this window.
    */
   async connectWithTimeout(timeoutMs: number): Promise<Sandbox> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.connectWithTimeout(timeoutMs));
+    const raw = await withMappedErrors(() =>
+      this.inner.connectWithTimeout(timeoutMs),
+    );
     return new Sandbox(raw, this.name, false);
   }
 
@@ -96,8 +100,11 @@ export class SandboxHandle {
    * 10_000 ms by default; use `stopWithTimeout` to override.
    */
   async stop(): Promise<void> {
-    const live = this.requireLive();
-    await withMappedErrors(() => live.stop());
+    await withMappedErrors(() => this.inner.stop());
+  }
+
+  async requestStop(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestStop());
   }
 
   /**
@@ -107,18 +114,33 @@ export class SandboxHandle {
    * does not throw on timeout expiry.
    */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
-    const live = this.requireLive();
-    await withMappedErrors(() => live.stopWithTimeout(timeoutMs));
+    await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 
   async kill(): Promise<void> {
-    const live = this.requireLive();
-    await withMappedErrors(() => live.kill());
+    await withMappedErrors(() => this.inner.kill());
+  }
+
+  async requestKill(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestKill());
+  }
+
+  async killWithTimeout(timeoutMs: number): Promise<void> {
+    await withMappedErrors(() => this.inner.killWithTimeout(timeoutMs));
+  }
+
+  async requestDrain(): Promise<void> {
+    await withMappedErrors(() => this.inner.requestDrain());
+  }
+
+  async waitUntilStopped(): Promise<SandboxStopResult> {
+    return sandboxStopResultFromNapi(
+      await withMappedErrors(() => this.inner.waitUntilStopped()),
+    );
   }
 
   async remove(): Promise<void> {
-    const live = this.requireLive();
-    await withMappedErrors(() => live.remove());
+    await withMappedErrors(() => this.inner.remove());
   }
 
   /**
@@ -130,9 +152,8 @@ export class SandboxHandle {
    * `{ sources: ["all"] }` for everything.
    */
   async logs(opts?: LogReadOptions): Promise<LogEntry[]> {
-    const live = this.requireLive();
     const napiOpts = logReadOptionsToNapi(opts);
-    const raw = await withMappedErrors(() => live.logs(napiOpts));
+    const raw = await withMappedErrors(() => this.inner.logs(napiOpts));
     return raw.map(logEntryFromNapi);
   }
 
@@ -144,9 +165,8 @@ export class SandboxHandle {
    * `exec.log`.
    */
   async logStream(opts?: LogStreamOptions): Promise<LogStream> {
-    const live = this.requireLive();
     const napiOpts = logStreamOptionsToNapi(opts);
-    const raw = await withMappedErrors(() => live.logStream(napiOpts));
+    const raw = await withMappedErrors(() => this.inner.logStream(napiOpts));
     return new LogStream(raw);
   }
 
@@ -159,26 +179,45 @@ export class SandboxHandle {
    * rejected with a `SnapshotSandboxRunning` error.
    */
   async snapshot(name: string): Promise<Snapshot> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.snapshot(name));
+    const raw = await withMappedErrors(() => this.inner.snapshot(name));
     return new Snapshot(raw);
   }
 
   /** Snapshot this (stopped) sandbox to an explicit filesystem path. */
   async snapshotTo(path: string): Promise<Snapshot> {
-    const live = this.requireLive();
-    const raw = await withMappedErrors(() => live.snapshotTo(path));
+    const raw = await withMappedErrors(() => this.inner.snapshotTo(path));
     return new Snapshot(raw);
   }
 }
 
-function isHandle(
-  v: NapiSandboxHandle | NapiSandboxInfo,
-): v is NapiSandboxHandle {
-  return typeof (v as { start?: unknown }).start === "function";
+function sandboxStopResultFromNapi(result: {
+  name: string;
+  status: string;
+  exitCode?: number | null;
+  signal?: number | null;
+  observedAt: number;
+  source?: string | null;
+}): SandboxStopResult {
+  return {
+    name: result.name,
+    status: result.status as SandboxStatus,
+    exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null,
+    observedAt: new Date(result.observedAt),
+    source: result.source ?? null,
+  };
 }
 
-/** @internal */
-export function sandboxInfoToHandle(info: NapiSandboxInfo): SandboxHandle {
-  return new SandboxHandle(info);
+function remapKeysToCamel(v: any): any {
+  if (Array.isArray(v)) return v.map(remapKeysToCamel);
+  if (v && typeof v === "object" && v.constructor === Object) {
+    const out: any = {};
+    for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeysToCamel(val);
+    return out;
+  }
+  return v;
+}
+
+function snakeToCamel(s: string): string {
+  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }

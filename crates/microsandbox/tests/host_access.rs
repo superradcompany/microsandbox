@@ -103,7 +103,9 @@ async fn spawn_sandbox(name: &str, policy: Option<NetworkPolicy>) -> Sandbox {
 
 /// Stop the sandbox and remove it.
 async fn teardown(sb: Sandbox, name: &str) {
-    sb.stop_and_wait().await.expect("stop");
+    drop(sb);
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 
@@ -357,4 +359,38 @@ async fn group_host_deny_blocks_host_only() {
     );
 
     teardown(sb, name).await;
+}
+
+/// Guest ULA IPv6 address is present and in preferred state on boot.
+///
+/// Skipped when the host has no IPv6 route — the runtime does not provision
+/// a guest IPv6 address on IPv4-only hosts.
+#[msb_test]
+async fn guest_ipv6_address_is_preferred() {
+    use std::net::{Ipv6Addr, UdpSocket};
+
+    let host_has_ipv6 = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))
+        .and_then(|s| s.connect((Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1), 443)))
+        .is_ok();
+    if !host_has_ipv6 {
+        eprintln!("skip: host has no IPv6 route — guest IPv6 would not be provisioned");
+        return;
+    }
+
+    let name = "host-ipv6-addr";
+    let sb = spawn_sandbox(name, Some(NetworkPolicy::allow_all())).await;
+
+    let out = sb.shell("ip -6 addr show dev eth0").await.expect("ip addr");
+    let stdout = out.stdout().unwrap_or_default();
+    teardown(sb, name).await;
+
+    let ula_line = stdout
+        .lines()
+        .find(|l| l.contains("fd42:"))
+        .unwrap_or_else(|| panic!("expected ULA IPv6 address (fd42:…) on eth0; got:\n{stdout}"));
+
+    assert!(
+        !ula_line.contains("tentative"),
+        "ULA IPv6 address is still tentative — DAD did not complete; got:\n{ula_line}"
+    );
 }

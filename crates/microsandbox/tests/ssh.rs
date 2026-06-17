@@ -23,7 +23,11 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 async fn ssh_exec_preserves_status_stdout_and_stderr() {
     let name = "ssh-exec-status-streams";
     let sandbox = create_sandbox(name).await;
-    let ssh = sandbox.ssh().connect().await.expect("connect SSH client");
+    let ssh = sandbox
+        .ssh()
+        .open_client()
+        .await
+        .expect("connect SSH client");
 
     let output = ssh
         .exec("printf 'stdout:%s\\n' ok; printf 'stderr:%s\\n' bad >&2; exit 17")
@@ -42,7 +46,11 @@ async fn ssh_exec_preserves_status_stdout_and_stderr() {
 async fn ssh_exec_with_pty_merges_stderr_into_stdout() {
     let name = "ssh-exec-pty";
     let sandbox = create_sandbox(name).await;
-    let ssh = sandbox.ssh().connect().await.expect("connect SSH client");
+    let ssh = sandbox
+        .ssh()
+        .open_client()
+        .await
+        .expect("connect SSH client");
 
     let output = ssh
         .exec_with("printf 'out'; printf 'err' >&2", |exec| exec.tty(true))
@@ -67,7 +75,11 @@ async fn ssh_exec_with_pty_merges_stderr_into_stdout() {
 async fn ssh_sftp_exercises_handles_offsets_metadata_and_links() {
     let name = "ssh-sftp-roundtrip";
     let sandbox = create_sandbox(name).await;
-    let ssh = sandbox.ssh().connect().await.expect("connect SSH client");
+    let ssh = sandbox
+        .ssh()
+        .open_client()
+        .await
+        .expect("connect SSH client");
     let sftp = ssh.sftp().await.expect("open SFTP session");
 
     let dir = "/tmp/msb-ssh-sftp";
@@ -162,7 +174,11 @@ async fn ssh_attach_interactive_shell_accepts_tty_input() {
 
     let name = "ssh-attach-interactive";
     let sandbox = create_sandbox(name).await;
-    let ssh = sandbox.ssh().connect().await.expect("connect SSH client");
+    let ssh = sandbox
+        .ssh()
+        .open_client()
+        .await
+        .expect("connect SSH client");
 
     let code = ssh.attach().await.expect("attach SSH shell");
 
@@ -188,6 +204,8 @@ async fn create_sandbox(name: &str) -> Sandbox {
 }
 
 async fn cleanup(sandbox: Sandbox, name: &str) {
-    sandbox.stop_and_wait().await.expect("stop sandbox");
+    drop(sandbox);
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    handle.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 }

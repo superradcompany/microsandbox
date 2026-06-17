@@ -23,12 +23,12 @@
 //! What they verify:
 //! - `/proc/1/comm` matches the test init (i.e. handoff happened)
 //! - `getppid()` from a host-issued exec returns 1 (the new init)
-//! - graceful shutdown via host `Sandbox::stop_and_wait` actually
+//! - graceful shutdown via host `Sandbox::stop` actually
 //!   tears the VM down (signal-based shutdown path works)
 
 use std::path::{Path, PathBuf};
 
-use microsandbox::Sandbox;
+use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use test_utils::msb_test;
 
 const TEST_INIT_PATH_ENV: &str = "MSB_TEST_INIT_PATH";
@@ -66,6 +66,12 @@ async fn boot_with_test_init(name: &str, init_bin: &Path) -> Sandbox {
         .expect("create sandbox with handoff")
 }
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -85,8 +91,7 @@ async fn pid_1_is_handed_off_to_test_init() {
         .expect("read /proc/1/comm");
     let comm = out.stdout().expect("utf8").trim().to_owned();
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 
     assert_eq!(
         comm, "test-init",
@@ -130,8 +135,7 @@ async fn exec_session_parent_is_pid_1_post_handoff() {
         .parse()
         .expect("agentd PPid is u32");
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 
     assert_eq!(
         agentd_ppid, 1,
@@ -152,15 +156,18 @@ async fn shutdown_via_signal_path_terminates_guest() {
     // Verify the sandbox is alive first.
     let _ = sb.shell("true").await.expect("alive");
 
-    // stop_and_wait drives request_guest_poweroff inside agentd; the
+    // stop drives request_guest_poweroff inside agentd; the
     // PID-1 branch will fail (we're not PID 1), so the signal-based
     // path runs. Should still complete within the host's normal
     // shutdown timeout.
-    let status = sb.stop_and_wait().await.expect("stop_and_wait");
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    handle.stop().await.expect("stop");
+    let status = handle
+        .refresh()
+        .await
+        .expect("refresh stopped sandbox")
+        .status_snapshot();
     let _ = Sandbox::remove(name).await;
 
-    assert!(
-        status.success(),
-        "guest should have exited cleanly via the signal path, got {status:?}"
-    );
+    assert_eq!(status, SandboxStatus::Stopped);
 }

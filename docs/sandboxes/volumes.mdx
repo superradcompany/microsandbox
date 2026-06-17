@@ -12,6 +12,16 @@ Mounts use normal Linux behavior by default: writable, executable, suid-enabled,
 
 For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
 
+CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
+
+| Flag | Source | Options |
+|------|--------|---------|
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
+| `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
+
 ## Bind mounts
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
@@ -61,22 +71,34 @@ sb, err := m.CreateSandbox(ctx, "dev",
 
 ```bash CLI
 msb create python --name dev \
-  -v ./src:/app/src:ro,noexec \
-  -v ./data:/app/data
+  --mount-dir ./src:/app/src:ro,noexec \
+  --mount-dir ./data:/app/data
 ```
 
 </CodeGroup>
 
+Use `--mount-file` when you want to bind one host file instead of an entire directory.
+
+```bash
+msb create alpine --name config-reader \
+  --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
+```
+
 ## Named volumes
 
 Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
+
+Named volumes can be directory-backed or disk-backed. Directory volumes mount through virtiofs. Disk volumes are raw ext4 disk images managed by microsandbox and mount through virtio-blk.
+
+CLI named mounts are idempotent. `-v name:/path` and `--mount-named name:/path` create a directory-backed named volume if it does not already exist, then mount it. If the volume already exists, microsandbox reuses it when the requested storage settings are compatible and errors when they are not. Use `--mount-named name:/path:kind=disk,size=20G` to create or reuse a disk-backed named volume from the mount flag itself.
+
+SDK `named(...)` mount helpers are existing-only. They fail if the named volume does not already exist. Use each SDK's explicit named-volume mode API when you want sandbox creation to create or ensure the volume.
 
 ### Create a volume
 
 <CodeGroup>
 ```rust Rust
 let cache = Volume::builder("pip-cache")
-    .quota(1024)
     .create()
     .await?;
 ```
@@ -84,23 +106,55 @@ let cache = Volume::builder("pip-cache")
 ```typescript TypeScript
 import { Volume } from "microsandbox";
 
-const cache = await Volume.builder("pip-cache").quota(1024).create();
+const cache = await Volume.builder("pip-cache").create();
 ```
 
 ```python Python
-cache = await Volume.create("pip-cache", quota_mib=1024)
+cache = await Volume.create("pip-cache")
 ```
 
 ```go Go
-cache, err := m.CreateVolume(ctx, "pip-cache",
-    m.WithVolumeQuota(1024),
+cache, err := m.CreateVolume(ctx, "pip-cache")
+```
+
+```bash CLI
+msb volume create pip-cache
+```
+
+</CodeGroup>
+
+Create a disk-backed named volume when a workload needs a real guest block filesystem, such as Docker's data root:
+
+<CodeGroup>
+```rust Rust
+let docker_data = Volume::builder("docker-data")
+    .disk()
+    .size(20.gib())
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
+  .create();
+```
+
+```python Python
+docker_data = await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
+```
+
+```go Go
+dockerData, err := m.CreateVolume(ctx, "docker-data",
+    m.WithVolumeKind(m.VolumeKindDisk),
+    m.WithVolumeSize(20 * 1024),
 )
 ```
 
 ```bash CLI
-msb volume create pip-cache --size 1024
+msb volume create docker-data --kind disk --size 20G
 ```
-
 </CodeGroup>
 
 ### Mount in a sandbox
@@ -142,16 +196,23 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ```bash CLI
 msb create python --name worker \
-  -v pip-cache:/root/.cache/pip
+  --mount-named pip-cache:/root/.cache/pip
 ```
 
 </CodeGroup>
 
+The CLI command above creates `pip-cache` as a directory-backed named volume if it is missing. To create or reuse a disk-backed named volume while mounting it:
+
+```bash
+msb create docker:dind --name docker-demo \
+  --mount-named docker-data:/var/lib/docker:kind=disk,size=20G
+```
+
 ### Sharing and host-side access
 
-Mount the same named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write.
+Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. Disk-backed named volumes are attached as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
 
-Named volumes are also accessible from the host without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. See the SDK references for filesystem helpers on volume handles.
+Directory-backed named volumes are also accessible from the host without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Disk-backed named volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
 
 ### Manage volumes
 
@@ -219,6 +280,11 @@ sb, err := m.CreateSandbox(ctx, "seeded",
     }),
 )
 ```
+
+```bash CLI
+msb create alpine --name seeded \
+  --mount-disk ./seed.raw:/seed:ro,noexec,fstype=ext4
+```
 </CodeGroup>
 
 ## Tmpfs
@@ -267,4 +333,39 @@ msb create alpine --name worker \
   --tmpfs /tmp/scratch:100:noexec
 ```
 
+</CodeGroup>
+
+## Combining mounts
+
+Mount flags may be repeated, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("full")
+    .image("python")
+    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
+    .volume("/app/pyproject.toml", |v| v.bind("./pyproject.toml").readonly())
+    .volume("/root/.cache/pip", |v| {
+        v.named("pip-cache")
+            .stat_virtualization(StatVirtualization::Relaxed)
+    })
+    .volume("/dataset", |v| {
+        v.disk("./dataset.qcow2")
+            .format(DiskImageFormat::Qcow2)
+            .fstype("ext4")
+            .readonly()
+    })
+    .volume("/tmp", |v| v.tmpfs().size(1024).noexec().nosuid().nodev())
+    .create()
+    .await?;
+```
+
+```bash CLI
+msb create python --name full \
+  --mount-dir ./src:/app/src:ro,noexec \
+  --mount-file ./pyproject.toml:/app/pyproject.toml:ro \
+  --mount-named pip-cache:/root/.cache/pip:stat-virt=relaxed \
+  --mount-disk ./dataset.qcow2:/dataset:ro,format=qcow2,fstype=ext4 \
+  --tmpfs /tmp:1G:noexec,nosuid,nodev
+```
 </CodeGroup>

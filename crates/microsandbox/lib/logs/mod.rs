@@ -124,10 +124,15 @@ pub struct LogSnapshot {
 
 /// Compute the on-disk log directory for a sandbox name.
 pub fn log_dir_for(name: &str) -> PathBuf {
-    crate::config::config()
-        .sandboxes_dir()
-        .join(name)
-        .join("logs")
+    crate::backend::default_backend()
+        .as_local()
+        .map(|local| local.config().sandboxes_dir().join(name).join("logs"))
+        .unwrap_or_else(|| {
+            microsandbox_utils::resolve_home()
+                .join(microsandbox_utils::SANDBOXES_SUBDIR)
+                .join(name)
+                .join("logs")
+        })
 }
 
 /// Read all matching log entries for the named sandbox.

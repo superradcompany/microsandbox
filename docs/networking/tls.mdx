@@ -23,7 +23,7 @@ The default CA is intentionally local to the host, not to one sandbox lifetime. 
 ```rust Rust
 use microsandbox::Sandbox;
 
-let sb = Sandbox::builder("agent")
+let sb = Sandbox::builder("worker")
     .image("python")
     .network(|n| n
         .tls(|t| t
@@ -38,7 +38,7 @@ let sb = Sandbox::builder("agent")
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("agent")
+await using sb = await Sandbox.builder("worker")
     .image("python")
     .network((n) => n.tls((t) =>
         t.bypass("pinned-api.example.com").bypass("*.gov"),
@@ -50,7 +50,7 @@ await using sb = await Sandbox.builder("agent")
 from microsandbox import Network, Sandbox, TlsConfig
 
 sb = await Sandbox.create(
-    "agent",
+    "worker",
     image="python",
     network=Network(
         tls=TlsConfig(bypass=("pinned-api.example.com", "*.gov")),
@@ -59,7 +59,7 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := m.CreateSandbox(ctx, "agent",
+sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
     m.WithNetwork(&m.NetworkConfig{
         TLS: &m.TLSConfig{
@@ -70,7 +70,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
 ```
 
 ```bash CLI
-msb create python --name agent \
+msb create python --name worker \
   --tls-intercept \
   --tls-bypass "pinned-api.example.com" \
   --tls-bypass "*.gov"
@@ -105,7 +105,7 @@ It matches the existing threat model (a host-access attacker already owns the sa
 <CodeGroup>
 
 ```rust Rust
-let sb = Sandbox::builder("agent")
+let sb = Sandbox::builder("devbox")
     .image("alpine")
     .network(|n| n.trust_host_cas(true))
     .create()
@@ -113,7 +113,7 @@ let sb = Sandbox::builder("agent")
 ```
 
 ```typescript TypeScript
-await using sb = await Sandbox.builder("agent")
+await using sb = await Sandbox.builder("devbox")
     .image("alpine")
     .network((n) => n.trustHostCAs(true))
     .create();
@@ -121,7 +121,7 @@ await using sb = await Sandbox.builder("agent")
 
 ```python Python
 sb = await Sandbox.create(
-    "agent",
+    "devbox",
     image="alpine",
     network=Network(trust_host_cas=True),
 )
@@ -129,7 +129,7 @@ sb = await Sandbox.create(
 
 ```go Go
 trustHostCAs := true
-sb, err := m.CreateSandbox(ctx, "agent",
+sb, err := m.CreateSandbox(ctx, "devbox",
     m.WithImage("alpine"),
     m.WithNetwork(&m.NetworkConfig{
         TrustHostCAs: &trustHostCAs,

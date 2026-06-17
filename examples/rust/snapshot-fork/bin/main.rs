@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Snapshots are stopped-only.
-    baseline.stop_and_wait().await?;
+    baseline.stop().await?;
 
     let h = Sandbox::get("snapshot-baseline").await?;
     let snap = h.snapshot("snapshot-baseline-state").await?;
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = fork.shell("cat /root/marker.txt").await?;
     println!("fork sees: {}", output.stdout()?.trim());
 
-    fork.stop_and_wait().await?;
+    fork.stop().await?;
 
     Sandbox::remove("snapshot-baseline").await?;
     Sandbox::remove("snapshot-fork").await?;

@@ -12,7 +12,7 @@ Understanding the lifecycle is useful once you start managing long-running sandb
 stateDiagram-v2
     [*] --> Creating: create()
     Creating --> Running: boot complete
-    Running --> Draining: drain()
+    Running --> Draining: request_drain()
     Running --> Stopped: stop()
     Running --> Crashed: unexpected exit
     Draining --> Stopped: drain complete
@@ -180,48 +180,48 @@ err := sb.Detach(ctx)
 
 </CodeGroup>
 
-## Drain
+## Request drain
 
 Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox moves to `Draining` and transitions to `Stopped` when all in-flight commands complete. This is useful for zero-downtime rotation of worker sandboxes.
 
 <CodeGroup>
 ```rust Rust
-sb.drain().await?;
+sb.request_drain().await?;
 ```
 
 ```typescript TypeScript
-await sb.drain()
+await sb.requestDrain()
 ```
 
 ```python Python
-await sb.drain()
+await sb.request_drain()
 ```
 
 ```go Go
-err := sb.Drain(ctx)
+err := sb.RequestDrain(ctx)
 ```
 
 </CodeGroup>
 
-## Wait
+## Wait until stopped
 
-Block until the sandbox exits on its own, without triggering a stop.
+Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
 <CodeGroup>
 ```rust Rust
-let exit_status = sb.wait().await?;
+let result = sb.wait_until_stopped().await?;
 ```
 
 ```typescript TypeScript
-const exitStatus = await sb.wait()
+const result = await sb.waitUntilStopped()
 ```
 
 ```python Python
-code, success = await sb.wait()
+result = await sb.wait_until_stopped()
 ```
 
 ```go Go
-code, err := sb.Wait(ctx)
+result, err := sb.WaitUntilStopped(ctx)
 ```
 
 </CodeGroup>
@@ -258,7 +258,7 @@ msb rm worker
 <CodeGroup>
 ```rust Rust
 for handle in Sandbox::list().await? {
-    println!("{}: {:?}", handle.name(), handle.status());
+    println!("{}: {:?}", handle.name(), handle.status_snapshot());
 }
 ```
 

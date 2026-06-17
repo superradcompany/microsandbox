@@ -42,6 +42,7 @@ futures.workspace = true
 hex.workspace = true
 libc.workspace = true
 microsandbox-db.workspace = true
+microsandbox-agent-client = { workspace = true, features = ["uds"] }
 microsandbox-filesystem.workspace = true
 microsandbox-image.workspace = true
 microsandbox-metrics.workspace = true
@@ -65,6 +66,7 @@ tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 typed-builder.workspace = true
 which.workspace = true

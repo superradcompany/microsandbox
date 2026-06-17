@@ -20,5 +20,4 @@ def test_image_namespace_includes_cache_management() -> None:
     assert hasattr(Image, "list")
     assert hasattr(Image, "inspect")
     assert hasattr(Image, "remove")
-    assert hasattr(Image, "gc_layers")
-    assert hasattr(Image, "gc")
+    assert hasattr(Image, "prune")

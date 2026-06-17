@@ -10,6 +10,7 @@ mod error;
 //--------------------------------------------------------------------------------------------------
 
 pub mod agent;
+pub mod backend;
 pub mod config;
 #[allow(dead_code)]
 pub(crate) mod db;
@@ -25,6 +26,17 @@ pub use agent::{
     AgentBridge, AgentClient, AgentClientError, AgentClientResult, AgentProtocol, BridgeFrame,
     RawFrame, StreamHandle,
 };
+pub use backend::{
+    Backend, BackendKind, CloudBackend, CloudBackendBuilder, CloudCreateSandboxRequest,
+    CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox, CloudSandboxStatus,
+    LocalBackend, LocalBackendBuilder, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
+    SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState, SandboxInner,
+    SandboxList, SandboxLocalState, SdkConfig, VolumeBackend, VolumeCloudState,
+    VolumeHandleCloudState, VolumeHandleInner, VolumeHandleLocalState, VolumeInner,
+    VolumeLocalState, default_backend, load_sdk_config, resolve_default_backend,
+    set_default_backend, swap_default_backend, with_backend,
+};
+pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;
 pub use image::{Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail};
 pub use microsandbox_image::RegistryAuth;
@@ -41,10 +53,11 @@ pub use sandbox::ssh::{
     SshStdioStream,
 };
 pub use sandbox::{
-    ExecOutput, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig, validate_sandbox_name,
+    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig,
+    validate_sandbox_name,
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
     SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
-pub use volume::Volume;
+pub use volume::{Volume, VolumeHandle, VolumeKind};

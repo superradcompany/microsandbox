@@ -39,13 +39,20 @@ impl JsSandboxHandle {
     /// Status at time of query: "running", "stopped", "crashed", or "draining".
     #[napi(getter)]
     pub fn status(&self) -> String {
-        format!("{:?}", self.inner.status()).to_lowercase()
+        format!("{:?}", self.inner.status_snapshot()).to_lowercase()
     }
 
     /// Raw config JSON string from the database.
     #[napi(getter)]
     pub fn config_json(&self) -> String {
         self.inner.config_json().to_string()
+    }
+
+    /// Return a fresh handle for the same sandbox.
+    #[napi]
+    pub async fn refresh(&self) -> Result<JsSandboxHandle> {
+        let handle = self.inner.refresh().await.map_err(to_napi_error)?;
+        Ok(JsSandboxHandle::from_rust(handle))
     }
 
     /// Creation timestamp as ms since Unix epoch.
@@ -115,11 +122,14 @@ impl JsSandboxHandle {
         self.inner.stop().await.map_err(to_napi_error)
     }
 
+    /// Request graceful shutdown without waiting.
+    #[napi]
+    pub async fn request_stop(&self) -> Result<()> {
+        self.inner.request_stop().await.map_err(to_napi_error)
+    }
+
     /// Stop the sandbox gracefully with an explicit timeout in
-    /// milliseconds. If the sandbox is still running after this window,
-    /// it is force-killed. `timeoutMs == 0` force-kills immediately.
-    /// The call resolves successfully either way — it does not throw
-    /// on timeout expiry.
+    /// milliseconds before escalation.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
         let timeout = std::time::Duration::from_millis(timeout_ms.into());
@@ -129,12 +139,43 @@ impl JsSandboxHandle {
             .map_err(to_napi_error)
     }
 
-    /// Kill the sandbox (SIGKILL).
+    /// Force-kill the sandbox and wait until stopped state is observed.
     #[napi]
     pub async fn kill(&self) -> Result<()> {
-        // kill takes &mut self in Rust, but we can clone the handle
-        // For now, use stop + kill pattern
-        self.inner.stop().await.map_err(to_napi_error)
+        self.inner.kill().await.map_err(to_napi_error)
+    }
+
+    /// Request force termination without waiting.
+    #[napi]
+    pub async fn request_kill(&self) -> Result<()> {
+        self.inner.request_kill().await.map_err(to_napi_error)
+    }
+
+    /// Force-kill the sandbox with an explicit observation timeout in milliseconds.
+    #[napi]
+    pub async fn kill_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
+        self.inner
+            .kill_with_timeout(timeout)
+            .await
+            .map_err(to_napi_error)
+    }
+
+    /// Request graceful drain without waiting for completion.
+    #[napi]
+    pub async fn request_drain(&self) -> Result<()> {
+        self.inner.request_drain().await.map_err(to_napi_error)
+    }
+
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    #[napi]
+    pub async fn wait_until_stopped(&self) -> Result<SandboxStopResult> {
+        let result = self
+            .inner
+            .wait_until_stopped()
+            .await
+            .map_err(to_napi_error)?;
+        Ok(crate::sandbox::sandbox_stop_result_to_js(result))
     }
 
     /// Remove the sandbox from the database.

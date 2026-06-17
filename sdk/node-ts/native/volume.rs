@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
+
+use microsandbox::Backend;
 
 use microsandbox::sandbox::FsEntry as RustFsEntry;
 use microsandbox::sandbox::FsEntryKind as RustFsEntryKind;
 use microsandbox::sandbox::FsMetadata as RustFsMetadata;
-use microsandbox::volume::fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
+use microsandbox::volume::fs::{VolumeFsReadStream, VolumeFsWriteSink};
 use microsandbox::volume::{Volume, VolumeHandle};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -26,12 +27,12 @@ pub struct JsVolume {
 #[napi(js_name = "VolumeHandle")]
 pub struct JsVolumeHandle {
     inner: VolumeHandle,
-    path: PathBuf,
 }
 
 #[napi(js_name = "VolumeFs")]
 pub struct JsVolumeFs {
-    path: PathBuf,
+    backend: Arc<dyn Backend>,
+    name: String,
 }
 
 #[napi(async_iterator, js_name = "VolumeFsReadStream")]
@@ -53,13 +54,7 @@ impl JsVolume {
     #[napi]
     pub async fn get(name: String) -> Result<JsVolumeHandle> {
         let handle = Volume::get(&name).await.map_err(to_napi_error)?;
-        let path = microsandbox::config::config()
-            .volumes_dir()
-            .join(handle.name());
-        Ok(JsVolumeHandle {
-            inner: handle,
-            path,
-        })
+        Ok(JsVolumeHandle { inner: handle })
     }
 
     #[napi]
@@ -79,15 +74,21 @@ impl JsVolume {
     }
 
     #[napi(getter)]
-    pub fn path(&self) -> String {
-        self.inner.path().to_string_lossy().to_string()
+    pub fn path(&self) -> Result<String> {
+        Ok(self
+            .inner
+            .path()
+            .map_err(to_napi_error)?
+            .to_string_lossy()
+            .to_string())
     }
 
     /// Host-side filesystem operations on this volume's directory.
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            path: self.inner.path().to_path_buf(),
+            backend: microsandbox::default_backend(),
+            name: self.inner.name().to_string(),
         }
     }
 }
@@ -112,8 +113,28 @@ impl JsVolumeHandle {
     }
 
     #[napi(getter)]
+    pub fn kind(&self) -> String {
+        self.inner.kind().as_str().to_string()
+    }
+
+    #[napi(getter)]
     pub fn used_bytes(&self) -> f64 {
         self.inner.used_bytes() as f64
+    }
+
+    #[napi(getter)]
+    pub fn capacity_bytes(&self) -> Option<f64> {
+        self.inner.capacity_bytes().map(|v| v as f64)
+    }
+
+    #[napi(getter)]
+    pub fn disk_format(&self) -> Option<String> {
+        self.inner.disk_format().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn disk_fstype(&self) -> Option<String> {
+        self.inner.disk_fstype().map(str::to_string)
     }
 
     #[napi(getter)]
@@ -139,15 +160,20 @@ impl JsVolumeHandle {
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            path: self.path.clone(),
+            backend: microsandbox::default_backend(),
+            name: self.inner.name().to_string(),
         }
     }
 }
 
 #[napi]
 impl JsVolumeFs {
-    fn make(&self) -> VolumeFs<'_> {
-        VolumeFs::from_path(self.path.clone())
+    fn make(&self) -> microsandbox::volume::VolumeFs<'_> {
+        // VolumeFs borrows the parent's backend + name; we keep an owned copy
+        // of each on `JsVolumeFs` and re-construct per call.
+        // Safety / lifetime note: the temporary VolumeFs only lives for the
+        // duration of each FFI call.
+        microsandbox::volume::VolumeFs::with_backend(self.backend.clone(), &self.name)
     }
 
     #[napi]
@@ -301,8 +327,12 @@ impl JsVolumeFsWriteSink {
 fn volume_handle_to_info(handle: &VolumeHandle) -> VolumeInfo {
     VolumeInfo {
         name: handle.name().to_string(),
+        kind: handle.kind().as_str().to_string(),
         quota_mib: handle.quota_mib(),
         used_bytes: handle.used_bytes() as f64,
+        capacity_bytes: handle.capacity_bytes().map(|bytes| bytes as f64),
+        disk_format: handle.disk_format().map(str::to_string),
+        disk_fstype: handle.disk_fstype().map(str::to_string),
         labels: handle
             .labels()
             .iter()

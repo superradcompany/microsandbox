@@ -79,6 +79,12 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
     sb
 }
 
+async fn stop_and_remove(name: &str) {
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 /// Run an HTTPS probe inside the guest. Returns the HTTP status code
 /// as a 3-digit string on success, or [`CURL_FAIL`] when curl couldn't
 /// complete the request (connection refused, TLS handshake aborted,
@@ -248,8 +254,7 @@ async fn domain_policy_allows_whitelisted_https() {
         "HTTPS to example.com should be denied by default-action: got `{example}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// `deny Domain("example.com")` denies DNS for that name; unrelated
@@ -286,8 +291,7 @@ async fn domain_policy_deny_domain_denies_dns() {
         "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// Default-allow plus `deny Domain("www.rfc-editor.org")` must block a
@@ -324,8 +328,7 @@ async fn domain_policy_deny_domain_blocks_sni_direct_ip_without_dns_cache() {
         "direct-IP HTTPS with denied SNI {DENIED_HOST} should be blocked: got `{denied}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// `deny DomainSuffix(".example.com")` denies DNS for the apex and
@@ -369,8 +372,7 @@ async fn domain_policy_deny_suffix_denies_dns_apex_and_subdomain() {
     // and rapid back-to-back queries trip the runner's egress DNS
     // rate-limit.
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// SNI-based enforcement on shared-CDN IPs (the over-allow fix).
@@ -427,8 +429,7 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
         "pypi.org should be denied even on shared Fastly IP: got `{denied}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// SNI spoofing defense: claiming an allowed name in the ClientHello
@@ -490,8 +491,7 @@ async fn domain_policy_sni_spoof_on_unrelated_ip_is_denied() {
         "SNI spoof on unrelated IP {spoof_ip} should be denied: got `{spoof_out}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }
 
 /// `Destination::DomainSuffix` matches subdomains but not unrelated
@@ -519,6 +519,5 @@ async fn domain_policy_suffix_allows_subdomain_https() {
         "example.com should not match .cloudflare.com suffix: got `{example}`"
     );
 
-    sb.stop_and_wait().await.expect("stop");
-    let _ = Sandbox::remove(name).await;
+    stop_and_remove(name).await;
 }

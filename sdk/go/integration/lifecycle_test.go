@@ -11,74 +11,73 @@ import (
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
 
-// TestSandboxStopAndWaitReturnsExitCode verifies that StopAndWait returns a
-// numeric exit code (typically -1 when the guest is killed, 0 when it exits
-// cleanly). The contract is "returns int + error", not the specific value.
-func TestSandboxStopAndWaitReturnsExitCode(t *testing.T) {
+// TestSandboxStopWaitsUntilStopped verifies that Stop returns after stopped
+// state is observed.
+func TestSandboxStopWaitsUntilStopped(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	// Boot is complete by now; tear it down and wait.
-	code, err := sb.StopAndWait(ctx)
-	if err != nil {
-		t.Fatalf("StopAndWait: %v", err)
+	if err := sb.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
-	t.Logf("StopAndWait returned exit_code=%d", code)
 	if err := sb.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
 
-// TestSandboxWait blocks until the sandbox exits and returns its code.
-// We trigger the exit via Stop on a background goroutine.
-func TestSandboxWait(t *testing.T) {
+// TestSandboxWaitUntilStopped blocks until the sandbox reaches terminal state.
+func TestSandboxWaitUntilStopped(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		_ = sb.Stop(context.Background())
+		_ = sb.RequestStop(context.Background())
 	}()
 
-	code, err := sb.Wait(ctx)
+	result, err := sb.WaitUntilStopped(ctx)
 	if err != nil {
-		t.Fatalf("Wait: %v", err)
+		t.Fatalf("WaitUntilStopped: %v", err)
 	}
-	t.Logf("Wait returned exit_code=%d", code)
+	if result.Status != microsandbox.SandboxStatusStopped && result.Status != microsandbox.SandboxStatusCrashed {
+		t.Fatalf("WaitUntilStopped status = %q", result.Status)
+	}
 }
 
-// TestSandboxDrain sends SIGUSR1. A vanilla alpine guest doesn't have a
+// TestSandboxRequestDrain sends SIGUSR1. A vanilla alpine guest doesn't have a
 // SIGUSR1 handler so we only assert the call doesn't error out, mirroring
 // how the Node and Python SDKs cover this surface.
-func TestSandboxDrain(t *testing.T) {
+func TestSandboxRequestDrain(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	if err := sb.Drain(ctx); err != nil {
-		t.Fatalf("Drain: %v", err)
+	if err := sb.RequestDrain(ctx); err != nil {
+		t.Fatalf("RequestDrain: %v", err)
 	}
 }
 
-// TestSandboxRemovePersisted removes the persisted state of a stopped
-// sandbox. The handle is consumed by the call.
-func TestSandboxRemovePersisted(t *testing.T) {
+// TestSandboxRemove removes the persisted state of a stopped sandbox.
+func TestSandboxRemove(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-rmpersist-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if _, err := sb.StopAndWait(ctx); err != nil {
-		t.Fatalf("StopAndWait: %v", err)
+	if err := sb.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
-	if err := sb.RemovePersisted(ctx); err != nil {
-		t.Fatalf("RemovePersisted: %v", err)
+	if err := sb.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := microsandbox.RemoveSandbox(ctx, name); err != nil {
+		t.Fatalf("RemoveSandbox: %v", err)
 	}
 
 	// Sandbox should no longer be discoverable.
 	if _, err := microsandbox.GetSandbox(ctx, name); err == nil {
-		t.Errorf("GetSandbox still succeeds after RemovePersisted")
+		t.Errorf("GetSandbox still succeeds after RemoveSandbox")
 	} else if !microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound) {
 		t.Errorf("expected ErrSandboxNotFound, got %v", err)
 	}
@@ -112,7 +111,7 @@ func TestOwnsLifecycleAfterDetachOrConnect(t *testing.T) {
 	name := "go-sdk-ownsconn-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithDetached(),
 	)
 	if err != nil {
@@ -154,7 +153,7 @@ func TestWithReplace(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-replace-" + t.Name()
 
-	first, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	first, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("first CreateSandbox: %v", err)
 	}
@@ -167,13 +166,13 @@ func TestWithReplace(t *testing.T) {
 	})
 
 	// Without replace, the second create should fail.
-	if _, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19")); err == nil {
+	if _, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage)); err == nil {
 		t.Error("expected error creating duplicate sandbox without WithReplace")
 	}
 
 	// With replace, it should succeed.
 	second, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithReplace(),
 	)
 	if err != nil {
@@ -197,7 +196,7 @@ func TestWithUser(t *testing.T) {
 	name := "go-sdk-user-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithUser("nobody"),
 	)
 	if err != nil {
@@ -226,7 +225,7 @@ func TestWithHostname(t *testing.T) {
 	name := "go-sdk-hostname-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithHostname("go-sdk-test-host"),
 	)
 	if err != nil {
@@ -255,7 +254,7 @@ func TestWithWorkdir(t *testing.T) {
 	name := "go-sdk-workdir-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithWorkdir("/var/log"),
 	)
 	if err != nil {
@@ -284,7 +283,7 @@ func TestWithEnvVisibleInsideSandbox(t *testing.T) {
 	name := "go-sdk-env-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithEnv(map[string]string{
 			"FOO_INTEGRATION": "bar-marker-123",
 			"BAZ_INTEGRATION": "qux-marker-456",
@@ -315,7 +314,7 @@ func TestSandboxHandleListsRichMetadata(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-handle-rich-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -357,7 +356,7 @@ func TestSandboxHandleStopKill(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-handle-stop-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}

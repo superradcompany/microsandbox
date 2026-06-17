@@ -50,7 +50,7 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
     finally:
         if sandbox is not None:
             with suppress(Exception):
-                await sandbox.stop_and_wait()
+                await sandbox.stop()
         await remove_sandbox(name)
 
 
@@ -78,7 +78,7 @@ async def test_create_with_progress_result_rejects_on_second_call(sandbox_name):
     finally:
         if sandbox is not None:
             with suppress(Exception):
-                await sandbox.stop_and_wait()
+                await sandbox.stop()
         await remove_sandbox(name)
 
 
@@ -110,9 +110,8 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
         assert "resolved" in event_types
         assert event_types[-1] == "complete"
         assert await sandbox.name == name
-        assert await sandbox.owns_lifecycle is True
+        assert await sandbox.owns_lifecycle is False
 
-        await sandbox.detach()
         sandbox = None
 
         handle = await Sandbox.get(name)
@@ -127,13 +126,13 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
                 await connected.detach()
         if sandbox is not None:
             with suppress(Exception):
-                await sandbox.stop_and_wait()
+                await sandbox.stop()
         if handle is None:
             with suppress(Exception):
                 handle = await Sandbox.get(name)
         if handle is not None:
             with suppress(Exception):
-                await handle.stop_with_timeout(10.0)
+                await handle.stop(timeout=10.0)
         await remove_sandbox(name)
 
 

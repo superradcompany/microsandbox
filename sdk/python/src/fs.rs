@@ -10,11 +10,15 @@ use crate::error::to_py_err;
 //--------------------------------------------------------------------------------------------------
 
 /// Filesystem operations on a running sandbox.
-/// Holds a direct Arc<AgentClient> — no Sandbox mutex lock per operation.
+/// Holds the backend Arc + sandbox name; each op dispatches through the
+/// `SandboxBackend` trait. No Sandbox mutex lock per operation.
 #[pyclass(name = "SandboxFs")]
 pub struct PySandboxFs {
-    client: Arc<microsandbox::agent::AgentClient>,
+    backend: Arc<dyn microsandbox::Backend>,
+    name: String,
 }
+
+pub type PySandboxFsOps = PySandboxFs;
 
 /// Streaming reader for file data.
 #[pyclass(name = "FsReadStream")]
@@ -33,8 +37,8 @@ pub struct PyFsWriteSink {
 //--------------------------------------------------------------------------------------------------
 
 impl PySandboxFs {
-    pub fn from_client(client: Arc<microsandbox::agent::AgentClient>) -> Self {
-        Self { client }
+    pub fn from_backend(backend: Arc<dyn microsandbox::Backend>, name: String) -> Self {
+        Self { backend, name }
     }
 }
 
@@ -42,9 +46,10 @@ impl PySandboxFs {
 impl PySandboxFs {
     /// Read an entire file as bytes.
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
         })
@@ -52,9 +57,10 @@ impl PySandboxFs {
 
     /// Read a file as a UTF-8 string.
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
         })
@@ -62,9 +68,10 @@ impl PySandboxFs {
 
     /// Read a file with streaming. Returns an async iterator of bytes chunks.
     fn read_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let stream = fs.read_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsReadStream {
                 inner: Arc::new(Mutex::new(stream)),
@@ -79,9 +86,10 @@ impl PySandboxFs {
         path: String,
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -89,9 +97,10 @@ impl PySandboxFs {
 
     /// Write with streaming. Returns an async context manager.
     fn write_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let sink = fs.write_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsWriteSink {
                 inner: Arc::new(Mutex::new(Some(sink))),
@@ -101,9 +110,10 @@ impl PySandboxFs {
 
     /// List directory contents.
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<PyFsEntry> = entries.into_iter().map(convert_fs_entry).collect();
             Ok(py_entries)
@@ -112,9 +122,10 @@ impl PySandboxFs {
 
     /// Create a directory (and parents).
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -122,9 +133,10 @@ impl PySandboxFs {
 
     /// Remove a file.
     fn remove<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -132,9 +144,10 @@ impl PySandboxFs {
 
     /// Remove a directory recursively.
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -142,9 +155,10 @@ impl PySandboxFs {
 
     /// Copy a file within the sandbox.
     fn copy<'py>(&self, py: Python<'py>, src: String, dst: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.copy(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -157,9 +171,10 @@ impl PySandboxFs {
         src: String,
         dst: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.rename(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -167,9 +182,10 @@ impl PySandboxFs {
 
     /// Get file/directory metadata.
     fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let meta = fs.stat(&path).await.map_err(to_py_err)?;
             Ok(convert_fs_metadata(&meta))
         })
@@ -177,9 +193,10 @@ impl PySandboxFs {
 
     /// Check if a path exists.
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
         })
@@ -192,9 +209,10 @@ impl PySandboxFs {
         host_path: String,
         guest_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.copy_from_host(&host_path, &guest_path)
                 .await
                 .map_err(to_py_err)?;
@@ -209,9 +227,10 @@ impl PySandboxFs {
         guest_path: String,
         host_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let backend = self.backend.clone();
+        let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::new(&client);
+            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
             fs.copy_to_host(&guest_path, &host_path)
                 .await
                 .map_err(to_py_err)?;

@@ -11,6 +11,12 @@ export {
   type AgentConnectOptions,
   type RawFrame,
 } from "./agent.js";
+export {
+  defaultBackendKind,
+  setDefaultBackend,
+  withDefaultBackend,
+} from "./runtime.js";
+export type { DefaultBackend } from "./runtime.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox } from "./sandbox.js";
@@ -33,7 +39,7 @@ export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
-export { SandboxSsh, SftpClient, SshClient, SshServer } from "./ssh.js";
+export { SandboxSshOps, SftpClient, SshClient, SshServer } from "./ssh.js";
 export type {
   SshAttachOptions,
   SshClientOptions,
@@ -43,7 +49,7 @@ export type {
 } from "./ssh.js";
 
 // Filesystem
-export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
+export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
 export { Volume } from "./volume.js";
@@ -89,6 +95,7 @@ export type {
   ImageConfigDetail,
   ImageDetail,
   ImageLayerDetail,
+  ImagePruneReport,
 } from "./image.js";
 
 // Logs
@@ -353,6 +360,7 @@ export { allSandboxMetrics } from "./all-metrics.js";
 // Errors
 export {
   CustomError,
+  CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
   HttpError,
@@ -364,16 +372,19 @@ export {
   JsonError,
   LibkrunfwNotFoundError,
   MetricsDisabledError,
+  MetricsUnavailableError,
   MicrosandboxError,
   NixError,
   PatchFailedError,
   ProtocolError,
   RuntimeError,
-  SandboxFsError,
+  SandboxFsOpsError,
+  SandboxAlreadyExistsError,
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
   UnsupportedOperationError,
+  UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";

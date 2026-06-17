@@ -190,7 +190,7 @@ func TestNamedVolumeMountIntoSandbox(t *testing.T) {
 	}
 
 	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{}),
 		}),
@@ -226,7 +226,7 @@ func TestNamedVolumeReadonlyMount(t *testing.T) {
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
 	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/ro": microsandbox.Mount.Named(name, microsandbox.MountOptions{Readonly: true}),
 		}),
@@ -264,7 +264,7 @@ func TestNamedVolumeNoexecMount(t *testing.T) {
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
 	writer, err := microsandbox.CreateSandbox(ctx, "sb-writer-"+name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{}),
 		}),
@@ -292,7 +292,7 @@ chmod +x /data/run.sh`)
 	}
 
 	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{Noexec: true}),
 		}),
@@ -326,7 +326,7 @@ func TestTmpfsMountWithSizeLimit(t *testing.T) {
 	name := "go-sdk-tmpfs-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 4}),
 		}),
@@ -377,7 +377,7 @@ func TestBindMountReadonly(t *testing.T) {
 	name := "go-sdk-bindro-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/host-tmp": microsandbox.Mount.Bind("/tmp", microsandbox.MountOptions{Readonly: true}),
 		}),

@@ -95,7 +95,7 @@ func main() {
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 		defer c()
-		_, _ = sb2.StopAndWait(stopCtx)
+		_ = sb2.Stop(stopCtx)
 		_ = sb2.Close()
 	}()
 

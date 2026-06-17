@@ -19,7 +19,7 @@ func TestNetworkPolicyNonLocal(t *testing.T) {
 	name := "go-sdk-nonlocal-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(microsandbox.NetworkPolicy.NonLocal()),
 	)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestCustomPolicyDefaultEgressDeny(t *testing.T) {
 	name := "go-sdk-defegress-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress:  microsandbox.PolicyActionDeny,
 			DefaultIngress: microsandbox.PolicyActionAllow,
@@ -96,7 +96,7 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 	name := uniqueIntegrationName(t, "go-net-ip")
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionDeny,
 			Rules: []microsandbox.PolicyRule{
@@ -161,7 +161,7 @@ func TestCustomPolicyPortRange(t *testing.T) {
 	name := "go-sdk-portrange-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionDeny,
 			Rules: []microsandbox.PolicyRule{
@@ -211,7 +211,7 @@ func TestCustomPolicyMultiProtocolCreates(t *testing.T) {
 	name := "go-sdk-multiproto-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionAllow,
 			Rules: []microsandbox.PolicyRule{
@@ -245,7 +245,7 @@ func TestCustomPolicyDirectionAnyCreates(t *testing.T) {
 	name := "go-sdk-dirany-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress:  microsandbox.PolicyActionDeny,
 			DefaultIngress: microsandbox.PolicyActionDeny,
@@ -280,7 +280,7 @@ func TestDNSConfigCreates(t *testing.T) {
 	rebind := true
 	timeoutMs := uint64(5000)
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy: microsandbox.NetworkPolicyPresetAllowAll,
 			DNS: &microsandbox.DNSConfig{
@@ -317,7 +317,7 @@ func TestNetworkOnSecretViolationCreates(t *testing.T) {
 	name := "go-sdk-onviolation-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:            microsandbox.NetworkPolicyPresetPublicOnly,
 			OnSecretViolation: microsandbox.ViolationActionBlockAndLog,
@@ -342,7 +342,7 @@ func TestSecretWithOnViolation(t *testing.T) {
 	name := "go-sdk-secretviol-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithSecrets(microsandbox.Secret.Env(
 			"VIOLATION_KEY",
 			"value-not-leaked-xyz",
@@ -379,7 +379,7 @@ func TestTLSConfigUpstreamCACertsCreates(t *testing.T) {
 	name := "go-sdk-upstreamcas-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy: microsandbox.NetworkPolicyPresetAllowAll,
 			TLS: &microsandbox.TLSConfig{
@@ -406,7 +406,7 @@ func TestNetworkMaxConnectionsCreates(t *testing.T) {
 
 	max := uint(64)
 	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:         microsandbox.NetworkPolicyPresetAllowAll,
 			MaxConnections: &max,

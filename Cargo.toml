@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "agent-client/rust",
     "crates/agentd",
     "crates/cli",
     "crates/db",
@@ -16,6 +17,7 @@ members = [
     "crates/test-macros",
     "crates/test-utils",
     "crates/utils",
+    "examples/rust/cloud-backend",
     "examples/rust/fs-read-stream",
     "examples/rust/init-handoff",
     "examples/rust/logs-read",
@@ -43,7 +45,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.5.4"
+version = "0.5.7"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -58,16 +60,18 @@ panic = "abort"
 # manifest; members reference them via `{ workspace = true }`.
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
-microsandbox = { version = "0.5.4", path = "crates/microsandbox", default-features = false }
-microsandbox-db = { version = "0.5.4", path = "crates/db" }
-microsandbox-filesystem = { version = "0.5.4", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "0.5.4", path = "crates/image" }
-microsandbox-metrics = { version = "0.5.4", path = "crates/metrics" }
-microsandbox-migration = { version = "0.5.4", path = "crates/migration" }
-microsandbox-network = { version = "0.5.4", path = "crates/network" }
-microsandbox-protocol = { version = "0.5.4", path = "crates/protocol" }
-microsandbox-runtime = { version = "0.5.4", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "0.5.4", path = "crates/utils" }
+microsandbox = { version = "0.5.7", path = "crates/microsandbox", default-features = false }
+microsandbox-agent-client = { version = "0.5.7", path = "agent-client/rust" }
+microsandbox-db = { version = "0.5.7", path = "crates/db" }
+microsandbox-filesystem = { version = "0.5.7", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "0.5.7", path = "crates/image" }
+microsandbox-metrics = { version = "0.5.7", path = "crates/metrics" }
+microsandbox-migration = { version = "0.5.7", path = "crates/migration" }
+microsandbox-network = { version = "0.5.7", path = "crates/network" }
+microsandbox-protocol = { version = "0.5.7", path = "crates/protocol" }
+microsandbox-runtime = { version = "0.5.7", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "0.5.7", path = "crates/utils" }
+msb_krun = { version = "0.1.16" }
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }
 
@@ -87,6 +91,7 @@ dirs = "6.0"
 etherparse = "0.19"
 flate2 = "1.0"
 futures = "0.3"
+futures-util = "0.3"
 hex = "0.4"
 hickory-client = "0.26.0-alpha.1"
 hickory-proto = "0.26.0-alpha.1"
@@ -116,6 +121,7 @@ time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
+tokio-tungstenite = "0.29.0"
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

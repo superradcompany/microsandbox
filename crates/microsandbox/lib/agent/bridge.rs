@@ -19,10 +19,10 @@ use std::time::Duration;
 use microsandbox_protocol::codec::RawFrame;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 
-use super::client::AgentClient;
-use super::error::{AgentClientError, AgentClientResult};
+use super::{AgentClient, connect_sandbox, connect_sandbox_with_timeout};
+use microsandbox_agent_client::{AgentClientError, AgentClientResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -49,8 +49,14 @@ pub struct BridgeFrame {
 /// [`StreamHandle`].
 pub struct AgentBridge {
     inner: StdMutex<Option<Arc<AgentClient>>>,
-    streams: Mutex<HashMap<StreamHandle, UnboundedReceiver<RawFrame>>>,
+    streams: Mutex<HashMap<StreamHandle, Arc<BridgeStream>>>,
     next_handle: AtomicU64,
+    closed: AtomicBool,
+    closed_notify: Notify,
+}
+
+struct BridgeStream {
+    rx: Mutex<Receiver<RawFrame>>,
     closed: AtomicBool,
     closed_notify: Notify,
 }
@@ -64,7 +70,7 @@ impl AgentBridge {
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
-        let client = AgentClient::connect_sandbox(name).await?;
+        let client = connect_sandbox(name).await?;
         Ok(Self::from_client(client))
     }
 
@@ -75,7 +81,7 @@ impl AgentBridge {
         name: &str,
         timeout: Duration,
     ) -> AgentClientResult<Self> {
-        let client = AgentClient::connect_sandbox_with_timeout(name, timeout).await?;
+        let client = connect_sandbox_with_timeout(name, timeout).await?;
         Ok(Self::from_client(client))
     }
 
@@ -166,7 +172,14 @@ impl AgentBridge {
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentClientError::Closed);
         }
-        streams.insert(handle, rx);
+        streams.insert(
+            handle,
+            Arc::new(BridgeStream {
+                rx: Mutex::new(rx),
+                closed: AtomicBool::new(false),
+                closed_notify: Notify::new(),
+            }),
+        );
         Ok((corr_id, handle))
     }
 
@@ -182,33 +195,32 @@ impl AgentBridge {
             return Err(AgentClientError::Closed);
         }
 
-        // Take the receiver out of the map for the duration of the recv so we
-        // don't hold the streams lock while parked. Put it back if more frames
-        // are expected.
-        let mut rx = match self.streams.lock().await.remove(&handle) {
-            Some(rx) => rx,
+        let stream = match self.streams.lock().await.get(&handle).cloned() {
+            Some(stream) => stream,
             None => return Ok(None),
         };
 
+        let stream_closed = stream.closed_notify.notified();
+        tokio::pin!(stream_closed);
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentClientError::Closed);
         }
+        if stream.closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
 
+        let mut rx = stream.rx.lock().await;
         let frame = tokio::select! {
             frame = rx.recv() => frame,
             _ = &mut closed => return Err(AgentClientError::Closed),
+            _ = &mut stream_closed => return Ok(None),
         };
 
         match frame {
             Some(f) => {
                 let terminal = (f.flags & microsandbox_protocol::message::FLAG_TERMINAL) != 0;
-                if !terminal {
-                    // Re-insert so the next call can keep pulling.
-                    let mut streams = self.streams.lock().await;
-                    if self.closed.load(Ordering::Acquire) {
-                        return Err(AgentClientError::Closed);
-                    }
-                    streams.insert(handle, rx);
+                if terminal {
+                    self.streams.lock().await.remove(&handle);
                 }
                 Ok(Some(BridgeFrame {
                     id: f.id,
@@ -222,7 +234,10 @@ impl AgentBridge {
 
     /// Close a stream and drop its handle. Idempotent.
     pub async fn stream_close(&self, handle: StreamHandle) {
-        self.streams.lock().await.remove(&handle);
+        if let Some(stream) = self.streams.lock().await.remove(&handle) {
+            stream.closed.store(true, Ordering::Release);
+            stream.closed_notify.notify_waiters();
+        }
     }
 
     /// Cached handshake `core.ready` frame body bytes (CBOR).
@@ -238,18 +253,20 @@ impl AgentBridge {
         }
 
         self.closed_notify.notify_waiters();
-        // Drop receivers still parked in the streams map. Receivers currently
-        // held by `stream_next` are woken by `closed_notify` above.
-        self.streams.lock().await.clear();
+        let streams = self
+            .streams
+            .lock()
+            .await
+            .drain()
+            .map(|(_, stream)| stream)
+            .collect::<Vec<_>>();
+        for stream in streams {
+            stream.closed.store(true, Ordering::Release);
+            stream.closed_notify.notify_waiters();
+        }
         if let Ok(mut inner) = self.inner.lock() {
             inner.take();
         }
-    }
-
-    /// Test-only accessor: how many streams are open.
-    #[cfg(test)]
-    pub(crate) async fn open_stream_count(&self) -> usize {
-        self.streams.lock().await.len()
     }
 
     fn inner(&self) -> AgentClientResult<Arc<AgentClient>> {
@@ -281,10 +298,17 @@ mod tests {
 
     #[tokio::test]
     async fn close_wakes_in_flight_stream_next() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1);
         let bridge = Arc::new(AgentBridge {
             inner: StdMutex::new(None),
-            streams: Mutex::new(HashMap::from([(1, rx)])),
+            streams: Mutex::new(HashMap::from([(
+                1,
+                Arc::new(BridgeStream {
+                    rx: Mutex::new(rx),
+                    closed: AtomicBool::new(false),
+                    closed_notify: Notify::new(),
+                }),
+            )])),
             next_handle: AtomicU64::new(2),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
@@ -294,10 +318,6 @@ mod tests {
             let bridge = Arc::clone(&bridge);
             tokio::spawn(async move { bridge.stream_next(1).await })
         };
-
-        while bridge.open_stream_count().await != 0 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
 
         bridge.close().await;
         let result = tokio::time::timeout(Duration::from_secs(1), waiter)

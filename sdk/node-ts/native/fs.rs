@@ -16,10 +16,12 @@ use crate::types::*;
 //--------------------------------------------------------------------------------------------------
 
 /// Filesystem operations on a running sandbox (via agent protocol).
-#[napi(js_name = "SandboxFs")]
-pub struct JsSandboxFs {
+#[napi(js_name = "SandboxFsOps")]
+pub struct JsSandboxFsOps {
     sandbox: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
+
+pub type JsSandboxFs = JsSandboxFsOps;
 
 /// A streaming reader for file data from the sandbox.
 ///
@@ -45,14 +47,14 @@ pub struct JsFsWriteSink {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl JsSandboxFs {
+impl JsSandboxFsOps {
     pub fn new(sandbox: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>) -> Self {
         Self { sandbox }
     }
 }
 
 #[napi]
-impl JsSandboxFs {
+impl JsSandboxFsOps {
     /// Read a file as a Buffer.
     #[napi]
     pub async fn read(&self, path: String) -> Result<Buffer> {

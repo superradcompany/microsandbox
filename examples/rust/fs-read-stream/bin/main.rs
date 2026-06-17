@@ -34,6 +34,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "expected {FILE_SIZE} bytes, got {total_bytes}"
     );
 
-    sandbox.stop_and_wait().await?;
+    sandbox.stop().await?;
     Ok(())
 }

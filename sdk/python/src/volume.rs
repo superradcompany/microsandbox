@@ -31,15 +31,42 @@ pub struct PyVolumeHandle {
 impl PyVolume {
     /// Create a new named volume.
     #[staticmethod]
-    #[pyo3(signature = (name, *, quota_mib=None, labels=None))]
+    #[pyo3(signature = (name, *, kind=None, size_mib=None, quota_mib=None, labels=None))]
     fn create<'py>(
         py: Python<'py>,
         name: String,
+        kind: Option<String>,
+        size_mib: Option<u32>,
         quota_mib: Option<u32>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = microsandbox::Volume::builder(&name);
+            let kind = kind.unwrap_or_else(|| "dir".to_string());
+            match kind.as_str() {
+                "dir" => {
+                    builder = builder.directory();
+                    if size_mib.is_some() {
+                        return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                            "size_mib is only supported with kind='disk' until directory quotas are enforced".into(),
+                        )));
+                    }
+                }
+                "disk" => {
+                    builder = builder.disk();
+                    let size_mib = size_mib.ok_or_else(|| {
+                        to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                            "size_mib is required with kind='disk'".into(),
+                        ))
+                    })?;
+                    builder = builder.size(size_mib);
+                }
+                other => {
+                    return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                        format!("unknown volume kind: {other}"),
+                    )));
+                }
+            }
             if let Some(quota) = quota_mib {
                 builder = builder.quota(quota);
             }
@@ -49,9 +76,13 @@ impl PyVolume {
                 }
             }
             let vol = builder.create().await.map_err(to_py_err)?;
+            let path = vol
+                .path()
+                .map(|p| p.display().to_string())
+                .map_err(to_py_err)?;
             Ok(PyVolume {
                 name: vol.name().to_string(),
-                path: vol.path().display().to_string(),
+                path,
             })
         })
     }
@@ -128,10 +159,15 @@ impl PyVolume {
 
     /// Create a named volume mount config.
     #[staticmethod]
-    #[pyo3(signature = (name, *, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, *, mode = None, kind = None, size_mib = None, quota_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn named(
         py: Python<'_>,
         name: String,
+        mode: Option<String>,
+        kind: Option<String>,
+        size_mib: Option<u32>,
+        quota_mib: Option<u32>,
         readonly: bool,
         noexec: bool,
         nosuid: bool,
@@ -140,6 +176,18 @@ impl PyVolume {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
+        if let Some(mode) = mode {
+            kwargs.set_item("named_mode", mode)?;
+        }
+        if let Some(kind) = kind {
+            kwargs.set_item("named_kind", kind)?;
+        }
+        if let Some(size_mib) = size_mib {
+            kwargs.set_item("size_mib", size_mib)?;
+        }
+        if let Some(quota_mib) = quota_mib {
+            kwargs.set_item("quota_mib", quota_mib)?;
+        }
         kwargs.set_item("readonly", readonly)?;
         kwargs.set_item("noexec", noexec)?;
         kwargs.set_item("nosuid", nosuid)?;
@@ -224,8 +272,28 @@ impl PyVolumeHandle {
     }
 
     #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind().as_str()
+    }
+
+    #[getter]
     fn used_bytes(&self) -> u64 {
         self.inner.used_bytes()
+    }
+
+    #[getter]
+    fn capacity_bytes(&self) -> Option<u64> {
+        self.inner.capacity_bytes()
+    }
+
+    #[getter]
+    fn disk_format(&self) -> Option<&str> {
+        self.inner.disk_format()
+    }
+
+    #[getter]
+    fn disk_fstype(&self) -> Option<&str> {
+        self.inner.disk_fstype()
     }
 
     #[getter]
@@ -258,11 +326,9 @@ impl PyVolumeHandle {
     /// Host-side filesystem operations on this volume.
     #[getter]
     fn fs(&self) -> PyVolumeFs {
-        let vol_dir = microsandbox::config::config()
-            .volumes_dir()
-            .join(self.inner.name());
         PyVolumeFs {
-            vol_dir: vol_dir.to_string_lossy().into(),
+            name: self.inner.name().to_string().into(),
+            backend: microsandbox::default_backend(),
         }
     }
 }
@@ -272,27 +338,30 @@ impl PyVolumeHandle {
 //--------------------------------------------------------------------------------------------------
 
 /// Host-side filesystem operations on a volume (no running sandbox needed).
-/// Path resolved once at construction — zero DB lookups per operation.
+/// Holds the volume name + a backend Arc; constructs a [`VolumeFs`] per op.
 #[pyclass(name = "VolumeFs")]
 pub struct PyVolumeFs {
-    vol_dir: Arc<str>,
+    name: Arc<str>,
+    backend: Arc<dyn microsandbox::Backend>,
 }
 
 #[pymethods]
 impl PyVolumeFs {
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
         })
     }
 
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
         })
@@ -304,18 +373,20 @@ impl PyVolumeFs {
         path: String,
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<crate::fs::PyFsEntry> = entries
                 .into_iter()
@@ -326,27 +397,30 @@ impl PyVolumeFs {
     }
 
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
     fn remove_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let dir = Arc::clone(&self.vol_dir);
+        let name = Arc::clone(&self.name);
+        let backend = Arc::clone(&self.backend);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::volume::VolumeFs::from_path((*dir).into());
+            let fs = microsandbox::volume::VolumeFs::with_backend(backend, &name);
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
         })

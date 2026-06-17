@@ -42,6 +42,14 @@ pub enum AgentClientError {
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
 
+    /// CBOR encoding or decoding failed.
+    #[error("cbor: {0}")]
+    Cbor(String),
+
+    /// The supplied packet did not contain exactly one complete transport frame.
+    #[error("invalid transport packet: {0}")]
+    InvalidPacket(String),
+
     /// The connected sandbox's runtime is older than the requested feature
     /// needs.
     ///
@@ -69,4 +77,12 @@ pub enum AgentClientError {
     /// The client has been closed.
     #[error("client closed")]
     Closed,
+
+    /// The relay-assigned correlation ID range has no available IDs.
+    #[error("agent correlation id range exhausted")]
+    IdRangeExhausted,
+
+    /// The operation is not implemented yet.
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
 }

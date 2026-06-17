@@ -138,7 +138,9 @@ async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) ->
 
 /// Stop the sandbox and remove it.
 async fn teardown(sb: Sandbox, name: &str) {
-    sb.stop_and_wait().await.expect("stop");
+    drop(sb);
+    let handle = Sandbox::get(name).await.expect("get");
+    handle.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 

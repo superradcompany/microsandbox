@@ -369,6 +369,38 @@ mod linux {
         )))
     }
 
+    /// Filesystem-specific mount data for disk-image volume mounts.
+    fn disk_mount_data(fstype: &str, readonly: bool) -> Option<&'static str> {
+        if readonly && fstype == "ext4" {
+            // A read-only block device cannot replay an ext4 journal. `noload`
+            // lets seeded or intentionally read-only ext4 images mount without
+            // attempting journal recovery.
+            Some("noload")
+        } else {
+            None
+        }
+    }
+
+    /// Try mounting a disk-image volume, adding filesystem-specific options
+    /// where read-only block devices need them.
+    fn try_mount_disk_any(
+        device: &str,
+        target: &str,
+        flags: MsFlags,
+        readonly: bool,
+        fstypes: &[String],
+    ) -> AgentdResult<()> {
+        for fstype in fstypes {
+            let data = disk_mount_data(fstype, readonly);
+            if mount::mount(Some(device), target, Some(fstype.as_str()), flags, data).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(AgentdError::Init(format!(
+            "disk mount: failed to mount {device} at {target}: no supported filesystem found"
+        )))
+    }
+
     /// Mounts each virtiofs directory volume from the parsed specs.
     pub fn apply_dir_mounts(specs: &[DirMountSpec]) -> AgentdResult<()> {
         for spec in specs {
@@ -583,11 +615,15 @@ mod linux {
         if specs.is_empty() {
             return Ok(());
         }
-        // Read /proc/filesystems once and reuse the candidate list across
-        // all autodetect mounts in this batch.
-        let fstypes = read_proc_filesystems()?;
+        // Read /proc/filesystems only when at least one mount needs
+        // autodetection, then reuse the candidate list across the batch.
+        let fstypes = if specs.iter().any(|spec| spec.fstype.is_none()) {
+            Some(read_proc_filesystems()?)
+        } else {
+            None
+        };
         for spec in specs {
-            mount_disk(spec, &fstypes)?;
+            mount_disk(spec, fstypes.as_deref())?;
         }
         Ok(())
     }
@@ -646,7 +682,7 @@ mod linux {
         None
     }
 
-    fn mount_disk(spec: &DiskMountSpec, fstypes: &[String]) -> AgentdResult<()> {
+    fn mount_disk(spec: &DiskMountSpec, fstypes: Option<&[String]>) -> AgentdResult<()> {
         let path = spec.guest_path.as_str();
         fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("disk mount: create dir {path}: {e}")))?;
@@ -668,20 +704,17 @@ mod linux {
         }
 
         if let Some(fstype) = spec.fstype.as_deref() {
-            mount::mount(
-                Some(device.as_str()),
-                path,
-                Some(fstype),
-                flags,
-                None::<&str>,
-            )
-            .map_err(|e| {
+            let data = disk_mount_data(fstype, spec.readonly);
+            mount::mount(Some(device.as_str()), path, Some(fstype), flags, data).map_err(|e| {
                 AgentdError::Init(format!(
                     "disk mount: failed to mount {device} at {path} as {fstype}: {e}"
                 ))
             })?;
         } else {
-            try_mount_any(&device, path, flags, fstypes)?;
+            let fstypes = fstypes.ok_or_else(|| {
+                AgentdError::Init("disk mount: missing filesystem autodetect list".into())
+            })?;
+            try_mount_disk_any(&device, path, flags, spec.readonly, fstypes)?;
         }
 
         Ok(())

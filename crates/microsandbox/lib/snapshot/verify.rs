@@ -118,12 +118,15 @@ fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
     hasher.update(b"msb-sparse-sha256-v1\0");
     hasher.update(len.to_le_bytes());
 
-    let mut off: i64 = 0;
-    while (off as u64) < len {
-        let data_start = unsafe { libc::lseek(fd, off, libc::SEEK_DATA) };
+    let mut off: u64 = 0;
+    while off < len {
+        let seek_off = off as i64;
+        let data_start = unsafe { libc::lseek(fd, seek_off, libc::SEEK_DATA) };
         if data_start < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENXIO) {
+                hash_zeroes(len - off, &mut hasher);
+                off = len;
                 break;
             }
             return Err(err);
@@ -140,13 +143,18 @@ fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
             break;
         }
 
+        if data_start > off {
+            hash_zeroes(data_start - off, &mut hasher);
+        }
+
         let extent_len = data_end - data_start;
-        hasher.update(b"D");
-        hasher.update(data_start.to_le_bytes());
-        hasher.update(extent_len.to_le_bytes());
         hash_extent(fd, data_start, extent_len, &mut hasher)?;
 
-        off = data_end as i64;
+        off = data_end;
+    }
+
+    if off < len {
+        hash_zeroes(len - off, &mut hasher);
     }
 
     let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
@@ -181,6 +189,16 @@ fn hash_extent(fd: i32, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<(
     }
 
     Ok(())
+}
+
+fn hash_zeroes(mut len: u64, hasher: &mut Sha256) {
+    static ZEROES: [u8; 1024 * 1024] = [0; 1024 * 1024];
+
+    while len > 0 {
+        let chunk = len.min(ZEROES.len() as u64) as usize;
+        hasher.update(&ZEROES[..chunk]);
+        len -= chunk as u64;
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

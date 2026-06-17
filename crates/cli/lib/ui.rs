@@ -326,6 +326,8 @@ pub fn success(verb: &str, target: &str) {
 /// Format a sandbox status with appropriate color.
 pub fn format_status(status: &str) -> String {
     match status {
+        "Created" => format!("{}", style("created").dim()),
+        "Starting" => format!("{}", style("starting").yellow().bold()),
         "Running" => format!("{}", style("running").green().bold()),
         "Stopped" => format!("{}", style("stopped").dim()),
         "Paused" => format!("{}", style("paused").yellow().bold()),
@@ -348,7 +350,7 @@ pub fn detail_kv(key: &str, value: &str) {
 
 /// Print an indented key-value pair in detail views.
 pub fn detail_kv_indent(key: &str, value: &str) {
-    println!("  {:<14}{value}", style(format!("{key}:")).cyan());
+    println!("  {:<14}{value}", style(format!("{key}:")).dim());
 }
 
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.

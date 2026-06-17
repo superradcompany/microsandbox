@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytes::Bytes;
 use smoltcp::iface::{SocketHandle, SocketSet};
@@ -37,6 +37,28 @@ const RELAY_BUF_SIZE: usize = 16384;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Terminal connection status reported by an outbound proxy task.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyConnectStatus {
+    /// No final proxy connection status has been reported yet.
+    Pending = 0,
+    /// The proxy connected to the upstream.
+    Connected = 1,
+    /// The proxy denied the connection before dialing upstream.
+    PolicyDenied = 2,
+    /// The proxy attempted to dial upstream and the connect failed.
+    UpstreamConnectFailed = 3,
+}
+
+/// Shared status for an outbound proxy task.
+///
+/// The smoltcp poll loop reads this when the proxy task exits to decide
+/// whether the guest should see a clean close or a TCP reset.
+pub struct ProxyConnectState {
+    status: AtomicU8,
+}
 
 /// Tracks TCP connections between guest and proxy tasks.
 ///
@@ -76,13 +98,8 @@ struct Connection {
     proxy_channels: Option<ProxyChannels>,
     /// Whether a proxy task has been spawned for this connection.
     proxy_spawned: bool,
-    /// Set `true` by the proxy task once its `TcpStream::connect` to
-    /// the upstream succeeds. If the task exits with this still
-    /// `false`, the smoltcp socket is aborted (RST) so the guest
-    /// client gets ECONNREFUSED and happy-eyeballs clients fall back
-    /// to another address family, instead of being stuck on a
-    /// half-open connection that closed cleanly with FIN.
-    upstream_connected: Arc<AtomicBool>,
+    /// Status reported by the proxy task before it exits.
+    proxy_connect: Arc<ProxyConnectState>,
     /// Partial data from proxy that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
     /// Data read from smoltcp socket that couldn't be sent to proxy (channel full).
@@ -112,15 +129,67 @@ pub struct NewConnection {
     pub from_smoltcp: mpsc::Receiver<Bytes>,
     /// Send data to smoltcp socket (proxy task → guest).
     pub to_smoltcp: mpsc::Sender<Bytes>,
-    /// Flag the proxy task flips to `true` after a successful upstream
-    /// connect. Read by the connection tracker on proxy exit to decide
-    /// between FIN (clean close) and RST (upstream never reached).
-    pub upstream_connected: Arc<AtomicBool>,
+    /// Status the proxy task updates before it exits.
+    pub proxy_connect: Arc<ProxyConnectState>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl ProxyConnectStatus {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            value if value == Self::Connected as u8 => Self::Connected,
+            value if value == Self::PolicyDenied as u8 => Self::PolicyDenied,
+            value if value == Self::UpstreamConnectFailed as u8 => Self::UpstreamConnectFailed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+impl ProxyConnectState {
+    /// Create a new pending proxy connection status.
+    pub fn new() -> Self {
+        Self {
+            status: AtomicU8::new(ProxyConnectStatus::Pending.as_u8()),
+        }
+    }
+
+    /// Mark the proxy as successfully connected to upstream.
+    pub fn mark_connected(&self) {
+        self.store(ProxyConnectStatus::Connected);
+    }
+
+    /// Mark the proxy as denied by egress policy before dialing upstream.
+    pub fn mark_policy_denied(&self) {
+        self.store(ProxyConnectStatus::PolicyDenied);
+    }
+
+    /// Mark the proxy as failed while dialing upstream.
+    pub fn mark_upstream_connect_failed(&self) {
+        self.store(ProxyConnectStatus::UpstreamConnectFailed);
+    }
+
+    /// Load the latest proxy connection status.
+    pub fn status(&self) -> ProxyConnectStatus {
+        ProxyConnectStatus::from_u8(self.status.load(Ordering::Acquire))
+    }
+
+    fn store(&self, status: ProxyConnectStatus) {
+        self.status.store(status.as_u8(), Ordering::Release);
+    }
+}
+
+impl Default for ProxyConnectState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ConnectionTracker {
     /// Create a new tracker with the given connection limit.
@@ -195,7 +264,7 @@ impl ConnectionTracker {
                     to_smoltcp: from_proxy_tx,
                 }),
                 proxy_spawned: false,
-                upstream_connected: Arc::new(AtomicBool::new(false)),
+                proxy_connect: Arc::new(ProxyConnectState::new()),
                 write_buf: None,
                 read_buf: None,
                 close_attempts: 0,
@@ -229,16 +298,19 @@ impl ConnectionTracker {
             // Detect proxy task exit: when the proxy drops its channel
             // ends, close the smoltcp socket so the guest gets a FIN.
             //
-            // If the proxy never successfully reached the upstream,
+            // If the proxy attempted and failed to reach upstream,
             // an RST via `abort()` is instead sent so happy-eyeballs
             // clients fall back to another family instead of committing
             // to this half-open connection.
             if conn.to_proxy.is_closed() {
-                if !conn.upstream_connected.load(Ordering::Acquire) {
+                if matches!(
+                    conn.proxy_connect.status(),
+                    ProxyConnectStatus::UpstreamConnectFailed
+                ) {
                     tracing::debug!(
                         src = %conn.src,
                         dst = %conn.dst,
-                        "upstream never connected; aborting smoltcp socket (RST to guest)"
+                        "upstream connect failed; aborting smoltcp socket (RST to guest)"
                     );
                     socket.abort();
                     continue;
@@ -305,7 +377,7 @@ impl ConnectionTracker {
                         dst: conn.dst,
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
-                        upstream_connected: conn.upstream_connected.clone(),
+                        proxy_connect: conn.proxy_connect.clone(),
                     });
                 }
             }

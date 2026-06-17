@@ -53,6 +53,10 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install --package-lock-only --ignore-scripts
 
+      - name: Refresh agent client npm lockfile
+        working-directory: agent-client/typescript
+        run: npm install --package-lock-only --ignore-scripts
+
       - name: Open release PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
@@ -62,11 +66,13 @@ jobs:
 
             bumped by `scripts/bump-version.sh`:
             - `Cargo.toml` workspace + path-dep versions
+            - `agent-client/typescript/package.json`
             - `sdk/node-ts/package.json` and per-platform sub-packages
             - `sdk/go/setup.go` `sdkVersion` (if present)
 
             regenerated:
             - `Cargo.lock`
+            - `agent-client/typescript/package-lock.json`
             - `sdk/node-ts/package-lock.json`
 
             after this PR merges:

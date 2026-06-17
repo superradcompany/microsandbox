@@ -124,15 +124,23 @@ impl Sandbox {
         Ok(handles.iter().map(sandbox_handle_to_info).collect())
     }
 
-    /// List sandboxes filtered to those carrying all of the filter's labels
-    /// (AND-matched).
-    #[napi]
+    /// List sandboxes matching a filter.
+    #[napi(js_name = "listWith")]
     pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<SandboxInfo>> {
-        let labels = filter.labels.unwrap_or_default();
-        let filter = microsandbox::sandbox::SandboxFilter::new().labels(labels);
-        let handles = microsandbox::sandbox::Sandbox::list_with(filter)
-            .await
-            .map_err(to_napi_error)?;
+        let handles = match filter.labels {
+            Some(labels) if !labels.is_empty() => {
+                let filter = labels.into_iter().fold(
+                    microsandbox::sandbox::SandboxFilter::new(),
+                    |filter, (key, value)| filter.label(key, value),
+                );
+                microsandbox::sandbox::Sandbox::list_with(filter)
+                    .await
+                    .map_err(to_napi_error)?
+            }
+            _ => microsandbox::sandbox::Sandbox::list()
+                .await
+                .map_err(to_napi_error)?,
+        };
         Ok(handles.iter().map(sandbox_handle_to_info).collect())
     }
 
@@ -686,7 +694,10 @@ fn ms_to_datetime(ms: f64) -> Option<chrono::DateTime<chrono::Utc>> {
 pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: m.cpu_percent as f64,
+        vcpu_time_ns: m.vcpu_time_ns as f64,
         memory_bytes: m.memory_bytes as f64,
+        memory_available_bytes: m.memory_available_bytes.map(|v| v as f64),
+        memory_host_resident_bytes: m.memory_host_resident_bytes.map(|v| v as f64),
         memory_limit_bytes: m.memory_limit_bytes as f64,
         disk_read_bytes: m.disk_read_bytes as f64,
         disk_write_bytes: m.disk_write_bytes as f64,
@@ -697,10 +708,23 @@ pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetric
     }
 }
 
+pub fn sandbox_stop_result_to_js(
+    result: microsandbox::sandbox::SandboxStopResult,
+) -> SandboxStopResult {
+    SandboxStopResult {
+        name: result.name,
+        status: format!("{:?}", result.status).to_lowercase(),
+        exit_code: result.exit_code,
+        signal: result.signal,
+        observed_at: datetime_to_ms(&result.observed_at),
+        source: result.source,
+    }
+}
+
 fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> SandboxInfo {
     SandboxInfo {
         name: handle.name().to_string(),
-        status: format!("{:?}", handle.status()).to_lowercase(),
+        status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
         config_json: handle.config_json().to_string(),
         created_at: opt_datetime_to_ms(&handle.created_at()),
         updated_at: opt_datetime_to_ms(&handle.updated_at()),

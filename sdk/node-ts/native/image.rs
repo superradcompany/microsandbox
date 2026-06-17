@@ -119,10 +119,22 @@ impl JsImageHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Backend>> {
+    let backend = microsandbox::backend::default_backend();
+    if backend.as_local().is_none() {
+        return Err(napi::Error::from_reason(
+            "image ops require a local backend".to_string(),
+        ));
+    }
+    Ok(backend)
+}
+
 /// Look up a cached image by reference.
 #[napi(js_name = "imageGet")]
 pub async fn image_get(reference: String) -> Result<JsImageHandle> {
-    let inner = msb_image::Image::get(&reference)
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    let inner = msb_image::Image::get(local, &reference)
         .await
         .map_err(to_napi_error)?;
     Ok(JsImageHandle { inner })
@@ -131,14 +143,18 @@ pub async fn image_get(reference: String) -> Result<JsImageHandle> {
 /// List all cached images.
 #[napi(js_name = "imageList")]
 pub async fn image_list() -> Result<Vec<ImageInfo>> {
-    let handles = msb_image::Image::list().await.map_err(to_napi_error)?;
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    let handles = msb_image::Image::list(local).await.map_err(to_napi_error)?;
     Ok(handles.iter().map(image_handle_to_info).collect())
 }
 
 /// Full inspect (config + layers).
 #[napi(js_name = "imageInspect")]
 pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
-    let detail = msb_image::Image::inspect(&reference)
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    let detail = msb_image::Image::inspect(local, &reference)
         .await
         .map_err(to_napi_error)?;
     Ok(image_detail_to_js(detail))
@@ -148,7 +164,9 @@ pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
 /// sandbox references it.
 #[napi(js_name = "imageRemove")]
 pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> {
-    msb_image::Image::remove(&reference, force.unwrap_or(false))
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    msb_image::Image::remove(local, &reference, force.unwrap_or(false))
         .await
         .map_err(to_napi_error)
 }
@@ -156,13 +174,19 @@ pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> 
 /// Garbage-collect orphaned layers. Returns the number reclaimed.
 #[napi(js_name = "imageGcLayers")]
 pub async fn image_gc_layers() -> Result<u32> {
-    msb_image::Image::gc_layers().await.map_err(to_napi_error)
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    msb_image::Image::gc_layers(local)
+        .await
+        .map_err(to_napi_error)
 }
 
 /// Garbage-collect everything reclaimable. Returns the number reclaimed.
 #[napi(js_name = "imageGc")]
 pub async fn image_gc() -> Result<u32> {
-    msb_image::Image::gc().await.map_err(to_napi_error)
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    msb_image::Image::gc(local).await.map_err(to_napi_error)
 }
 
 fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
