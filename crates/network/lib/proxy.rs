@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +43,73 @@ const PEEK_BUF_SIZE: usize = 16384;
 /// Upper bound on time spent buffering the first flight before
 /// falling back to a cache-only egress decision.
 const PEEK_BUDGET: Duration = Duration::from_secs(5);
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ConnectRequest {
+    bytes: Vec<u8>,
+    header_end: usize,
+    target: ConnectTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectTarget {
+    host: String,
+    port: u16,
+    expected_sni: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ConnectRequest {
+    fn header_bytes(&self) -> &[u8] {
+        &self.bytes[..self.header_end]
+    }
+
+    fn post_header_bytes(&self) -> &[u8] {
+        &self.bytes[self.header_end..]
+    }
+}
+
+impl ConnectTarget {
+    fn is_intercepted(&self, tls_state: &TlsState) -> bool {
+        tls_state.config.intercepted_ports.contains(&self.port)
+    }
+
+    fn guest_dst(&self, fallback: SocketAddr, shared: &SharedState) -> SocketAddr {
+        if let Ok(ip) = self.host.parse::<IpAddr>() {
+            return SocketAddr::new(ip, self.port);
+        }
+
+        if self.host.eq_ignore_ascii_case(crate::HOST_ALIAS) {
+            match fallback.ip() {
+                IpAddr::V4(_) => {
+                    if let Some(ip) = shared.gateway_ipv4() {
+                        return SocketAddr::new(IpAddr::V4(ip), self.port);
+                    }
+                }
+                IpAddr::V6(_) => {
+                    if let Some(ip) = shared.gateway_ipv6() {
+                        return SocketAddr::new(IpAddr::V6(ip), self.port);
+                    }
+                }
+            }
+            if let Some(ip) = shared.gateway_ipv4() {
+                return SocketAddr::new(IpAddr::V4(ip), self.port);
+            }
+            if let Some(ip) = shared.gateway_ipv6() {
+                return SocketAddr::new(IpAddr::V6(ip), self.port);
+            }
+        }
+
+        SocketAddr::new(fallback.ip(), self.port)
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -172,11 +239,11 @@ async fn tcp_proxy_task(
             let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
             initial_buf = peeked;
         }
-        if initial_buf.starts_with(b"CONNECT ") {
+        if could_be_connect_request(&initial_buf) {
             return handle_connect_tunnel(
                 guest_dst,
                 connect_dst,
-                &initial_buf,
+                initial_buf,
                 from_smoltcp,
                 to_smoltcp,
                 shared,
@@ -333,20 +400,30 @@ async fn tcp_proxy_task(
 async fn handle_connect_tunnel(
     guest_dst: SocketAddr,
     proxy_dst: SocketAddr,
-    connect_req: &[u8],
-    from_smoltcp: mpsc::Receiver<Bytes>,
+    initial_buf: Vec<u8>,
+    mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
 ) -> io::Result<()> {
-    if !is_valid_connect_request(connect_req) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "malformed CONNECT request line",
-        ));
-    }
+    let connect_req =
+        parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
+
+    let connect_headers = match sanitize_connect_headers(
+        connect_req.header_bytes(),
+        &tls_state.secrets,
+    ) {
+        Ok(headers) => headers,
+        Err(action) => {
+            tracing::warn!(dst = %proxy_dst, violation = ?action, "secret violation in CONNECT headers");
+            if matches!(action, ViolationAction::BlockAndTerminate) {
+                shared.trigger_termination();
+            }
+            return Ok(());
+        }
+    };
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match TcpStream::connect(proxy_dst).await {
@@ -357,39 +434,55 @@ async fn handle_connect_tunnel(
             return Err(e);
         }
     };
-    proxy_stream.write_all(connect_req).await?;
+
+    if !connect_req.target.is_intercepted(&tls_state) {
+        proxy_stream.write_all(&connect_headers).await?;
+        proxy_stream.flush().await?;
+        let (proxy_resp, header_end) = read_connect_response_headers(&mut proxy_stream).await?;
+        if to_smoltcp
+            .send(Bytes::copy_from_slice(&proxy_resp[..header_end]))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        if !proxy_resp[header_end..].is_empty()
+            && to_smoltcp
+                .send(Bytes::copy_from_slice(&proxy_resp[header_end..]))
+                .await
+                .is_err()
+        {
+            return Ok(());
+        }
+        shared.proxy_wake.wake();
+        if !connect_response_is_success(&proxy_resp[..header_end]) {
+            proxy_connect.mark_connected();
+            return Ok(());
+        }
+        if !connect_req.post_header_bytes().is_empty() {
+            proxy_stream
+                .write_all(connect_req.post_header_bytes())
+                .await?;
+        }
+        proxy_stream.flush().await?;
+        proxy_connect.mark_connected();
+        return relay_connected_stream(proxy_stream, from_smoltcp, to_smoltcp, shared).await;
+    }
+
+    proxy_stream.write_all(&connect_headers).await?;
     proxy_stream.flush().await?;
 
-    let mut proxy_resp = Vec::with_capacity(256);
-    let mut buf = [0u8; 4096];
-    let header_end = loop {
-        let n = proxy_stream.read(&mut buf).await?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "proxy closed before sending CONNECT response",
-            ));
-        }
-        proxy_resp.extend_from_slice(&buf[..n]);
-        if let Some(end) = headers_end(&proxy_resp) {
-            break end;
-        }
-        if proxy_resp.len() > CONNECT_RESP_LIMIT {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "proxy CONNECT response too large",
-            ));
-        }
-    };
-
-    let status_line = proxy_resp[..header_end]
-        .split(|&b| b == b'\n')
-        .next()
-        .unwrap_or(&[]);
-    if !status_line.windows(4).any(|w| w == b" 200") {
+    let (proxy_resp, header_end) = read_connect_response_headers(&mut proxy_stream).await?;
+    if !connect_response_is_success(&proxy_resp[..header_end]) {
         return Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "proxy rejected CONNECT",
+        ));
+    }
+    if !proxy_resp[header_end..].is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proxy sent unexpected bytes after CONNECT response headers",
         ));
     }
     proxy_connect.mark_connected();
@@ -403,18 +496,20 @@ async fn handle_connect_tunnel(
     }
     shared.proxy_wake.wake();
 
-    let mut tls_seed = body_after_headers(connect_req).to_vec();
-    tls_seed.extend_from_slice(&proxy_resp[header_end..]);
+    let tls_seed = connect_req.post_header_bytes().to_vec();
+    let tls_guest_dst = connect_req.target.guest_dst(guest_dst, &shared);
+    let expected_sni = connect_req.target.expected_sni.clone();
 
     tls_proxy_task(
         TlsProxyContext {
-            guest_dst,
+            guest_dst: tls_guest_dst,
             connect_dst: proxy_dst,
             shared,
             tls_state,
             network_policy,
             proxy_connect,
             upstream_stream: Some(proxy_stream),
+            expected_sni,
         },
         from_smoltcp,
         to_smoltcp,
@@ -423,29 +518,322 @@ async fn handle_connect_tunnel(
     .await
 }
 
+/// Relay an established TCP stream without inspecting or substituting bytes.
+async fn relay_connected_stream(
+    stream: TcpStream,
+    mut from_smoltcp: mpsc::Receiver<Bytes>,
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+) -> io::Result<()> {
+    let (mut server_rx, mut server_tx) = stream.into_split();
+    let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
+
+    loop {
+        tokio::select! {
+            data = from_smoltcp.recv() => {
+                match data {
+                    Some(bytes) => {
+                        server_tx.write_all(&bytes).await?;
+                        server_tx.flush().await?;
+                    }
+                    None => break,
+                }
+            }
+            result = server_rx.read(&mut server_buf) => {
+                match result {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if to_smoltcp
+                            .send(Bytes::copy_from_slice(&server_buf[..n]))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        shared.proxy_wake.wake();
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn buffer_connect_request(
+    mut buf: Vec<u8>,
+    from_smoltcp: &mut mpsc::Receiver<Bytes>,
+) -> io::Result<Vec<u8>> {
+    let timeout_fut = tokio::time::sleep(PEEK_BUDGET);
+    tokio::pin!(timeout_fut);
+
+    loop {
+        if !could_be_connect_request(&buf) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed CONNECT request prefix",
+            ));
+        }
+        if headers_end(&buf).is_some() {
+            return Ok(buf);
+        }
+        if buf.len() >= PEEK_BUF_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CONNECT request headers too large",
+            ));
+        }
+
+        tokio::select! {
+            biased;
+            _ = &mut timeout_fut => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for complete CONNECT request headers",
+                ));
+            }
+            data = from_smoltcp.recv() => match data {
+                Some(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "channel closed before complete CONNECT request headers",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+async fn read_connect_response_headers(stream: &mut TcpStream) -> io::Result<(Vec<u8>, usize)> {
+    tokio::time::timeout(PEEK_BUDGET, async {
+        let mut proxy_resp = Vec::with_capacity(256);
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "proxy closed before sending CONNECT response",
+                ));
+            }
+            proxy_resp.extend_from_slice(&buf[..n]);
+            if let Some(end) = headers_end(&proxy_resp) {
+                return Ok((proxy_resp, end));
+            }
+            if proxy_resp.len() > CONNECT_RESP_LIMIT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "proxy CONNECT response too large",
+                ));
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for proxy CONNECT response",
+        )
+    })?
+}
+
+fn sanitize_connect_headers<'a>(
+    header_bytes: &'a [u8],
+    secrets: &SecretsConfig,
+) -> Result<Cow<'a, [u8]>, ViolationAction> {
+    if secrets.secrets.is_empty() {
+        return Ok(Cow::Borrowed(header_bytes));
+    }
+
+    let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
+    match handler.substitute(header_bytes) {
+        Ok(headers) => Ok(headers),
+        Err(action) => {
+            let Some(stripped) = strip_placeholder_header_lines(header_bytes, secrets) else {
+                return Err(action);
+            };
+            let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
+            handler
+                .substitute(&stripped)
+                .map(|headers| Cow::Owned(headers.into_owned()))
+        }
+    }
+}
+
+fn strip_placeholder_header_lines(headers: &[u8], secrets: &SecretsConfig) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(headers.len());
+    let mut cursor = 0;
+    let mut first_line = true;
+    let mut stripped = false;
+
+    while cursor < headers.len() {
+        let Some(relative_end) = headers[cursor..].windows(2).position(|w| w == b"\r\n") else {
+            out.extend_from_slice(&headers[cursor..]);
+            break;
+        };
+        let line_end = cursor + relative_end;
+        let line = &headers[cursor..line_end];
+        let line_with_crlf = &headers[cursor..line_end + 2];
+        cursor = line_end + 2;
+
+        if first_line || line.is_empty() || !line_contains_secret_placeholder(line, secrets) {
+            out.extend_from_slice(line_with_crlf);
+        } else {
+            stripped = true;
+        }
+        first_line = false;
+    }
+
+    stripped.then_some(out)
+}
+
+fn line_contains_secret_placeholder(line: &[u8], secrets: &SecretsConfig) -> bool {
+    secrets.secrets.iter().any(|secret| {
+        !secret.placeholder.is_empty() && contains_bytes(line, secret.placeholder.as_bytes())
+    })
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 /// Returns the byte offset just past the `\r\n\r\n` header terminator, or `None`.
 fn headers_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
-/// Returns the slice after the `\r\n\r\n` header terminator, or empty if not found.
-fn body_after_headers(buf: &[u8]) -> &[u8] {
-    headers_end(buf).map_or(&[], |end| &buf[end..])
+fn could_be_connect_request(buf: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"CONNECT ";
+    if buf.is_empty() {
+        return false;
+    }
+    let n = buf.len().min(PREFIX.len());
+    buf[..n].eq_ignore_ascii_case(&PREFIX[..n])
 }
 
-/// Returns `true` if `buf` starts with a valid `CONNECT host:port HTTP/x.y` request line.
-fn is_valid_connect_request(buf: &[u8]) -> bool {
-    let Some(line) = buf.split(|&b| b == b'\n').next() else {
+fn parse_connect_request(bytes: Vec<u8>) -> io::Result<ConnectRequest> {
+    let header_end = headers_end(&bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incomplete CONNECT request headers",
+        )
+    })?;
+    let target = {
+        let request_line = bytes[..header_end]
+            .split(|&b| b == b'\n')
+            .next()
+            .unwrap_or(&[]);
+        let request_line = std::str::from_utf8(request_line)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CONNECT line is not UTF-8"))?
+            .trim_end_matches('\r');
+        let mut parts = request_line.split_ascii_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let authority = parts.next().unwrap_or_default();
+        let version = parts.next().unwrap_or_default();
+        if !method.eq_ignore_ascii_case("CONNECT")
+            || authority.is_empty()
+            || !is_http_version(version)
+            || parts.next().is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed CONNECT request line",
+            ));
+        }
+        parse_connect_target(authority)?
+    };
+
+    Ok(ConnectRequest {
+        bytes,
+        header_end,
+        target,
+    })
+}
+
+fn parse_connect_target(authority: &str) -> io::Result<ConnectTarget> {
+    let authority = authority.trim();
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, rest) = rest.split_once(']').ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed CONNECT IPv6 authority",
+            )
+        })?;
+        let port = rest.strip_prefix(':').ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "CONNECT authority missing port")
+        })?;
+        (host, port)
+    } else {
+        let (host, port) = authority.rsplit_once(':').ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "CONNECT authority missing port")
+        })?;
+        if host.contains(':') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CONNECT IPv6 authority must be bracketed",
+            ));
+        }
+        (host, port)
+    };
+    let host = host.trim().trim_end_matches('.');
+    if host.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CONNECT authority missing host",
+        ));
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid CONNECT port"))?;
+    let expected_sni = host
+        .parse::<IpAddr>()
+        .is_err()
+        .then(|| host.to_ascii_lowercase());
+
+    Ok(ConnectTarget {
+        host: host.to_ascii_lowercase(),
+        port,
+        expected_sni,
+    })
+}
+
+fn is_http_version(version: &str) -> bool {
+    let Some(version) = version.strip_prefix("HTTP/") else {
         return false;
     };
-    let Ok(line) = std::str::from_utf8(line) else {
+    let Some((major, minor)) = version.split_once('.') else {
         return false;
     };
-    let mut parts = line.split_ascii_whitespace();
-    parts
-        .next()
-        .is_some_and(|m| m.eq_ignore_ascii_case("CONNECT"))
-        && parts.next().is_some()
+    !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|b| b.is_ascii_digit())
+        && minor.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn connect_response_is_success(headers: &[u8]) -> bool {
+    let Some(status_line) = headers.split(|&b| b == b'\n').next() else {
+        return false;
+    };
+    let Ok(status_line) = std::str::from_utf8(status_line) else {
+        return false;
+    };
+    let mut parts = status_line.trim_end_matches('\r').split_ascii_whitespace();
+    let version = parts.next().unwrap_or_default();
+    let status = parts.next().unwrap_or_default();
+    is_http_version(version)
+        && status.len() == 3
+        && status
+            .parse::<u16>()
+            .is_ok_and(|code| (200..300).contains(&code))
 }
 
 /// Extract the `Host:` header value from an already-buffered HTTP header block.
@@ -675,6 +1063,75 @@ mod tests {
         record.extend_from_slice(&hs);
 
         record
+    }
+
+    #[test]
+    fn could_be_connect_request_matches_split_prefixes_only() {
+        assert!(could_be_connect_request(b"C"));
+        assert!(could_be_connect_request(b"connect "));
+        assert!(could_be_connect_request(b"CONNECT example.com:443"));
+        assert!(!could_be_connect_request(b"CLIENT"));
+        assert!(!could_be_connect_request(b"GET / HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn buffer_connect_request_reads_split_headers() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"NECT example.com:443 HTTP/1.1\r\n"))
+            .await
+            .unwrap();
+        tx.send(Bytes::from_static(b"Host: example.com\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buffered = buffer_connect_request(b"CON".to_vec(), &mut rx)
+            .await
+            .unwrap();
+        let parsed = parse_connect_request(buffered).unwrap();
+
+        assert_eq!(parsed.target.host, "example.com");
+        assert_eq!(parsed.target.port, 443);
+        assert_eq!(parsed.target.expected_sni.as_deref(), Some("example.com"));
+        assert!(parsed.post_header_bytes().is_empty());
+    }
+
+    #[test]
+    fn parse_connect_request_preserves_post_header_tls_seed() {
+        let mut request = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        request.extend_from_slice(b"\x16\x03\x01client-hello");
+
+        let parsed = parse_connect_request(request).unwrap();
+
+        assert_eq!(
+            parsed.header_bytes(),
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        );
+        assert_eq!(parsed.post_header_bytes(), b"\x16\x03\x01client-hello");
+    }
+
+    #[test]
+    fn parse_connect_target_requires_authority_port() {
+        assert!(parse_connect_target("example.com").is_err());
+        assert!(parse_connect_target("2001:db8::1:443").is_err());
+
+        let target = parse_connect_target("[2001:db8::1]:8443").unwrap();
+        assert_eq!(target.host, "2001:db8::1");
+        assert_eq!(target.port, 8443);
+        assert_eq!(target.expected_sni, None);
+    }
+
+    #[test]
+    fn connect_response_success_requires_exact_2xx_status_code() {
+        assert!(connect_response_is_success(
+            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        ));
+        assert!(connect_response_is_success(
+            b"HTTP/1.1 204 Connection Established\r\n\r\n"
+        ));
+        assert!(!connect_response_is_success(b"HTTP/1.1 2000 Weird\r\n\r\n"));
+        assert!(!connect_response_is_success(b"HTTP/1.1 199 Nope\r\n\r\n"));
+        assert!(!connect_response_is_success(b"NOTHTTP 200 OK\r\n\r\n"));
     }
 
     #[tokio::test]
@@ -1061,6 +1518,56 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn make_host_bound_secret(placeholder: &str, value: &str, host: &str) -> SecretsConfig {
+        SecretsConfig {
+            secrets: vec![SecretEntry {
+                env_var: "API_KEY".into(),
+                value: value.into(),
+                placeholder: placeholder.into(),
+                allowed_hosts: vec![HostPattern::Exact(host.into())],
+                injection: SecretInjection::default(),
+                on_violation: None,
+                require_tls_identity: true,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sanitize_connect_headers_strips_placeholder_metadata_header() {
+        let secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\nUser-Agent: curl\r\n\r\n";
+
+        let sanitized = sanitize_connect_headers(headers, &secrets).unwrap();
+
+        assert_eq!(
+            sanitized.as_ref(),
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nUser-Agent: curl\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn sanitize_connect_headers_keeps_safe_metadata_headers() {
+        let secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        let headers =
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nUser-Agent: curl\r\n\r\n";
+
+        let sanitized = sanitize_connect_headers(headers, &secrets).unwrap();
+
+        assert_eq!(sanitized.as_ref(), headers);
+    }
+
+    #[test]
+    fn sanitize_connect_headers_blocks_placeholder_in_request_line() {
+        let secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        let headers = b"CONNECT $MSB_KEY:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+
+        assert_eq!(
+            sanitize_connect_headers(headers, &secrets),
+            Err(ViolationAction::BlockAndLog)
+        );
     }
 
     async fn spawn_sink() -> (SocketAddr, JoinHandle<Vec<u8>>) {

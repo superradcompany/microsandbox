@@ -103,6 +103,9 @@ pub struct SecretsHandler {
     /// Buffered HTTP bytes while waiting for complete headers or a complete
     /// body-rewriteable request.
     http_pending: Vec<u8>,
+    /// Body-only tail for detecting eligible placeholders inside HTTP/1 bodies
+    /// whose framing or encoding cannot be rewritten safely.
+    unsupported_body_tail: Vec<u8>,
     /// HTTP/2 parser/rewriter state once an HTTP/2 preface is observed.
     http2_state: Option<Http2State>,
 }
@@ -602,6 +605,7 @@ impl SecretsHandler {
             http_sni: enforce_http_authority.then(|| sni.to_string()),
             http1_request_summary: None,
             http_pending: Vec::new(),
+            unsupported_body_tail: Vec::new(),
             http2_state: None,
         }
     }
@@ -794,6 +798,20 @@ impl SecretsHandler {
             String::from_utf8_lossy(header_bytes).as_ref(),
             RequestLocation::Unknown,
         ))?;
+        if !body_substitution_allowed {
+            self.block_unsupported_body_placeholder(&self.unsupported_body_tail, body_bytes)?;
+            if matches!(self.http_state, HttpState::InBody { .. }) {
+                update_tail_buffer(
+                    &mut self.unsupported_body_tail,
+                    body_bytes,
+                    self.max_body_placeholder_len.saturating_sub(1),
+                );
+            } else {
+                self.unsupported_body_tail.clear();
+            }
+        } else {
+            self.unsupported_body_tail.clear();
+        }
         self.update_tail(this_request);
 
         if self.eligible_for_substitution.is_empty() {
@@ -1066,6 +1084,7 @@ impl SecretsHandler {
             None => (data, &[] as &[u8]),
         };
 
+        self.block_unsupported_body_placeholder(&self.unsupported_body_tail, body_part)?;
         self.apply_blocking_action(self.detect_blocking_action(
             body_part,
             "",
@@ -1078,11 +1097,19 @@ impl SecretsHandler {
         self.http_state = match body_end {
             Some(_) => {
                 self.http1_request_summary = None;
+                self.unsupported_body_tail.clear();
                 HttpState::AwaitingHeaders
             }
-            None => HttpState::InBody {
-                remaining: remaining - body_part.len(),
-            },
+            None => {
+                update_tail_buffer(
+                    &mut self.unsupported_body_tail,
+                    body_part,
+                    self.max_body_placeholder_len.saturating_sub(1),
+                );
+                HttpState::InBody {
+                    remaining: remaining - body_part.len(),
+                }
+            }
         };
 
         self.append_pipelined_spillover(data, body_part, spillover)
@@ -1157,6 +1184,7 @@ impl SecretsHandler {
     pub fn is_empty(&self) -> bool {
         self.http_sni.is_none()
             && self.http_pending.is_empty()
+            && self.unsupported_body_tail.is_empty()
             && self.http1_request_summary.is_none()
             && self.http2_state.is_none()
             && matches!(self.http_state, HttpState::AwaitingHeaders)
@@ -1170,7 +1198,21 @@ impl SecretsHandler {
         })
     }
 
-    fn contains_eligible_http2_body_placeholder(&self, prev_tail: &[u8], data: &[u8]) -> bool {
+    fn block_unsupported_body_placeholder(
+        &self,
+        prev_tail: &[u8],
+        data: &[u8],
+    ) -> Result<(), ViolationAction> {
+        if self.contains_eligible_body_placeholder(prev_tail, data) {
+            tracing::warn!(
+                "secret substitution in this request body is unsupported; blocking placeholder"
+            );
+            return Err(ViolationAction::Block);
+        }
+        Ok(())
+    }
+
+    fn contains_eligible_body_placeholder(&self, prev_tail: &[u8], data: &[u8]) -> bool {
         if !self.needs_body_injection() {
             return false;
         }
@@ -1261,6 +1303,7 @@ impl SecretsHandler {
             let ChunkedBodyEvent::Payload(payload) = event else {
                 return Ok(());
             };
+            self.block_unsupported_body_placeholder(&decoded_tail, payload)?;
             self.apply_blocking_action(detect_blocking_action_with_tail(
                 &self.ineligible_for_substitution,
                 &decoded_tail,
@@ -1628,7 +1671,7 @@ impl Http2State {
 
         let data = http2_data_payload(frame.flags, frame.payload)?;
         let tail = self.data_tails.entry(frame.stream_id).or_default();
-        if handler.contains_eligible_http2_body_placeholder(tail, data) {
+        if handler.contains_eligible_body_placeholder(tail, data) {
             tracing::warn!(
                 "secret substitution in HTTP/2 DATA frames is unsupported; blocking placeholder"
             );
@@ -3536,16 +3579,18 @@ mod tests {
     }
 
     #[test]
-    fn chunked_body_injection_skips_content_encoded_body() {
+    fn chunked_body_injection_blocks_content_encoded_placeholder() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.injection.body = true;
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
         let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n4\r\n$KEY\r\n0\r\n\r\n";
-        let output = handler.substitute(input).unwrap();
 
-        assert_eq!(output.as_ref(), input);
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
@@ -3609,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn body_injection_skips_content_encoded_body() {
+    fn body_injection_blocks_content_encoded_placeholder() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.injection.body = true;
         let config = make_config(vec![secret]);
@@ -3623,8 +3668,27 @@ mod tests {
         .into_bytes();
         input.extend_from_slice(body);
 
-        let output = handler.substitute(&input).unwrap();
-        assert_eq!(&*output, input.as_slice());
+        assert_eq!(
+            handler.substitute(&input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn body_injection_blocks_split_content_encoded_placeholder() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let first = b"POST /git-upload-pack HTTP/1.1\r\nContent-Encoding: gzip\r\nContent-Length: 4\r\n\r\n$K";
+
+        let output = handler.substitute(first).unwrap();
+        assert_eq!(&*output, first.as_slice());
+        assert_eq!(
+            handler.substitute(b"EY").unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]

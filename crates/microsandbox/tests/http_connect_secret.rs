@@ -33,15 +33,25 @@ struct TargetHttps {
     handle: Option<JoinHandle<io::Result<String>>>,
 }
 
+/// Minimal proxy fixture that records a `Proxy-Authorization` CONNECT header.
+struct ProxyAuthCapture {
+    port: u16,
+    handle: Option<JoinHandle<io::Result<Option<String>>>>,
+}
+
 // Methods
 
 impl ConnectProxy {
     async fn start(target_port: u16) -> io::Result<Self> {
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
-        let port = listener.local_addr()?.port();
+        let v4 = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
+        let port = v4.local_addr()?.port();
+        let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))).await?;
 
         let handle = tokio::spawn(async move {
-            let (client, _) = listener.accept().await?;
+            let (client, _) = tokio::select! {
+                a = v4.accept() => a?,
+                a = v6.accept() => a?,
+            };
             handle_connect(client, target_port).await
         });
 
@@ -115,6 +125,47 @@ impl Drop for TargetHttps {
     }
 }
 
+impl ProxyAuthCapture {
+    async fn start() -> io::Result<Self> {
+        let v4 = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
+        let port = v4.local_addr()?.port();
+        let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))).await?;
+
+        let handle = tokio::spawn(async move {
+            let (client, _) = tokio::select! {
+                a = v4.accept() => a?,
+                a = v6.accept() => a?,
+            };
+            read_proxy_auth_header(client).await
+        });
+
+        Ok(Self {
+            port,
+            handle: Some(handle),
+        })
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    async fn try_received_auth(&mut self, timeout: std::time::Duration) -> Option<String> {
+        let handle = self.handle.take().expect("proxy fixture already consumed");
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(joined) => joined.ok().and_then(|res| res.ok()).flatten(),
+            Err(_) => None,
+        }
+    }
+}
+
+impl Drop for ProxyAuthCapture {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+    }
+}
+
 // Functions
 
 async fn handle_connect(client: TcpStream, target_port: u16) -> io::Result<()> {
@@ -145,20 +196,33 @@ async fn handle_connect(client: TcpStream, target_port: u16) -> io::Result<()> {
         target
     };
 
-    let upstream = TcpStream::connect(&connect_addr).await?;
+    let mut upstream = TcpStream::connect(&connect_addr).await?;
+    let buffered_client_bytes = reader.buffer().to_vec();
 
     let mut client_write = write_half;
     client_write
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
+    if !buffered_client_bytes.is_empty() {
+        upstream.write_all(&buffered_client_bytes).await?;
+    }
 
     let mut client_read = reader.into_inner();
     let (mut up_read, mut up_write) = upstream.into_split();
 
-    tokio::try_join!(
-        tokio::io::copy(&mut client_read, &mut up_write),
-        tokio::io::copy(&mut up_read, &mut client_write),
-    )?;
+    let client_to_upstream = tokio::io::copy(&mut client_read, &mut up_write);
+    let upstream_to_client = tokio::io::copy(&mut up_read, &mut client_write);
+    tokio::pin!(client_to_upstream);
+    tokio::pin!(upstream_to_client);
+
+    tokio::select! {
+        result = &mut client_to_upstream => {
+            result?;
+        }
+        result = &mut upstream_to_client => {
+            result?;
+        }
+    }
 
     Ok(())
 }
@@ -171,6 +235,32 @@ fn parse_connect_target(line: &str) -> Option<String> {
         return None;
     }
     Some(target.to_string())
+}
+
+async fn read_proxy_auth_header(client: TcpStream) -> io::Result<Option<String>> {
+    let mut reader = BufReader::new(client);
+    let mut proxy_auth = None;
+
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = trimmed.split_once(':')
+            && name.eq_ignore_ascii_case("proxy-authorization")
+        {
+            proxy_auth = Some(value.trim().to_string());
+        }
+    }
+
+    reader
+        .into_inner()
+        .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
+        .await?;
+
+    Ok(proxy_auth)
 }
 
 async fn received_auth_header(
@@ -276,11 +366,21 @@ async fn https_connect_proxy_substitutes_secret_in_authorization_header() {
         .expect("curl through connect proxy");
 
     let stdout = out.stdout().unwrap_or_default();
-    assert!(
-        stdout.contains("code=200"),
-        "expected 200 from target, got: {stdout} (stderr: {})",
-        out.stderr().unwrap_or_default()
-    );
+    if !stdout.contains("code=200") {
+        let proxy_status = tokio::time::timeout(std::time::Duration::from_secs(3), proxy.join())
+            .await
+            .map_err(|_| "proxy timed out".to_string())
+            .and_then(|res| res.map_err(|err| err.to_string()));
+        let target_auth =
+            tokio::time::timeout(std::time::Duration::from_secs(3), target.received_auth())
+                .await
+                .map_err(|_| "target timed out".to_string())
+                .and_then(|res| res.map_err(|err| err.to_string()));
+        panic!(
+            "expected 200 from target, got: {stdout} (stderr: {}), proxy={proxy_status:?}, target={target_auth:?}",
+            out.stderr().unwrap_or_default()
+        );
+    }
 
     let auth = target.received_auth().await.expect("target auth");
     assert_eq!(
@@ -359,5 +459,138 @@ echo "status=$?"
     );
 
     drop(proxy);
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn https_connect_proxy_leaves_non_intercepted_target_port_opaque() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut target = TargetHttps::start().await.expect("target fixture");
+    let target_port = target.port();
+    let mut proxy = ConnectProxy::start(target_port)
+        .await
+        .expect("proxy fixture");
+    let proxy_port = proxy.port();
+    let intercepted_port = if target_port == 443 { 444 } else { 443 };
+    let name = "http-connect-secret-non-intercepted";
+
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_host("host.microsandbox.internal")
+        })
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all()).tls(|t| {
+                t.intercepted_ports(vec![intercepted_port])
+                    .verify_upstream(false)
+            })
+        })
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let out = sb
+        .shell(format!(
+            r#"curl -k --http1.1 -m 30 -sS -o /dev/null \
+  -w 'code=%{{http_code}}' \
+  -H "Authorization: Bearer $API_KEY" \
+  --proxytunnel \
+  --proxy http://host.microsandbox.internal:{proxy_port} \
+  https://host.microsandbox.internal:{target_port}/api"#
+        ))
+        .await
+        .expect("curl through connect proxy");
+
+    let stdout = out.stdout().unwrap_or_default();
+    if !stdout.contains("code=200") {
+        let proxy_status = tokio::time::timeout(std::time::Duration::from_secs(3), proxy.join())
+            .await
+            .map_err(|_| "proxy timed out".to_string())
+            .and_then(|res| res.map_err(|err| err.to_string()));
+        let target_auth =
+            tokio::time::timeout(std::time::Duration::from_secs(3), target.received_auth())
+                .await
+                .map_err(|_| "target timed out".to_string())
+                .and_then(|res| res.map_err(|err| err.to_string()));
+        panic!(
+            "expected 200 from opaque target tunnel, got: {stdout} (stderr: {}), proxy={proxy_status:?}, target={target_auth:?}",
+            out.stderr().unwrap_or_default()
+        );
+    }
+
+    let auth = target.received_auth().await.expect("target auth");
+    assert!(
+        auth.contains(PLACEHOLDER),
+        "non-intercepted target port must receive the placeholder unchanged; got: {auth:?}"
+    );
+    assert!(
+        !auth.contains(REAL_SECRET),
+        "non-intercepted target port must not receive the real secret; got: {auth:?}"
+    );
+
+    let _ = proxy.join().await;
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn https_connect_proxy_blocks_secret_in_outer_connect_headers() {
+    let mut proxy = ProxyAuthCapture::start()
+        .await
+        .expect("proxy capture fixture");
+    let proxy_port = proxy.port();
+    let name = "http-connect-secret-outer-header";
+
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_host("host.microsandbox.internal")
+        })
+        .network(|n| n.policy(NetworkPolicy::allow_all()))
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let out = sb
+        .shell(format!(
+            r#"set +e
+curl -k --http1.1 -m 10 -sS -o /dev/null \
+  --proxytunnel \
+  --proxy http://host.microsandbox.internal:{proxy_port} \
+  --proxy-header "Proxy-Authorization: Bearer $API_KEY" \
+  https://example.com/
+echo "status=$?"
+"#
+        ))
+        .await
+        .expect("curl through connect proxy");
+
+    let stdout = out.stdout().unwrap_or_default();
+    assert!(
+        !stdout.trim_end().ends_with("status=0"),
+        "expected curl to fail when the outer CONNECT header carries a protected placeholder; got: {stdout:?}"
+    );
+
+    let proxy_auth = proxy
+        .try_received_auth(std::time::Duration::from_secs(5))
+        .await
+        .unwrap_or_default();
+    assert!(
+        !proxy_auth.contains(PLACEHOLDER) && !proxy_auth.contains(REAL_SECRET),
+        "CONNECT proxy must not receive a raw placeholder or real secret in outer headers; got: {proxy_auth:?}"
+    );
+
     teardown(sb, name).await;
 }

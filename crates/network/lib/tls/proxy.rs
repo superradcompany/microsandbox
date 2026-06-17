@@ -47,6 +47,8 @@ pub(crate) struct TlsProxyContext {
     pub(crate) proxy_connect: Arc<ProxyConnectState>,
     /// Pre-connected upstream; when `Some`, skips dialing `connect_dst`.
     pub(crate) upstream_stream: Option<TcpStream>,
+    /// Hostname from a CONNECT authority that must match the ClientHello SNI.
+    pub(crate) expected_sni: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -78,6 +80,7 @@ pub fn spawn_tls_proxy(
             network_policy,
             proxy_connect,
             upstream_stream: None,
+            expected_sni: None,
         };
 
         if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp, Vec::new()).await {
@@ -101,6 +104,7 @@ pub(crate) async fn tls_proxy_task(
         network_policy,
         proxy_connect,
         upstream_stream,
+        expected_sni,
     } = context;
 
     // Buffer initial data to extract SNI from ClientHello. Timeout prevents a
@@ -115,6 +119,20 @@ pub(crate) async fn tls_proxy_task(
 
     // Canonicalize so byte equality against rule destinations works.
     let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
+
+    if let Some(expected) = expected_sni.as_deref()
+        && !sni_name.eq_ignore_ascii_case(expected.trim_end_matches('.'))
+    {
+        tracing::debug!(
+            sni = %sni_name,
+            expected = %expected,
+            dst = %connect_dst,
+            "TLS SNI did not match CONNECT authority",
+        );
+        proxy_connect.mark_policy_denied();
+        shared.proxy_wake.wake();
+        return Ok(());
+    }
 
     // Apply Domain / DomainSuffix rules against the SNI.
     let eval = network_policy.evaluate_egress_with_source(
