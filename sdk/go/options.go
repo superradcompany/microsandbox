@@ -479,7 +479,8 @@ type initFactory struct{}
 //	microsandbox.WithInit(microsandbox.Init.Cmd("/sbin/init", microsandbox.InitOptions{}))
 var Init initFactory
 
-// Auto delegates to agentd to probe common init paths.
+// Auto uses a known image ENTRYPOINT init when present, preserving attached
+// init-entrypoint commands, otherwise it delegates to agentd to probe common init paths.
 func (initFactory) Auto() InitConfig { return InitConfig{Cmd: "auto"} }
 
 // Cmd sets the init binary path with optional args/env.

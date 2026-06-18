@@ -966,7 +966,7 @@ class InitConfig:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| cmd | `str` | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| cmd | `str` | Absolute path or `"auto"` to the init binary. Auto honors known image ENTRYPOINT inits before probing common guest paths and preserves attached init-entrypoint commands |
 | args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
 | env | `dict[str, str]` | Extra env vars merged on top of the inherited env |
 

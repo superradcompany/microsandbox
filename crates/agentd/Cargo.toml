@@ -15,6 +15,7 @@ path = "bin/main.rs"
 path = "lib/lib.rs"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true

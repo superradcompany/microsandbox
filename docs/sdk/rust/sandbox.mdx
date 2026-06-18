@@ -537,7 +537,7 @@ fn init(self, cmd: impl Into<PathBuf>) -> Self
 
 Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
-`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"` (probes `/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`). For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
+`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`. Auto first honors a known init at the start of the image ENTRYPOINT, such as `/init` in s6-overlay images, then falls back to probing `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd` inside the guest. When attached `msb run` uses an image-declared init entrypoint, the remaining ENTRYPOINT plus CMD or trailing command is passed to that init instead of direct-executed through agentd. For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
 
 **Parameters**
 

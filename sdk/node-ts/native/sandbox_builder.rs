@@ -262,8 +262,10 @@ impl JsSandboxBuilder {
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// `cmd` is either an absolute path inside the guest rootfs or
-    /// the literal `"auto"`. `args` is the supplemental argv;
-    /// `argv[0]` is implicitly `cmd`. For env vars, use `initWith`.
+    /// the literal `"auto"`. Auto honors known image ENTRYPOINT inits,
+    /// preserves attached init-entrypoint commands, then probes common
+    /// guest paths. `args` is the supplemental argv; `argv[0]` is
+    /// implicitly `cmd`. For env vars, use `initWith`.
     #[napi]
     pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> &Self {
         let prev = self.take_inner();

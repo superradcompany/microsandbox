@@ -168,9 +168,10 @@ pub struct SandboxOpts {
     pub entrypoint: Option<String>,
 
     /// Hand off PID 1 to this init binary inside the guest after agentd
-    /// finishes setup. Use `auto` to probe `/sbin/init`,
-    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd` (first hit
-    /// wins), or supply an explicit absolute path.
+    /// finishes setup. Use `auto` to honor a known init at the start of
+    /// the image ENTRYPOINT (for example /init in s6-overlay images),
+    /// preserving attached init-entrypoint commands when needed, or to
+    /// probe common distro init paths when the image does not declare one.
     #[arg(long, value_name = "PATH|auto")]
     pub init: Option<String>,
 
