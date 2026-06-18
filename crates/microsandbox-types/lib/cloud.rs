@@ -1,14 +1,4 @@
-//! Wire types for the cloud backend's HTTP calls to msb-cloud.
-//!
-//! These mirror msb-cloud's `crates/msb-models/src/sandbox.rs` shape — name +
-//! field set + JSON serialisation must match byte-for-byte. The shared
-//! `task-config.golden.json` fixture on the msb-cloud side is the contract;
-//! drift breaks the contract test there.
-//!
-//! Duplicated here (rather than depending on msb-cloud crates) to keep
-//! microsandbox a single-repo build. If the duplication becomes painful, the
-//! candidate is extracting to a shared `microsandbox-protocol` crate that both
-//! projects pull in.
+//! Wire types for the cloud backend's HTTP calls.
 
 use std::collections::HashMap;
 
@@ -19,11 +9,9 @@ use serde::{Deserialize, Serialize};
 // Types: Request
 //--------------------------------------------------------------------------------------------------
 
-/// Wire shape of `POST /v1/sandboxes` request body.
-///
-/// **Must stay in sync** with msb-cloud's `CreateSandboxRequest` in
-/// `crates/msb-models/src/sandbox.rs`.
+/// Wire shape of a cloud sandbox create request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct CloudCreateSandboxRequest {
     /// User-facing sandbox name.
@@ -69,6 +57,108 @@ pub struct CloudCreateSandboxRequest {
     pub idle_timeout_secs: Option<u64>,
 }
 
+//--------------------------------------------------------------------------------------------------
+// Types: Response
+//--------------------------------------------------------------------------------------------------
+
+/// Wire shape of the cloud sandbox response returned by sandbox endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudSandbox {
+    /// Server-side UUID.
+    pub id: String,
+    /// Owning org's UUID.
+    pub org_id: String,
+    /// User-facing sandbox name.
+    pub name: String,
+    /// Current lifecycle status.
+    pub status: CloudSandboxStatus,
+    /// Create request stored by the cloud control plane.
+    pub config: CloudCreateSandboxRequest,
+    /// Whether the sandbox should be removed when its allocation terminates.
+    pub ephemeral: bool,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last start timestamp, when known.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Last stop timestamp, when known.
+    #[serde(default)]
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Last failure reason, when any.
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Sandbox lifecycle status returned by the cloud control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudSandboxStatus {
+    /// Created in the database but not yet started.
+    Created,
+    /// Start request has been submitted.
+    Starting,
+    /// Sandbox is running.
+    Running,
+    /// Stop request has been submitted.
+    Stopping,
+    /// Sandbox is stopped.
+    Stopped,
+    /// Sandbox failed.
+    Failed,
+}
+
+/// Wire shape of paginated list responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudPaginated<T> {
+    /// Page of response items.
+    pub data: Vec<T>,
+    /// Cursor for the next page, when one exists.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// Wire shape of the message response returned by mutation endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudMessageResponse {
+    /// Human-readable response message.
+    pub message: String,
+}
+
+/// Wire shape of the typed error body returned by cloud APIs on 4xx/5xx responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudErrorBody {
+    /// Flat machine-readable error code, when returned in this shape.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Flat human-readable error message, when returned in this shape.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Nested error object returned by the API error responder.
+    #[serde(default)]
+    pub error: Option<CloudErrorDetails>,
+}
+
+/// Nested cloud API error details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudErrorDetails {
+    /// Machine-readable error code.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Human-readable error message.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
 impl Default for CloudCreateSandboxRequest {
     fn default() -> Self {
         Self {
@@ -92,100 +182,6 @@ impl Default for CloudCreateSandboxRequest {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Response
-//--------------------------------------------------------------------------------------------------
-
-/// Wire shape of the `Sandbox` response from msb-cloud — what every sandbox
-/// endpoint returns. Mirrors msb-cloud's `Sandbox` model with `skip_serializing`
-/// fields excluded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudSandbox {
-    /// Server-side UUID (as a string — avoids pulling in the `uuid` crate here).
-    pub id: String,
-    /// Owning org's UUID (as a string).
-    pub org_id: String,
-    /// User-facing sandbox name.
-    pub name: String,
-    /// Current lifecycle status.
-    pub status: CloudSandboxStatus,
-    /// Create request stored by msb-cloud.
-    pub config: CloudCreateSandboxRequest,
-    /// Whether the sandbox should be removed when its allocation terminates.
-    pub ephemeral: bool,
-    /// Creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// Last start timestamp, when known.
-    #[serde(default)]
-    pub started_at: Option<DateTime<Utc>>,
-    /// Last stop timestamp, when known.
-    #[serde(default)]
-    pub stopped_at: Option<DateTime<Utc>>,
-    /// Last failure reason, when any.
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-/// Sandbox lifecycle status — must match msb-cloud's `SandboxStatus` enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CloudSandboxStatus {
-    /// Created in the database but not yet started.
-    Created,
-    /// Start request has been submitted.
-    Starting,
-    /// Sandbox is running.
-    Running,
-    /// Stop request has been submitted.
-    Stopping,
-    /// Sandbox is stopped.
-    Stopped,
-    /// Sandbox failed.
-    Failed,
-}
-
-/// Wire shape of paginated list responses: `{ data: [...], next_cursor: "..." }`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudPaginated<T> {
-    /// Page of response items.
-    pub data: Vec<T>,
-    /// Cursor for the next page, when one exists.
-    #[serde(default)]
-    pub next_cursor: Option<String>,
-}
-
-/// Wire shape of the `MessageResponse` returned by `DELETE` endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudMessageResponse {
-    /// Human-readable response message.
-    pub message: String,
-}
-
-/// Wire shape of the typed error body msb-cloud returns on 4xx/5xx.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudErrorBody {
-    /// Flat machine-readable error code, when returned in this shape.
-    #[serde(default)]
-    pub code: Option<String>,
-    /// Flat human-readable error message, when returned in this shape.
-    #[serde(default)]
-    pub message: Option<String>,
-    /// Nested error object returned by msb-cloud's `ApiError` responder.
-    #[serde(default)]
-    pub error: Option<CloudErrorDetails>,
-}
-
-/// Nested msb-cloud API error details.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudErrorDetails {
-    /// Machine-readable error code.
-    #[serde(default)]
-    pub code: Option<String>,
-    /// Human-readable error message.
-    #[serde(default)]
-    pub message: Option<String>,
-}
-
-//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -201,13 +197,11 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&req).unwrap();
-        // Required fields present.
         assert_eq!(json["name"], "agent-1");
         assert_eq!(json["image"], "python:3.12");
         assert_eq!(json["vcpus"], 1);
         assert_eq!(json["memory_mib"], 512);
         assert_eq!(json["ephemeral"], true);
-        // Optional fields elided when unset.
         assert!(json.get("workdir").is_none());
         assert!(json.get("entrypoint").is_none());
         assert!(json.get("max_duration_secs").is_none());

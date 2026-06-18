@@ -958,48 +958,6 @@ impl SandboxBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Maximum length of a sandbox name.
-/// Must stay in sync with msb-cloud's `MAX_SANDBOX_NAME_LEN` in `msb-api/src/validators/sandbox.rs`.
-const MAX_SANDBOX_NAME_LEN: usize = 128;
-
-/// Validate that a sandbox name is safe: alphanumeric / dot / hyphen / underscore,
-/// 1..=128 chars, must start alphanumeric.
-///
-/// **Must stay in sync with msb-cloud's `validate_sandbox_name`.** The rule lives
-/// in two places; if it changes here, change it there too.
-pub fn validate_sandbox_name(name: &str) -> MicrosandboxResult<()> {
-    if name.is_empty() {
-        return Err(crate::MicrosandboxError::InvalidConfig(
-            "sandbox name must not be empty".into(),
-        ));
-    }
-    if name.len() > MAX_SANDBOX_NAME_LEN {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "sandbox name must be at most {MAX_SANDBOX_NAME_LEN} characters: got {}",
-            name.len()
-        )));
-    }
-    let first_alphanumeric = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric());
-    let charset_ok = name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
-
-    if !first_alphanumeric || !charset_ok {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "sandbox name must start with an alphanumeric and contain only \
-             alphanumeric, dots, hyphens, and underscores: {name}"
-        )));
-    }
-    Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -1532,8 +1490,6 @@ mod tests {
     // Sandbox name validation
     //----------------------------------------------------------------------------------------------
 
-    use super::{MAX_SANDBOX_NAME_LEN, validate_sandbox_name};
-
     #[test]
     fn sandbox_name_accepts_typical() {
         for name in [
@@ -1549,7 +1505,7 @@ mod tests {
             "my.app_2026",
         ] {
             assert!(
-                validate_sandbox_name(name).is_ok(),
+                crate::sandbox::validate_sandbox_name(name).is_ok(),
                 "expected {name:?} to be accepted"
             );
         }
@@ -1557,19 +1513,19 @@ mod tests {
 
     #[test]
     fn sandbox_name_rejects_empty() {
-        assert!(validate_sandbox_name("").is_err());
+        assert!(crate::sandbox::validate_sandbox_name("").is_err());
     }
 
     #[test]
     fn sandbox_name_rejects_too_long() {
-        let long = "a".repeat(MAX_SANDBOX_NAME_LEN + 1);
-        assert!(validate_sandbox_name(&long).is_err());
+        let long = "a".repeat(MAX_SANDBOX_NAME_BYTES + 1);
+        assert!(crate::sandbox::validate_sandbox_name(&long).is_err());
     }
 
     #[test]
     fn sandbox_name_accepts_at_max_length() {
-        let max = "a".repeat(MAX_SANDBOX_NAME_LEN);
-        assert!(validate_sandbox_name(&max).is_ok());
+        let max = "a".repeat(MAX_SANDBOX_NAME_BYTES);
+        assert!(crate::sandbox::validate_sandbox_name(&max).is_ok());
     }
 
     #[test]
@@ -1578,7 +1534,7 @@ mod tests {
             "foo bar", "foo/bar", "foo:bar", "foo!", "foo@bar", "foo#1", "✨",
         ] {
             assert!(
-                validate_sandbox_name(name).is_err(),
+                crate::sandbox::validate_sandbox_name(name).is_err(),
                 "expected {name:?} to be rejected"
             );
         }
@@ -1588,7 +1544,7 @@ mod tests {
     fn sandbox_name_rejects_non_alphanumeric_start() {
         for name in [".foo", "-foo", "_foo"] {
             assert!(
-                validate_sandbox_name(name).is_err(),
+                crate::sandbox::validate_sandbox_name(name).is_err(),
                 "expected {name:?} to be rejected (non-alphanumeric start)"
             );
         }

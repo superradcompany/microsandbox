@@ -10,6 +10,7 @@ members = [
     "crates/metrics",
     "crates/metrics-collector",
     "crates/microsandbox",
+    "crates/microsandbox-types",
     "crates/migration",
     "crates/protocol",
     "crates/runtime",
@@ -66,6 +67,7 @@ microsandbox-db = { version = "0.5.7", path = "crates/db" }
 microsandbox-filesystem = { version = "0.5.7", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "0.5.7", path = "crates/image" }
 microsandbox-metrics = { version = "0.5.7", path = "crates/metrics" }
+microsandbox-types = { version = "0.5.7", path = "crates/microsandbox-types" }
 microsandbox-migration = { version = "0.5.7", path = "crates/migration" }
 microsandbox-network = { version = "0.5.7", path = "crates/network" }
 microsandbox-protocol = { version = "0.5.7", path = "crates/protocol" }
@@ -125,6 +127,7 @@ tokio-tungstenite = "0.29.0"
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ts-rs = "12.0.1"
 typed-builder = "0.23"
 which = "8"
 xattr = "1.3"

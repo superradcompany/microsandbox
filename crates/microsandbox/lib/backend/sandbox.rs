@@ -17,7 +17,6 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use futures::future::BoxFuture;
 
-use super::cloud_wire::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
 use super::{Backend, CloudBackend, LocalBackend};
 use crate::agent::AgentClient;
 use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
@@ -29,6 +28,7 @@ use crate::sandbox::{
     OciRootfsSource, RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
+use microsandbox_types::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Type Aliases
