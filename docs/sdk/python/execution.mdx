@@ -136,6 +136,9 @@ Metrics snapshot for a running sandbox.
 | disk_write_bytes | `int` | Total bytes written to disk |
 | net_rx_bytes | `int` | Total bytes received over the network |
 | net_tx_bytes | `int` | Total bytes sent over the network |
+| upper_used_bytes | `int \| None` | Guest-visible OCI upper filesystem used bytes when the protected reporter is available and fresh |
+| upper_free_bytes | `int \| None` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
+| upper_host_allocated_bytes | `int \| None` | Host-allocated bytes for the writable OCI upper image when available |
 | uptime_ms | `int` | Sandbox uptime in milliseconds |
 | timestamp_ms | `float` | Timestamp of the snapshot in milliseconds |
 

@@ -206,7 +206,7 @@ chance to flush.
 async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics>
 ```
 
-Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, and uptime.
+Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, optional upper disk usage, and uptime.
 
 **Returns**
 
@@ -1218,6 +1218,9 @@ Point-in-time resource usage snapshot.
 | memory_limit_bytes | `u64` | Memory limit in bytes |
 | net_rx_bytes | `u64` | Total bytes received over the network since boot |
 | net_tx_bytes | `u64` | Total bytes sent over the network since boot |
+| upper_used_bytes | `Option<u64>` | Guest-visible OCI upper filesystem used bytes when the protected reporter is available and fresh |
+| upper_free_bytes | `Option<u64>` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
+| upper_host_allocated_bytes | `Option<u64>` | Host-allocated bytes for the writable OCI upper image when available |
 | timestamp | `DateTime<Utc>` | When this measurement was taken |
 | uptime | `Duration` | Time since the sandbox was created |
 

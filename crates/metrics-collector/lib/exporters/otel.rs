@@ -40,10 +40,10 @@
 //! - `sandbox.run_id`  — opt-in (high cardinality across sandbox restarts)
 //! - `sandbox.pid`     — opt-in (high cardinality across sandbox restarts)
 
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
-use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider};
+use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider, ObservableGauge};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
     Compression, MetricExporter as OtlpMetricExporter, Protocol, WithExportConfig, WithTonicConfig,
@@ -143,11 +143,28 @@ struct Instruments {
     disk_bytes_written: Gauge<u64>,
     network_bytes_received: Gauge<u64>,
     network_bytes_sent: Gauge<u64>,
-    upper_used: Gauge<u64>,
-    upper_free: Gauge<u64>,
-    upper_host_allocated: Gauge<u64>,
+    upper_observations: UpperMetricObservations,
+    _upper_used: ObservableGauge<u64>,
+    _upper_free: ObservableGauge<u64>,
+    _upper_host_allocated: ObservableGauge<u64>,
     uptime: Gauge<f64>,
 }
+
+#[derive(Clone, Debug)]
+struct UpperMetricObservation {
+    value: u64,
+    attrs: Vec<KeyValue>,
+}
+
+#[derive(Default, Debug)]
+struct UpperMetricObservationSet {
+    used: Vec<UpperMetricObservation>,
+    free: Vec<UpperMetricObservation>,
+    host_allocated: Vec<UpperMetricObservation>,
+}
+
+#[derive(Clone, Default, Debug)]
+struct UpperMetricObservations(Arc<Mutex<UpperMetricObservationSet>>);
 
 /// Instruments describing the collector's own operation, shipped through
 /// the same OTLP pipeline so a user can query
@@ -225,6 +242,81 @@ impl OtelExporter {
     /// Create a new builder.
     pub fn builder() -> OtelExporterBuilder {
         OtelExporterBuilder::default()
+    }
+}
+
+impl Instruments {
+    fn clear_upper_observations(&self) {
+        self.upper_observations.clear();
+    }
+}
+
+impl UpperMetricObservations {
+    fn clear(&self) {
+        let mut observations = self
+            .0
+            .lock()
+            .expect("upper metric observations lock poisoned");
+        observations.used.clear();
+        observations.free.clear();
+        observations.host_allocated.clear();
+    }
+
+    fn push_used(&self, value: u64, attrs: &[KeyValue]) {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .used
+            .push(UpperMetricObservation {
+                value,
+                attrs: attrs.to_vec(),
+            });
+    }
+
+    fn push_free(&self, value: u64, attrs: &[KeyValue]) {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .free
+            .push(UpperMetricObservation {
+                value,
+                attrs: attrs.to_vec(),
+            });
+    }
+
+    fn push_host_allocated(&self, value: u64, attrs: &[KeyValue]) {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .host_allocated
+            .push(UpperMetricObservation {
+                value,
+                attrs: attrs.to_vec(),
+            });
+    }
+
+    fn used(&self) -> Vec<UpperMetricObservation> {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .used
+            .clone()
+    }
+
+    fn free(&self) -> Vec<UpperMetricObservation> {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .free
+            .clone()
+    }
+
+    fn host_allocated(&self) -> Vec<UpperMetricObservation> {
+        self.0
+            .lock()
+            .expect("upper metric observations lock poisoned")
+            .host_allocated
+            .clone()
     }
 }
 
@@ -370,6 +462,7 @@ impl MetricsExporter for OtelExporter {
         }
 
         if batch.collections.is_empty() {
+            self.instruments.clear_upper_observations();
             let result = export_recorded_metrics(&self.reader, &self.otlp).await;
             record_export_outcome(&self.self_instruments, &result);
             return result;
@@ -379,6 +472,7 @@ impl MetricsExporter for OtelExporter {
         // one collection at a time so a buffered flush preserves every collected
         // sample instead of collapsing to the final value.
         for collection in &batch.collections {
+            self.instruments.clear_upper_observations();
             for snapshot in &collection.sandboxes {
                 let labels = collection.labels.get(&snapshot.sandbox_id);
                 let attrs =
@@ -387,6 +481,7 @@ impl MetricsExporter for OtelExporter {
             }
 
             let result = export_recorded_metrics(&self.reader, &self.otlp).await;
+            self.instruments.clear_upper_observations();
             record_export_outcome(&self.self_instruments, &result);
             result?;
         }
@@ -574,6 +669,11 @@ fn build_self_instruments(meter: &Meter) -> SelfInstruments {
 
 /// Build the bundle of instruments from the meter.
 fn build_instruments(meter: &Meter) -> Instruments {
+    let upper_observations = UpperMetricObservations::default();
+    let upper_used_observations = upper_observations.clone();
+    let upper_free_observations = upper_observations.clone();
+    let upper_host_allocated_observations = upper_observations.clone();
+
     Instruments {
         cpu_utilization: meter
             .f64_gauge("microsandbox.cpu.utilization")
@@ -616,22 +716,38 @@ fn build_instruments(meter: &Meter) -> Instruments {
             )
             .with_unit("By")
             .build(),
-        upper_used: meter
-            .u64_gauge("microsandbox.upper.used")
+        upper_observations,
+        _upper_used: meter
+            .u64_observable_gauge("microsandbox.upper.used")
             .with_description("Guest-visible used bytes on the OCI upper filesystem")
             .with_unit("By")
+            .with_callback(move |observer| {
+                for observation in upper_used_observations.used() {
+                    observer.observe(observation.value, &observation.attrs);
+                }
+            })
             .build(),
-        upper_free: meter
-            .u64_gauge("microsandbox.upper.free")
+        _upper_free: meter
+            .u64_observable_gauge("microsandbox.upper.free")
             .with_description(
                 "Guest-visible bytes available to ordinary allocation on the OCI upper filesystem",
             )
             .with_unit("By")
+            .with_callback(move |observer| {
+                for observation in upper_free_observations.free() {
+                    observer.observe(observation.value, &observation.attrs);
+                }
+            })
             .build(),
-        upper_host_allocated: meter
-            .u64_gauge("microsandbox.upper.host_allocated")
+        _upper_host_allocated: meter
+            .u64_observable_gauge("microsandbox.upper.host_allocated")
             .with_description("Host-allocated bytes for the writable upper image")
             .with_unit("By")
+            .with_callback(move |observer| {
+                for observation in upper_host_allocated_observations.host_allocated() {
+                    observer.observe(observation.value, &observation.attrs);
+                }
+            })
             .build(),
         uptime: meter
             .f64_gauge("microsandbox.uptime")
@@ -696,13 +812,15 @@ fn record_snapshot(
         .record(m.net_rx_bytes, attrs);
     instruments.network_bytes_sent.record(m.net_tx_bytes, attrs);
     if let Some(bytes) = m.upper_used_bytes {
-        instruments.upper_used.record(bytes, attrs);
+        instruments.upper_observations.push_used(bytes, attrs);
     }
     if let Some(bytes) = m.upper_free_bytes {
-        instruments.upper_free.record(bytes, attrs);
+        instruments.upper_observations.push_free(bytes, attrs);
     }
     if let Some(bytes) = m.upper_host_allocated_bytes {
-        instruments.upper_host_allocated.record(bytes, attrs);
+        instruments
+            .upper_observations
+            .push_host_allocated(bytes, attrs);
     }
     instruments.uptime.record(m.uptime.as_secs_f64(), attrs);
 }
@@ -716,6 +834,7 @@ mod tests {
     use std::time::Duration;
 
     use microsandbox_metrics::SandboxMetrics;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 
     use super::*;
 
@@ -752,6 +871,32 @@ mod tests {
             .collect()
     }
 
+    fn test_reader() -> (SdkMeterProvider, SharedManualReader, Instruments) {
+        let reader = SharedManualReader(Arc::new(
+            ManualReader::builder()
+                .with_temporality(Temporality::Cumulative)
+                .build(),
+        ));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let meter = provider.meter("microsandbox-test");
+        let instruments = build_instruments(&meter);
+
+        (provider, reader, instruments)
+    }
+
+    fn upper_metric_point_count(rm: &ResourceMetrics, metric_name: &str) -> usize {
+        rm.scope_metrics()
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == metric_name)
+            .map(|metric| match metric.data() {
+                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge.data_points().count(),
+                _ => panic!("{metric_name} should be a u64 gauge"),
+            })
+            .sum()
+    }
+
     #[test]
     fn labels_become_datapoint_attributes() {
         let labels = [
@@ -779,6 +924,52 @@ mod tests {
             with_none
                 .iter()
                 .all(|kv| kv.key.as_str().starts_with("sandbox."))
+        );
+    }
+
+    #[test]
+    fn optional_upper_metrics_do_not_survive_absent_collection() {
+        let (_provider, reader, instruments) = test_reader();
+        let attrs = build_attributes(&snapshot(), &IdentityAttributes::default(), None);
+
+        record_snapshot(&instruments, &snapshot(), &attrs);
+        let mut with_upper = ResourceMetrics::default();
+        reader.collect(&mut with_upper).expect("collect with upper");
+        assert_eq!(
+            upper_metric_point_count(&with_upper, "microsandbox.upper.used"),
+            1
+        );
+        assert_eq!(
+            upper_metric_point_count(&with_upper, "microsandbox.upper.free"),
+            1
+        );
+        assert_eq!(
+            upper_metric_point_count(&with_upper, "microsandbox.upper.host_allocated"),
+            1
+        );
+
+        let mut absent = snapshot();
+        absent.metrics.upper_used_bytes = None;
+        absent.metrics.upper_free_bytes = None;
+        absent.metrics.upper_host_allocated_bytes = None;
+        instruments.clear_upper_observations();
+        record_snapshot(&instruments, &absent, &attrs);
+
+        let mut without_upper = ResourceMetrics::default();
+        reader
+            .collect(&mut without_upper)
+            .expect("collect without upper");
+        assert_eq!(
+            upper_metric_point_count(&without_upper, "microsandbox.upper.used"),
+            0
+        );
+        assert_eq!(
+            upper_metric_point_count(&without_upper, "microsandbox.upper.free"),
+            0
+        );
+        assert_eq!(
+            upper_metric_point_count(&without_upper, "microsandbox.upper.host_allocated"),
+            0
         );
     }
 }

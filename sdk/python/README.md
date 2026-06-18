@@ -19,7 +19,7 @@ The `microsandbox` Python package provides native bindings to the [microsandbox]
 - **Port publishing** — Expose guest TCP/UDP services on host ports
 - **Rootfs patches** — Modify the filesystem before the VM boots
 - **Detached mode** — Sandboxes can outlive the Python process
-- **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
+- **Metrics** — CPU, memory, disk I/O, network I/O, and optional upper disk usage per sandbox
 - **Typed** — Frozen dataclasses, `StrEnum`s, event objects, `.pyi` stubs
 
 ## Requirements

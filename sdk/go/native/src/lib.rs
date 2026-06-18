@@ -4323,24 +4323,11 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
             let map = all_sandbox_metrics(local).await.map_err(FfiError::from)?;
-            let mut entries = String::new();
-            for (name, m) in &map {
-                if !entries.is_empty() {
-                    entries.push(',');
-                }
-                entries.push_str(&format!(
-                    r#""{name}":{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                    cpu = m.cpu_percent,
-                    mem = m.memory_bytes,
-                    lim = m.memory_limit_bytes,
-                    dr  = m.disk_read_bytes,
-                    dw  = m.disk_write_bytes,
-                    rx  = m.net_rx_bytes,
-                    tx  = m.net_tx_bytes,
-                    up  = m.uptime.as_secs(),
-                ));
+            let mut sandboxes = serde_json::Map::with_capacity(map.len());
+            for (name, metrics) in &map {
+                sandboxes.insert(name.clone(), metrics_json(metrics));
             }
-            Ok(format!(r#"{{"sandboxes":{{{entries}}}}}"#))
+            Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
         }))
     })
 }
