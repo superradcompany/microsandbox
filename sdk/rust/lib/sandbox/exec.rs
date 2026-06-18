@@ -10,6 +10,7 @@ use microsandbox_protocol::{
 use tokio::sync::mpsc;
 
 use crate::{MicrosandboxResult, agent::AgentClient};
+use microsandbox_types::EnvVar;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,7 +29,7 @@ pub struct ExecOptions {
     pub user: Option<String>,
 
     /// Environment variables (merged with sandbox env).
-    pub env: Vec<(String, String)>,
+    pub env: Vec<EnvVar>,
 
     /// Execution timeout. On expiry, SIGKILL is sent.
     pub timeout: Option<Duration>,
@@ -182,7 +183,7 @@ impl ExecOptionsBuilder {
     /// Set an environment variable for this command. Merged on top of
     /// the sandbox-level env vars.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.options.env.push((key.into(), value.into()));
+        self.options.env.push(EnvVar::new(key, value));
         self
     }
 
@@ -193,7 +194,7 @@ impl ExecOptionsBuilder {
     ) -> Self {
         self.options
             .env
-            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+            .extend(vars.into_iter().map(|(key, value)| EnvVar::new(key, value)));
         self
     }
 

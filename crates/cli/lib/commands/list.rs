@@ -101,7 +101,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 fn extract_image(config_json: &str) -> String {
     serde_json::from_str::<SandboxConfig>(config_json)
         .ok()
-        .map(|c| match c.image {
+        .map(|c| match c.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(ref oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(ref p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { ref path, .. } => {

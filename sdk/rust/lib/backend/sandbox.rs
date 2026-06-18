@@ -28,7 +28,10 @@ use crate::sandbox::{
     OciRootfsSource, RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_types::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
+use microsandbox_types::{
+    CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus, EnvVar, SandboxPolicy,
+    SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Type Aliases
@@ -1084,69 +1087,52 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
 /// `Sandbox` for a sandbox the cloud created earlier).
 ///
 /// Maps every field that exists on the cloud wire shape
-/// ([`CloudCreateSandboxRequest`]). Fields with no cloud counterpart are
-/// filled from [`SandboxConfig::default()`] via the `..Default::default()`
-/// spread — see inline comments for the synthesized defaults so a caller
-/// inspecting `sb.config()` after `Sandbox::start(name)` can reason about
-/// which fields are "live" vs. "synthesized stub".
+/// ([`CloudCreateSandboxRequest`]) into the shared [`SandboxSpec`]. Fields
+/// with no cloud counterpart are filled from [`SandboxConfig::default()`], so
+/// a caller inspecting `sb.config()` after `Sandbox::start(name)` can reason
+/// about which fields are "live" vs. "synthesized stub".
 fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
-    let mut config = SandboxConfig {
-        // --- Mapped from cloud wire (CloudCreateSandboxRequest) ---
+    let spec = SandboxSpec {
         name: cloud.config.name.clone(),
         image: RootfsSource::Oci(OciRootfsSource {
             reference: cloud.config.image.clone(),
             upper_size_mib: None,
         }),
-        cpus: cloud.config.vcpus,
-        memory_mib: cloud.config.memory_mib,
-        env: cloud.config.env.clone().into_iter().collect(),
-        workdir: cloud.config.workdir.clone(),
-        shell: cloud.config.shell.clone(),
-        entrypoint: cloud.config.entrypoint.clone(),
-        hostname: cloud.config.hostname.clone(),
-        user: cloud.config.user.clone(),
-        scripts: cloud.config.scripts.clone(),
-        log_level: cloud
+        resources: SandboxResources {
+            cpus: cloud.config.vcpus,
+            memory_mib: cloud.config.memory_mib,
+        },
+        runtime: SandboxRuntimeOptions {
+            workdir: cloud.config.workdir.clone(),
+            shell: cloud.config.shell.clone(),
+            scripts: cloud.config.scripts.clone().into_iter().collect(),
+            entrypoint: cloud.config.entrypoint.clone(),
+            hostname: cloud.config.hostname.clone(),
+            user: cloud.config.user.clone(),
+            log_level: cloud
+                .config
+                .log_level
+                .as_deref()
+                .and_then(|level| level.parse().ok()),
+            ..Default::default()
+        },
+        env: cloud
             .config
-            .log_level
-            .as_deref()
-            .and_then(cloud_log_level_to_local),
-        // --- Synthesized defaults: no cloud counterpart yet ---
-        // The fields below are filled from `SandboxConfig::default()` via the
-        // `..Default::default()` spread because the cloud wire shape doesn't
-        // carry them (D13). Surfacing them as defaults rather than panicking
-        // keeps `sb.config()` total, but callers should not treat these as
-        // authoritative for a cloud sandbox:
-        //   - metrics_sample_interval_ms / disable_metrics_sample (cloud
-        //     metrics are not yet exposed through the SDK config surface)
-        //   - mounts / patches / rlimits (cloud volumes deferred)
-        //   - cmd (cloud cmd override deferred)
-        //   - init (cloud handoff init deferred)
-        //   - pull_policy / registry_auth / insecure / ca_certs (cloud
-        //     manages image pulls server-side)
-        //   - replace_existing / replace_with_grace (operation flags, not
-        //     persisted state)
-        //   - network (cloud networking deferred)
+            .env
+            .clone()
+            .into_iter()
+            .map(|(key, value)| EnvVar::new(key, value))
+            .collect(),
+        lifecycle: SandboxPolicy {
+            max_duration_secs: cloud.config.max_duration_secs,
+            idle_timeout_secs: cloud.config.idle_timeout_secs,
+        },
         ..Default::default()
     };
-    // policy lives in a sub-struct; spread above seeded a default policy,
-    // overlay the two timeout fields the cloud DOES expose.
-    config.policy.max_duration_secs = cloud.config.max_duration_secs;
-    config.policy.idle_timeout_secs = cloud.config.idle_timeout_secs;
-    config
-}
 
-/// Parse the cloud wire `log_level` string back into a local [`LogLevel`].
-/// Unknown values map to `None` — better to drop than to misclassify.
-fn cloud_log_level_to_local(level: &str) -> Option<microsandbox_runtime::logging::LogLevel> {
-    use microsandbox_runtime::logging::LogLevel;
-    match level {
-        "error" => Some(LogLevel::Error),
-        "warn" => Some(LogLevel::Warn),
-        "info" => Some(LogLevel::Info),
-        "debug" => Some(LogLevel::Debug),
-        "trace" => Some(LogLevel::Trace),
-        _ => None,
+    SandboxConfig {
+        spec,
+        ..Default::default()
     }
 }
 
@@ -1164,12 +1150,12 @@ pub(super) fn cloud_create_request_from_config(
         "when cloud volumes ship",
     )?;
     reject_cloud_deferred(
-        !config.rlimits.is_empty(),
+        !config.spec.rlimits.is_empty(),
         "rlimits",
         "when rlimits land on the cloud API",
     )?;
     reject_cloud_deferred(
-        config.cmd.is_some(),
+        config.spec.runtime.cmd.is_some(),
         "cmd",
         "when cmd lands on the cloud API",
     )?;
@@ -1222,7 +1208,17 @@ pub(super) fn cloud_create_request_from_config(
         )?;
     }
 
-    let image = match config.image {
+    let SandboxSpec {
+        name,
+        image,
+        resources,
+        runtime,
+        env,
+        lifecycle,
+        ..
+    } = config.spec;
+
+    let image = match image {
         RootfsSource::Oci(image) => image.reference,
         RootfsSource::Bind(_) => {
             return Err(unsupported(
@@ -1236,21 +1232,21 @@ pub(super) fn cloud_create_request_from_config(
     };
 
     Ok(CloudCreateSandboxRequest {
-        name: config.name,
+        name,
         image,
-        vcpus: config.cpus,
-        memory_mib: config.memory_mib,
-        env: config.env.into_iter().collect(),
+        vcpus: resources.cpus,
+        memory_mib: resources.memory_mib,
+        env: env.into_iter().map(Into::into).collect(),
         ephemeral: true,
-        workdir: config.workdir,
-        shell: config.shell,
-        entrypoint: config.entrypoint,
-        hostname: config.hostname,
-        user: config.user,
-        log_level: config.log_level.map(log_level_to_cloud),
-        scripts: config.scripts,
-        max_duration_secs: config.policy.max_duration_secs,
-        idle_timeout_secs: config.policy.idle_timeout_secs,
+        workdir: runtime.workdir,
+        shell: runtime.shell,
+        entrypoint: runtime.entrypoint,
+        hostname: runtime.hostname,
+        user: runtime.user,
+        log_level: runtime.log_level.map(|level| level.as_str().to_string()),
+        scripts: runtime.scripts.into_iter().collect(),
+        max_duration_secs: lifecycle.max_duration_secs,
+        idle_timeout_secs: lifecycle.idle_timeout_secs,
     })
 }
 
@@ -1291,17 +1287,6 @@ fn unsupported_metrics(feature: &'static str) -> MicrosandboxError {
         feature: feature.into(),
         available_when: "when cloud metrics land".into(),
     }
-}
-
-fn log_level_to_cloud(level: microsandbox_runtime::logging::LogLevel) -> String {
-    match level {
-        microsandbox_runtime::logging::LogLevel::Error => "error",
-        microsandbox_runtime::logging::LogLevel::Warn => "warn",
-        microsandbox_runtime::logging::LogLevel::Info => "info",
-        microsandbox_runtime::logging::LogLevel::Debug => "debug",
-        microsandbox_runtime::logging::LogLevel::Trace => "trace",
-    }
-    .to_string()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1345,11 +1330,14 @@ mod tests {
     #[tokio::test]
     async fn cloud_create_request_rejects_disk_image_rootfs() {
         let config = SandboxConfig {
-            name: "agent-1".into(),
-            image: RootfsSource::DiskImage {
-                path: "rootfs.img".into(),
-                format: crate::sandbox::DiskImageFormat::Raw,
-                fstype: None,
+            spec: SandboxSpec {
+                name: "agent-1".into(),
+                image: RootfsSource::DiskImage {
+                    path: "rootfs.img".into(),
+                    format: crate::sandbox::DiskImageFormat::Raw,
+                    fstype: None,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1363,11 +1351,14 @@ mod tests {
     /// the resulting request errors with `Unsupported`.
     fn base_cloud_config() -> SandboxConfig {
         SandboxConfig {
-            name: "agent-1".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
-                reference: "python:3.12".into(),
-                upper_size_mib: None,
-            }),
+            spec: SandboxSpec {
+                name: "agent-1".into(),
+                image: RootfsSource::Oci(OciRootfsSource {
+                    reference: "python:3.12".into(),
+                    upper_size_mib: None,
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1481,31 +1472,36 @@ mod tests {
 
         let config = sandbox_config_from_cloud(&cloud);
 
-        assert_eq!(config.name, "agent-1");
-        assert!(matches!(config.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12"));
-        assert_eq!(config.cpus, 4);
-        assert_eq!(config.memory_mib, 2048);
+        assert_eq!(config.spec.name, "agent-1");
+        assert!(
+            matches!(config.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12")
+        );
+        assert_eq!(config.spec.resources.cpus, 4);
+        assert_eq!(config.spec.resources.memory_mib, 2048);
         assert_eq!(
-            config.env,
-            vec![("A".to_string(), "B".to_string())],
+            config.spec.env,
+            vec![EnvVar::new("A", "B")],
             "env round-trip"
         );
-        assert_eq!(config.workdir.as_deref(), Some("/app"));
-        assert_eq!(config.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(
-            config.entrypoint,
+            config.spec.runtime.entrypoint,
             Some(vec!["python".to_string(), "-u".to_string()])
         );
-        assert_eq!(config.hostname.as_deref(), Some("worker"));
-        assert_eq!(config.user.as_deref(), Some("appuser"));
+        assert_eq!(config.spec.runtime.hostname.as_deref(), Some("worker"));
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
         assert_eq!(
-            config.log_level,
-            Some(microsandbox_runtime::logging::LogLevel::Debug),
+            config.spec.runtime.log_level,
+            Some(microsandbox_types::SandboxLogLevel::Debug),
             "log_level should round-trip via string mapping",
         );
-        assert_eq!(config.scripts.get("setup"), Some(&"echo hi".to_string()));
-        assert_eq!(config.policy.max_duration_secs, Some(3600));
-        assert_eq!(config.policy.idle_timeout_secs, Some(600));
+        assert_eq!(
+            config.spec.runtime.scripts.get("setup"),
+            Some(&"echo hi".to_string())
+        );
+        assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
+        assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(600));
     }
 
     #[test]
@@ -1530,7 +1526,7 @@ mod tests {
 
         let config = sandbox_config_from_cloud(&cloud);
         assert!(
-            config.log_level.is_none(),
+            config.spec.runtime.log_level.is_none(),
             "unknown log_level should map to None"
         );
     }

@@ -1,5 +1,7 @@
 //! Interactive attach types for terminal bridging with sandboxes.
 
+use microsandbox_types::EnvVar;
+
 use crate::MicrosandboxResult;
 
 use super::exec::Rlimit;
@@ -19,7 +21,7 @@ pub struct AttachOptions {
     pub(crate) args: Vec<String>,
 
     /// Environment variables (merged with sandbox env).
-    pub(crate) env: Vec<(String, String)>,
+    pub(crate) env: Vec<EnvVar>,
 
     /// Working directory (default: sandbox's workdir).
     pub(crate) cwd: Option<String>,
@@ -83,7 +85,7 @@ impl AttachOptionsBuilder {
     /// Set an environment variable for the attached session. Merged on
     /// top of sandbox-level env vars.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.options.env.push((key.into(), value.into()));
+        self.options.env.push(EnvVar::new(key, value));
         self
     }
 
@@ -94,7 +96,7 @@ impl AttachOptionsBuilder {
     ) -> Self {
         self.options
             .env
-            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+            .extend(vars.into_iter().map(|(key, value)| EnvVar::new(key, value)));
         self
     }
 

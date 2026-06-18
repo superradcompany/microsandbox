@@ -1,9 +1,23 @@
 //! Shared sandbox domain types.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Default number of virtual CPUs in a sandbox specification.
+pub const DEFAULT_SANDBOX_CPUS: u8 = 1;
+
+/// Default guest memory in MiB in a sandbox specification.
+pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
+
+/// Default metrics sampling interval in milliseconds.
+pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
@@ -146,6 +160,125 @@ pub struct SandboxPolicy {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Sandbox Specs
+//--------------------------------------------------------------------------------------------------
+
+/// Backend-neutral sandbox task description.
+///
+/// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct SandboxSpec {
+    /// Unique sandbox name.
+    pub name: String,
+
+    /// Root filesystem source.
+    pub image: RootfsSource,
+
+    /// CPU and memory resources.
+    pub resources: SandboxResources,
+
+    /// Guest runtime options.
+    pub runtime: SandboxRuntimeOptions,
+
+    /// Environment variables visible to commands in the sandbox.
+    pub env: Vec<EnvVar>,
+
+    /// User-defined labels attached to the sandbox.
+    pub labels: BTreeMap<String, String>,
+
+    /// Sandbox-wide resource limits inherited by guest processes.
+    pub rlimits: Vec<Rlimit>,
+
+    /// In-guest security profile.
+    pub security_profile: SecurityProfile,
+
+    /// Sandbox lifecycle policy.
+    pub lifecycle: SandboxPolicy,
+}
+
+/// CPU and memory resources for a sandbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct SandboxResources {
+    /// Number of virtual CPUs.
+    pub cpus: u8,
+
+    /// Guest memory in MiB.
+    pub memory_mib: u32,
+}
+
+/// Guest runtime options for a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct SandboxRuntimeOptions {
+    /// Working directory inside the guest.
+    pub workdir: Option<String>,
+
+    /// Default shell for scripts and interactive sessions.
+    pub shell: Option<String>,
+
+    /// Named scripts available inside the guest.
+    pub scripts: BTreeMap<String, String>,
+
+    /// Image entrypoint override.
+    pub entrypoint: Option<Vec<String>>,
+
+    /// Image command override.
+    pub cmd: Option<Vec<String>>,
+
+    /// Guest hostname override.
+    pub hostname: Option<String>,
+
+    /// Guest user identity override.
+    pub user: Option<String>,
+
+    /// Runtime log verbosity.
+    pub log_level: Option<SandboxLogLevel>,
+
+    /// Metrics sampling interval in milliseconds. `None` disables sampling.
+    pub metrics_sample_interval_ms: Option<u64>,
+
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+    pub disable_metrics_sample: bool,
+}
+
+/// Environment variable entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EnvVar {
+    /// Environment variable name.
+    pub key: String,
+
+    /// Environment variable value.
+    pub value: String,
+}
+
+/// Runtime log verbosity for sandbox specs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxLogLevel {
+    /// Emit only error logs.
+    Error,
+
+    /// Emit warning and error logs.
+    Warn,
+
+    /// Emit info, warning, and error logs.
+    Info,
+
+    /// Emit debug and higher-severity logs.
+    Debug,
+
+    /// Emit trace and higher-severity logs.
+    Trace,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Exec
 //--------------------------------------------------------------------------------------------------
 
@@ -283,6 +416,21 @@ impl RootfsSource {
     }
 }
 
+impl EnvVar {
+    /// Create an environment variable entry.
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Return this entry as key and value string slices.
+    pub fn as_pair(&self) -> (&str, &str) {
+        (&self.key, &self.value)
+    }
+}
+
 impl RlimitResource {
     /// Returns the lowercase string representation used on the wire.
     pub fn as_str(&self) -> &'static str {
@@ -326,6 +474,19 @@ impl LogSource {
     }
 }
 
+impl SandboxLogLevel {
+    /// Return the lowercase string representation for this level.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -352,6 +513,59 @@ impl FromStr for DiskImageFormat {
 impl Default for RootfsSource {
     fn default() -> Self {
         Self::oci(String::new())
+    }
+}
+
+impl Default for SandboxResources {
+    fn default() -> Self {
+        Self {
+            cpus: DEFAULT_SANDBOX_CPUS,
+            memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+        }
+    }
+}
+
+impl Default for SandboxRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            workdir: None,
+            shell: None,
+            scripts: BTreeMap::new(),
+            entrypoint: None,
+            cmd: None,
+            hostname: None,
+            user: None,
+            log_level: None,
+            metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
+            disable_metrics_sample: false,
+        }
+    }
+}
+
+impl From<(String, String)> for EnvVar {
+    fn from((key, value): (String, String)) -> Self {
+        Self { key, value }
+    }
+}
+
+impl From<EnvVar> for (String, String) {
+    fn from(var: EnvVar) -> Self {
+        (var.key, var.value)
+    }
+}
+
+impl FromStr for SandboxLogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(format!("unknown sandbox log level: {s}")),
+        }
     }
 }
 
@@ -463,5 +677,32 @@ mod tests {
 
         assert_eq!(decoded.max_duration_secs, Some(3600));
         assert_eq!(decoded.idle_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn sandbox_spec_default_uses_static_resource_defaults() {
+        let spec = SandboxSpec::default();
+
+        assert_eq!(spec.resources.cpus, DEFAULT_SANDBOX_CPUS);
+        assert_eq!(spec.resources.memory_mib, DEFAULT_SANDBOX_MEMORY_MIB);
+        assert_eq!(
+            spec.runtime.metrics_sample_interval_ms,
+            Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn sandbox_log_level_roundtrips_lowercase_values() {
+        for (input, expected) in [
+            ("error", SandboxLogLevel::Error),
+            ("warn", SandboxLogLevel::Warn),
+            ("info", SandboxLogLevel::Info),
+            ("debug", SandboxLogLevel::Debug),
+            ("trace", SandboxLogLevel::Trace),
+        ] {
+            let parsed: SandboxLogLevel = input.parse().unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), input);
+        }
     }
 }

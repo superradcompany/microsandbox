@@ -246,5 +246,5 @@ fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
 }
 
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
-    u64::from(config.memory_mib) * 1024 * 1024
+    u64::from(config.spec.resources.memory_mib) * 1024 * 1024
 }

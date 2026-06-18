@@ -38,6 +38,7 @@ use microsandbox_protocol::{
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
     ENV_USER,
 };
+use microsandbox_types::SandboxLogLevel;
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 use crate::{
@@ -127,14 +128,14 @@ pub async fn spawn_sandbox(
     tracing::debug!(
         msb = %msb_path.display(),
         libkrunfw = %libkrunfw_path.display(),
-        sandbox = %config.name,
-        cpus = config.cpus,
-        memory_mib = config.memory_mib,
+        sandbox = %config.spec.name,
+        cpus = config.spec.resources.cpus,
+        memory_mib = config.spec.resources.memory_mib,
         mode = ?mode,
         "spawn_sandbox: resolved paths"
     );
 
-    let sandbox_dir = global.sandboxes_dir().join(&config.name);
+    let sandbox_dir = global.sandboxes_dir().join(&config.spec.name);
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
     let scripts_dir = runtime_dir.join("scripts");
@@ -148,7 +149,7 @@ pub async fn spawn_sandbox(
     )?;
 
     // Write scripts to the runtime scripts directory.
-    for (name, content) in &config.scripts {
+    for (name, content) in &config.spec.runtime.scripts {
         // Prevent path traversal: only use the filename component.
         let safe_name = Path::new(name).file_name().ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
@@ -160,7 +161,7 @@ pub async fn spawn_sandbox(
     }
 
     // Compute the agent relay socket path.
-    let agent_sock_path = resolve_sandbox_agent_socket_path(&config.name)?;
+    let agent_sock_path = resolve_sandbox_agent_socket_path(&config.spec.name)?;
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
@@ -271,7 +272,7 @@ pub async fn spawn_sandbox(
             ));
         }
     };
-    tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
+    tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
 
     // Read the startup JSON from the dedicated startup pipe in detached
     // mode, otherwise stdout.
@@ -338,7 +339,7 @@ pub async fn spawn_sandbox(
 
     let handle = ProcessHandle::new(
         startup.pid,
-        config.name.clone(),
+        config.spec.name.clone(),
         child,
         file_mounts_staging,
         Vec::new(),
@@ -369,14 +370,14 @@ fn reserve_metrics_slot(
     let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
         Ok(registry) => registry,
         Err(err) => {
-            tracing::warn!(error = %err, sandbox = %config.name, "failed to open metrics registry");
+            tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to open metrics registry");
             return None;
         }
     };
-    let memory_limit_bytes = u64::from(config.memory_mib) * 1024 * 1024;
+    let memory_limit_bytes = u64::from(config.spec.resources.memory_mib) * 1024 * 1024;
     match registry.reserve(ReserveSlot {
         sandbox_id,
-        name: &config.name,
+        name: &config.spec.name,
         memory_limit_bytes,
     }) {
         Ok(SlotReservation { slot, generation }) => Some(MetricsReservation {
@@ -385,7 +386,7 @@ fn reserve_metrics_slot(
             generation,
         }),
         Err(err) => {
-            tracing::warn!(error = %err, sandbox = %config.name, "failed to reserve metrics slot");
+            tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to reserve metrics slot");
             None
         }
     }
@@ -489,12 +490,12 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     let registry = match MetricsRegistry::open(&reservation.shm_name) {
         Ok(registry) => registry,
         Err(err) => {
-            tracing::debug!(error = %err, sandbox = %config.name, "release: failed to open metrics registry");
+            tracing::debug!(error = %err, sandbox = %config.spec.name, "release: failed to open metrics registry");
             return;
         }
     };
     if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
-        tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
+        tracing::debug!(error = %err, sandbox = %config.spec.name, "release: metrics slot release failed");
     }
 }
 
@@ -1056,12 +1057,12 @@ fn sandbox_cli_args(
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
-    if let Some(log_level) = config.log_level {
-        args.push(OsString::from(log_level.as_cli_flag()));
+    if let Some(log_level) = config.spec.runtime.log_level {
+        args.push(OsString::from(sandbox_log_level_cli_flag(log_level)));
     }
 
     args.push(OsString::from("--name"));
-    args.push(OsString::from(&config.name));
+    args.push(OsString::from(&config.spec.name));
     args.push(OsString::from("--sandbox-id"));
     args.push(OsString::from(sandbox_id.to_string()));
     args.push(OsString::from("--db-path"));
@@ -1083,7 +1084,7 @@ fn sandbox_cli_args(
         args.push(OsString::from(fd.to_string()));
     }
 
-    let sp = &config.policy;
+    let sp = &config.spec.lifecycle;
     if let Some(max_dur) = sp.max_duration_secs {
         args.push(OsString::from("--max-duration"));
         args.push(OsString::from(max_dur.to_string()));
@@ -1096,9 +1097,9 @@ fn sandbox_cli_args(
     args.push(OsString::from("--libkrunfw-path"));
     args.push(libkrunfw_path.as_os_str().to_os_string());
     args.push(OsString::from("--vcpus"));
-    args.push(OsString::from(config.cpus.to_string()));
+    args.push(OsString::from(config.spec.resources.cpus.to_string()));
     args.push(OsString::from("--memory-mib"));
-    args.push(OsString::from(config.memory_mib.to_string()));
+    args.push(OsString::from(config.spec.resources.memory_mib.to_string()));
     match config.effective_metrics_interval() {
         Some(ms) => {
             args.push(OsString::from("--metrics-sample-interval-ms"));
@@ -1115,7 +1116,7 @@ fn sandbox_cli_args(
         args.push(OsString::from(reservation.generation.to_string()));
     }
 
-    match &config.image {
+    match &config.spec.image {
         RootfsSource::Bind(path) => {
             args.push(OsString::from("--rootfs-path"));
             args.push(path.as_os_str().to_os_string());
@@ -1128,7 +1129,7 @@ fn sandbox_cli_args(
                 let digest: Digest = digest_str.parse().expect("invalid manifest digest");
                 let vmdk_path = cache.vmdk_path(&digest);
 
-                let sandbox_dir = local.sandboxes_dir().join(&config.name);
+                let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
                 let upper_path = sandbox_dir.join("upper.ext4");
 
                 // VMDK (fsmeta + layers) as read-only block device.
@@ -1292,12 +1293,12 @@ fn sandbox_cli_args(
         )));
     }
 
-    if !config.rlimits.is_empty() {
+    if !config.spec.rlimits.is_empty() {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
             "{}={}",
             microsandbox_protocol::ENV_RLIMITS,
-            encode_rlimits(&config.rlimits)
+            encode_rlimits(&config.spec.rlimits)
         )));
     }
 
@@ -1312,12 +1313,12 @@ fn sandbox_cli_args(
         args.push(OsString::from(sandbox_id.to_string()));
     }
 
-    for (key, value) in &config.env {
+    for var in &config.spec.env {
         args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{key}={value}")));
+        args.push(OsString::from(format!("{}={}", var.key, var.value)));
     }
 
-    if let Some(ref user) = config.user {
+    if let Some(ref user) = config.spec.runtime.user {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={user}", ENV_USER)));
     }
@@ -1326,7 +1327,7 @@ fn sandbox_cli_args(
     args.push(OsString::from(format!(
         "{}={}",
         ENV_SECURITY_PROFILE,
-        match config.security_profile {
+        match config.spec.security_profile {
             crate::sandbox::SecurityProfile::Default => "default",
             crate::sandbox::SecurityProfile::Restricted => "restricted",
         }
@@ -1335,9 +1336,9 @@ fn sandbox_cli_args(
     // Hostname: explicit value or fall back to a sandbox-name-derived form
     // that fits within the Linux UTS limit.
     {
-        let hostname = match config.hostname.as_deref() {
+        let hostname = match config.spec.runtime.hostname.as_deref() {
             Some(h) => h.to_string(),
-            None => crate::sandbox::hostname_from_sandbox_name(&config.name),
+            None => crate::sandbox::hostname_from_sandbox_name(&config.spec.name),
         };
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
@@ -1370,12 +1371,22 @@ fn sandbox_cli_args(
         }
     }
 
-    if let Some(ref workdir) = config.workdir {
+    if let Some(ref workdir) = config.spec.runtime.workdir {
         args.push(OsString::from("--workdir"));
         args.push(OsString::from(workdir));
     }
 
     args
+}
+
+fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
+    match level {
+        SandboxLogLevel::Error => "--error",
+        SandboxLogLevel::Warn => "--warn",
+        SandboxLogLevel::Info => "--info",
+        SandboxLogLevel::Debug => "--debug",
+        SandboxLogLevel::Trace => "--trace",
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1761,7 +1772,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert!(matches!(config.image, RootfsSource::Oci(_)));
+        assert!(matches!(config.spec.image, RootfsSource::Oci(_)));
 
         let rendered = render_args(&config);
         // Without a manifest_digest set, no block root args should be emitted.
@@ -1802,12 +1813,18 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
-            name: "test".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
-                reference: "alpine".into(),
-                upper_size_mib: None,
-            }),
-            memory_mib: 1024,
+            spec: microsandbox_types::SandboxSpec {
+                name: "test".into(),
+                image: RootfsSource::Oci(OciRootfsSource {
+                    reference: "alpine".into(),
+                    upper_size_mib: None,
+                }),
+                resources: microsandbox_types::SandboxResources {
+                    memory_mib: 1024,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             ),
@@ -1841,7 +1858,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
+        assert!(matches!(config.spec.image, RootfsSource::DiskImage { .. }));
 
         let rendered = render_args(&config);
 
@@ -1870,7 +1887,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
+        assert!(matches!(config.spec.image, RootfsSource::DiskImage { .. }));
 
         let rendered = render_args(&config);
 

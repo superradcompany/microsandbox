@@ -1837,7 +1837,7 @@ fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
 /// Resolution order when the user supplies no explicit command:
 /// 1. Image entrypoint [+ cmd]
 /// 2. Image cmd alone
-/// 3. `config.shell` (interactive only)
+/// 3. `config.spec.runtime.shell` (interactive only)
 /// 4. `/bin/sh` (interactive only)
 pub fn resolve_command(
     config: &microsandbox::sandbox::SandboxConfig,
@@ -1846,7 +1846,7 @@ pub fn resolve_command(
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
     // User supplied an explicit command — prepend entrypoint if set.
     if !user_command.is_empty() {
-        return match &config.entrypoint {
+        return match &config.spec.runtime.entrypoint {
             Some(ep) if !ep.is_empty() => {
                 let bin = ep[0].clone();
                 let args = ep[1..].iter().cloned().chain(user_command).collect();
@@ -1867,7 +1867,7 @@ pub fn resolve_command(
 
     // Fall back to configured shell (or /bin/sh) in interactive mode.
     if interactive {
-        let shell = config.shell.as_deref().unwrap_or("/bin/sh");
+        let shell = config.spec.runtime.shell.as_deref().unwrap_or("/bin/sh");
         return Ok((Some(shell.to_string()), vec![]));
     }
 
@@ -1886,7 +1886,7 @@ pub fn resolve_command(
 fn resolve_image_command(
     config: &microsandbox::sandbox::SandboxConfig,
 ) -> Option<(String, Vec<String>)> {
-    match (&config.entrypoint, &config.cmd) {
+    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
         (Some(ep), cmd) if !ep.is_empty() => {
             let bin = ep[0].clone();
             let args = ep[1..]
@@ -2105,7 +2105,7 @@ mod tests {
             .await
             .unwrap();
 
-        match config.image {
+        match config.spec.image {
             RootfsSource::Oci(oci) => assert_eq!(oci.upper_size_mib, Some(8192)),
             other => panic!("expected Oci, got {other:?}"),
         }
@@ -2123,7 +2123,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(config.security_profile, SecurityProfile::Restricted);
+        assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
     }
 
     #[tokio::test]

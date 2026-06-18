@@ -29,31 +29,31 @@ pub struct CloudCreateSandboxRequest {
 
     // Optional config fields.
     /// Working directory inside the guest.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
     /// Default shell inside the guest.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
     /// OCI entrypoint override.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
     /// Guest hostname override.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     /// Guest user identity.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Runtime log verbosity.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
     /// Named scripts mounted into the guest.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scripts: HashMap<String, String>,
     /// Hard sandbox lifetime cap in seconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_duration_secs: Option<u64>,
     /// Idle timeout in seconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
 }
 
@@ -81,12 +81,15 @@ pub struct CloudSandbox {
     pub created_at: DateTime<Utc>,
     /// Last start timestamp, when known.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub started_at: Option<DateTime<Utc>>,
     /// Last stop timestamp, when known.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub stopped_at: Option<DateTime<Utc>>,
     /// Last failure reason, when any.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub last_error: Option<String>,
 }
 
@@ -117,6 +120,7 @@ pub struct CloudPaginated<T> {
     pub data: Vec<T>,
     /// Cursor for the next page, when one exists.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub next_cursor: Option<String>,
 }
 
@@ -134,12 +138,15 @@ pub struct CloudMessageResponse {
 pub struct CloudErrorBody {
     /// Flat machine-readable error code, when returned in this shape.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub code: Option<String>,
     /// Flat human-readable error message, when returned in this shape.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub message: Option<String>,
     /// Nested error object returned by the API error responder.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub error: Option<CloudErrorDetails>,
 }
 
@@ -149,9 +156,11 @@ pub struct CloudErrorBody {
 pub struct CloudErrorDetails {
     /// Machine-readable error code.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub code: Option<String>,
     /// Human-readable error message.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub message: Option<String>,
 }
 

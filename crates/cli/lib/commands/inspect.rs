@@ -96,7 +96,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
 
     // Parse and display config details.
     if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
-        let image = match &config.image {
+        let image = match &config.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => {
@@ -104,36 +104,39 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
-        if let Some(upper_size_mib) = config.image.oci_upper_size_mib() {
+        if let Some(upper_size_mib) = config.spec.image.oci_upper_size_mib() {
             ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
         }
 
         ui::detail_header("Resources");
-        ui::detail_kv_indent("CPUs", &config.cpus.to_string());
-        ui::detail_kv_indent("Memory", &format!("{} MiB", config.memory_mib));
-        let security = match config.security_profile {
+        ui::detail_kv_indent("CPUs", &config.spec.resources.cpus.to_string());
+        ui::detail_kv_indent(
+            "Memory",
+            &format!("{} MiB", config.spec.resources.memory_mib),
+        );
+        let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
             SecurityProfile::Restricted => "restricted",
         };
         ui::detail_kv("Security", security);
 
-        if let Some(ref workdir) = config.workdir {
+        if let Some(ref workdir) = config.spec.runtime.workdir {
             ui::detail_kv("Workdir", workdir);
         }
-        if let Some(ref shell) = config.shell {
+        if let Some(ref shell) = config.spec.runtime.shell {
             ui::detail_kv("Shell", shell);
         }
 
-        if !config.env.is_empty() {
+        if !config.spec.env.is_empty() {
             ui::detail_header("Environment");
-            for (k, v) in &config.env {
-                println!("  {k}={v}");
+            for var in &config.spec.env {
+                println!("  {}={}", var.key, var.value);
             }
         }
 
-        if !config.labels.is_empty() {
+        if !config.spec.labels.is_empty() {
             ui::detail_header("Labels");
-            let mut labels: Vec<_> = config.labels.iter().collect();
+            let mut labels: Vec<_> = config.spec.labels.iter().collect();
             labels.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in labels {
                 println!("  {k}={v}");

@@ -18,6 +18,7 @@ use microsandbox_protocol::{
     },
     message::MessageType,
 };
+use microsandbox_types::EnvVar;
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
 use russh::server::{Auth, Msg, Session};
@@ -151,7 +152,7 @@ enum ChannelState {
     Pending {
         channel: Option<Channel<Msg>>,
         pty: Option<PtyInfo>,
-        env: Vec<(String, String)>,
+        env: Vec<EnvVar>,
     },
     Exec {
         control: ExecControl,
@@ -863,6 +864,8 @@ impl SshSession {
             .settings
             .sandbox
             .config()
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -873,7 +876,7 @@ impl SshSession {
         };
         let mut env = env;
         if let Some(pty) = &pty {
-            env.push(("TERM".to_string(), pty.term.clone()));
+            env.push(EnvVar::new("TERM", pty.term.clone()));
         }
         let user = self
             .settings
@@ -1010,7 +1013,7 @@ impl russh::server::Handler for SshSession {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if let Some(ChannelState::Pending { env, .. }) = self.channels.get_mut(&channel) {
-            env.push((variable_name.to_string(), variable_value.to_string()));
+            env.push(EnvVar::new(variable_name, variable_value));
             session.channel_success(channel)?;
         } else {
             session.channel_failure(channel)?;
@@ -1093,6 +1096,8 @@ impl russh::server::Handler for SshSession {
             .settings
             .sandbox
             .config()
+            .spec
+            .runtime
             .workdir
             .as_deref()
             .filter(|path| !path.is_empty() && path.starts_with('/'))

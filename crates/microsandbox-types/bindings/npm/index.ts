@@ -2,21 +2,29 @@
 
 export type DiskImageFormat = "Qcow2" | "Raw" | "Vmdk";
 
-export interface OciRootfsSource {
-  reference: string;
-  upper_size_mib?: number | null;
-}
+export type OciRootfsSource = {
+/**
+ * OCI image reference (e.g. `python`).
+ */
+reference: string,
+/**
+ * Writable overlay upper size in MiB.
+ */
+upper_size_mib?: number | null, };
 
-export type RootfsSource =
-  | { Bind: string }
-  | { Oci: OciRootfsSource }
-  | {
-      DiskImage: {
-        path: string;
-        format: DiskImageFormat;
-        fstype?: string | null;
-      };
-    };
+export type RootfsSource = { "Bind": string } | { "Oci": OciRootfsSource } | { "DiskImage": {
+/**
+ * Path to the disk image file on the host.
+ */
+path: string,
+/**
+ * Disk image format.
+ */
+format: DiskImageFormat,
+/**
+ * Inner filesystem type (optional; auto-detected if absent).
+ */
+fstype: string | null, } };
 
 export type StatVirtualization = "strict" | "relaxed" | "off";
 
@@ -24,99 +32,300 @@ export type HostPermissions = "private" | "mirror";
 
 export type SecurityProfile = "default" | "restricted";
 
-export interface MountOptions {
-  readonly: boolean;
-  noexec: boolean;
-  nosuid: boolean;
-  nodev: boolean;
-}
+export type MountOptions = {
+/**
+ * Whether the mount is read-only.
+ *
+ * Guest writes fail with the kernel's read-only filesystem behavior. Virtiofs-backed mounts also reject writes on the host-side filesystem server as defense in depth.
+ */
+readonly: boolean,
+/**
+ * Whether direct execution from the mount is disabled.
+ *
+ * This prevents `execve` of binaries or scripts located on the mount. Interpreters can still read files from the mount, for example `sh /mnt/script.sh`, because the interpreter itself executes from a different filesystem.
+ */
+noexec: boolean,
+/**
+ * Whether setuid and setgid privilege elevation from files on the mount is ignored.
+ */
+nosuid: boolean,
+/**
+ * Whether device files on the mount are ignored.
+ */
+nodev: boolean, };
 
-export interface SandboxPolicy {
-  max_duration_secs?: number | null;
-  idle_timeout_secs?: number | null;
-}
+export type SandboxPolicy = {
+/**
+ * Hard cap on total sandbox lifetime in seconds. `None` = run forever.
+ */
+max_duration_secs: number | null,
+/**
+ * Idle timeout in seconds. `None` = no idle detection.
+ */
+idle_timeout_secs: number | null, };
 
-export type RlimitResource =
-  | "Cpu"
-  | "Fsize"
-  | "Data"
-  | "Stack"
-  | "Core"
-  | "Rss"
-  | "Nproc"
-  | "Nofile"
-  | "Memlock"
-  | "As"
-  | "Locks"
-  | "Sigpending"
-  | "Msgqueue"
-  | "Nice"
-  | "Rtprio"
-  | "Rttime";
+export type SandboxSpec = {
+/**
+ * Unique sandbox name.
+ */
+name: string,
+/**
+ * Root filesystem source.
+ */
+image: RootfsSource,
+/**
+ * CPU and memory resources.
+ */
+resources: SandboxResources,
+/**
+ * Guest runtime options.
+ */
+runtime: SandboxRuntimeOptions,
+/**
+ * Environment variables visible to commands in the sandbox.
+ */
+env: Array<EnvVar>,
+/**
+ * User-defined labels attached to the sandbox.
+ */
+labels: { [key in string]: string },
+/**
+ * Sandbox-wide resource limits inherited by guest processes.
+ */
+rlimits: Array<Rlimit>,
+/**
+ * In-guest security profile.
+ */
+security_profile: SecurityProfile,
+/**
+ * Sandbox lifecycle policy.
+ */
+lifecycle: SandboxPolicy, };
 
-export interface Rlimit {
-  resource: RlimitResource;
-  soft: number;
-  hard: number;
-}
+export type SandboxResources = {
+/**
+ * Number of virtual CPUs.
+ */
+cpus: number,
+/**
+ * Guest memory in MiB.
+ */
+memory_mib: number, };
+
+export type SandboxRuntimeOptions = {
+/**
+ * Working directory inside the guest.
+ */
+workdir: string | null,
+/**
+ * Default shell for scripts and interactive sessions.
+ */
+shell: string | null,
+/**
+ * Named scripts available inside the guest.
+ */
+scripts: { [key in string]: string },
+/**
+ * Image entrypoint override.
+ */
+entrypoint: Array<string> | null,
+/**
+ * Image command override.
+ */
+cmd: Array<string> | null,
+/**
+ * Guest hostname override.
+ */
+hostname: string | null,
+/**
+ * Guest user identity override.
+ */
+user: string | null,
+/**
+ * Runtime log verbosity.
+ */
+log_level: SandboxLogLevel | null,
+/**
+ * Metrics sampling interval in milliseconds. `None` disables sampling.
+ */
+metrics_sample_interval_ms: number | null,
+/**
+ * Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+ */
+disable_metrics_sample: boolean, };
+
+export type EnvVar = {
+/**
+ * Environment variable name.
+ */
+key: string,
+/**
+ * Environment variable value.
+ */
+value: string, };
+
+export type SandboxLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+export type RlimitResource = "Cpu" | "Fsize" | "Data" | "Stack" | "Core" | "Rss" | "Nproc" | "Nofile" | "Memlock" | "As" | "Locks" | "Sigpending" | "Msgqueue" | "Nice" | "Rtprio" | "Rttime";
+
+export type Rlimit = {
+/**
+ * Resource type.
+ */
+resource: RlimitResource,
+/**
+ * Soft limit (can be raised up to hard limit by the process).
+ */
+soft: number,
+/**
+ * Hard limit (ceiling, requires privileges to raise).
+ */
+hard: number, };
 
 export type LogSource = "stdout" | "stderr" | "output" | "system";
 
-export interface CloudCreateSandboxRequest {
-  name: string;
-  image: string;
-  vcpus: number;
-  memory_mib: number;
-  env: Record<string, string>;
-  ephemeral: boolean;
-  workdir?: string | null;
-  shell?: string | null;
-  entrypoint?: string[] | null;
-  hostname?: string | null;
-  user?: string | null;
-  log_level?: string | null;
-  scripts?: Record<string, string>;
-  max_duration_secs?: number | null;
-  idle_timeout_secs?: number | null;
-}
+export type CloudCreateSandboxRequest = {
+/**
+ * User-facing sandbox name.
+ */
+name: string,
+/**
+ * OCI image reference to run.
+ */
+image: string,
+/**
+ * Virtual CPU count.
+ */
+vcpus: number,
+/**
+ * Guest memory in MiB.
+ */
+memory_mib: number,
+/**
+ * Environment variables injected into the sandbox.
+ */
+env: { [key in string]: string },
+/**
+ * Whether the sandbox should be removed when its allocation terminates.
+ */
+ephemeral: boolean,
+/**
+ * Working directory inside the guest.
+ */
+workdir?: string | null,
+/**
+ * Default shell inside the guest.
+ */
+shell?: string | null,
+/**
+ * OCI entrypoint override.
+ */
+entrypoint?: Array<string> | null,
+/**
+ * Guest hostname override.
+ */
+hostname?: string | null,
+/**
+ * Guest user identity.
+ */
+user?: string | null,
+/**
+ * Runtime log verbosity.
+ */
+log_level?: string | null,
+/**
+ * Named scripts mounted into the guest.
+ */
+scripts?: { [key in string]: string },
+/**
+ * Hard sandbox lifetime cap in seconds.
+ */
+max_duration_secs?: number | null,
+/**
+ * Idle timeout in seconds.
+ */
+idle_timeout_secs?: number | null, };
 
-export interface CloudSandbox {
-  id: string;
-  org_id: string;
-  name: string;
-  status: CloudSandboxStatus;
-  config: CloudCreateSandboxRequest;
-  ephemeral: boolean;
-  created_at: string;
-  started_at?: string | null;
-  stopped_at?: string | null;
-  last_error?: string | null;
-}
+export type CloudSandbox = {
+/**
+ * Server-side UUID.
+ */
+id: string,
+/**
+ * Owning org's UUID.
+ */
+org_id: string,
+/**
+ * User-facing sandbox name.
+ */
+name: string,
+/**
+ * Current lifecycle status.
+ */
+status: CloudSandboxStatus,
+/**
+ * Create request stored by the cloud control plane.
+ */
+config: CloudCreateSandboxRequest,
+/**
+ * Whether the sandbox should be removed when its allocation terminates.
+ */
+ephemeral: boolean,
+/**
+ * Creation timestamp.
+ */
+created_at: string,
+/**
+ * Last start timestamp, when known.
+ */
+started_at?: string | null,
+/**
+ * Last stop timestamp, when known.
+ */
+stopped_at?: string | null,
+/**
+ * Last failure reason, when any.
+ */
+last_error?: string | null, };
 
-export type CloudSandboxStatus =
-  | "created"
-  | "starting"
-  | "running"
-  | "stopping"
-  | "stopped"
-  | "failed";
+export type CloudSandboxStatus = "created" | "starting" | "running" | "stopping" | "stopped" | "failed";
 
-export interface CloudPaginated<T> {
-  data: T[];
-  next_cursor?: string | null;
-}
+export type CloudPaginated<T> = {
+/**
+ * Page of response items.
+ */
+data: Array<T>,
+/**
+ * Cursor for the next page, when one exists.
+ */
+next_cursor?: string | null, };
 
-export interface CloudMessageResponse {
-  message: string;
-}
+export type CloudMessageResponse = {
+/**
+ * Human-readable response message.
+ */
+message: string, };
 
-export interface CloudErrorBody {
-  code?: string | null;
-  message?: string | null;
-  error?: CloudErrorDetails | null;
-}
+export type CloudErrorBody = {
+/**
+ * Flat machine-readable error code, when returned in this shape.
+ */
+code?: string | null,
+/**
+ * Flat human-readable error message, when returned in this shape.
+ */
+message?: string | null,
+/**
+ * Nested error object returned by the API error responder.
+ */
+error?: CloudErrorDetails | null, };
 
-export interface CloudErrorDetails {
-  code?: string | null;
-  message?: string | null;
-}
+export type CloudErrorDetails = {
+/**
+ * Machine-readable error code.
+ */
+code?: string | null,
+/**
+ * Human-readable error message.
+ */
+message?: string | null, };

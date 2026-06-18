@@ -1,19 +1,21 @@
 //! Sandbox configuration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
-use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
+use microsandbox_runtime::logging::LogLevel;
+use microsandbox_types::{
+    EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+};
 use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
 
 use super::{
-    exec::Rlimit,
     init::HandoffInit,
-    types::{MountOptions, Patch, RootfsSource, SecurityProfile, VolumeMount},
+    types::{MountOptions, Patch, RootfsSource, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -52,7 +54,7 @@ fn default_memory_mib() -> u32 {
     crate::config::DEFAULT_MEMORY_MIB
 }
 
-fn default_log_level() -> Option<LogLevel> {
+fn default_log_level() -> Option<SandboxLogLevel> {
     None
 }
 
@@ -70,84 +72,19 @@ fn default_disable_metrics_sample() -> bool {
 
 /// Configuration for a sandbox.
 ///
-/// All config structs derive `Default` for direct construction and
-/// `Serialize`/`Deserialize` for file-based configuration.
+/// The durable task description lives in [`SandboxSpec`]. This type keeps
+/// local SDK/runtime operation state beside that shared contract, such as
+/// mounts, patches, registry credentials, replacement flags, and resolved
+/// snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Unique sandbox name (required, maximum 128 UTF-8 bytes).
-    pub name: String,
-
-    /// Root filesystem source (required).
-    #[serde(default)]
-    pub image: RootfsSource,
-
-    /// Number of virtual CPUs.
-    #[serde(default = "default_cpus")]
-    pub cpus: u8,
-
-    /// Guest memory in MiB.
-    #[serde(default = "default_memory_mib")]
-    pub memory_mib: u32,
-
-    /// Runtime log level for the sandbox process.
-    ///
-    /// `None` means the sandbox process stays silent.
-    #[serde(default = "default_log_level")]
-    pub log_level: Option<LogLevel>,
-
-    /// Metrics sampling interval in milliseconds; `0` disables sampling.
-    #[serde(
-        default = "default_metrics_sample_interval_ms",
-        with = "crate::config::metrics_interval_serde"
-    )]
-    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
-
-    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
-    #[serde(default = "default_disable_metrics_sample")]
-    pub disable_metrics_sample: bool,
-
-    /// Working directory inside the sandbox.
-    #[serde(default)]
-    pub workdir: Option<String>,
-
-    /// Default shell for scripts and interactive sessions.
-    #[serde(default)]
-    pub shell: Option<String>,
-
-    /// Named scripts available at `/.msb/scripts/<name>` in the guest.
-    #[serde(default)]
-    pub scripts: HashMap<String, String>,
-
-    /// Environment variables.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-
-    /// User-defined labels (`key`/`value`) attached to the sandbox for
-    /// attribution. Surfaced as attributes on the sandbox's emitted metrics so
-    /// backends can build per-user/per-tenant views. Immutable once the sandbox
-    /// is created.
-    #[serde(default)]
-    pub labels: HashMap<String, String>,
-
-    /// Sandbox-wide resource limits inherited by guest processes.
-    ///
-    /// Unlike per-exec rlimits, these are applied by agentd during PID 1
-    /// startup so long-lived daemons and bootstrap scripts inherit the same
-    /// raised baseline automatically.
-    #[serde(default)]
-    pub rlimits: Vec<Rlimit>,
+    /// Backend-neutral sandbox task description shared across SDKs and services.
+    #[serde(flatten)]
+    pub spec: SandboxSpec,
 
     /// Volume mounts.
     #[serde(default)]
     pub mounts: Vec<VolumeMount>,
-
-    /// In-guest security profile.
-    ///
-    /// `Default` preserves normal guest-root behavior. `Restricted` applies
-    /// stronger in-guest hardening that is incompatible with workflows such
-    /// as `sudo` and Docker-in-Docker.
-    #[serde(default)]
-    pub security_profile: SecurityProfile,
 
     /// Rootfs patches applied before VM start.
     ///
@@ -160,22 +97,6 @@ pub struct SandboxConfig {
     #[cfg(feature = "net")]
     #[serde(default)]
     pub network: microsandbox_network::config::NetworkConfig,
-
-    /// Image entrypoint (inherited from image config, overridable).
-    #[serde(default)]
-    pub entrypoint: Option<Vec<String>>,
-
-    /// Image default command (inherited from image config, overridable).
-    #[serde(default)]
-    pub cmd: Option<Vec<String>>,
-
-    /// Guest hostname. Defaults to a sandbox-name-derived hostname.
-    #[serde(default)]
-    pub hostname: Option<String>,
-
-    /// User identity inside sandbox (inherited from image config, overridable).
-    #[serde(default)]
-    pub user: Option<String>,
 
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
@@ -193,10 +114,6 @@ pub struct SandboxConfig {
     /// Pull policy for OCI images. Default: `IfMissing`.
     #[serde(default)]
     pub pull_policy: PullPolicy,
-
-    /// Sandbox lifecycle policy.
-    #[serde(default)]
-    pub policy: SandboxPolicy,
 
     /// Registry authentication for private OCI registries.
     ///
@@ -280,10 +197,13 @@ pub struct SandboxConfig {
 impl SandboxConfig {
     /// Resolve the effective metrics sampling interval, accounting for the disable override.
     pub fn effective_metrics_interval(&self) -> Option<NonZero<u64>> {
-        if self.disable_metrics_sample {
+        if self.spec.runtime.disable_metrics_sample {
             None
         } else {
-            self.metrics_sample_interval_ms
+            self.spec
+                .runtime
+                .metrics_sample_interval_ms
+                .and_then(NonZero::new)
         }
     }
 
@@ -335,26 +255,26 @@ impl SandboxConfig {
     /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
     /// - `init`: an `auto` init may resolve from a known init at the start of the image entrypoint and inherit the effective entrypoint env.
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
-        self.env = merge_env(&image.env, &self.env);
-        self.labels = merge_image_labels(&image.labels, &self.labels);
+        self.spec.env = merge_env(&image.env, &self.spec.env);
+        self.spec.labels = merge_image_labels(&image.labels, &self.spec.labels);
 
-        let inherit_entrypoint = self.entrypoint.is_none();
+        let inherit_entrypoint = self.spec.runtime.entrypoint.is_none();
 
-        if self.cmd.is_none() {
-            self.cmd = image.cmd.clone();
+        if self.spec.runtime.cmd.is_none() {
+            self.spec.runtime.cmd = image.cmd.clone();
         }
-        if self.entrypoint.is_none() {
-            self.entrypoint = image.entrypoint.clone();
+        if self.spec.runtime.entrypoint.is_none() {
+            self.spec.runtime.entrypoint = image.entrypoint.clone();
         }
-        if self.workdir.is_none() {
-            self.workdir = image
+        if self.spec.runtime.workdir.is_none() {
+            self.spec.runtime.workdir = image
                 .working_dir
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
         }
-        if self.user.is_none() {
-            self.user = image
+        if self.spec.runtime.user.is_none() {
+            self.spec.runtime.user = image
                 .user
                 .as_deref()
                 .filter(|s| !s.is_empty())
@@ -421,7 +341,7 @@ impl SandboxConfig {
             return;
         }
 
-        let Some(mut entrypoint) = self.entrypoint.take() else {
+        let Some(mut entrypoint) = self.spec.runtime.entrypoint.take() else {
             return;
         };
         if entrypoint
@@ -430,7 +350,7 @@ impl SandboxConfig {
         {
             entrypoint.remove(0);
         }
-        self.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
+        self.spec.runtime.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
     }
 
     fn image_init_entrypoint_argv_tail(
@@ -445,7 +365,7 @@ impl SandboxConfig {
 
         let mut process = image_entrypoint.to_vec();
         if initial_command.is_empty() {
-            process.extend(self.cmd.iter().flatten().cloned());
+            process.extend(self.spec.runtime.cmd.iter().flatten().cloned());
         } else {
             process.extend(initial_command.iter().cloned());
         }
@@ -457,7 +377,7 @@ impl SandboxConfig {
     /// Materialize rootfs defaults that should be persisted with the sandbox.
     pub(crate) fn apply_rootfs_defaults(&mut self, upper_size_mib: Option<u32>) {
         if self.snapshot_upper_source.is_none()
-            && let RootfsSource::Oci(oci) = &mut self.image
+            && let RootfsSource::Oci(oci) = &mut self.spec.image
             && oci.upper_size_mib.is_none()
         {
             oci.upper_size_mib = Some(upper_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB));
@@ -467,7 +387,7 @@ impl SandboxConfig {
     /// Apply runtime defaults that should exist for OCI sandboxes unless the
     /// user explicitly overrode them.
     pub(crate) fn apply_runtime_defaults(&mut self) {
-        if !matches!(self.image, RootfsSource::Oci(_)) {
+        if !matches!(self.spec.image, RootfsSource::Oci(_)) {
             return;
         }
 
@@ -481,7 +401,7 @@ impl SandboxConfig {
 
         self.mounts.push(VolumeMount::Tmpfs {
             guest: DEFAULT_OCI_TMPFS_PATH.to_string(),
-            size_mib: Some(default_oci_tmpfs_size_mib(self.memory_mib)),
+            size_mib: Some(default_oci_tmpfs_size_mib(self.spec.resources.memory_mib)),
             options: MountOptions::default(),
         });
     }
@@ -493,15 +413,12 @@ impl SandboxConfig {
 
 /// Merge two sets of env-var pairs. Base entries are kept unless overridden by
 /// key, then all override entries are appended.
-pub(crate) fn merge_env_pairs(
-    base: &[(String, String)],
-    overrides: &[(String, String)],
-) -> Vec<(String, String)> {
-    let override_keys: HashSet<&str> = overrides.iter().map(|(k, _)| k.as_str()).collect();
+pub(crate) fn merge_env_pairs(base: &[EnvVar], overrides: &[EnvVar]) -> Vec<EnvVar> {
+    let override_keys: HashSet<&str> = overrides.iter().map(|var| var.key.as_str()).collect();
 
-    let mut merged: Vec<(String, String)> = base
+    let mut merged: Vec<EnvVar> = base
         .iter()
-        .filter(|(k, _)| !override_keys.contains(k.as_str()))
+        .filter(|var| !override_keys.contains(var.key.as_str()))
         .cloned()
         .collect();
 
@@ -510,11 +427,11 @@ pub(crate) fn merge_env_pairs(
 }
 
 /// Merge image env vars (OCI `KEY=VALUE` strings) with user env var pairs.
-fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String, String)> {
-    let base: Vec<(String, String)> = image_env
+fn merge_env(image_env: &[String], user_env: &[EnvVar]) -> Vec<EnvVar> {
+    let base: Vec<EnvVar> = image_env
         .iter()
         .filter_map(|entry| match entry.split_once('=') {
-            Some((k, v)) => Some((k.to_string(), v.to_string())),
+            Some((key, value)) => Some(EnvVar::new(key, value)),
             None => {
                 tracing::warn!(entry = %entry, "skipping malformed image env var (expected KEY=VALUE)");
                 None
@@ -532,9 +449,9 @@ fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String
 /// validation (which already ran before the image was pulled).
 fn merge_image_labels(
     image_labels: &HashMap<String, String>,
-    user_labels: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut merged: HashMap<String, String> = image_labels
+    user_labels: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged: BTreeMap<String, String> = image_labels
         .iter()
         .filter(|(key, _)| !key.is_empty() && super::reserved_label_prefix(key).is_none())
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -571,6 +488,16 @@ fn normalized_guest_path(path: &str) -> &str {
     if trimmed.is_empty() { "/" } else { trimmed }
 }
 
+pub(crate) fn sandbox_log_level_from_runtime(level: LogLevel) -> SandboxLogLevel {
+    match level {
+        LogLevel::Error => SandboxLogLevel::Error,
+        LogLevel::Warn => SandboxLogLevel::Warn,
+        LogLevel::Info => SandboxLogLevel::Info,
+        LogLevel::Debug => SandboxLogLevel::Debug,
+        LogLevel::Trace => SandboxLogLevel::Trace,
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -578,31 +505,26 @@ fn normalized_guest_path(path: &str) -> &str {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            name: String::new(),
-            image: RootfsSource::default(),
-            cpus: default_cpus(),
-            memory_mib: default_memory_mib(),
-            log_level: default_log_level(),
-            metrics_sample_interval_ms: default_metrics_sample_interval_ms(),
-            disable_metrics_sample: default_disable_metrics_sample(),
-            workdir: None,
-            shell: None,
-            scripts: HashMap::new(),
-            env: Vec::new(),
-            labels: HashMap::new(),
-            rlimits: Vec::new(),
+            spec: SandboxSpec {
+                resources: SandboxResources {
+                    cpus: default_cpus(),
+                    memory_mib: default_memory_mib(),
+                },
+                runtime: SandboxRuntimeOptions {
+                    log_level: default_log_level(),
+                    metrics_sample_interval_ms: default_metrics_sample_interval_ms()
+                        .map(NonZero::get),
+                    disable_metrics_sample: default_disable_metrics_sample(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             mounts: Vec::new(),
-            security_profile: SecurityProfile::default(),
             patches: Vec::new(),
             #[cfg(feature = "net")]
             network: microsandbox_network::config::NetworkConfig::default(),
-            hostname: None,
-            entrypoint: None,
-            cmd: None,
-            user: None,
             init: None,
             pull_policy: PullPolicy::default(),
-            policy: SandboxPolicy::default(),
             registry_auth: None,
             insecure: false,
             ca_certs: Vec::new(),
@@ -628,6 +550,10 @@ mod tests {
     use super::{SandboxConfig, merge_env};
     use crate::sandbox::{HandoffInit, MountOptions, RootfsSource, VolumeMount};
     use microsandbox_image::ImageConfig;
+    use microsandbox_types::{
+        EnvVar, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
+        SandboxSpec, SecurityProfile,
+    };
 
     #[test]
     fn test_merge_env_image_base_with_user_override() {
@@ -636,8 +562,8 @@ mod tests {
             "PYTHON_VERSION=3.14".to_string(),
         ];
         let user_env = vec![
-            ("PATH".to_string(), "/custom/bin".to_string()),
-            ("MY_VAR".to_string(), "hello".to_string()),
+            EnvVar::new("PATH", "/custom/bin"),
+            EnvVar::new("MY_VAR", "hello"),
         ];
 
         let merged = merge_env(&image_env, &user_env);
@@ -645,9 +571,9 @@ mod tests {
         assert_eq!(
             merged,
             vec![
-                ("PYTHON_VERSION".to_string(), "3.14".to_string()),
-                ("PATH".to_string(), "/custom/bin".to_string()),
-                ("MY_VAR".to_string(), "hello".to_string()),
+                EnvVar::new("PYTHON_VERSION", "3.14"),
+                EnvVar::new("PATH", "/custom/bin"),
+                EnvVar::new("MY_VAR", "hello"),
             ]
         );
     }
@@ -655,15 +581,15 @@ mod tests {
     #[test]
     fn test_merge_env_empty_user_inherits_image() {
         let image_env = vec!["PATH=/usr/bin".to_string(), "LANG=C.UTF-8".to_string()];
-        let user_env = vec![];
+        let user_env = Vec::new();
 
         let merged = merge_env(&image_env, &user_env);
 
         assert_eq!(
             merged,
             vec![
-                ("PATH".to_string(), "/usr/bin".to_string()),
-                ("LANG".to_string(), "C.UTF-8".to_string()),
+                EnvVar::new("PATH", "/usr/bin"),
+                EnvVar::new("LANG", "C.UTF-8"),
             ]
         );
     }
@@ -671,11 +597,11 @@ mod tests {
     #[test]
     fn test_merge_env_empty_image_keeps_user() {
         let image_env = vec![];
-        let user_env = vec![("MY_VAR".to_string(), "val".to_string())];
+        let user_env = vec![EnvVar::new("MY_VAR", "val")];
 
         let merged = merge_env(&image_env, &user_env);
 
-        assert_eq!(merged, vec![("MY_VAR".to_string(), "val".to_string())]);
+        assert_eq!(merged, vec![EnvVar::new("MY_VAR", "val")]);
     }
 
     #[test]
@@ -691,10 +617,13 @@ mod tests {
         let mut config = SandboxConfig::default();
         config.merge_image_defaults(&image);
 
-        assert_eq!(config.cmd, Some(vec!["python3".to_string()]));
-        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
-        assert_eq!(config.workdir, Some("/app".to_string()));
-        assert_eq!(config.user, Some("appuser".to_string()));
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/entrypoint.sh".to_string()])
+        );
+        assert_eq!(config.spec.runtime.workdir, Some("/app".to_string()));
+        assert_eq!(config.spec.runtime.user, Some("appuser".to_string()));
     }
 
     #[test]
@@ -708,17 +637,26 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            cmd: Some(vec!["bash".to_string()]),
-            workdir: Some("/workspace".to_string()),
-            user: Some("root".to_string()),
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    cmd: Some(vec!["bash".to_string()]),
+                    workdir: Some("/workspace".to_string()),
+                    user: Some("root".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.merge_image_defaults(&image);
 
-        assert_eq!(config.cmd, Some(vec!["bash".to_string()]));
-        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
-        assert_eq!(config.workdir, Some("/workspace".to_string()));
-        assert_eq!(config.user, Some("root".to_string()));
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["bash".to_string()]));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/entrypoint.sh".to_string()])
+        );
+        assert_eq!(config.spec.runtime.workdir, Some("/workspace".to_string()));
+        assert_eq!(config.spec.runtime.user, Some("root".to_string()));
     }
 
     #[test]
@@ -745,7 +683,7 @@ mod tests {
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert!(init.args.is_empty());
         assert_eq!(
-            config.entrypoint,
+            config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
         );
     }
@@ -783,7 +721,7 @@ mod tests {
         );
         assert!(config.initial_command_consumed_by_init());
         assert_eq!(
-            config.entrypoint,
+            config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
         );
     }
@@ -948,7 +886,7 @@ mod tests {
             vec!["/app/server".to_string(), "--serve".to_string()]
         );
         assert!(config.initial_command_consumed_by_init());
-        assert_eq!(config.entrypoint, None);
+        assert_eq!(config.spec.runtime.entrypoint, None);
     }
 
     #[test]
@@ -973,7 +911,7 @@ mod tests {
         assert_eq!(init.cmd, PathBuf::from("/lib/systemd/systemd"));
         assert!(init.args.is_empty());
         assert!(!config.initial_command_consumed_by_init());
-        assert_eq!(config.entrypoint, None);
+        assert_eq!(config.spec.runtime.entrypoint, None);
     }
 
     #[test]
@@ -987,7 +925,13 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            entrypoint: Some(vec!["/bin/sh".to_string()]),
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    entrypoint: Some(vec!["/bin/sh".to_string()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             init: Some(HandoffInit {
                 cmd: PathBuf::from("auto"),
                 args: Vec::new(),
@@ -1001,7 +945,10 @@ mod tests {
         let init = config.init.as_ref().expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert!(init.args.is_empty());
-        assert_eq!(config.entrypoint, Some(vec!["/bin/sh".to_string()]));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/bin/sh".to_string()])
+        );
         assert!(!config.initial_command_consumed_by_init());
     }
 
@@ -1026,7 +973,10 @@ mod tests {
             config.init.expect("init should remain configured").cmd,
             PathBuf::from("auto")
         );
-        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/entrypoint.sh".to_string()])
+        );
     }
 
     #[test]
@@ -1048,32 +998,38 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            labels: HashMap::from([
-                ("user.id".to_string(), "alice".to_string()),
-                // Collides with an image label; the user value must win.
-                ("vendor".to_string(), "user-vendor".to_string()),
-            ]),
+            spec: SandboxSpec {
+                labels: [
+                    ("user.id".to_string(), "alice".to_string()),
+                    // Collides with an image label; the user value must win.
+                    ("vendor".to_string(), "user-vendor".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.merge_image_defaults(&image);
 
         assert_eq!(
             config
+                .spec
                 .labels
                 .get("org.opencontainers.image.source")
                 .map(String::as_str),
             Some("https://example.com/repo")
         );
         assert_eq!(
-            config.labels.get("user.id").map(String::as_str),
+            config.spec.labels.get("user.id").map(String::as_str),
             Some("alice")
         );
         assert_eq!(
-            config.labels.get("vendor").map(String::as_str),
+            config.spec.labels.get("vendor").map(String::as_str),
             Some("user-vendor")
         );
-        assert!(!config.labels.contains_key("sandbox.id"));
-        assert!(!config.labels.contains_key(""));
+        assert!(!config.spec.labels.contains_key("sandbox.id"));
+        assert!(!config.spec.labels.contains_key(""));
     }
 
     #[test]
@@ -1088,16 +1044,22 @@ mod tests {
         config.merge_image_defaults(&image);
 
         assert!(
-            config.workdir.is_none(),
+            config.spec.runtime.workdir.is_none(),
             "empty working_dir should not propagate"
         );
-        assert!(config.user.is_none(), "empty user should not propagate");
+        assert!(
+            config.spec.runtime.user.is_none(),
+            "empty user should not propagate"
+        );
     }
 
     #[test]
     fn test_sandbox_config_serializes_manifest_digest_but_redacts_registry_auth() {
         let mut config = SandboxConfig {
-            name: "persisted".into(),
+            spec: SandboxSpec {
+                name: "persisted".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.replace_existing = true;
@@ -1113,6 +1075,80 @@ mod tests {
         assert!(decoded.registry_auth.is_none());
         assert!(!decoded.replace_existing);
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[test]
+    fn test_sandbox_config_embeds_shared_spec() {
+        let spec = microsandbox_types::SandboxSpec {
+            name: "spec-test".into(),
+            image: RootfsSource::oci("python:3.12"),
+            resources: SandboxResources {
+                cpus: 2,
+                memory_mib: 1024,
+            },
+            runtime: SandboxRuntimeOptions {
+                workdir: Some("/app".into()),
+                shell: Some("/bin/bash".into()),
+                scripts: [("setup".to_string(), "echo hi".to_string())]
+                    .into_iter()
+                    .collect(),
+                entrypoint: Some(vec!["python".into(), "-u".into()]),
+                cmd: Some(vec!["worker.py".into()]),
+                hostname: Some("worker".into()),
+                user: Some("appuser".into()),
+                log_level: Some(SandboxLogLevel::Trace),
+                metrics_sample_interval_ms: Some(750),
+                disable_metrics_sample: true,
+            },
+            env: vec![EnvVar::new("A", "B")],
+            labels: [("team".to_string(), "infra".to_string())]
+                .into_iter()
+                .collect(),
+            rlimits: vec![microsandbox_types::Rlimit {
+                resource: microsandbox_types::RlimitResource::Nofile,
+                soft: 1024,
+                hard: 2048,
+            }],
+            security_profile: SecurityProfile::Restricted,
+            lifecycle: SandboxPolicy {
+                max_duration_secs: Some(3600),
+                idle_timeout_secs: Some(120),
+            },
+        };
+
+        let config = SandboxConfig {
+            spec,
+            ..Default::default()
+        };
+
+        assert_eq!(config.spec.name, "spec-test");
+        assert!(
+            matches!(config.spec.image, RootfsSource::Oci(ref oci) if oci.reference == "python:3.12")
+        );
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.memory_mib, 1024);
+        assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Trace));
+        assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(750));
+        assert!(config.spec.runtime.disable_metrics_sample);
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(
+            config.spec.runtime.scripts.get("setup"),
+            Some(&"echo hi".into())
+        );
+        assert_eq!(config.spec.env, vec![EnvVar::new("A", "B")]);
+        assert_eq!(config.spec.labels.get("team"), Some(&"infra".into()));
+        assert_eq!(config.spec.rlimits.len(), 1);
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["python".to_string(), "-u".to_string()])
+        );
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["worker.py".to_string()]));
+        assert_eq!(config.spec.runtime.hostname.as_deref(), Some("worker"));
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
+        assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+        assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
+        assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(120));
     }
 
     #[test]
@@ -1139,8 +1175,14 @@ mod tests {
     #[test]
     fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
         let mut config = SandboxConfig {
-            image: RootfsSource::oci("python:3.12"),
-            memory_mib: 2048,
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                resources: SandboxResources {
+                    memory_mib: 2048,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1164,44 +1206,56 @@ mod tests {
     #[test]
     fn test_apply_rootfs_defaults_sets_oci_upper_size() {
         let mut config = SandboxConfig {
-            image: RootfsSource::oci("python:3.12"),
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         config.apply_rootfs_defaults(None);
 
-        assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(4096));
     }
 
     #[test]
     fn test_apply_rootfs_defaults_uses_backend_oci_upper_size() {
         let mut config = SandboxConfig {
-            image: RootfsSource::oci("python:3.12"),
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         config.apply_rootfs_defaults(Some(8192));
 
-        assert_eq!(config.image.oci_upper_size_mib(), Some(8192));
+        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(8192));
     }
 
     #[test]
     fn test_apply_rootfs_defaults_skips_snapshot_upper_source() {
         let mut config = SandboxConfig {
-            image: RootfsSource::oci("python:3.12"),
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
             snapshot_upper_source: Some("/tmp/upper.ext4".into()),
             ..Default::default()
         };
 
         config.apply_rootfs_defaults(Some(8192));
 
-        assert_eq!(config.image.oci_upper_size_mib(), None);
+        assert_eq!(config.spec.image.oci_upper_size_mib(), None);
     }
 
     #[test]
     fn test_apply_runtime_defaults_preserves_explicit_tmp_mount() {
         let mut config = SandboxConfig {
-            image: RootfsSource::oci("python:3.12"),
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
             mounts: vec![VolumeMount::Bind {
                 host: "/host/tmp".into(),
                 guest: "/tmp/".into(),
@@ -1224,7 +1278,10 @@ mod tests {
     #[test]
     fn test_apply_runtime_defaults_skips_non_oci_roots() {
         let mut config = SandboxConfig {
-            image: RootfsSource::Bind("/tmp/rootfs".into()),
+            spec: SandboxSpec {
+                image: RootfsSource::Bind("/tmp/rootfs".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1241,10 +1298,13 @@ mod tests {
         // be deliberate.
         use crate::sandbox::DiskImageFormat;
         let mut config = SandboxConfig {
-            image: RootfsSource::DiskImage {
-                path: "/tmp/disk.qcow2".into(),
-                format: DiskImageFormat::Qcow2,
-                fstype: None,
+            spec: SandboxSpec {
+                image: RootfsSource::DiskImage {
+                    path: "/tmp/disk.qcow2".into(),
+                    format: DiskImageFormat::Qcow2,
+                    fstype: None,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };

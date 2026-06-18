@@ -18,7 +18,12 @@ mod patch;
 pub mod ssh;
 mod types;
 
-use std::{collections::HashMap, path::Path, process::ExitStatus, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    process::ExitStatus,
+    sync::Arc,
+};
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
@@ -110,7 +115,10 @@ pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
 pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
-pub use microsandbox_types::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES};
+pub use microsandbox_types::{
+    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxLogLevel, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec,
+};
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
@@ -384,7 +392,7 @@ impl Sandbox {
         Self {
             backend,
             inner: Arc::new(crate::backend::SandboxInner::Local(local)),
-            name: config.name.clone(),
+            name: config.spec.name.clone(),
             config,
         }
     }
@@ -426,11 +434,11 @@ pub(crate) async fn create_local(
     progress: Option<PullProgressSender>,
 ) -> MicrosandboxResult<Sandbox> {
     tracing::debug!(
-        sandbox = %config.name,
-        image = ?config.image,
+        sandbox = %config.spec.name,
+        image = ?config.spec.image,
         mode = ?mode,
-        cpus = config.cpus,
-        memory_mib = config.memory_mib,
+        cpus = config.spec.resources.cpus,
+        memory_mib = config.spec.resources.memory_mib,
         "create_local: starting"
     );
 
@@ -448,11 +456,11 @@ pub(crate) async fn create_local(
     let mut pinned_reference: Option<String> = None;
 
     config.apply_runtime_defaults();
-    validate_sandbox_name_for_runtime(&config.name)?;
-    validate_hostname(config.hostname.as_deref())?;
-    validate_rootfs_source(&config.image)?;
-    validate_env(&config.env)?;
-    validate_labels(&config.labels)?;
+    validate_sandbox_name_for_runtime(&config.spec.name)?;
+    validate_hostname(config.spec.runtime.hostname.as_deref())?;
+    validate_rootfs_source(&config.spec.image)?;
+    validate_env(&config.spec.env)?;
+    validate_labels(&config.spec.labels)?;
     if let Some(init) = &config.init {
         init::validate(init)?;
     }
@@ -460,11 +468,11 @@ pub(crate) async fn create_local(
     // Initialize the database before any expensive image pull so we can
     // fail fast on conflicting persisted sandbox state.
     let db = local_backend.db().await?;
-    let sandbox_dir = local_backend.sandboxes_dir().join(&config.name);
+    let sandbox_dir = local_backend.sandboxes_dir().join(&config.spec.name);
     prepare_create_target(db, &config, &sandbox_dir).await?;
 
     // Resolve OCI images before spawning the sandbox process.
-    if let RootfsSource::Oci(oci) = config.image.clone() {
+    if let RootfsSource::Oci(oci) = config.spec.image.clone() {
         let reference = oci.reference;
         let upper_size_mib = oci
             .upper_size_mib
@@ -566,15 +574,15 @@ pub(crate) async fn create_local(
 
     // Apply rootfs patches before VM start (bind mounts only — OCI patches
     // are baked into upper.ext4 above).
-    if !config.patches.is_empty() && !matches!(config.image, RootfsSource::Oci(_)) {
-        patch::apply_patches(&config.image, &config.patches).await?;
+    if !config.patches.is_empty() && !matches!(config.spec.image, RootfsSource::Oci(_)) {
+        patch::apply_patches(&config.spec.image, &config.patches).await?;
     }
 
     // Insert the sandbox record and keep its stable database ID.
     let write_db = db.write();
     let persisted_config = config.clone_for_persistence();
     let sandbox_id = insert_sandbox_record(write_db, &persisted_config).await?;
-    tracing::debug!(sandbox_id, sandbox = %config.name, "create_local: db record inserted");
+    tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
     // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
     // as stopped so it doesn't appear as a phantom "Running" entry.
@@ -599,7 +607,7 @@ pub(crate) async fn create_local(
     }
 
     // Validate that the configured workdir exists inside the guest.
-    if let Some(ref workdir) = sandbox.config.workdir
+    if let Some(ref workdir) = sandbox.config.spec.runtime.workdir
         && !sandbox.fs().exists(workdir).await.unwrap_or(false)
     {
         let _ = sandbox.stop().await;
@@ -647,11 +655,11 @@ pub(crate) async fn start_local(
 
     let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
     config.apply_runtime_defaults();
-    validate_sandbox_name_for_runtime(&config.name)?;
-    validate_hostname(config.hostname.as_deref())?;
-    validate_rootfs_source(&config.image)?;
-    validate_env(&config.env)?;
-    validate_labels(&config.labels)?;
+    validate_sandbox_name_for_runtime(&config.spec.name)?;
+    validate_hostname(config.spec.runtime.hostname.as_deref())?;
+    validate_rootfs_source(&config.spec.image)?;
+    validate_env(&config.spec.env)?;
+    validate_labels(&config.spec.labels)?;
     validate_start_state(
         local_backend,
         &config,
@@ -679,10 +687,10 @@ async fn create_inner_local(
     mode: SpawnMode,
 ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
     let (mut handle, agent_sock_path) = spawn_sandbox(local, &config, sandbox_id, mode).await?;
-    let log_dir = local.sandboxes_dir().join(&config.name).join("logs");
+    let log_dir = local.sandboxes_dir().join(&config.spec.name).join("logs");
 
     // Wait for the relay socket to become available.
-    let client = wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.name).await?;
+    let client = wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name).await?;
 
     if let Ok(ready) = client.ready() {
         tracing::info!(
@@ -1302,6 +1310,8 @@ impl Sandbox {
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
         let shell = self
             .config
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -1324,6 +1334,8 @@ impl Sandbox {
     ) -> MicrosandboxResult<ExecOutput> {
         let shell = self
             .config
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -1343,6 +1355,8 @@ impl Sandbox {
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
         let shell = self
             .config
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -1365,6 +1379,8 @@ impl Sandbox {
     ) -> MicrosandboxResult<ExecHandle> {
         let shell = self
             .config
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -1438,6 +1454,8 @@ impl Sandbox {
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
         let shell = self
             .config
+            .spec
+            .runtime
             .shell
             .as_deref()
             .unwrap_or("/bin/sh")
@@ -1597,14 +1615,17 @@ pub(crate) fn build_exec_request(
     args: Vec<String>,
     cwd: Option<String>,
     user: Option<String>,
-    env: &[(String, String)],
+    env: &[EnvVar],
     rlimits: &[Rlimit],
     tty: bool,
     rows: u16,
     cols: u16,
 ) -> ExecRequest {
-    let merged = config::merge_env_pairs(&config.env, env);
-    let mut env: Vec<String> = merged.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let merged = config::merge_env_pairs(&config.spec.env, env);
+    let mut env: Vec<String> = merged
+        .iter()
+        .map(|var| format!("{}={}", var.key, var.value))
+        .collect();
 
     // Inject TERM for TTY sessions if not already set.
     if tty && !env.iter().any(|e| e.starts_with("TERM=")) {
@@ -1625,9 +1646,9 @@ pub(crate) fn build_exec_request(
         args,
         env,
         cwd: cwd
-            .or_else(|| config.workdir.clone())
+            .or_else(|| config.spec.runtime.workdir.clone())
             .or_else(|| Some("/".to_string())),
-        user: user.or_else(|| config.user.clone()),
+        user: user.or_else(|| config.spec.runtime.user.clone()),
         tty,
         rows,
         cols,
@@ -2034,7 +2055,7 @@ async fn pull_oci_image(
 
 /// Validate user-defined sandbox labels. Keys must be non-empty and must not
 /// use a reserved prefix. Values may be empty.
-pub(crate) fn validate_labels(labels: &HashMap<String, String>) -> MicrosandboxResult<()> {
+pub(crate) fn validate_labels(labels: &BTreeMap<String, String>) -> MicrosandboxResult<()> {
     for key in labels.keys() {
         if key.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
@@ -2051,11 +2072,12 @@ pub(crate) fn validate_labels(labels: &HashMap<String, String>) -> MicrosandboxR
 }
 
 /// Validate sandbox environment variables.
-pub(crate) fn validate_env(env: &[(String, String)]) -> MicrosandboxResult<()> {
-    for (key, _) in env {
-        if key.starts_with("MSB_") {
+pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
+    for var in env {
+        if var.key.starts_with("MSB_") {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "environment variable {key:?} uses the reserved MSB_ prefix"
+                "environment variable {:?} uses the reserved MSB_ prefix",
+                var.key
             )));
         }
     }
@@ -2145,7 +2167,7 @@ async fn prepare_create_target(
     sandbox_dir: &Path,
 ) -> MicrosandboxResult<()> {
     let existing = sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Name.eq(&config.name))
+        .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
         .one(pools.read())
         .await?;
 
@@ -2155,7 +2177,7 @@ async fn prepare_create_target(
         if existing.is_some() || dir_exists {
             return Err(crate::MicrosandboxError::SandboxAlreadyExists(format!(
                 "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .replace()",
-                config.name
+                config.spec.name
             )));
         }
         return Ok(());
@@ -2304,12 +2326,12 @@ fn validate_start_state(
     if !sandbox_dir.exists() {
         return Err(crate::MicrosandboxError::Custom(format!(
             "sandbox state missing for '{}': {}",
-            config.name,
+            config.spec.name,
             sandbox_dir.display()
         )));
     }
 
-    if let RootfsSource::Oci(_) = &config.image
+    if let RootfsSource::Oci(_) = &config.spec.image
         && let Some(ref digest_str) = config.manifest_digest
     {
         let cache_dir = local_backend.cache_dir();
@@ -2320,7 +2342,7 @@ fn validate_start_state(
             if !vmdk_path.exists() {
                 return Err(crate::MicrosandboxError::Custom(format!(
                     "sandbox '{}' cannot start: VMDK missing: {}",
-                    config.name,
+                    config.spec.name,
                     vmdk_path.display()
                 )));
             }
@@ -2342,7 +2364,7 @@ async fn insert_sandbox_record(
         async move {
             let now = chrono::Utc::now().naive_utc();
             let model = sandbox_entity::ActiveModel {
-                name: Set(config.name.clone()),
+                name: Set(config.spec.name.clone()),
                 config: Set(config_json),
                 status: Set(SandboxStatus::Running),
                 created_at: Set(Some(now)),
@@ -2497,6 +2519,27 @@ mod tests {
         .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
         pools
+    }
+
+    fn test_config(name: impl Into<String>) -> SandboxConfig {
+        SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: name.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn test_config_with_rootfs(name: impl Into<String>, image: RootfsSource) -> SandboxConfig {
+        SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: name.into(),
+                image,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
@@ -2711,12 +2754,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let config = SandboxConfig {
-            name: "test".into(),
-            image: RootfsSource::Bind(unique_temp_path("missing")),
-            hostname: Some("y".repeat(MAX_HOSTNAME_BYTES + 1)),
-            ..Default::default()
-        };
+        let mut config =
+            test_config_with_rootfs("test", RootfsSource::Bind(unique_temp_path("missing")));
+        config.spec.runtime.hostname = Some("y".repeat(MAX_HOSTNAME_BYTES + 1));
 
         let err =
             match super::create_local(backend, config, crate::runtime::SpawnMode::Attached, None)
@@ -2761,14 +2801,13 @@ mod tests {
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
 
-        let mut config = SandboxConfig {
-            name: "pinned".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
+        let mut config = test_config_with_rootfs(
+            "pinned",
+            RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
                 upper_size_mib: None,
             }),
-            ..Default::default()
-        };
+        );
         config.manifest_digest = Some("sha256:aaaa".into());
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
@@ -2806,14 +2845,13 @@ mod tests {
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
 
-        let mut config = SandboxConfig {
-            name: "recreated".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
+        let mut config = test_config_with_rootfs(
+            "recreated",
+            RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
                 upper_size_mib: None,
             }),
-            ..Default::default()
-        };
+        );
         config.manifest_digest = Some("sha256:aaaa".into());
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
@@ -2850,14 +2888,13 @@ mod tests {
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
 
-        let mut config = SandboxConfig {
-            name: "persisted-digest".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
+        let mut config = test_config_with_rootfs(
+            "persisted-digest",
+            RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
                 upper_size_mib: None,
             }),
-            ..Default::default()
-        };
+        );
         config.manifest_digest = Some("sha256:abc123".into());
 
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
@@ -2880,10 +2917,7 @@ mod tests {
         let sandbox_dir = temp.path().join("sandboxes").join("existing");
         fs::create_dir_all(&sandbox_dir).unwrap();
 
-        let config = SandboxConfig {
-            name: "existing".into(),
-            ..Default::default()
-        };
+        let config = test_config("existing");
 
         let err = prepare_create_target(&pools, &config, &sandbox_dir)
             .await
@@ -2899,19 +2933,13 @@ mod tests {
 
         let sandbox_dir = temp.path().join("sandboxes").join("replaceable");
         fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
-        let config = SandboxConfig {
-            name: "replaceable".into(),
-            ..Default::default()
-        };
+        let config = test_config("replaceable");
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
         super::update_sandbox_status(pools.write(), sandbox_id, super::SandboxStatus::Stopped)
             .await
             .unwrap();
 
-        let mut forced = SandboxConfig {
-            name: "replaceable".into(),
-            ..Default::default()
-        };
+        let mut forced = test_config("replaceable");
         forced.replace_existing = true;
 
         prepare_create_target(&pools, &forced, &sandbox_dir)
@@ -2934,10 +2962,7 @@ mod tests {
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
 
-        let config = SandboxConfig {
-            name: "stale".into(),
-            ..Default::default()
-        };
+        let config = test_config("stale");
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
         let dead_run_pid = dead_pid();
 
@@ -2984,10 +3009,7 @@ mod tests {
 
         let sandbox_dir = temp.path().join("sandboxes").join("stale-running");
         fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
-        let config = SandboxConfig {
-            name: "stale-running".into(),
-            ..Default::default()
-        };
+        let config = test_config("stale-running");
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         let run = run_entity::ActiveModel {
@@ -3001,10 +3023,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut forced = SandboxConfig {
-            name: "stale-running".into(),
-            ..Default::default()
-        };
+        let mut forced = test_config("stale-running");
         forced.replace_existing = true;
 
         prepare_create_target(&pools, &forced, &sandbox_dir)
@@ -3029,10 +3048,7 @@ mod tests {
 
         let sandbox_dir = temp.path().join("sandboxes").join("running");
         fs::create_dir_all(&sandbox_dir).unwrap();
-        let config = SandboxConfig {
-            name: "running".into(),
-            ..Default::default()
-        };
+        let config = test_config("running");
         let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         let child = Command::new("sleep").arg("30").spawn().unwrap();
@@ -3052,10 +3068,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut forced = SandboxConfig {
-            name: "running".into(),
-            ..Default::default()
-        };
+        let mut forced = test_config("running");
         forced.replace_existing = true;
 
         prepare_create_target(&pools, &forced, &sandbox_dir)
@@ -3079,10 +3092,7 @@ mod tests {
     fn test_validate_start_state_requires_existing_sandbox_dir() {
         let temp = tempdir().unwrap();
         let sandbox_dir = temp.path().join("missing");
-        let config = SandboxConfig {
-            name: "missing".into(),
-            ..Default::default()
-        };
+        let config = test_config("missing");
 
         let backend = crate::backend::LocalBackend::lazy();
         let err = super::validate_start_state(&backend, &config, &sandbox_dir).unwrap_err();
@@ -3095,14 +3105,13 @@ mod tests {
         let sandbox_dir = temp.path().join("persisted");
         fs::create_dir_all(&sandbox_dir).unwrap();
 
-        let mut config = SandboxConfig {
-            name: "persisted".into(),
-            image: RootfsSource::Oci(OciRootfsSource {
+        let mut config = test_config_with_rootfs(
+            "persisted",
+            RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
                 upper_size_mib: None,
             }),
-            ..Default::default()
-        };
+        );
         config.manifest_digest = Some("sha256:aaaa".into());
 
         // validate_start_state checks VMDK existence via GlobalCache,
@@ -3126,10 +3135,7 @@ mod tests {
         let dead = dead_pid();
 
         // --- Sandbox A: Running + dead PID → should become Crashed ---
-        let cfg_a = SandboxConfig {
-            name: "running-dead".into(),
-            ..Default::default()
-        };
+        let cfg_a = test_config("running-dead");
         let id_a = insert_sandbox_record(pools.write(), &cfg_a).await.unwrap();
         run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id_a),
@@ -3149,10 +3155,7 @@ mod tests {
             child.wait().unwrap()
         });
 
-        let cfg_b = SandboxConfig {
-            name: "running-alive".into(),
-            ..Default::default()
-        };
+        let cfg_b = test_config("running-alive");
         let id_b = insert_sandbox_record(pools.write(), &cfg_b).await.unwrap();
         run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id_b),
@@ -3165,10 +3168,7 @@ mod tests {
         .unwrap();
 
         // --- Sandbox C: Draining + dead PID → should become Crashed ---
-        let cfg_c = SandboxConfig {
-            name: "draining-dead".into(),
-            ..Default::default()
-        };
+        let cfg_c = test_config("draining-dead");
         let id_c = insert_sandbox_record(pools.write(), &cfg_c).await.unwrap();
         super::update_sandbox_status(pools.write(), id_c, SandboxStatus::Draining)
             .await
@@ -3184,20 +3184,14 @@ mod tests {
         .unwrap();
 
         // --- Sandbox D: Stopped → should stay Stopped ---
-        let cfg_d = SandboxConfig {
-            name: "stopped".into(),
-            ..Default::default()
-        };
+        let cfg_d = test_config("stopped");
         let id_d = insert_sandbox_record(pools.write(), &cfg_d).await.unwrap();
         super::update_sandbox_status(pools.write(), id_d, SandboxStatus::Stopped)
             .await
             .unwrap();
 
         // --- Sandbox E: Running + no run record (still starting) → should stay Running ---
-        let cfg_e = SandboxConfig {
-            name: "starting".into(),
-            ..Default::default()
-        };
+        let cfg_e = test_config("starting");
         let id_e = insert_sandbox_record(pools.write(), &cfg_e).await.unwrap();
 
         // --- Reap: query all Running/Draining, reconcile each ---

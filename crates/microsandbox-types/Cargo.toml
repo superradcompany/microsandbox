@@ -11,6 +11,11 @@ edition.workspace = true
 name = "microsandbox_types"
 path = "lib/lib.rs"
 
+[[bin]]
+name = "microsandbox-types-generate"
+path = "bin/main.rs"
+required-features = ["ts"]
+
 [features]
 default = []
 ts = ["dep:ts-rs", "ts-rs/chrono-impl"]

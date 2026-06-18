@@ -81,7 +81,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     };
 
     // Resolve the command using the same OCI-aware logic as `msb run`:
-    // user command > entrypoint [+ cmd] > cmd > config.shell > /bin/sh.
+    // user command > entrypoint [+ cmd] > cmd > config.spec.runtime.shell > /bin/sh.
     let (cmd, cmd_args) =
         match super::common::resolve_command(sandbox.config(), args.command, interactive)? {
             (Some(cmd), cmd_args) => (cmd, cmd_args),

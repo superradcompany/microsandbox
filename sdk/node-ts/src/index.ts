@@ -25,6 +25,12 @@ export type {
   CloudPaginated,
   CloudSandbox,
   CloudSandboxStatus,
+  EnvVar,
+  SandboxLogLevel,
+  SandboxPolicy,
+  SandboxResources,
+  SandboxRuntimeOptions,
+  SandboxSpec,
 } from "./generated/types.js";
 
 // Sandbox lifecycle and execution
