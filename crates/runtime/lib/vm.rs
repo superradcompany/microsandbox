@@ -586,11 +586,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
-        (None, _) => tracing::debug!(
-            sandbox = %config.sandbox_name,
-            "metrics sampling disabled; not spawning sampler"
-        ),
+    let metrics_sampler = match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                "metrics sampling disabled; not spawning sampler"
+            );
+            None
+        }
         (Some(_), None) => {
             // Distinguish "host did not reserve a slot" from "host reserved
             // but runtime activation failed" so operators reading the warn
@@ -606,25 +609,20 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
                 );
             }
+            None
         }
-        (Some(interval_ms), Some(writer)) => {
-            tracing::debug!(
-                sandbox = %config.sandbox_name,
-                interval_ms = interval_ms.get(),
-                "starting metrics sampler"
-            );
-            tokio_rt.spawn(run_metrics_sampler(
-                writer,
-                config.sandbox_id,
-                pid,
-                interval_ms,
-                krun_metrics_handle,
-                network_metrics_handle
-                    .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-                upper_host_path,
-            ));
-        }
-    }
+        (Some(interval_ms), Some(writer)) => Some((
+            writer,
+            interval_ms,
+            krun_metrics_handle,
+            network_metrics_handle
+                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            upper_host_path,
+        )),
+    };
+    let metrics_sandbox_id = config.sandbox_id;
+    let metrics_sandbox_name = config.sandbox_name.clone();
+    let metrics_pid = pid;
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -639,6 +637,29 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
         match ready_result {
             Ok(Ok(relay)) => {
+                if let Some((
+                    writer,
+                    interval_ms,
+                    krun_metrics_handle,
+                    network_metrics_handle,
+                    upper_host_path,
+                )) = metrics_sampler
+                {
+                    tracing::debug!(
+                        sandbox = %metrics_sandbox_name,
+                        interval_ms = interval_ms.get(),
+                        "starting metrics sampler after agent ready"
+                    );
+                    tokio::spawn(run_metrics_sampler(
+                        writer,
+                        metrics_sandbox_id,
+                        metrics_pid,
+                        interval_ms,
+                        krun_metrics_handle,
+                        network_metrics_handle,
+                        upper_host_path,
+                    ));
+                }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
                 }
