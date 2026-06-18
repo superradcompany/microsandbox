@@ -192,6 +192,9 @@ pub struct SandboxMetrics {
     pub disk_write_bytes: f64,
     pub net_rx_bytes: f64,
     pub net_tx_bytes: f64,
+    pub upper_used_bytes: Option<f64>,
+    pub upper_free_bytes: Option<f64>,
+    pub upper_host_allocated_bytes: Option<f64>,
     /// Uptime in milliseconds.
     pub uptime_ms: f64,
     /// Timestamp as milliseconds since Unix epoch.

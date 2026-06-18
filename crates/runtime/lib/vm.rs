@@ -554,6 +554,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
+    let upper_host_path = oci_upper_host_path(&config.vm);
 
     if let Some(parent_watchdog) = config.parent_watchdog
         && let Err(e) = spawn_parent_watchdog(
@@ -620,6 +621,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 krun_metrics_handle,
                 network_metrics_handle
                     .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+                upper_host_path,
             ));
         }
     }
@@ -789,6 +791,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             Err(RuntimeError::Custom(format!("VM enter: {e}")))
         }
     }
+}
+
+fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
+    vm.rootfs_vmdk.as_ref()?;
+
+    vm.rootfs_upper_spec
+        .as_ref()
+        .map(|spec| spec.primary.clone())
+        .or_else(|| vm.rootfs_upper.clone())
 }
 
 //--------------------------------------------------------------------------------------------------

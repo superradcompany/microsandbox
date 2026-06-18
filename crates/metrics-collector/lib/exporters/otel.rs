@@ -10,6 +10,9 @@
 //! - `microsandbox.disk.bytes_written`  — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_received` — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_sent`     — gauge (cumulative bytes)
+//! - `microsandbox.upper.used`             — gauge (bytes)
+//! - `microsandbox.upper.free`             — gauge (bytes)
+//! - `microsandbox.upper.host_allocated`   — gauge (bytes)
 //! - `microsandbox.uptime`              — gauge (seconds)
 //!
 //! All cumulative byte counters are emitted as gauges carrying the
@@ -140,6 +143,9 @@ struct Instruments {
     disk_bytes_written: Gauge<u64>,
     network_bytes_received: Gauge<u64>,
     network_bytes_sent: Gauge<u64>,
+    upper_used: Gauge<u64>,
+    upper_free: Gauge<u64>,
+    upper_host_allocated: Gauge<u64>,
     uptime: Gauge<f64>,
 }
 
@@ -610,6 +616,23 @@ fn build_instruments(meter: &Meter) -> Instruments {
             )
             .with_unit("By")
             .build(),
+        upper_used: meter
+            .u64_gauge("microsandbox.upper.used")
+            .with_description("Guest-visible used bytes on the OCI upper filesystem")
+            .with_unit("By")
+            .build(),
+        upper_free: meter
+            .u64_gauge("microsandbox.upper.free")
+            .with_description(
+                "Guest-visible bytes available to ordinary allocation on the OCI upper filesystem",
+            )
+            .with_unit("By")
+            .build(),
+        upper_host_allocated: meter
+            .u64_gauge("microsandbox.upper.host_allocated")
+            .with_description("Host-allocated bytes for the writable upper image")
+            .with_unit("By")
+            .build(),
         uptime: meter
             .f64_gauge("microsandbox.uptime")
             .with_description("Sandbox uptime at the moment of sampling")
@@ -672,6 +695,15 @@ fn record_snapshot(
         .network_bytes_received
         .record(m.net_rx_bytes, attrs);
     instruments.network_bytes_sent.record(m.net_tx_bytes, attrs);
+    if let Some(bytes) = m.upper_used_bytes {
+        instruments.upper_used.record(bytes, attrs);
+    }
+    if let Some(bytes) = m.upper_free_bytes {
+        instruments.upper_free.record(bytes, attrs);
+    }
+    if let Some(bytes) = m.upper_host_allocated_bytes {
+        instruments.upper_host_allocated.record(bytes, attrs);
+    }
     instruments.uptime.record(m.uptime.as_secs_f64(), attrs);
 }
 
@@ -704,6 +736,9 @@ mod tests {
                 disk_write_bytes: 4,
                 net_rx_bytes: 5,
                 net_tx_bytes: 6,
+                upper_used_bytes: Some(7),
+                upper_free_bytes: Some(8),
+                upper_host_allocated_bytes: Some(7),
                 uptime: Duration::from_secs(1),
                 timestamp: chrono::Utc::now(),
             },

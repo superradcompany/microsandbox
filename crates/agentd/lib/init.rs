@@ -102,6 +102,8 @@ mod linux {
     use crate::config::{BlockRootSpec, DirMountSpec, DiskMountSpec, FileMountSpec, TmpfsSpec};
     use crate::error::{AgentdError, AgentdResult};
 
+    const UPPER_METRICS_PATH: &str = "/sys/kernel/msb_metrics/upper_path";
+
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
         // /dev — devtmpfs
@@ -267,6 +269,7 @@ mod linux {
             None::<&str>,
         )
         .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
+        register_upper_metrics(upperfs_dir);
 
         // Create upper and work subdirs on the writable device.
         let upper_dir = format!("{upperfs_dir}/upper");
@@ -289,6 +292,14 @@ mod linux {
         .map_err(|e| AgentdError::Init(format!("mount overlay at /newroot: {e}")))?;
 
         Ok(())
+    }
+
+    fn register_upper_metrics(upperfs_dir: &str) {
+        match fs::write(UPPER_METRICS_PATH, upperfs_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!("agentd: upper metrics registration failed: {err}"),
+        }
     }
 
     /// Bind-mount /.msb into /newroot, then MS_MOVE + chroot + re-mount essentials.

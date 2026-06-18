@@ -9,6 +9,9 @@ export interface SandboxMetrics {
   readonly diskWriteBytes: number;
   readonly netRxBytes: number;
   readonly netTxBytes: number;
+  readonly upperUsedBytes: number | null;
+  readonly upperFreeBytes: number | null;
+  readonly upperHostAllocatedBytes: number | null;
   /** Uptime in milliseconds. */
   readonly uptimeMs: number;
   readonly timestamp: Date;

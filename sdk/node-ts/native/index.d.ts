@@ -1878,6 +1878,9 @@ export interface SandboxMetrics {
   diskWriteBytes: number
   netRxBytes: number
   netTxBytes: number
+  upperUsedBytes?: number
+  upperFreeBytes?: number
+  upperHostAllocatedBytes?: number
   /** Uptime in milliseconds. */
   uptimeMs: number
   /** Timestamp as milliseconds since Unix epoch. */
