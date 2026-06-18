@@ -961,7 +961,9 @@ fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
 /// Returns `Ok(None)` when `MSB_HANDOFF_INIT` is unset/empty (the
 /// default no-handoff path). Returns `Err` when the cmd path is
 /// not absolute, or when `MSB_HANDOFF_INIT_ARGS` / `MSB_HANDOFF_INIT_ENV`
-/// contain invalid base64url JSON.
+/// contain invalid base64url JSON. The args/env payloads are the one
+/// structured exception to the delimiter-based `MSB_*` boot envs because
+/// they carry exact process argv/env strings.
 fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
     let Some(cmd_str) = read_env_raw(ENV_HANDOFF_INIT) else {
         return Ok(None);
@@ -984,8 +986,9 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
         Some(val) if !val.is_empty() => {
             decode_handoff_json::<Vec<String>>(ENV_HANDOFF_INIT_ARGS, &val)?
                 .into_iter()
-                .map(OsString::from)
-                .collect()
+                .enumerate()
+                .map(|(index, arg)| parse_handoff_arg(index, arg))
+                .collect::<AgentdResult<Vec<_>>>()?
         }
         _ => Vec::new(),
     };
@@ -995,14 +998,7 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
             let entries = decode_handoff_json::<Vec<(String, String)>>(ENV_HANDOFF_INIT_ENV, &val)?;
             entries
                 .into_iter()
-                .map(|(k, v)| {
-                    if k.is_empty() {
-                        return Err(AgentdError::Config(format!(
-                            "{ENV_HANDOFF_INIT_ENV} entry has empty key"
-                        )));
-                    }
-                    Ok((OsString::from(k), OsString::from(v)))
-                })
+                .map(|(key, value)| parse_handoff_env_pair(key, value))
                 .collect::<AgentdResult<Vec<_>>>()?
         }
         _ => Vec::new(),
@@ -1017,6 +1013,39 @@ fn decode_handoff_json<T: DeserializeOwned>(env_name: &str, value: &str) -> Agen
     })?;
     serde_json::from_slice(&json)
         .map_err(|e| AgentdError::Config(format!("{env_name} contains invalid JSON: {e}")))
+}
+
+fn parse_handoff_arg(index: usize, arg: String) -> AgentdResult<OsString> {
+    if arg.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT_ARGS} entry #{index} must not contain NUL"
+        )));
+    }
+    Ok(OsString::from(arg))
+}
+
+fn parse_handoff_env_pair(key: String, value: String) -> AgentdResult<(OsString, OsString)> {
+    if key.is_empty() {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT_ENV} entry has empty key"
+        )));
+    }
+    if key.contains('=') {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT_ENV} key {key:?} must not contain '='"
+        )));
+    }
+    if key.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT_ENV} key {key:?} must not contain NUL"
+        )));
+    }
+    if value.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT_ENV} value for {key:?} must not contain NUL"
+        )));
+    }
+    Ok((OsString::from(key), OsString::from(value)))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1598,6 +1627,41 @@ mod tests {
         let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
             .unwrap_err();
         assert!(err.to_string().contains("empty key"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_arg_rejects_nul() {
+        let argv = encode_handoff_json(&vec!["ok", "bad\0arg"]);
+        let err = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("entry #1"));
+        assert!(err.to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_key_rejects_equals() {
+        let envs = encode_handoff_json(&vec![("BAD=KEY", "value")]);
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("must not contain '='"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_key_rejects_nul() {
+        let envs = encode_handoff_json(&vec![("BAD\0KEY", "value")]);
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("key"));
+        assert!(err.to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_value_rejects_nul() {
+        let envs = encode_handoff_json(&vec![("KEY", "bad\0value")]);
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("value for"));
+        assert!(err.to_string().contains("NUL"));
     }
 
     #[test]

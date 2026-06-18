@@ -345,6 +345,10 @@ pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
 ///
 /// Format: base64url-no-padding encoded JSON array of strings.
 /// Empty or unset means the init is exec'd with `argv = [program]`.
+/// This deliberately differs from the delimiter-based `MSB_*` boot env
+/// formats because argv entries are arbitrary strings; wrapping JSON in
+/// base64url preserves spaces, separators, empty strings, and Unicode
+/// without inventing a second escaping language.
 ///
 /// Example:
 /// - `MSB_HANDOFF_INIT_ARGS=WyItdW5pdD1tdWx0aS11c2VyLnRhcmdldCJd`
@@ -354,6 +358,9 @@ pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
 ///
 /// Format: base64url-no-padding encoded JSON array of `[key, value]`
 /// pairs. Merged on top of the inherited env.
+/// This uses the same structured payload exception as
+/// [`ENV_HANDOFF_INIT_ARGS`] so env values can contain the delimiter
+/// characters used by older `MSB_*` boot env formats.
 ///
 /// Example:
 /// - `MSB_HANDOFF_INIT_ENV=W1siY29udGFpbmVyIiwibWljcm9zYW5kYm94Il1d`
