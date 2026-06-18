@@ -50,6 +50,7 @@ microsandbox-migration.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-runtime.workspace = true
+microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term"] }
 notify.workspace = true

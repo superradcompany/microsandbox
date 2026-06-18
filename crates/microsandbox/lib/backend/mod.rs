@@ -20,18 +20,17 @@
 //! for the resolution ladder + process-level config story.
 
 mod cloud;
-mod cloud_wire;
 mod local;
 mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
 
 pub use cloud::{CloudBackend, CloudBackendBuilder};
-pub use cloud_wire::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox,
-    CloudSandboxStatus,
-};
 pub use local::{LocalBackend, LocalBackendBuilder};
+pub use microsandbox_types::{
+    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
+    CloudPaginated, CloudSandbox, CloudSandboxStatus,
+};
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,

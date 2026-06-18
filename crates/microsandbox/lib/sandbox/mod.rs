@@ -27,6 +27,7 @@ use microsandbox_protocol::{
     exec::{ExecRequest, ExecRlimit},
     message::MessageType,
 };
+use microsandbox_types::hostname_from_sandbox_name as derive_hostname;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, sea_query::Expr,
 };
@@ -52,12 +53,6 @@ use self::exec::{ExecHandle, ExecOptions};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Maximum UTF-8 byte length for a sandbox name.
-pub const MAX_SANDBOX_NAME_BYTES: usize = microsandbox_metrics::SLOT_NAME_BYTES;
-
-/// Maximum UTF-8 byte length for a guest hostname (Linux `__NEW_UTS_LEN`).
-pub const MAX_HOSTNAME_BYTES: usize = 64;
-
 /// Prefixes reserved for built-in identity/resource attributes.
 pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
 
@@ -67,7 +62,7 @@ pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox
 
 /// Validate a sandbox name used by CLI and SDK APIs.
 pub fn validate_sandbox_name(name: &str) -> MicrosandboxResult<()> {
-    builder::validate_sandbox_name(name)
+    microsandbox_types::validate_sandbox_name(name).map_err(Into::into)
 }
 
 /// Validate sandbox-name-derived runtime paths before the sandbox process starts.
@@ -78,24 +73,7 @@ pub(super) fn validate_sandbox_name_for_runtime(name: &str) -> MicrosandboxResul
 
 /// Validate an explicit guest hostname before it is forwarded to agentd.
 pub(super) fn validate_hostname(hostname: Option<&str>) -> MicrosandboxResult<()> {
-    let Some(hostname) = hostname else {
-        return Ok(());
-    };
-
-    if hostname.is_empty() {
-        return Err(crate::MicrosandboxError::InvalidConfig(
-            "hostname must not be empty".into(),
-        ));
-    }
-
-    let len = hostname.len();
-    if len > MAX_HOSTNAME_BYTES {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "hostname is too long: {len} bytes (max {MAX_HOSTNAME_BYTES})"
-        )));
-    }
-
-    Ok(())
+    microsandbox_types::validate_hostname(hostname).map_err(Into::into)
 }
 
 pub(crate) fn sandbox_name_validation_message(name: &str) -> Option<String> {
@@ -132,6 +110,7 @@ pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
 pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
+pub use microsandbox_types::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES};
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
@@ -1954,28 +1933,7 @@ fn pid_is_dead_or_reaped(pid: i32) -> bool {
 /// longer names collapse to a deterministic `<prefix>-<hash>` form to
 /// keep distinct long names very unlikely to share a hostname.
 pub(crate) fn hostname_from_sandbox_name(name: &str) -> String {
-    if name.len() <= MAX_HOSTNAME_BYTES {
-        return name.to_string();
-    }
-
-    // 55-byte prefix + '-' + 8 hex chars of sha256 = 64 bytes.
-    const HASH_HEX_LEN: usize = 8;
-    const PREFIX_MAX: usize = MAX_HOSTNAME_BYTES - 1 - HASH_HEX_LEN;
-
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-    let suffix = format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        digest[0], digest[1], digest[2], digest[3]
-    );
-
-    let mut end = PREFIX_MAX;
-    while end > 0 && !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}-{}", &name[..end], suffix)
+    derive_hostname(name)
 }
 
 /// Pull an OCI image and return the pull result.

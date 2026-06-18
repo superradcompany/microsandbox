@@ -28,10 +28,10 @@ pub use agent::{
 };
 pub use backend::{
     Backend, BackendKind, CloudBackend, CloudBackendBuilder, CloudCreateSandboxRequest,
-    CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox, CloudSandboxStatus,
-    LocalBackend, LocalBackendBuilder, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
-    SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState, SandboxInner,
-    SandboxList, SandboxLocalState, SdkConfig, VolumeBackend, VolumeCloudState,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandbox,
+    CloudSandboxStatus, LocalBackend, LocalBackendBuilder, Profile, ProfileBackend, SandboxBackend,
+    SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
+    SandboxInner, SandboxList, SandboxLocalState, SdkConfig, VolumeBackend, VolumeCloudState,
     VolumeHandleCloudState, VolumeHandleInner, VolumeHandleLocalState, VolumeInner,
     VolumeLocalState, default_backend, load_sdk_config, resolve_default_backend,
     set_default_backend, swap_default_backend, with_backend,

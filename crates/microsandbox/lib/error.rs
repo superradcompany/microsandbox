@@ -203,6 +203,18 @@ pub enum MicrosandboxError {
     Custom(String),
 }
 
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl From<microsandbox_types::TypesError> for MicrosandboxError {
+    fn from(value: microsandbox_types::TypesError) -> Self {
+        match value {
+            microsandbox_types::TypesError::InvalidConfig(message) => Self::InvalidConfig(message),
+        }
+    }
+}
+
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))

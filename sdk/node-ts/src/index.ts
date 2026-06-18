@@ -17,6 +17,15 @@ export {
   withDefaultBackend,
 } from "./runtime.js";
 export type { DefaultBackend } from "./runtime.js";
+export type {
+  CloudCreateSandboxRequest,
+  CloudErrorBody,
+  CloudErrorDetails,
+  CloudMessageResponse,
+  CloudPaginated,
+  CloudSandbox,
+  CloudSandboxStatus,
+} from "./generated/types.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox } from "./sandbox.js";

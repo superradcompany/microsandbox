@@ -38,9 +38,6 @@ use tokio_tungstenite::{
     },
 };
 
-use super::cloud_wire::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox,
-};
 use super::{Backend, BackendKind, SandboxBackend, VolumeBackend, sandbox::LogStream};
 use crate::logs::{LogCursor, LogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
 use crate::sandbox::{
@@ -48,6 +45,9 @@ use crate::sandbox::{
     exec::{ExecOptions, ExecOutput, ExitStatus, StdinMode},
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
+use microsandbox_types::{
+    CloudCreateSandboxRequest, CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
