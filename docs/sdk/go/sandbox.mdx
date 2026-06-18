@@ -590,7 +590,7 @@ Helpers that construct [`InitConfig`](#initconfig) values for [`WithInit`](#with
 func (initFactory) Auto() InitConfig
 ```
 
-Probe common init paths inside the guest (`/sbin/init`, `/lib/systemd/systemd`, ...).
+Use a known init at the start of the image ENTRYPOINT when present, or probe common init paths inside the guest (`/sbin/init`, `/lib/systemd/systemd`, ...). For attached `msb run` against image-declared init entrypoints, microsandbox passes the remaining ENTRYPOINT plus CMD or trailing command to that init instead of direct-executing the wrapper through agentd.
 
 ```go
 m.WithInit(m.Init.Auto())
@@ -1026,7 +1026,7 @@ Custom init specification.
 
 | Field | Type                | Description                                                          |
 | ----- | ------------------- | -------------------------------------------------------------------- |
-| Cmd   | `string`            | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| Cmd   | `string`            | Absolute path or `"auto"` to the init binary. Auto honors known image ENTRYPOINT inits before probing common guest paths and preserves attached init-entrypoint commands |
 | Args  | `[]string`          | Supplemental argv (`argv[0]` is implicitly `Cmd`)                    |
 | Env   | `map[string]string` | Extra env vars merged on top of the inherited env                    |
 

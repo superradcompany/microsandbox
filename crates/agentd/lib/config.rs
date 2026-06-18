@@ -18,12 +18,14 @@ use std::ffi::OsString;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
     ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
-    HANDOFF_INIT_AUTO, HANDOFF_INIT_SEP, exec::ExecRlimit,
+    HANDOFF_INIT_AUTO, exec::ExecRlimit,
 };
+use serde::de::DeserializeOwned;
 
 use crate::error::{AgentdError, AgentdResult};
 use crate::rlimit;
@@ -958,8 +960,8 @@ fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
 ///
 /// Returns `Ok(None)` when `MSB_HANDOFF_INIT` is unset/empty (the
 /// default no-handoff path). Returns `Err` when the cmd path is
-/// not absolute, or when `MSB_HANDOFF_INIT_ENV` contains an entry
-/// without an `=`.
+/// not absolute, or when `MSB_HANDOFF_INIT_ARGS` / `MSB_HANDOFF_INIT_ENV`
+/// contain invalid base64url JSON.
 fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
     let Some(cmd_str) = read_env_raw(ENV_HANDOFF_INIT) else {
         return Ok(None);
@@ -979,31 +981,42 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
     }
 
     let argv = match read_env_raw(ENV_HANDOFF_INIT_ARGS) {
-        Some(val) if !val.is_empty() => val.split(HANDOFF_INIT_SEP).map(OsString::from).collect(),
+        Some(val) if !val.is_empty() => {
+            decode_handoff_json::<Vec<String>>(ENV_HANDOFF_INIT_ARGS, &val)?
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        }
         _ => Vec::new(),
     };
 
     let env = match read_env_raw(ENV_HANDOFF_INIT_ENV) {
-        Some(val) if !val.is_empty() => val
-            .split(HANDOFF_INIT_SEP)
-            .map(|entry| {
-                let (k, v) = entry.split_once('=').ok_or_else(|| {
-                    AgentdError::Config(format!(
-                        "{ENV_HANDOFF_INIT_ENV} entry missing '=': {entry}"
-                    ))
-                })?;
-                if k.is_empty() {
-                    return Err(AgentdError::Config(format!(
-                        "{ENV_HANDOFF_INIT_ENV} entry has empty key: {entry}"
-                    )));
-                }
-                Ok((OsString::from(k), OsString::from(v)))
-            })
-            .collect::<AgentdResult<Vec<_>>>()?,
+        Some(val) if !val.is_empty() => {
+            let entries = decode_handoff_json::<Vec<(String, String)>>(ENV_HANDOFF_INIT_ENV, &val)?;
+            entries
+                .into_iter()
+                .map(|(k, v)| {
+                    if k.is_empty() {
+                        return Err(AgentdError::Config(format!(
+                            "{ENV_HANDOFF_INIT_ENV} entry has empty key"
+                        )));
+                    }
+                    Ok((OsString::from(k), OsString::from(v)))
+                })
+                .collect::<AgentdResult<Vec<_>>>()?
+        }
         _ => Vec::new(),
     };
 
     Ok(Some(HandoffInit { cmd, argv, env }))
+}
+
+fn decode_handoff_json<T: DeserializeOwned>(env_name: &str, value: &str) -> AgentdResult<T> {
+    let json = URL_SAFE_NO_PAD.decode(value).map_err(|e| {
+        AgentdError::Config(format!("{env_name} must be base64url-no-padding JSON: {e}"))
+    })?;
+    serde_json::from_slice(&json)
+        .map_err(|e| AgentdError::Config(format!("{env_name} contains invalid JSON: {e}")))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1020,8 +1033,8 @@ fn read_env(key: &str) -> Option<String> {
 
 /// Reads a single environment variable without trimming whitespace.
 ///
-/// Used for the handoff-init vars where the `\x1f` separator and argv
-/// content are sensitive to byte-exact preservation.
+/// Used for the handoff-init vars where argv content is sensitive to
+/// byte-exact preservation.
 fn read_env_raw(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -1477,6 +1490,13 @@ mod tests {
         out
     }
 
+    fn encode_handoff_json<T: serde::Serialize>(value: &T) -> String {
+        use base64::Engine as _;
+
+        let json = serde_json::to_vec(value).unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    }
+
     #[test]
     fn test_parse_handoff_init_unset_returns_none() {
         let res = with_handoff_env(None, None, None, parse_handoff_init).unwrap();
@@ -1501,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_with_argv() {
-        let argv = format!("--unit=multi-user.target{HANDOFF_INIT_SEP}--log-level=warning");
+        let argv = encode_handoff_json(&vec!["--unit=multi-user.target", "--log-level=warning"]);
         let res = with_handoff_env(
             Some("/lib/systemd/systemd"),
             Some(&argv),
@@ -1521,7 +1541,7 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_with_env() {
-        let envs = format!("container=microsandbox{HANDOFF_INIT_SEP}LANG=C.UTF-8");
+        let envs = encode_handoff_json(&vec![("container", "microsandbox"), ("LANG", "C.UTF-8")]);
         let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
             .unwrap()
             .unwrap();
@@ -1536,8 +1556,11 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_argv_with_spaces_preserved() {
-        // Argv entries can contain any characters except '\x1f' and NUL.
-        let argv = format!("--label=hello world{HANDOFF_INIT_SEP}--config=/etc/foo;bar");
+        let argv = encode_handoff_json(&vec![
+            "--label=hello world",
+            "--config=/etc/foo;bar",
+            "old\x1fseparator",
+        ]);
         let res = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
             .unwrap()
             .unwrap();
@@ -1546,6 +1569,7 @@ mod tests {
             vec![
                 OsString::from("--label=hello world"),
                 OsString::from("--config=/etc/foo;bar"),
+                OsString::from("old\x1fseparator"),
             ]
         );
     }
@@ -1557,17 +1581,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_handoff_init_env_entry_missing_equals() {
-        let envs = format!("KEY=value{HANDOFF_INIT_SEP}NOEQUALS");
-        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap_err();
-        assert!(err.to_string().contains("missing '='"));
+    fn test_parse_handoff_init_env_rejects_invalid_base64() {
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            Some("not base64!"),
+            parse_handoff_init,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("base64url-no-padding JSON"));
     }
 
     #[test]
     fn test_parse_handoff_init_env_entry_empty_key_rejected() {
-        // `=value` (empty key) used to silently produce a nameless env entry.
-        let envs = "=value".to_string();
+        let envs = encode_handoff_json(&vec![("", "value")]);
         let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
             .unwrap_err();
         assert!(err.to_string().contains("empty key"));
@@ -1575,8 +1602,7 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_env_value_with_equals_is_value() {
-        // Only the first '=' splits; the rest is part of the value.
-        let envs = "PATH=/a:/b=/c".to_string();
+        let envs = encode_handoff_json(&vec![("PATH", "/a:/b=/c")]);
         let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
             .unwrap()
             .unwrap();

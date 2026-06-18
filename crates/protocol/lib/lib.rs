@@ -284,19 +284,6 @@ pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
 pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
-/// Separator byte for argv/env entries in handoff-init env vars.
-///
-/// ASCII Unit Separator (`0x1F`). Argv entries and `KEY=VAL` env pairs
-/// are arbitrary user strings, so the `;` separator other MSB_* vars use
-/// is unsafe — they collide with realistic shell input. `0x1F` is
-/// purpose-built for this and absent from any printable string.
-pub const HANDOFF_INIT_SEP: char = '\x1f';
-
-/// String form of [`HANDOFF_INIT_SEP`] for use with `&str`-friendly
-/// APIs like `[T]::join`. Avoids per-call `char.to_string()` allocations
-/// on the host's encoder side.
-pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
-
 /// Environment variable selecting a guest init binary for PID 1 handoff.
 ///
 /// When set, agentd performs initial setup (mounts, runtime dirs), then
@@ -315,11 +302,28 @@ pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
 
 /// Sentinel value for [`ENV_HANDOFF_INIT`] requesting auto-detection.
 ///
-/// When the env var matches this exact string, agentd probes
-/// [`HANDOFF_INIT_AUTO_CANDIDATES`] in order and uses the first path
-/// that exists and is executable. If none match, boot fails with a
-/// clear error in `kernel.log` listing the paths it checked.
+/// The host may resolve this sentinel before boot when an OCI image
+/// declares a known init as the first entrypoint token. If the sentinel
+/// reaches the guest unchanged, agentd probes [`HANDOFF_INIT_AUTO_CANDIDATES`]
+/// in order and uses the first path that exists and is executable. If
+/// none match, boot fails with a clear error in `kernel.log` listing the
+/// paths it checked.
 pub const HANDOFF_INIT_AUTO: &str = "auto";
+
+/// Ordered list of image entrypoint paths that `--init auto` may treat
+/// as an explicit handoff init.
+///
+/// This host-side list is intentionally slightly wider than
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`]: `/init` is common in s6-overlay
+/// images but too broad to probe blindly inside every guest rootfs.
+/// Matching it only when the image declares it as ENTRYPOINT keeps the
+/// behavior image-directed.
+pub const HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES: &[&str] = &[
+    "/init",
+    "/sbin/init",
+    "/lib/systemd/systemd",
+    "/usr/lib/systemd/systemd",
+];
 
 /// Ordered list of init-binary paths agentd probes when
 /// [`ENV_HANDOFF_INIT`] is set to [`HANDOFF_INIT_AUTO`].
@@ -339,21 +343,20 @@ pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
 
 /// Argv list for the handoff init binary.
 ///
-/// Format: entries separated by [`HANDOFF_INIT_SEP`] (ASCII `0x1F`).
+/// Format: base64url-no-padding encoded JSON array of strings.
 /// Empty or unset means the init is exec'd with `argv = [program]`.
 ///
 /// Example:
-/// - `MSB_HANDOFF_INIT_ARGS=--unit=multi-user.target\x1f--log-level=warning`
+/// - `MSB_HANDOFF_INIT_ARGS=WyItdW5pdD1tdWx0aS11c2VyLnRhcmdldCJd`
 pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
 
 /// Extra environment variables for the handoff init binary.
 ///
-/// Format: `KEY=VAL` pairs separated by [`HANDOFF_INIT_SEP`]
-/// (ASCII `0x1F`). Each entry must contain at least one `=`. Merged on
-/// top of the inherited env.
+/// Format: base64url-no-padding encoded JSON array of `[key, value]`
+/// pairs. Merged on top of the inherited env.
 ///
 /// Example:
-/// - `MSB_HANDOFF_INIT_ENV=container=microsandbox\x1fLANG=C.UTF-8`
+/// - `MSB_HANDOFF_INIT_ENV=W1siY29udGFpbmVyIiwibWljcm9zYW5kYm94Il1d`
 pub const ENV_HANDOFF_INIT_ENV: &str = "MSB_HANDOFF_INIT_ENV";
 
 /// Guest-side path to the CA certificate for TLS interception.

@@ -453,6 +453,9 @@ pub(crate) async fn create_local(
     validate_rootfs_source(&config.image)?;
     validate_env(&config.env)?;
     validate_labels(&config.labels)?;
+    if let Some(init) = &config.init {
+        init::validate(init)?;
+    }
 
     // Initialize the database before any expensive image pull so we can
     // fail fast on conflicting persisted sandbox state.
@@ -482,6 +485,9 @@ pub(crate) async fn create_local(
 
         // Merge image config defaults under user-provided config.
         config.merge_image_defaults(&pull_result.config);
+        if let Some(init) = &config.init {
+            init::validate(init)?;
+        }
 
         pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
         pinned_reference = Some(reference.clone());

@@ -20,9 +20,10 @@ use std::{
     process::Stdio,
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngExt;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
@@ -32,7 +33,7 @@ use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
-    ENV_USER, HANDOFF_INIT_SEP_STR,
+    ENV_USER,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -929,6 +930,12 @@ fn encode_rlimits(rlimits: &[Rlimit]) -> String {
     out
 }
 
+/// Encodes a handoff-init argv/env payload into printable env-var text.
+fn encode_handoff_json<T: Serialize>(value: &T) -> String {
+    let json = serde_json::to_vec(value).expect("handoff init payload is JSON-serializable");
+    URL_SAFE_NO_PAD.encode(json)
+}
+
 /// Derive a stable, collision-resistant identifier from a guest mount path.
 ///
 /// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
@@ -1272,8 +1279,8 @@ fn sandbox_cli_args(
 
     // Handoff-init: PID 1 hand-off to a user-supplied init binary.
     // The builder's `validate()` rejects non-UTF-8 cmd paths, args/env
-    // containing the separator byte (\x1f) or NUL, and env keys containing
-    // `=`, so the joins below can't produce a corrupted wire format.
+    // containing NUL, and env keys containing `=`, so the JSON payloads
+    // below can't produce a corrupted execve wire format.
     if let Some(ref init) = config.init {
         let cmd = init
             .cmd
@@ -1283,7 +1290,7 @@ fn sandbox_cli_args(
         args.push(OsString::from(format!("{ENV_HANDOFF_INIT}={cmd}")));
 
         if !init.args.is_empty() {
-            let argv_val = init.args.join(HANDOFF_INIT_SEP_STR);
+            let argv_val = encode_handoff_json(&init.args);
             args.push(OsString::from("--env"));
             args.push(OsString::from(format!(
                 "{ENV_HANDOFF_INIT_ARGS}={argv_val}"
@@ -1291,12 +1298,7 @@ fn sandbox_cli_args(
         }
 
         if !init.env.is_empty() {
-            let env_val = init
-                .env
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(HANDOFF_INIT_SEP_STR);
+            let env_val = encode_handoff_json(&init.env);
             args.push(OsString::from("--env"));
             args.push(OsString::from(format!("{ENV_HANDOFF_INIT_ENV}={env_val}")));
         }
@@ -1319,6 +1321,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use serde::de::DeserializeOwned;
+    use tempfile::tempdir;
+
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
@@ -1328,7 +1334,6 @@ mod tests {
             SandboxConfig,
         },
     };
-    use tempfile::tempdir;
 
     //----------------------------------------------------------------------------------------------
     // Functions: Helpers
@@ -1360,6 +1365,11 @@ mod tests {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
+    }
+
+    fn decode_handoff_json<T: DeserializeOwned>(value: &str) -> T {
+        let json = URL_SAFE_NO_PAD.decode(value).expect("base64url payload");
+        serde_json::from_slice(&json).expect("handoff JSON payload")
     }
 
     fn render_args_with_file_mounts(
@@ -1966,11 +1976,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_init_joins_argv_with_unit_separator() {
+    async fn test_handoff_init_encodes_argv_as_base64url_json() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/lib/systemd/systemd", |i| {
-                i.args(["--unit=multi-user.target", "--log-level=warning"])
+                i.args([
+                    "--unit=multi-user.target",
+                    "--log-level=warning",
+                    "literal\x1funit-separator",
+                ])
             })
             .build()
             .await
@@ -1978,16 +1992,26 @@ mod tests {
 
         let args = render_args(&config);
         let argv = find_env(&args, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
+        let decoded: Vec<String> = decode_handoff_json(&argv);
 
-        assert_eq!(argv, "--unit=multi-user.target\x1f--log-level=warning");
+        assert_eq!(
+            decoded,
+            vec![
+                "--unit=multi-user.target",
+                "--log-level=warning",
+                "literal\x1funit-separator"
+            ]
+        );
     }
 
     #[tokio::test]
-    async fn test_handoff_init_emits_env_pairs_separated_by_unit_separator() {
+    async fn test_handoff_init_encodes_env_pairs_as_base64url_json() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| {
-                i.env("container", "microsandbox").env("LANG", "C.UTF-8")
+                i.env("container", "microsandbox")
+                    .env("LANG", "C.UTF-8")
+                    .env("TOKEN", "a=b;c\x1fd")
             })
             .build()
             .await
@@ -1995,8 +2019,16 @@ mod tests {
 
         let args = render_args(&config);
         let env_val = find_env(&args, "MSB_HANDOFF_INIT_ENV").expect("env present");
+        let decoded: Vec<(String, String)> = decode_handoff_json(&env_val);
 
-        assert_eq!(env_val, "container=microsandbox\x1fLANG=C.UTF-8");
+        assert_eq!(
+            decoded,
+            vec![
+                ("container".to_string(), "microsandbox".to_string()),
+                ("LANG".to_string(), "C.UTF-8".to_string()),
+                ("TOKEN".to_string(), "a=b;c\x1fd".to_string())
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2015,14 +2047,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_init_separator_in_arg_rejected_at_build_time() {
-        let err = SandboxBuilder::new("test")
+    async fn test_handoff_init_unit_separator_in_arg_allowed() {
+        let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| i.args(["foo\x1fbar"]))
             .build()
             .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("0x1F"));
+            .unwrap();
+        let args = render_args(&config);
+        let argv = find_env(&args, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
+        let decoded: Vec<String> = decode_handoff_json(&argv);
+
+        assert_eq!(decoded, vec!["foo\x1fbar"]);
     }
 
     #[tokio::test]

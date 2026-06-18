@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_SEP};
+use microsandbox_protocol::HANDOFF_INIT_AUTO;
 use serde::{Deserialize, Serialize};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -118,11 +118,10 @@ impl InitOptionsBuilder {
 /// - `cmd` must be either an absolute path or the literal sentinel
 ///   [`HANDOFF_INIT_AUTO`] (which agentd resolves at boot time).
 /// - `cmd` must not contain a NUL byte (CString incompatibility).
-/// - Each argv entry must be free of `\x1f` and `\0` (the wire-format
-///   separator and CString terminator respectively).
-/// - Each env key must be non-empty, free of `=`, `\x1f`, and `\0`
-///   (POSIX disallows `=` in keys; `\x1f` is the separator).
-/// - Each env value must be free of `\x1f` and `\0`.
+/// - Each argv entry must be free of `\0` (CString terminator).
+/// - Each env key must be non-empty and free of `=` and `\0`
+///   (POSIX disallows `=` in keys).
+/// - Each env value must be free of `\0`.
 pub(crate) fn validate(spec: &HandoffInit) -> MicrosandboxResult<()> {
     validate_cmd(&spec.cmd)?;
     for (i, arg) in spec.args.iter().enumerate() {
@@ -157,11 +156,6 @@ fn validate_cmd(cmd: &Path) -> MicrosandboxResult<()> {
 }
 
 fn validate_arg(index: usize, arg: &str) -> MicrosandboxResult<()> {
-    if arg.contains(HANDOFF_INIT_SEP) {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "init arg #{index} contains the reserved separator byte (0x1F)"
-        )));
-    }
     if arg.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "init arg #{index} must not contain a NUL byte"
@@ -181,14 +175,14 @@ fn validate_env_pair(key: &str, value: &str) -> MicrosandboxResult<()> {
             "init env key {key:?} must not contain '='"
         )));
     }
-    if key.contains(HANDOFF_INIT_SEP) || key.contains('\0') {
+    if key.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init env key {key:?} must not contain 0x1F or NUL"
+            "init env key {key:?} must not contain NUL"
         )));
     }
-    if value.contains(HANDOFF_INIT_SEP) || value.contains('\0') {
+    if value.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init env value for {key:?} must not contain 0x1F or NUL"
+            "init env value for {key:?} must not contain NUL"
         )));
     }
     Ok(())
@@ -224,10 +218,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_separator_in_arg() {
+    fn validate_accepts_unit_separator_in_arg() {
         let spec = ok("/sbin/init", &["foo\x1fbar"], &[]);
-        let err = validate(&spec).unwrap_err();
-        assert!(format!("{err}").contains("0x1F"));
+        assert!(validate(&spec).is_ok());
     }
 
     #[test]
@@ -245,10 +238,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_separator_in_env_value() {
+    fn validate_accepts_unit_separator_in_env_value() {
         let spec = ok("/sbin/init", &[], &[("KEY", "v\x1fbad")]);
-        let err = validate(&spec).unwrap_err();
-        assert!(format!("{err}").contains("0x1F"));
+        assert!(validate(&spec).is_ok());
     }
 
     #[test]

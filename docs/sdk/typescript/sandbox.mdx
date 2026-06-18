@@ -580,7 +580,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
 | `security(profile)` | In-guest security profile (`"default"` or `"restricted"`) |
 | `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
-| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
+| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`, including known image ENTRYPOINT inits and attached init-entrypoint commands) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
 | `hostname(name)` | Guest hostname |
 | `user(user)` | Default guest user |

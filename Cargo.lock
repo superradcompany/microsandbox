@@ -3202,6 +3202,7 @@ dependencies = [
 name = "microsandbox-agentd"
 version = "0.5.7"
 dependencies = [
+ "base64",
  "chrono",
  "ciborium",
  "libc",

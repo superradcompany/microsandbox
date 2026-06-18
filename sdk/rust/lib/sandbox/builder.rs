@@ -306,11 +306,21 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the transient initial command for attached CLI `run`.
+    #[doc(hidden)]
+    pub fn initial_command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config
+            .set_initial_command(command.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// `cmd` is either an absolute path inside the guest rootfs or
-    /// the literal `"auto"` (probes `/sbin/init`,
-    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`).
+    /// the literal `"auto"`. Auto first honors a known init path at
+    /// the start of the image ENTRYPOINT, preserving attached
+    /// init-entrypoint commands when needed, then falls back to
+    /// guest-side probing of common distro init paths.
     ///
     /// ```ignore
     /// .init("auto")

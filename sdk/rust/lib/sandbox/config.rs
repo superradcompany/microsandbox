@@ -8,6 +8,7 @@ use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
 use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
+use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
 
 use super::{
     exec::Rlimit,
@@ -249,6 +250,19 @@ pub struct SandboxConfig {
     /// during `create_with_mode`. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
+
+    /// Initial command requested by an attached `msb run` invocation.
+    ///
+    /// This is transient CLI intent, not persisted sandbox config. It lets
+    /// `--init auto` decide before VM spawn whether an image-declared init
+    /// entrypoint should receive the OCI command as argv.
+    #[serde(skip)]
+    pub(crate) initial_command: Option<Vec<String>>,
+
+    /// Whether [`initial_command`](Self::initial_command) was consumed by
+    /// the handoff init instead of being executed through agentd.
+    #[serde(skip)]
+    pub(crate) initial_command_consumed_by_init: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -265,14 +279,30 @@ impl SandboxConfig {
         }
     }
 
+    /// Return whether the attached initial command was launched by the
+    /// handoff init rather than through agentd.
+    #[doc(hidden)]
+    pub fn initial_command_consumed_by_init(&self) -> bool {
+        self.initial_command_consumed_by_init
+    }
+
+    /// Set transient initial command intent for attached `msb run`.
+    pub(crate) fn set_initial_command(&mut self, command: Vec<String>) {
+        self.initial_command = Some(command);
+        self.initial_command_consumed_by_init = false;
+    }
+
     /// Apply OCI image config as defaults. User-provided values take precedence.
     ///
     /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
     /// - `labels`: image labels form the base; user labels override by key.
     /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
+    /// - `init`: an `auto` init may resolve from a known init at the start of the image entrypoint.
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
         self.env = merge_env(&image.env, &self.env);
         self.labels = merge_image_labels(&image.labels, &self.labels);
+
+        let inherit_entrypoint = self.entrypoint.is_none();
 
         if self.cmd.is_none() {
             self.cmd = image.cmd.clone();
@@ -294,6 +324,97 @@ impl SandboxConfig {
                 .filter(|s| !s.is_empty())
                 .map(String::from);
         }
+
+        self.resolve_auto_init_from_image_entrypoint(
+            image.entrypoint.as_deref(),
+            inherit_entrypoint,
+        );
+    }
+
+    /// Resolve `init = "auto"` from a known init path declared as the
+    /// image entrypoint.
+    ///
+    /// When an attached `msb run` provided an initial command, and the
+    /// image declares a container-init entrypoint such as `/init`, the
+    /// remaining OCI process vector is passed to the init as argv. The
+    /// image init token is still stripped from the persisted workload
+    /// entrypoint so later agentd exec command resolution never tries
+    /// to direct-exec `/init`.
+    fn resolve_auto_init_from_image_entrypoint(
+        &mut self,
+        image_entrypoint: Option<&[String]>,
+        inherited_entrypoint: bool,
+    ) {
+        let Some(init) = self.init.as_ref() else {
+            return;
+        };
+        if init.cmd.as_os_str() != HANDOFF_INIT_AUTO {
+            return;
+        }
+        let init_args_empty = init.args.is_empty();
+
+        let Some(entrypoint) = image_entrypoint else {
+            return;
+        };
+        let Some(init_path) = entrypoint
+            .first()
+            .map(String::as_str)
+            .filter(|path| is_image_entrypoint_init(path))
+        else {
+            return;
+        };
+
+        let init_argv_tail = if inherited_entrypoint && init_args_empty {
+            self.image_init_entrypoint_argv_tail(init_path, entrypoint)
+        } else {
+            None
+        };
+
+        let init = self
+            .init
+            .as_mut()
+            .expect("init was present at start of auto resolution");
+        init.cmd = PathBuf::from(init_path);
+        if let Some(argv_tail) = init_argv_tail {
+            init.args = argv_tail;
+            self.initial_command_consumed_by_init = true;
+        }
+
+        if !inherited_entrypoint {
+            return;
+        }
+
+        let Some(mut entrypoint) = self.entrypoint.take() else {
+            return;
+        };
+        if entrypoint
+            .first()
+            .is_some_and(|first| first.as_str() == init_path)
+        {
+            entrypoint.remove(0);
+        }
+        self.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
+    }
+
+    fn image_init_entrypoint_argv_tail(
+        &self,
+        init_path: &str,
+        image_entrypoint: &[String],
+    ) -> Option<Vec<String>> {
+        let initial_command = self.initial_command.as_ref()?;
+        if init_path != "/init" && image_entrypoint.len() <= 1 {
+            return None;
+        }
+
+        let mut process = image_entrypoint.to_vec();
+        if initial_command.is_empty() {
+            process.extend(self.cmd.iter().flatten().cloned());
+        } else {
+            process.extend(initial_command.iter().cloned());
+        }
+
+        let argv_tail: Vec<_> = process.into_iter().skip(1).collect();
+        (!argv_tail.is_empty()).then_some(argv_tail)
     }
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
@@ -389,6 +510,10 @@ fn merge_image_labels(
     merged
 }
 
+fn is_image_entrypoint_init(path: &str) -> bool {
+    HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES.contains(&path)
+}
+
 fn default_oci_tmpfs_size_mib(memory_mib: u32) -> u32 {
     (memory_mib / DEFAULT_OCI_TMPFS_MEMORY_DIVISOR).clamp(1, DEFAULT_OCI_TMPFS_MAX_SIZE_MIB)
 }
@@ -448,6 +573,8 @@ impl Default for SandboxConfig {
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
+            initial_command: None,
+            initial_command_consumed_by_init: false,
         }
     }
 }
@@ -458,8 +585,10 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{SandboxConfig, merge_env};
-    use crate::sandbox::{MountOptions, RootfsSource, VolumeMount};
+    use crate::sandbox::{HandoffInit, MountOptions, RootfsSource, VolumeMount};
     use microsandbox_image::ImageConfig;
 
     #[test]
@@ -552,6 +681,180 @@ mod tests {
         assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
         assert_eq!(config.workdir, Some("/workspace".to_string()));
         assert_eq!(config.user, Some("root".to_string()));
+    }
+
+    #[test]
+    fn test_merge_image_defaults_resolves_auto_init_from_image_entrypoint() {
+        let image = ImageConfig {
+            entrypoint: Some(vec![
+                "/init".to_string(),
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.merge_image_defaults(&image);
+
+        let init = config.init.as_ref().expect("init should remain configured");
+        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert!(init.args.is_empty());
+        assert_eq!(
+            config.entrypoint,
+            Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_merge_image_defaults_passes_initial_command_to_init_entrypoint() {
+        let image = ImageConfig {
+            entrypoint: Some(vec![
+                "/init".to_string(),
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.merge_image_defaults(&image);
+
+        let init = config.init.as_ref().expect("init should remain configured");
+        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(
+            init.args,
+            vec![
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+                "gateway".to_string(),
+                "run".to_string()
+            ]
+        );
+        assert!(config.initial_command_consumed_by_init());
+        assert_eq!(
+            config.entrypoint,
+            Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_merge_image_defaults_passes_image_cmd_to_init_entrypoint() {
+        let image = ImageConfig {
+            entrypoint: Some(vec!["/init".to_string()]),
+            cmd: Some(vec!["/app/server".to_string(), "--serve".to_string()]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.set_initial_command(Vec::new());
+        config.merge_image_defaults(&image);
+
+        let init = config.init.as_ref().expect("init should remain configured");
+        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(
+            init.args,
+            vec!["/app/server".to_string(), "--serve".to_string()]
+        );
+        assert!(config.initial_command_consumed_by_init());
+        assert_eq!(config.entrypoint, None);
+    }
+
+    #[test]
+    fn test_merge_image_defaults_bare_systemd_does_not_consume_initial_command() {
+        let image = ImageConfig {
+            entrypoint: Some(vec!["/lib/systemd/systemd".to_string()]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.set_initial_command(vec!["bash".to_string()]);
+        config.merge_image_defaults(&image);
+
+        let init = config.init.as_ref().expect("init should remain configured");
+        assert_eq!(init.cmd, PathBuf::from("/lib/systemd/systemd"));
+        assert!(init.args.is_empty());
+        assert!(!config.initial_command_consumed_by_init());
+        assert_eq!(config.entrypoint, None);
+    }
+
+    #[test]
+    fn test_merge_image_defaults_keeps_user_entrypoint_when_resolving_auto_init() {
+        let image = ImageConfig {
+            entrypoint: Some(vec![
+                "/init".to_string(),
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            entrypoint: Some(vec!["/bin/sh".to_string()]),
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.merge_image_defaults(&image);
+
+        let init = config.init.as_ref().expect("init should remain configured");
+        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert!(init.args.is_empty());
+        assert_eq!(config.entrypoint, Some(vec!["/bin/sh".to_string()]));
+        assert!(!config.initial_command_consumed_by_init());
+    }
+
+    #[test]
+    fn test_merge_image_defaults_leaves_auto_init_for_unknown_entrypoint() {
+        let image = ImageConfig {
+            entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            init: Some(HandoffInit {
+                cmd: PathBuf::from("auto"),
+                args: Vec::new(),
+                env: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        config.merge_image_defaults(&image);
+
+        assert_eq!(
+            config.init.expect("init should remain configured").cmd,
+            PathBuf::from("auto")
+        );
+        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
     }
 
     #[test]

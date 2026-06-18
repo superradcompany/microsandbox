@@ -174,7 +174,7 @@ By default the microsandbox agent runs as PID 1 inside the guest: small, fast, m
 
 Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
 
-Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI.
+Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI. When an OCI image declares a known init path as the first ENTRYPOINT token, such as `/init` in s6-overlay images, `auto` hands PID 1 to that path. For attached `msb run`, microsandbox preserves the OCI launch contract by passing the remaining ENTRYPOINT plus CMD or trailing command to that init instead of direct-executing the wrapper through agentd. Otherwise, `auto` falls back to probing common distro paths: `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd`.
 
 <CodeGroup>
 ```rust Rust
@@ -236,7 +236,7 @@ $ msb run ghcr.io/superradcompany/debian-systemd:12 --init auto -- cat /proc/1/c
 systemd
 ```
 
-If `--init=auto` cannot find an init binary, boot fails with a clear error in `kernel.log`. Use an explicit path when you know where the init lives.
+If `--init=auto` cannot find an init binary from the image ENTRYPOINT or the guest-side probe list, boot fails with a clear error in `kernel.log`. Use an explicit path when you know where the init lives.
 
 ### Argv and env
 
@@ -307,4 +307,4 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 
 Most slim Docker base images do not include systemd or another full init. Use an image that ships the init you want, or build a small custom image that installs it.
 
-`--init` controls PID 1. `--entrypoint` and the trailing command control the workload you run after boot, so the two can be combined.
+`--init` controls PID 1. `--entrypoint` and the trailing command normally control the workload you run after boot, so the two can be combined. The special case is an image-declared init entrypoint such as `/init`: with `--init auto` and attached `msb run`, the trailing command is passed to PID 1 as part of the image's own launch contract.
