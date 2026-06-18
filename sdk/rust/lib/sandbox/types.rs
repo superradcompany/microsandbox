@@ -15,48 +15,6 @@ use crate::size::Mebibytes;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Disk image format for virtio-blk rootfs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DiskImageFormat {
-    /// QEMU Copy-on-Write v2.
-    Qcow2,
-    /// Raw disk image.
-    Raw,
-    /// VMware Disk (FLAT/ZERO only, no delta links).
-    Vmdk,
-}
-
-/// Root filesystem source for a sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RootfsSource {
-    /// Use a host directory directly as the root filesystem.
-    Bind(PathBuf),
-
-    /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
-    Oci(OciRootfsSource),
-
-    /// Use a disk image file as the root filesystem via virtio-blk.
-    DiskImage {
-        /// Path to the disk image file on the host.
-        path: PathBuf,
-        /// Disk image format.
-        format: DiskImageFormat,
-        /// Inner filesystem type (optional; auto-detected if absent).
-        fstype: Option<String>,
-    },
-}
-
-/// OCI root filesystem source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OciRootfsSource {
-    /// OCI image reference (e.g. `python`).
-    pub reference: String,
-
-    /// Writable overlay upper size in MiB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upper_size_mib: Option<u32>,
-}
-
 /// Intermediate type for parsing user input into a [`RootfsSource`].
 ///
 /// Accepts `&str`, `String`, or `PathBuf` and resolves to the correct
@@ -98,87 +56,6 @@ pub struct ImageBuilder {
 pub trait IntoImage {
     /// Resolve this value into a concrete root filesystem source.
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
-}
-
-/// Stat virtualization policy for a virtiofs-backed volume mount.
-///
-/// Mirrors `microsandbox_filesystem::StatVirtualization`. See
-/// `design/filesystems/stat-virtualization.md` for the threat model.
-///
-/// Serializes/deserializes as the lowercase variant name (`"strict"`,
-/// `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar
-/// (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StatVirtualization {
-    /// Fail-closed: probe the host backing path; require xattr support.
-    Strict,
-    /// Opportunistic: apply the overlay when present; tolerate missing xattr support.
-    Relaxed,
-    /// Literal host metadata: do not read or apply the override xattr.
-    Off,
-}
-
-/// Host permission propagation policy for a virtiofs-backed volume mount.
-///
-/// Mirrors `microsandbox_filesystem::HostPermissions`.
-///
-/// Serializes/deserializes as the lowercase variant name (`"private"`,
-/// `"mirror"`) to align with the CLI and NAPI spellings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HostPermissions {
-    /// Guest chmod stays in the metadata overlay only.
-    Private,
-    /// Mirror ordinary rwx bits for regular files and directories to the host inode.
-    Mirror,
-}
-
-/// Sandbox-level in-guest security profile.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SecurityProfile {
-    /// Preserve normal guest-root semantics.
-    ///
-    /// Exec sessions do not set `no_new_privs` and keep `CAP_SYS_ADMIN`, so
-    /// workflows such as `sudo`, package managers, and Docker-in-Docker work
-    /// as they would in a regular VM.
-    #[default]
-    Default,
-
-    /// Harden guest exec sessions.
-    ///
-    /// Agentd sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces
-    /// `nosuid,nodev` on user mounts. Workloads that need privilege
-    /// elevation or guest mount administration, such as `sudo` and
-    /// Docker-in-Docker, are intentionally incompatible with this profile.
-    Restricted,
-}
-
-/// Guest mount behavior shared by every volume mount kind.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MountOptions {
-    /// Whether the mount is read-only.
-    ///
-    /// Guest writes fail with the kernel's read-only filesystem behavior.
-    /// Virtiofs-backed mounts also reject writes on the host-side filesystem
-    /// server as defense in depth.
-    pub readonly: bool,
-
-    /// Whether direct execution from the mount is disabled.
-    ///
-    /// This prevents `execve` of binaries or scripts located on the mount.
-    /// Interpreters can still read files from the mount, for example
-    /// `sh /mnt/script.sh`, because the interpreter itself executes from a
-    /// different filesystem.
-    pub noexec: bool,
-
-    /// Whether setuid and setgid privilege elevation from files on the mount is ignored.
-    pub nosuid: bool,
-
-    /// Whether device files on the mount are ignored.
-    pub nodev: bool,
 }
 
 /// A volume mount specification for a sandbox.
@@ -968,45 +845,6 @@ impl VolumeMount {
     }
 }
 
-impl OciRootfsSource {
-    /// Create a new OCI rootfs source.
-    pub fn new(reference: impl Into<String>) -> Self {
-        Self {
-            reference: reference.into(),
-            upper_size_mib: None,
-        }
-    }
-
-    /// Set the writable overlay upper size.
-    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.upper_size_mib = Some(size.into().as_u32());
-        self
-    }
-}
-
-impl RootfsSource {
-    /// Create an OCI rootfs source from an image reference.
-    pub fn oci(reference: impl Into<String>) -> Self {
-        Self::Oci(OciRootfsSource::new(reference))
-    }
-
-    /// Return the OCI image reference if this is an OCI rootfs.
-    pub fn oci_reference(&self) -> Option<&str> {
-        match self {
-            Self::Oci(oci) => Some(&oci.reference),
-            _ => None,
-        }
-    }
-
-    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
-    pub fn oci_upper_size_mib(&self) -> Option<u32> {
-        match self {
-            Self::Oci(oci) => oci.upper_size_mib,
-            _ => None,
-        }
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods: ImageSource
 //--------------------------------------------------------------------------------------------------
@@ -1037,33 +875,6 @@ impl ImageSource {
             })
         } else {
             Ok(RootfsSource::Bind(path))
-        }
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: DiskImageFormat
-//--------------------------------------------------------------------------------------------------
-
-impl DiskImageFormat {
-    /// Returns the format as a CLI-safe lowercase string.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Qcow2 => "qcow2",
-            Self::Raw => "raw",
-            Self::Vmdk => "vmdk",
-        }
-    }
-
-    /// Parse a disk image format from a file extension.
-    ///
-    /// Returns `None` if the extension is not a recognized disk image format.
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "qcow2" => Some(Self::Qcow2),
-            "raw" => Some(Self::Raw),
-            "vmdk" => Some(Self::Vmdk),
-            _ => None,
         }
     }
 }
@@ -1350,31 +1161,6 @@ impl IntoImage for PathBuf {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl std::fmt::Display for DiskImageFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for DiskImageFormat {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "qcow2" => Ok(Self::Qcow2),
-            "raw" => Ok(Self::Raw),
-            "vmdk" => Ok(Self::Vmdk),
-            _ => Err(format!("unknown disk image format: {s}")),
-        }
-    }
-}
-
-impl Default for RootfsSource {
-    fn default() -> Self {
-        Self::oci(String::new())
-    }
-}
 
 impl From<&str> for ImageSource {
     fn from(s: &str) -> Self {
@@ -2103,3 +1889,12 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::{
+    DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RootfsSource, SecurityProfile,
+    StatVirtualization,
+};

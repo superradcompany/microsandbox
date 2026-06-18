@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod cloud;
+mod domain;
 mod error;
 #[cfg(feature = "ts")]
 pub mod typescript;
@@ -15,6 +16,10 @@ mod validation;
 pub use cloud::{
     CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
     CloudPaginated, CloudSandbox, CloudSandboxStatus,
+};
+pub use domain::{
+    DiskImageFormat, HostPermissions, LogSource, MountOptions, OciRootfsSource, Rlimit,
+    RlimitResource, RootfsSource, SandboxPolicy, SecurityProfile, StatVirtualization,
 };
 pub use error::{TypesError, TypesResult};
 pub use validation::{

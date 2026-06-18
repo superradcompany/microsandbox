@@ -3428,6 +3428,7 @@ version = "0.5.7"
 dependencies = [
  "chrono",
  "ciborium",
+ "microsandbox-types",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -3465,6 +3466,7 @@ dependencies = [
  "microsandbox-metrics",
  "microsandbox-network",
  "microsandbox-protocol",
+ "microsandbox-types",
  "microsandbox-utils",
  "msb_krun",
  "nix 0.31.3",

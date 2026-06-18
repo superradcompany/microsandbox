@@ -7,54 +7,6 @@ use chrono::{DateTime, Utc};
 use super::cursor::LogCursor;
 
 //--------------------------------------------------------------------------------------------------
-// LogSource
-//--------------------------------------------------------------------------------------------------
-
-/// Source tag on a captured log entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogSource {
-    /// Captured from a session's stdout (pipe mode).
-    Stdout,
-
-    /// Captured from a session's stderr (pipe mode).
-    Stderr,
-
-    /// Captured from a session in pty mode (stdout + stderr merged
-    /// at the kernel level inside the guest arrive as a single
-    /// stream — tagged `output` rather than pretending to be
-    /// `stdout`).
-    Output,
-
-    /// Synthetic system entry: lifecycle markers, runtime
-    /// diagnostics, kernel console output.
-    System,
-}
-
-impl LogSource {
-    /// Apply the empty-means-default rule used by both
-    /// [`read_logs`](super::read_logs) and
-    /// [`log_stream`](super::log_stream): if `requested` is empty,
-    /// return the default user-program sources
-    /// (`Stdout` + `Stderr` + `Output`); otherwise return a
-    /// sorted, deduplicated copy of `requested`.
-    pub(crate) fn effective(requested: &[Self]) -> Vec<Self> {
-        if requested.is_empty() {
-            vec![Self::Stdout, Self::Stderr, Self::Output]
-        } else {
-            let mut s = requested.to_vec();
-            s.sort_by_key(|src| match src {
-                Self::Stdout => 0,
-                Self::Stderr => 1,
-                Self::Output => 2,
-                Self::System => 3,
-            });
-            s.dedup();
-            s
-        }
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
 // LogEntry
 //--------------------------------------------------------------------------------------------------
 
@@ -168,3 +120,9 @@ mod tests {
         assert_eq!(entries.len(), 2);
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::LogSource;

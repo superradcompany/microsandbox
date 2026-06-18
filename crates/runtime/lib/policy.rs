@@ -1,20 +1,10 @@
 //! Sandbox lifecycle policies.
 
-use serde::{Deserialize, Serialize};
-
 //--------------------------------------------------------------------------------------------------
-// Types
+// Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-/// Sandbox lifecycle policy.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct SandboxPolicy {
-    /// Hard cap on total sandbox lifetime in seconds. `None` = run forever.
-    pub max_duration_secs: Option<u64>,
-
-    /// Idle timeout in seconds. `None` = no idle detection.
-    pub idle_timeout_secs: Option<u64>,
-}
+pub use microsandbox_types::SandboxPolicy;
 
 //--------------------------------------------------------------------------------------------------
 // Tests

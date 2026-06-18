@@ -27,6 +27,7 @@ microsandbox-filesystem.workspace = true
 microsandbox-metrics.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
+microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }

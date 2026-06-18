@@ -7,9 +7,6 @@ use microsandbox_protocol::{
     exec::{ExecResize, ExecSignal, ExecStdin},
     message::MessageType,
 };
-
-pub use microsandbox_protocol::exec::RlimitResource;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{MicrosandboxResult, agent::AgentClient};
@@ -150,19 +147,6 @@ pub enum ExecEvent {
 pub struct ExecSink {
     id: u32,
     client: Arc<AgentClient>,
-}
-
-/// A POSIX resource limit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rlimit {
-    /// Resource type.
-    pub resource: RlimitResource,
-
-    /// Soft limit (can be raised up to hard limit by the process).
-    pub soft: u64,
-
-    /// Hard limit (ceiling, requires privileges to raise).
-    pub hard: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -695,3 +679,9 @@ pub(crate) mod local {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::{Rlimit, RlimitResource};

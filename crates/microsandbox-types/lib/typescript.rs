@@ -4,7 +4,9 @@ use ts_rs::TS;
 
 use crate::{
     CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus,
+    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, HostPermissions, LogSource,
+    MountOptions, OciRootfsSource, Rlimit, RlimitResource, RootfsSource, SandboxPolicy,
+    SecurityProfile, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -16,11 +18,22 @@ pub fn bindings() -> &'static str {
     include_str!("../bindings/typescript/index.ts")
 }
 
-/// Render raw `ts-rs` declarations for the shared cloud contracts.
+/// Render raw `ts-rs` declarations for the shared microsandbox contracts.
 pub fn declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
 
     vec![
+        DiskImageFormat::decl(&cfg),
+        OciRootfsSource::decl(&cfg),
+        RootfsSource::decl(&cfg),
+        StatVirtualization::decl(&cfg),
+        HostPermissions::decl(&cfg),
+        SecurityProfile::decl(&cfg),
+        MountOptions::decl(&cfg),
+        SandboxPolicy::decl(&cfg),
+        RlimitResource::decl(&cfg),
+        Rlimit::decl(&cfg),
+        LogSource::decl(&cfg),
         CloudCreateSandboxRequest::decl(&cfg),
         CloudSandbox::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
@@ -44,6 +57,17 @@ mod tests {
         let bindings = bindings();
 
         for name in [
+            "DiskImageFormat",
+            "OciRootfsSource",
+            "RootfsSource",
+            "StatVirtualization",
+            "HostPermissions",
+            "SecurityProfile",
+            "MountOptions",
+            "SandboxPolicy",
+            "RlimitResource",
+            "Rlimit",
+            "LogSource",
             "CloudCreateSandboxRequest",
             "CloudSandbox",
             "CloudSandboxStatus",
@@ -60,7 +84,13 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 7);
+        assert_eq!(declarations.len(), 18);
+        assert!(
+            declarations
+                .iter()
+                .any(|decl| decl.contains("RootfsSource"))
+        );
+        assert!(declarations.iter().any(|decl| decl.contains("Rlimit")));
         assert!(
             declarations
                 .iter()
