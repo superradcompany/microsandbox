@@ -46,9 +46,9 @@ Instead of putting real credentials inside the VM, microsandbox injects placehol
 
 All sandbox traffic flows through a host-side network stack. You can allow public internet access, block private networks, publish ports, deny by default, pin DNS behavior, or inspect TLS traffic without relying on guest cooperation.
 
-### Filesystem state is explicit
+### Storage is private by default
 
-Sandboxes can start from OCI images with copy-on-write storage, so writes do not modify cached image layers. Use volumes when data should come from the host or survive beyond one run, tmpfs for temporary scratch space, and snapshots when you want to boot again from a prepared filesystem state.
+For the normal OCI image workflow, each sandbox gets its own writable root filesystem on top of the image. Writes there do not change the cached image. Data reaches the host or another sandbox only when you choose a sharing mechanism, such as a bind mount, named volume, disk image, or snapshot.
 
 ## Minimal example
 
