@@ -46,9 +46,9 @@ Instead of putting real credentials inside the VM, microsandbox injects placehol
 
 All sandbox traffic flows through a host-side network stack. You can allow public internet access, block private networks, publish ports, deny by default, pin DNS behavior, or inspect TLS traffic without relying on guest cooperation.
 
-### Filesystems are disposable or persistent by choice
+### Filesystem state is explicit
 
-Use OCI images for disposable roots, bind mounts for host data, named volumes for persistent state, tmpfs for scratch space, and snapshots when you want to reuse prepared sandbox state.
+Sandboxes can start from OCI images with copy-on-write storage, so writes do not modify cached image layers. Use volumes when data should come from the host or survive beyond one run, tmpfs for temporary scratch space, and snapshots when you want to boot again from a prepared filesystem state.
 
 ## Minimal example
 
