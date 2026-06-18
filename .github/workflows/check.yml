@@ -437,7 +437,7 @@ jobs:
         with:
           cache-bin: false
 
-      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-nextest
 
