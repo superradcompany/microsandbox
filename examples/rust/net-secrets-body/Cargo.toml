@@ -9,7 +9,7 @@ name = "net-secrets-body"
 path = "bin/main.rs"
 
 [dependencies]
-microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox = { path = "../../../sdk/rust" }
 microsandbox-network = { path = "../../../crates/network" }
 tokio = { version = "1.52", features = ["full"] }
 axum = "0.8"

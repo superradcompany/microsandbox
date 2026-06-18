@@ -9,7 +9,7 @@ name = "cloud-backend"
 path = "bin/main.rs"
 
 [dependencies]
-microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox = { path = "../../../sdk/rust" }
 tokio = { version = "1.42", features = ["full"] }
 futures = "0.3"
 anyhow = "1"

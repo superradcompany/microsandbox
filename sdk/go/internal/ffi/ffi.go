@@ -891,7 +891,7 @@ func IsLoaded() bool {
 }
 
 // SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
-// resolver's tier 2 (see crates/microsandbox/lib/config/mod.rs:
+// resolver's tier 2 (see sdk/rust/lib/config/mod.rs:
 // resolve_msb_path). Set-once on the Rust side: subsequent calls are
 // ignored. The user's MSB_PATH env var still wins as tier 1.
 func SetSdkMsbPath(path string) {

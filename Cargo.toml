@@ -9,7 +9,7 @@ members = [
     "crates/image",
     "crates/metrics",
     "crates/metrics-collector",
-    "crates/microsandbox",
+    "sdk/rust",
     "crates/microsandbox-types",
     "crates/migration",
     "crates/protocol",
@@ -61,7 +61,7 @@ panic = "abort"
 # manifest; members reference them via `{ workspace = true }`.
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
-microsandbox = { version = "0.5.7", path = "crates/microsandbox", default-features = false }
+microsandbox = { version = "0.5.7", path = "sdk/rust", default-features = false }
 microsandbox-agent-client = { version = "0.5.7", path = "agent-client/rust" }
 microsandbox-db = { version = "0.5.7", path = "crates/db" }
 microsandbox-filesystem = { version = "0.5.7", path = "crates/filesystem", default-features = false }
