@@ -6,6 +6,7 @@
 //! fields in declaration order, map keys sorted, no fields elided.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -152,6 +153,7 @@ impl Manifest {
                 "snapshot manifest: empty upper.file".into(),
             ));
         }
+        validate_artifact_filename(&self.upper.file, "upper.file")?;
         if let Some(ref integrity) = self.upper.integrity {
             if integrity.algorithm.is_empty() {
                 return Err(ImageError::ManifestParse(
@@ -214,6 +216,21 @@ fn validate_digest_form(s: &str, field: &str) -> ImageResult<()> {
     if algo.is_empty() || hex.is_empty() {
         return Err(ImageError::ManifestParse(format!(
             "snapshot manifest: {field} has empty component: {s}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_artifact_filename(s: &str, field: &str) -> ImageResult<()> {
+    let mut components = Path::new(s).components();
+    let Some(Component::Normal(_)) = components.next() else {
+        return Err(ImageError::ManifestParse(format!(
+            "snapshot manifest: {field} must be a relative artifact filename: {s}"
+        )));
+    };
+    if components.next().is_some() {
+        return Err(ImageError::ManifestParse(format!(
+            "snapshot manifest: {field} must be a single artifact filename: {s}"
         )));
     }
     Ok(())

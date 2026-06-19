@@ -89,7 +89,8 @@ pub(super) async fn open_snapshot(
     // index, insert it. Keeps the cache aligned with reality without
     // forcing the user to think about it. Best-effort — errors are
     // logged, not propagated.
-    if dir.starts_with(local.snapshots_dir())
+    let snapshots_dir = local.snapshots_dir();
+    if dir.parent() == Some(snapshots_dir.as_path())
         && let Ok(None) = lookup_by_digest(local, &digest).await
         && let Err(e) = index_upsert(local, snap.path(), snap.digest(), snap.manifest()).await
     {

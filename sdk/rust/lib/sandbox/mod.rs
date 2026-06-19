@@ -466,6 +466,10 @@ pub(crate) async fn create_local(
     // Resolve OCI images before spawning the sandbox process.
     if let RootfsSource::Oci(oci) = config.image.clone() {
         let reference = oci.reference;
+        let expected_snapshot_manifest_digest = config
+            .snapshot_upper_source
+            .as_ref()
+            .and(config.manifest_digest.clone());
         let upper_size_mib = oci
             .upper_size_mib
             .unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB);
@@ -482,6 +486,14 @@ pub(crate) async fn create_local(
             progress,
         )
         .await?;
+        if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
+            && pull_result.manifest_digest.to_string() != expected
+        {
+            return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                "snapshot image digest mismatch: manifest pinned {}, resolved {}",
+                expected, pull_result.manifest_digest
+            )));
+        }
 
         // Merge image config defaults under user-provided config.
         config.merge_image_defaults(&pull_result.config);
