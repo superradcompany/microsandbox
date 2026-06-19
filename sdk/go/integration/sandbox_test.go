@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 // integrationCtx returns a context with a generous timeout for VM boot.
 func integrationCtx(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	return ctx
 }

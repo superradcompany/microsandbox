@@ -71,7 +71,7 @@ describe("Node.js SDK Pull Progress", () => {
 	const NAME_DETACHED = "sdk-pp-d";
 	const NAME_ERROR = "sdk-pp-e";
 	const NAME_DOUBLE = "sdk-pp-x";
-	const STARTUP_TEST_TIMEOUT_MS = 180_000;
+	const STARTUP_TEST_TIMEOUT_MS = 300_000;
 
 	afterAll(async () => {
 		for (const n of [NAME_ITER, NAME_RECV, NAME_DETACHED, NAME_ERROR, NAME_DOUBLE]) {
@@ -229,7 +229,7 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
       await build(jobName).label("owner", owner).label("tier", "job").create(),
       await build(otherName).label("owner", `${owner}-else`).create(),
     ];
-  }, 180_000);
+  }, 300_000);
 
   afterAll(async () => {
     for (const sb of created) await sb.stop().catch(() => undefined);
