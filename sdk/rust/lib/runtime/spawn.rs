@@ -545,7 +545,7 @@ async fn ensure_named_volumes(
     local: &LocalBackend,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    for mount in &config.mounts {
+    for mount in &config.spec.mounts {
         let Some(create) = mount.named_create() else {
             continue;
         };
@@ -727,7 +727,7 @@ async fn terminate_startup_process(
     child.wait().await.ok()
 }
 
-/// Scan `config.mounts` for file bind mounts and stage each file in its own
+/// Scan `config.spec.mounts` for file bind mounts and stage each file in its own
 /// isolated directory inside an ephemeral [`TempDir`].
 ///
 /// Returns a map from guest path to `(file_mount_dir, filename, tag)` for
@@ -739,6 +739,7 @@ async fn stage_file_mounts(
     // Collect file bind mounts first so we can skip TempDir creation when
     // there are none.
     let file_mounts: Vec<_> = config
+        .spec
         .mounts
         .iter()
         .filter_map(|m| match m {
@@ -1178,7 +1179,7 @@ fn sandbox_cli_args(
     let mut dir_mounts_val = String::new();
     let mut file_mounts_val = String::new();
     let mut disk_mounts_val = String::new();
-    for mount in &config.mounts {
+    for mount in &config.spec.mounts {
         match mount {
             VolumeMount::Bind {
                 host,
@@ -1305,8 +1306,10 @@ fn sandbox_cli_args(
     // Network configuration.
     #[cfg(feature = "net")]
     {
-        let net_json =
-            serde_json::to_string(&config.network).expect("failed to serialize network config");
+        let network = config
+            .local_network_config()
+            .expect("sandbox network spec should decode to local network config");
+        let net_json = serde_json::to_string(&network).expect("failed to serialize network config");
         args.push(OsString::from("--network-config"));
         args.push(OsString::from(net_json));
         args.push(OsString::from("--sandbox-slot"));
@@ -1348,7 +1351,7 @@ fn sandbox_cli_args(
     // The builder's `validate()` rejects non-UTF-8 cmd paths, args/env
     // containing NUL, and env keys containing `=`, so the JSON payloads
     // below can't produce a corrupted execve wire format.
-    if let Some(ref init) = config.init {
+    if let Some(ref init) = config.spec.init {
         let cmd = init
             .cmd
             .to_str()

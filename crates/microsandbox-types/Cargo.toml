@@ -18,14 +18,14 @@ required-features = ["ts"]
 
 [features]
 default = []
-ts = ["dep:ts-rs", "ts-rs/chrono-impl"]
+ts = ["dep:ts-rs", "ts-rs/chrono-impl", "ts-rs/serde-json-impl"]
 
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
-serde_json.workspace = true

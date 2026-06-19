@@ -13,6 +13,7 @@
 
 pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
+pub use microsandbox_types::{VolumeKind, VolumeSpec, VolumeSpec as VolumeConfig};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,35 +43,6 @@ pub struct Volume {
     backend: Arc<dyn Backend>,
     inner: Arc<VolumeInner>,
     name: String,
-}
-
-/// Configuration for creating a volume.
-#[derive(Debug, Clone)]
-pub struct VolumeConfig {
-    /// Volume name.
-    pub name: String,
-
-    /// Storage kind.
-    pub kind: VolumeKind,
-
-    /// Size quota in MiB (None = unlimited).
-    pub quota_mib: Option<u32>,
-
-    /// Disk capacity in MiB. Required for disk volumes.
-    pub capacity_mib: Option<u32>,
-
-    /// Labels for organization (JSON-serialized in DB).
-    pub labels: Vec<(String, String)>,
-}
-
-/// Storage kind for a named volume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VolumeKind {
-    /// Directory-backed named volume mounted through virtiofs.
-    Directory,
-
-    /// Raw ext4 disk-image named volume mounted through virtio-blk.
-    Disk,
 }
 
 /// A lightweight handle to a volume.
@@ -496,27 +468,6 @@ impl VolumeBuilder {
 impl From<VolumeConfig> for VolumeBuilder {
     fn from(config: VolumeConfig) -> Self {
         Self { config }
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: VolumeKind
-//--------------------------------------------------------------------------------------------------
-
-impl VolumeKind {
-    /// Database string for this volume kind.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Directory => "dir",
-            Self::Disk => "disk",
-        }
-    }
-
-    fn from_db_value(value: &str) -> Self {
-        match value {
-            "disk" => Self::Disk,
-            _ => Self::Directory,
-        }
     }
 }
 

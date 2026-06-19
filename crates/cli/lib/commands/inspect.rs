@@ -143,9 +143,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         }
 
-        if !config.mounts.is_empty() {
+        if !config.spec.mounts.is_empty() {
             ui::detail_header("Mounts");
-            for mount in &config.mounts {
+            for mount in &config.spec.mounts {
                 match mount {
                     VolumeMount::Bind {
                         host,

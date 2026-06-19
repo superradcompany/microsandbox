@@ -4,10 +4,12 @@ use ts_rs::TS;
 
 use crate::{
     CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, EnvVar, HostPermissions,
-    LogSource, MountOptions, OciRootfsSource, Rlimit, RlimitResource, RootfsSource,
-    SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    SecurityProfile, StatVirtualization,
+    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
+    HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkSpec,
+    OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
+    RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
+    SandboxSpec, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,
+    VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -55,14 +57,28 @@ pub fn declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
 
     vec![
+        serde_json::Value::decl(&cfg),
         DiskImageFormat::decl(&cfg),
         OciRootfsSource::decl(&cfg),
         RootfsSource::decl(&cfg),
+        PullPolicy::decl(&cfg),
         StatVirtualization::decl(&cfg),
         HostPermissions::decl(&cfg),
         SecurityProfile::decl(&cfg),
         MountOptions::decl(&cfg),
+        VolumeKind::decl(&cfg),
+        VolumeSpec::decl(&cfg),
+        NamedVolumeMode::decl(&cfg),
+        NamedVolumeCreate::decl(&cfg),
+        VolumeMount::decl(&cfg),
+        Patch::decl(&cfg),
+        NetworkSpec::decl(&cfg),
+        PublishedPortSpec::decl(&cfg),
+        PortProtocol::decl(&cfg),
+        HandoffInit::decl(&cfg),
         SandboxPolicy::decl(&cfg),
+        SnapshotDestination::decl(&cfg),
+        SnapshotSpec::decl(&cfg),
         SandboxSpec::decl(&cfg),
         SandboxResources::decl(&cfg),
         SandboxRuntimeOptions::decl(&cfg),
@@ -128,7 +144,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 23);
+        assert_eq!(declarations.len(), 37);
         assert!(
             declarations
                 .iter()

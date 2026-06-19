@@ -198,18 +198,18 @@ fn format_command_raw(config: &SandboxConfig) -> String {
 fn format_ports_raw(config: &SandboxConfig) -> Vec<String> {
     #[cfg(feature = "net")]
     {
-        if !config.network.enabled || config.network.ports.is_empty() {
+        let network = &config.spec.network;
+        if !network.enabled || network.ports.is_empty() {
             return Vec::new();
         }
 
-        config
-            .network
+        network
             .ports
             .iter()
             .map(|port| {
                 let protocol = match port.protocol {
-                    microsandbox_network::config::PortProtocol::Tcp => "tcp",
-                    microsandbox_network::config::PortProtocol::Udp => "udp",
+                    microsandbox::sandbox::PortProtocol::Tcp => "tcp",
+                    microsandbox::sandbox::PortProtocol::Udp => "udp",
                 };
                 format!(
                     "{}:{}->{}/{}",

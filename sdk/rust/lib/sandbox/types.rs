@@ -7,8 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::size::Mebibytes;
 
 //--------------------------------------------------------------------------------------------------
@@ -58,72 +56,6 @@ pub trait IntoImage {
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
 }
 
-/// A volume mount specification for a sandbox.
-#[derive(Clone)]
-pub enum VolumeMount {
-    /// Bind mount a host directory into the guest.
-    Bind {
-        /// Host path to bind mount.
-        host: PathBuf,
-        /// Guest mount path.
-        guest: String,
-        /// Guest mount behavior.
-        options: MountOptions,
-        /// Guest-visible stat virtualization policy.
-        stat_virtualization: StatVirtualization,
-        /// Host permission propagation policy.
-        host_permissions: HostPermissions,
-    },
-
-    /// Mount a named volume into the guest.
-    Named {
-        /// Volume name.
-        name: String,
-        /// Guest mount path.
-        guest: String,
-        /// Creation metadata for sandbox-time named volume provisioning.
-        ///
-        /// This is transient and intentionally skipped when sandbox configs are
-        /// persisted; restarting a sandbox mounts the already-created volume.
-        create: Option<NamedVolumeCreate>,
-        /// Guest mount behavior.
-        options: MountOptions,
-        /// Guest-visible stat virtualization policy.
-        stat_virtualization: StatVirtualization,
-        /// Host permission propagation policy.
-        host_permissions: HostPermissions,
-    },
-
-    /// Temporary filesystem (memory-backed).
-    Tmpfs {
-        /// Guest mount path.
-        guest: String,
-        /// Size limit in MiB.
-        size_mib: Option<u32>,
-        /// Guest mount behavior.
-        options: MountOptions,
-    },
-
-    /// Mount a disk image file as a virtio-blk device at a guest path.
-    ///
-    /// The guest OS owns the inner filesystem; microsandbox just attaches
-    /// the image and agentd mounts it. Use this for persistent state that
-    /// should be isolated from the host filesystem, for distributing
-    /// pre-built ext4/squashfs datasets, or for read-only seed volumes.
-    DiskImage {
-        /// Host path to the disk image file.
-        host: PathBuf,
-        /// Guest mount path.
-        guest: String,
-        /// Disk image format (qcow2 / raw / vmdk).
-        format: DiskImageFormat,
-        /// Inner filesystem type. When `None`, agentd probes `/proc/filesystems`.
-        fstype: Option<String>,
-        /// Guest mount behavior.
-        options: MountOptions,
-    },
-}
-
 /// Builder for constructing a [`VolumeMount`].
 pub struct MountBuilder {
     guest: String,
@@ -149,121 +81,6 @@ enum MountKind {
     Unset,
 }
 
-/// Rootfs patch applied before VM startup.
-///
-/// How patches are applied depends on the root filesystem type:
-/// - **OCI images (EROFS + ext4 overlay):** Patches are baked into `upper.ext4` under
-///   the overlayfs `upperdir` so the shared EROFS lower layers remain untouched.
-/// - **Bind/Passthrough roots:** Patches are applied directly to the host directory.
-/// - **Block device roots (Qcow2, Raw):** Patches are not supported. Returns an error at
-///   create time.
-///
-/// By default, patches that target a path already present in the rootfs (the visible lower
-/// overlay view for OCI, existing files for bind roots) will return an error. Set `replace: true` on
-/// the relevant variant to allow shadowing existing files.
-///
-/// For `Append` patches targeting a file in a lower layer, the file is first copied up to
-/// the writable overlay layer before appending.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Patch {
-    /// Write text content to a file.
-    Text {
-        /// Absolute guest path (e.g., `/etc/app.conf`).
-        path: String,
-        /// Text content to write.
-        content: String,
-        /// File permissions (e.g., `0o644`). `None` uses the default.
-        mode: Option<u32>,
-        /// Allow replacing a file that already exists in the rootfs.
-        replace: bool,
-    },
-    /// Write raw bytes to a file.
-    File {
-        /// Absolute guest path.
-        path: String,
-        /// Raw byte content to write.
-        content: Vec<u8>,
-        /// File permissions (e.g., `0o644`). `None` uses the default.
-        mode: Option<u32>,
-        /// Allow replacing a file that already exists in the rootfs.
-        replace: bool,
-    },
-    /// Copy a file from host into the rootfs.
-    CopyFile {
-        /// Host path to copy from.
-        src: PathBuf,
-        /// Absolute guest destination path.
-        dst: String,
-        /// File permissions. `None` preserves source permissions.
-        mode: Option<u32>,
-        /// Allow replacing a file that already exists in the rootfs.
-        replace: bool,
-    },
-    /// Copy a directory from host into the rootfs.
-    CopyDir {
-        /// Host directory to copy from.
-        src: PathBuf,
-        /// Absolute guest destination path.
-        dst: String,
-        /// Allow replacing files that already exist in the rootfs.
-        replace: bool,
-    },
-    /// Create a symlink.
-    Symlink {
-        /// Symlink target path.
-        target: String,
-        /// Absolute guest path where the symlink is created.
-        link: String,
-        /// Allow replacing a path that already exists in the rootfs.
-        replace: bool,
-    },
-    /// Create a directory (idempotent — does not error if the directory already exists).
-    Mkdir {
-        /// Absolute guest path.
-        path: String,
-        /// Directory permissions (e.g., `0o755`). `None` uses the default.
-        mode: Option<u32>,
-    },
-    /// Remove a file or directory (idempotent — does not error if the path does not exist).
-    Remove {
-        /// Absolute guest path to remove.
-        path: String,
-    },
-    /// Append content to an existing file. If the file lives in a lower layer,
-    /// it is copied up to the writable overlay layer first, then the content is
-    /// appended.
-    Append {
-        /// Absolute guest path of the file to append to.
-        path: String,
-        /// Content to append.
-        content: String,
-    },
-}
-
-/// Creation metadata for sandbox-time named volume provisioning.
-///
-/// Values are produced by [`MountBuilder::named_with`].
-#[derive(Debug, Clone)]
-pub struct NamedVolumeCreate {
-    pub(crate) mode: NamedVolumeMode,
-    pub(crate) name: String,
-    pub(crate) kind: crate::volume::VolumeKind,
-    pub(crate) quota_mib: Option<u32>,
-    pub(crate) capacity_mib: Option<u32>,
-    pub(crate) labels: Vec<(String, String)>,
-}
-
-/// Sandbox-time behavior for a named volume mount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamedVolumeMode {
-    /// Require the named volume to already exist.
-    Existing,
-    /// Create the named volume and fail if it already exists.
-    Create,
-    /// Ensure the named volume exists, or reuse a compatible existing volume.
-    EnsureExists,
-}
-
 /// Sub-builder for [`MountBuilder::named_with`].
 pub struct NamedVolumeBuilder {
     create: NamedVolumeCreate,
@@ -275,7 +92,7 @@ impl NamedVolumeBuilder {
             create: NamedVolumeCreate {
                 mode: NamedVolumeMode::Existing,
                 name,
-                kind: crate::volume::VolumeKind::Directory,
+                kind: VolumeKind::Directory,
                 quota_mib: None,
                 capacity_mib: None,
                 labels: Vec::new(),
@@ -309,14 +126,14 @@ impl NamedVolumeBuilder {
 
     /// Use directory-backed storage.
     pub fn directory(mut self) -> Self {
-        self.create.kind = crate::volume::VolumeKind::Directory;
+        self.create.kind = VolumeKind::Directory;
         self.create.capacity_mib = None;
         self
     }
 
     /// Use raw ext4 disk-image storage.
     pub fn disk(mut self) -> Self {
-        self.create.kind = crate::volume::VolumeKind::Disk;
+        self.create.kind = VolumeKind::Disk;
         self.create.quota_mib = None;
         self
     }
@@ -341,38 +158,6 @@ impl NamedVolumeBuilder {
 
     pub(crate) fn build(self) -> NamedVolumeCreate {
         self.create
-    }
-}
-
-impl NamedVolumeCreate {
-    /// Creation behavior for this named volume mount.
-    pub fn mode(&self) -> NamedVolumeMode {
-        self.mode
-    }
-
-    /// Volume name to create or ensure exists.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Storage kind to create or ensure exists.
-    pub fn kind(&self) -> crate::volume::VolumeKind {
-        self.kind
-    }
-
-    /// Directory quota in MiB, if configured.
-    pub fn quota_mib(&self) -> Option<u32> {
-        self.quota_mib
-    }
-
-    /// Disk capacity in MiB, if configured.
-    pub fn capacity_mib(&self) -> Option<u32> {
-        self.capacity_mib
-    }
-
-    /// Labels to attach to newly-created volumes.
-    pub fn labels(&self) -> &[(String, String)] {
-        &self.labels
     }
 }
 
@@ -826,25 +611,6 @@ impl PatchBuilder {
     }
 }
 
-impl VolumeMount {
-    /// The absolute path where this mount appears inside the guest.
-    pub fn guest(&self) -> &str {
-        match self {
-            Self::Bind { guest, .. }
-            | Self::Named { guest, .. }
-            | Self::Tmpfs { guest, .. }
-            | Self::DiskImage { guest, .. } => guest,
-        }
-    }
-
-    pub(crate) fn named_create(&self) -> Option<&NamedVolumeCreate> {
-        match self {
-            Self::Named { create, .. } => create.as_ref(),
-            _ => None,
-        }
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods: ImageSource
 //--------------------------------------------------------------------------------------------------
@@ -1129,13 +895,6 @@ fn validate_virtiofs_policies(
     Ok(())
 }
 
-fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountOptions {
-    options.unwrap_or(MountOptions {
-        readonly,
-        ..MountOptions::default()
-    })
-}
-
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations: IntoImage
 //--------------------------------------------------------------------------------------------------
@@ -1177,257 +936,6 @@ impl From<String> for ImageSource {
 impl From<PathBuf> for ImageSource {
     fn from(p: PathBuf) -> Self {
         Self::Path(p)
-    }
-}
-
-/// Custom serialization for `VolumeMount` covering all four variants.
-impl Serialize for VolumeMount {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-
-        match self {
-            Self::Bind {
-                host,
-                guest,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "Bind")?;
-                map.serialize_entry("host", host)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("options", options)?;
-                map.serialize_entry("stat_virtualization", stat_virtualization)?;
-                map.serialize_entry("host_permissions", host_permissions)?;
-                map.end()
-            }
-            Self::Named {
-                name,
-                guest,
-                create: _,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "Named")?;
-                map.serialize_entry("name", name)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("options", options)?;
-                map.serialize_entry("stat_virtualization", stat_virtualization)?;
-                map.serialize_entry("host_permissions", host_permissions)?;
-                map.end()
-            }
-            Self::Tmpfs {
-                guest,
-                size_mib,
-                options,
-            } => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "Tmpfs")?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("size_mib", size_mib)?;
-                map.serialize_entry("options", options)?;
-                map.end()
-            }
-            Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "DiskImage")?;
-                map.serialize_entry("host", host)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("format", format)?;
-                map.serialize_entry("fstype", fstype)?;
-                map.serialize_entry("options", options)?;
-                map.end()
-            }
-        }
-    }
-}
-
-/// Custom deserialization for `VolumeMount` covering all four variants.
-impl<'de> Deserialize<'de> for VolumeMount {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// Helper for tagged deserialization.
-        fn default_strict() -> StatVirtualization {
-            StatVirtualization::Strict
-        }
-        fn default_private() -> HostPermissions {
-            HostPermissions::Private
-        }
-
-        #[derive(Deserialize)]
-        #[serde(tag = "type")]
-        enum VolumeMountHelper {
-            Bind {
-                host: PathBuf,
-                guest: String,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-                #[serde(default = "default_strict")]
-                stat_virtualization: StatVirtualization,
-                #[serde(default = "default_private")]
-                host_permissions: HostPermissions,
-            },
-            Named {
-                name: String,
-                guest: String,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-                #[serde(default = "default_strict")]
-                stat_virtualization: StatVirtualization,
-                #[serde(default = "default_private")]
-                host_permissions: HostPermissions,
-            },
-            Tmpfs {
-                guest: String,
-                #[serde(default)]
-                size_mib: Option<u32>,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-            },
-            DiskImage {
-                host: PathBuf,
-                guest: String,
-                format: DiskImageFormat,
-                #[serde(default)]
-                fstype: Option<String>,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-            },
-        }
-
-        let helper = VolumeMountHelper::deserialize(deserializer)?;
-        Ok(match helper {
-            VolumeMountHelper::Bind {
-                host,
-                guest,
-                options,
-                readonly,
-                stat_virtualization,
-                host_permissions,
-            } => Self::Bind {
-                host,
-                guest,
-                options: decode_mount_options(options, readonly),
-                stat_virtualization,
-                host_permissions,
-            },
-            VolumeMountHelper::Named {
-                name,
-                guest,
-                options,
-                readonly,
-                stat_virtualization,
-                host_permissions,
-            } => Self::Named {
-                name,
-                guest,
-                create: None,
-                options: decode_mount_options(options, readonly),
-                stat_virtualization,
-                host_permissions,
-            },
-            VolumeMountHelper::Tmpfs {
-                guest,
-                size_mib,
-                options,
-                readonly,
-            } => Self::Tmpfs {
-                guest,
-                size_mib,
-                options: decode_mount_options(options, readonly),
-            },
-            VolumeMountHelper::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-                readonly,
-            } => Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options: decode_mount_options(options, readonly),
-            },
-        })
-    }
-}
-
-impl std::fmt::Debug for VolumeMount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bind {
-                host,
-                guest,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => f
-                .debug_struct("Bind")
-                .field("host", host)
-                .field("guest", guest)
-                .field("options", options)
-                .field("stat_virtualization", stat_virtualization)
-                .field("host_permissions", host_permissions)
-                .finish(),
-            Self::Named {
-                name,
-                guest,
-                create,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => f
-                .debug_struct("Named")
-                .field("name", name)
-                .field("guest", guest)
-                .field("create", create)
-                .field("options", options)
-                .field("stat_virtualization", stat_virtualization)
-                .field("host_permissions", host_permissions)
-                .finish(),
-            Self::Tmpfs {
-                guest,
-                size_mib,
-                options,
-            } => f
-                .debug_struct("Tmpfs")
-                .field("guest", guest)
-                .field("size_mib", size_mib)
-                .field("options", options)
-                .finish(),
-            Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-            } => f
-                .debug_struct("DiskImage")
-                .field("host", host)
-                .field("guest", guest)
-                .field("format", format)
-                .field("fstype", fstype)
-                .field("options", options)
-                .finish(),
-        }
     }
 }
 
@@ -1895,6 +1403,7 @@ mod tests {
 //--------------------------------------------------------------------------------------------------
 
 pub use microsandbox_types::{
-    DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RootfsSource, SecurityProfile,
-    StatVirtualization,
+    DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
+    OciRootfsSource, Patch, RootfsSource, SecurityProfile, StatVirtualization, VolumeKind,
+    VolumeMount,
 };

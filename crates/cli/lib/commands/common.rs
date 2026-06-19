@@ -2145,21 +2145,21 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            &config.patches[0],
+            &config.spec.patches[0],
             Patch::CopyFile { src, dst, .. }
                 if src == &file && dst == "/etc/app/config.toml"
         ));
         assert!(matches!(
-            &config.patches[1],
+            &config.spec.patches[1],
             Patch::CopyDir { src, dst, .. }
                 if src == &dir && dst == "/etc/app/certs"
         ));
         assert!(matches!(
-            &config.patches[2],
+            &config.spec.patches[2],
             Patch::Mkdir { path, .. } if path == "/var/cache/app"
         ));
         assert!(matches!(
-            &config.patches[3],
+            &config.spec.patches[3],
             Patch::Remove { path } if path == "/etc/motd"
         ));
 
@@ -2176,7 +2176,7 @@ mod tests {
         let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
         let builder = apply_volume(builder, spec).unwrap();
         let config = builder.build().await.unwrap();
-        config.mounts.into_iter().next().unwrap()
+        config.spec.mounts.into_iter().next().unwrap()
     }
 
     async fn build_explicit(
@@ -2185,7 +2185,7 @@ mod tests {
     ) -> VolumeMount {
         let builder = SandboxBuilder::new("test").image("alpine");
         let config = apply(builder, spec).unwrap().build().await.unwrap();
-        config.mounts.into_iter().next().unwrap()
+        config.spec.mounts.into_iter().next().unwrap()
     }
 
     #[tokio::test]
@@ -2562,7 +2562,7 @@ mod tests {
     async fn build_volume(spec: &str) -> VolumeMount {
         let builder = SandboxBuilder::new("test").image("alpine");
         let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
-        config.mounts.into_iter().next().unwrap()
+        config.spec.mounts.into_iter().next().unwrap()
     }
 
     // --- apply_volume ---

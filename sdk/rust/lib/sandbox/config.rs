@@ -10,13 +10,10 @@ use microsandbox_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
+use microsandbox_image::{ImageConfig, RegistryAuth};
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
 
-use super::{
-    init::HandoffInit,
-    types::{MountOptions, Patch, RootfsSource, VolumeMount},
-};
+use super::types::{MountOptions, RootfsSource, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -74,46 +71,12 @@ fn default_disable_metrics_sample() -> bool {
 ///
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
 /// local SDK/runtime operation state beside that shared contract, such as
-/// mounts, patches, registry credentials, replacement flags, and resolved
-/// snapshot metadata.
+/// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Backend-neutral sandbox task description shared across SDKs and services.
     #[serde(flatten)]
     pub spec: SandboxSpec,
-
-    /// Volume mounts.
-    #[serde(default)]
-    pub mounts: Vec<VolumeMount>,
-
-    /// Rootfs patches applied before VM start.
-    ///
-    /// OCI roots bake patches into `upper.ext4`; bind roots patch the host
-    /// directory directly.
-    #[serde(default)]
-    pub patches: Vec<Patch>,
-
-    /// Network configuration.
-    #[cfg(feature = "net")]
-    #[serde(default)]
-    pub network: microsandbox_network::config::NetworkConfig,
-
-    /// Hand off PID 1 to a guest init binary after agentd's setup.
-    ///
-    /// When set, agentd performs initial setup (mounts, runtime
-    /// directories), then forks. The parent execs the configured init
-    /// (typically `systemd`, but any init works) and becomes PID 1.
-    /// The child stays alive as a normal grandchild, serving host
-    /// requests over virtio-serial.
-    ///
-    /// `None` (the default) means agentd remains PID 1 — the existing
-    /// minimal-init behaviour.
-    #[serde(default)]
-    pub init: Option<HandoffInit>,
-
-    /// Pull policy for OCI images. Default: `IfMissing`.
-    #[serde(default)]
-    pub pull_policy: PullPolicy,
 
     /// Registry authentication for private OCI registries.
     ///
@@ -301,7 +264,7 @@ impl SandboxConfig {
         image_entrypoint: Option<&[String]>,
         inherited_entrypoint: bool,
     ) {
-        let Some(init) = self.init.as_ref() else {
+        let Some(init) = self.spec.init.as_ref() else {
             return;
         };
         if init.cmd.as_os_str() != HANDOFF_INIT_AUTO {
@@ -327,6 +290,7 @@ impl SandboxConfig {
         };
 
         let init = self
+            .spec
             .init
             .as_mut()
             .expect("init was present at start of auto resolution");
@@ -392,6 +356,7 @@ impl SandboxConfig {
         }
 
         if self
+            .spec
             .mounts
             .iter()
             .any(|mount| guest_mount_is(mount, DEFAULT_OCI_TMPFS_PATH))
@@ -399,7 +364,7 @@ impl SandboxConfig {
             return;
         }
 
-        self.mounts.push(VolumeMount::Tmpfs {
+        self.spec.mounts.push(VolumeMount::Tmpfs {
             guest: DEFAULT_OCI_TMPFS_PATH.to_string(),
             size_mib: Some(default_oci_tmpfs_size_mib(self.spec.resources.memory_mib)),
             options: MountOptions::default(),
@@ -498,6 +463,37 @@ pub(crate) fn sandbox_log_level_from_runtime(level: LogLevel) -> SandboxLogLevel
     }
 }
 
+#[cfg(feature = "net")]
+pub(crate) fn network_spec_from_config(
+    config: &microsandbox_network::config::NetworkConfig,
+) -> crate::MicrosandboxResult<microsandbox_types::NetworkSpec> {
+    Ok(serde_json::from_value(serde_json::to_value(config)?)?)
+}
+
+#[cfg(feature = "net")]
+pub(crate) fn network_config_from_spec(
+    spec: &microsandbox_types::NetworkSpec,
+) -> crate::MicrosandboxResult<microsandbox_network::config::NetworkConfig> {
+    Ok(serde_json::from_value(serde_json::to_value(spec)?)?)
+}
+
+#[cfg(feature = "net")]
+impl SandboxConfig {
+    pub(crate) fn local_network_config(
+        &self,
+    ) -> crate::MicrosandboxResult<microsandbox_network::config::NetworkConfig> {
+        network_config_from_spec(&self.spec.network)
+    }
+
+    pub(crate) fn set_local_network_config(
+        &mut self,
+        config: microsandbox_network::config::NetworkConfig,
+    ) -> crate::MicrosandboxResult<()> {
+        self.spec.network = network_spec_from_config(&config)?;
+        Ok(())
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -519,12 +515,6 @@ impl Default for SandboxConfig {
                 },
                 ..Default::default()
             },
-            mounts: Vec::new(),
-            patches: Vec::new(),
-            #[cfg(feature = "net")]
-            network: microsandbox_network::config::NetworkConfig::default(),
-            init: None,
-            pull_policy: PullPolicy::default(),
             registry_auth: None,
             insecure: false,
             ca_certs: Vec::new(),
@@ -670,16 +660,23 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert!(init.args.is_empty());
         assert_eq!(
@@ -699,17 +696,24 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert_eq!(
             init.args,
@@ -869,17 +873,24 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_initial_command(Vec::new());
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert_eq!(
             init.args,
@@ -897,17 +908,24 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_initial_command(vec!["bash".to_string()]);
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/lib/systemd/systemd"));
         assert!(init.args.is_empty());
         assert!(!config.initial_command_consumed_by_init());
@@ -930,19 +948,23 @@ mod tests {
                     entrypoint: Some(vec!["/bin/sh".to_string()]),
                     ..Default::default()
                 },
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
                 ..Default::default()
             },
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
             ..Default::default()
         };
         config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
         assert!(init.args.is_empty());
         assert_eq!(
@@ -960,17 +982,20 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.merge_image_defaults(&image);
 
         assert_eq!(
-            config.init.expect("init should remain configured").cmd,
+            config.spec.init.expect("init should remain configured").cmd,
             PathBuf::from("auto")
         );
         assert_eq!(
@@ -1114,6 +1139,7 @@ mod tests {
                 max_duration_secs: Some(3600),
                 idle_timeout_secs: Some(120),
             },
+            ..Default::default()
         };
 
         let config = SandboxConfig {
@@ -1157,8 +1183,8 @@ mod tests {
 
         let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
 
-        assert_eq!(decoded.mounts.len(), 1);
-        match &decoded.mounts[0] {
+        assert_eq!(decoded.spec.mounts.len(), 1);
+        match &decoded.spec.mounts[0] {
             VolumeMount::Tmpfs {
                 guest,
                 size_mib,
@@ -1188,8 +1214,8 @@ mod tests {
 
         config.apply_runtime_defaults();
 
-        assert_eq!(config.mounts.len(), 1);
-        match &config.mounts[0] {
+        assert_eq!(config.spec.mounts.len(), 1);
+        match &config.spec.mounts[0] {
             VolumeMount::Tmpfs {
                 guest,
                 size_mib,
@@ -1254,22 +1280,22 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
+                mounts: vec![VolumeMount::Bind {
+                    host: "/host/tmp".into(),
+                    guest: "/tmp/".into(),
+                    options: MountOptions::default(),
+                    stat_virtualization: crate::sandbox::StatVirtualization::Strict,
+                    host_permissions: crate::sandbox::HostPermissions::Private,
+                }],
                 ..Default::default()
             },
-            mounts: vec![VolumeMount::Bind {
-                host: "/host/tmp".into(),
-                guest: "/tmp/".into(),
-                options: MountOptions::default(),
-                stat_virtualization: crate::sandbox::StatVirtualization::Strict,
-                host_permissions: crate::sandbox::HostPermissions::Private,
-            }],
             ..Default::default()
         };
 
         config.apply_runtime_defaults();
 
-        assert_eq!(config.mounts.len(), 1);
-        match &config.mounts[0] {
+        assert_eq!(config.spec.mounts.len(), 1);
+        match &config.spec.mounts[0] {
             VolumeMount::Bind { guest, .. } => assert_eq!(guest, "/tmp/"),
             mount => panic!("expected bind mount, got {mount:?}"),
         }
@@ -1287,7 +1313,7 @@ mod tests {
 
         config.apply_runtime_defaults();
 
-        assert!(config.mounts.is_empty());
+        assert!(config.spec.mounts.is_empty());
     }
 
     #[test]
@@ -1311,6 +1337,6 @@ mod tests {
 
         config.apply_runtime_defaults();
 
-        assert!(config.mounts.is_empty());
+        assert!(config.spec.mounts.is_empty());
     }
 }

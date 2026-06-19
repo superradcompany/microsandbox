@@ -5,12 +5,12 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
+use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
+use microsandbox_types::{EnvVar, PullPolicy};
 #[cfg(feature = "net")]
-use microsandbox_network::config::{PortProtocol, PublishedPort};
-use microsandbox_types::EnvVar;
+use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
 use super::{
     config::{SandboxConfig, sandbox_log_level_from_runtime},
@@ -347,7 +347,7 @@ impl SandboxBuilder {
     /// PID 1; `entrypoint` is the user workload that agentd exec's
     /// per request. They can be combined freely.
     pub fn init(mut self, cmd: impl Into<PathBuf>) -> Self {
-        self.config.init = Some(HandoffInit {
+        self.config.spec.init = Some(HandoffInit {
             cmd: cmd.into(),
             args: Vec::new(),
             env: Vec::new(),
@@ -375,7 +375,7 @@ impl SandboxBuilder {
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
         let (args, env) = f(InitOptionsBuilder::default()).build();
-        self.config.init = Some(HandoffInit {
+        self.config.spec.init = Some(HandoffInit {
             cmd: cmd.into(),
             args,
             env,
@@ -398,7 +398,7 @@ impl SandboxBuilder {
 
     /// Set the pull policy for OCI images.
     pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
-        self.config.pull_policy = policy;
+        self.config.spec.pull_policy = policy;
         self
     }
 
@@ -413,8 +413,22 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn disable_network(mut self) -> Self {
-        self.config.network.enabled = false;
-        self.config.network.policy = microsandbox_network::policy::NetworkPolicy::none();
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                network.enabled = false;
+                network.policy = microsandbox_network::policy::NetworkPolicy::none();
+                if let Err(err) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(err);
+                }
+            }
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(err);
+                }
+            }
+        }
         self
     }
 
@@ -429,9 +443,23 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
-        let network = std::mem::take(&mut self.config.network);
+        let network = match self.config.local_network_config() {
+            Ok(network) => network,
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(err);
+                }
+                return self;
+            }
+        };
         match f(NetworkBuilder::from_config(network)).build() {
-            Ok(net) => self.config.network = net,
+            Ok(net) => {
+                if let Err(err) = self.config.set_local_network_config(net)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(err);
+                }
+            }
             Err(err) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(err.into());
@@ -479,11 +507,11 @@ impl SandboxBuilder {
         guest_port: u16,
         protocol: PortProtocol,
     ) {
-        self.config.network.ports.push(PublishedPort {
+        self.config.spec.network.ports.push(PublishedPortSpec {
             host_port,
             guest_port,
             protocol,
-            host_bind,
+            host_bind: host_bind.to_string(),
         });
     }
 
@@ -538,10 +566,23 @@ impl SandboxBuilder {
         mut self,
         entry: microsandbox_network::secrets::config::SecretEntry,
     ) -> Self {
-        self.config.network.secrets.secrets.push(entry);
-        // Auto-enable TLS when secrets are configured.
-        if !self.config.network.tls.enabled {
-            self.config.network.tls.enabled = true;
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                network.secrets.secrets.push(entry);
+                if !network.tls.enabled {
+                    network.tls.enabled = true;
+                }
+                if let Err(err) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(err);
+                }
+            }
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(err);
+                }
+            }
         }
         self
     }
@@ -696,7 +737,7 @@ impl SandboxBuilder {
         f: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self {
         match f(MountBuilder::new(guest_path)).build() {
-            Ok(mount) => self.config.mounts.push(mount),
+            Ok(mount) => self.config.spec.mounts.push(mount),
             Err(e) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(e);
@@ -720,13 +761,16 @@ impl SandboxBuilder {
     /// )
     /// ```
     pub fn patch(mut self, f: impl FnOnce(PatchBuilder) -> PatchBuilder) -> Self {
-        self.config.patches.extend(f(PatchBuilder::new()).build());
+        self.config
+            .spec
+            .patches
+            .extend(f(PatchBuilder::new()).build());
         self
     }
 
     /// Add a single patch directly.
     pub fn add_patch(mut self, patch: Patch) -> Self {
-        self.config.patches.push(patch);
+        self.config.spec.patches.push(patch);
         self
     }
 
@@ -925,7 +969,7 @@ impl SandboxBuilder {
                     "oci upper_size must be greater than 0".into(),
                 ));
             }
-            RootfsSource::DiskImage { .. } if !self.config.patches.is_empty() => {
+            RootfsSource::DiskImage { .. } if !self.config.spec.patches.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "patches are not compatible with disk image rootfs".into(),
                 ));
@@ -944,18 +988,22 @@ impl SandboxBuilder {
             }
         }
 
-        super::types::validate_volume_mounts(&self.config.mounts)?;
+        super::types::validate_volume_mounts(&self.config.spec.mounts)?;
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
 
-        if let Some(spec) = &self.config.init {
+        if let Some(spec) = &self.config.spec.init {
             super::init::validate(spec)?;
         }
 
         #[cfg(feature = "net")]
-        self.config.network.secrets.validate().map_err(|err| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid network secrets: {err}"))
-        })?;
+        self.config
+            .local_network_config()?
+            .secrets
+            .validate()
+            .map_err(|err| {
+                crate::MicrosandboxError::InvalidConfig(format!("invalid network secrets: {err}"))
+            })?;
 
         // Reject any two DiskImage mounts pointing at the same host file.
         // Each virtio-blk device caches independently on the host, so any
@@ -966,7 +1014,7 @@ impl SandboxBuilder {
         // canonical path so symlinks and `./` prefixes don't bypass the
         // check.
         let mut seen: Vec<PathBuf> = Vec::new();
-        for mount in &self.config.mounts {
+        for mount in &self.config.spec.mounts {
             if let VolumeMount::DiskImage { host, .. } = mount {
                 let canonical = std::fs::canonicalize(host).map_err(|e| {
                     crate::MicrosandboxError::InvalidConfig(format!(
@@ -1014,9 +1062,9 @@ mod tests {
     use crate::backend::{LocalBackend, with_backend};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
-    use microsandbox_network::config::PortProtocol;
-    #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
+    #[cfg(feature = "net")]
+    use microsandbox_types::PortProtocol;
     use microsandbox_types::SandboxLogLevel;
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
@@ -1341,28 +1389,28 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(config.network.ports.len(), 5);
-        assert_eq!(config.network.ports[0].host_port, 8080);
-        assert_eq!(config.network.ports[0].guest_port, 80);
-        assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(config.spec.network.ports.len(), 5);
+        assert_eq!(config.spec.network.ports[0].host_port, 8080);
+        assert_eq!(config.spec.network.ports[0].guest_port, 80);
+        assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
         assert_eq!(
-            config.network.ports[0].host_bind,
-            IpAddr::V4(Ipv4Addr::LOCALHOST)
+            config.spec.network.ports[0].host_bind,
+            IpAddr::V4(Ipv4Addr::LOCALHOST).to_string()
         );
-        assert_eq!(config.network.ports[1].host_port, 3000);
-        assert_eq!(config.network.ports[1].guest_port, 3000);
-        assert_eq!(config.network.ports[1].protocol, PortProtocol::Tcp);
-        assert_eq!(config.network.ports[2].host_port, 5353);
-        assert_eq!(config.network.ports[2].guest_port, 53);
-        assert_eq!(config.network.ports[2].protocol, PortProtocol::Udp);
-        assert_eq!(config.network.ports[3].host_bind, bind);
-        assert_eq!(config.network.ports[3].host_port, 8081);
-        assert_eq!(config.network.ports[3].guest_port, 81);
-        assert_eq!(config.network.ports[3].protocol, PortProtocol::Tcp);
-        assert_eq!(config.network.ports[4].host_bind, bind);
-        assert_eq!(config.network.ports[4].host_port, 5354);
-        assert_eq!(config.network.ports[4].guest_port, 54);
-        assert_eq!(config.network.ports[4].protocol, PortProtocol::Udp);
+        assert_eq!(config.spec.network.ports[1].host_port, 3000);
+        assert_eq!(config.spec.network.ports[1].guest_port, 3000);
+        assert_eq!(config.spec.network.ports[1].protocol, PortProtocol::Tcp);
+        assert_eq!(config.spec.network.ports[2].host_port, 5353);
+        assert_eq!(config.spec.network.ports[2].guest_port, 53);
+        assert_eq!(config.spec.network.ports[2].protocol, PortProtocol::Udp);
+        assert_eq!(config.spec.network.ports[3].host_bind, bind.to_string());
+        assert_eq!(config.spec.network.ports[3].host_port, 8081);
+        assert_eq!(config.spec.network.ports[3].guest_port, 81);
+        assert_eq!(config.spec.network.ports[3].protocol, PortProtocol::Tcp);
+        assert_eq!(config.spec.network.ports[4].host_bind, bind.to_string());
+        assert_eq!(config.spec.network.ports[4].host_port, 5354);
+        assert_eq!(config.spec.network.ports[4].guest_port, 54);
+        assert_eq!(config.spec.network.ports[4].protocol, PortProtocol::Udp);
     }
 
     #[cfg(feature = "net")]
@@ -1377,12 +1425,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!config.network.enabled);
+        let network = config.local_network_config().unwrap();
+        assert!(!network.enabled);
         // `disable_network()` uses `NetworkPolicy::none()` which is deny-all
         // in both directions with no rules.
-        assert_eq!(config.network.policy.default_egress, Action::Deny);
-        assert_eq!(config.network.policy.default_ingress, Action::Deny);
-        assert!(config.network.policy.rules.is_empty());
+        assert_eq!(network.policy.default_egress, Action::Deny);
+        assert_eq!(network.policy.default_ingress, Action::Deny);
+        assert!(network.policy.rules.is_empty());
     }
 
     #[cfg(feature = "net")]
@@ -1397,12 +1446,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(config.network.ports.len(), 1);
-        assert_eq!(config.network.ports[0].host_port, 8080);
-        assert_eq!(config.network.ports[0].guest_port, 80);
-        assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
-        assert_eq!(config.network.secrets.secrets.len(), 1);
-        assert_eq!(config.network.max_connections, Some(128));
+        assert_eq!(config.spec.network.ports.len(), 1);
+        assert_eq!(config.spec.network.ports[0].host_port, 8080);
+        assert_eq!(config.spec.network.ports[0].guest_port, 80);
+        assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
+        let network = config.local_network_config().unwrap();
+        assert_eq!(network.secrets.secrets.len(), 1);
+        assert_eq!(network.max_connections, Some(128));
     }
 
     #[cfg(feature = "net")]

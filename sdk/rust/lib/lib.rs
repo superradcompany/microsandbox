@@ -58,6 +58,6 @@ pub use sandbox::{
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
-    SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
+    SnapshotSpec, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
-pub use volume::{Volume, VolumeHandle, VolumeKind};
+pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};

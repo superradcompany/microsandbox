@@ -24,34 +24,15 @@
 //!     .build().await?;
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use microsandbox_protocol::HANDOFF_INIT_AUTO;
-use serde::{Deserialize, Serialize};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
-
-/// Fully-assembled handoff-init specification stored on a sandbox
-/// config and serialised into the `MSB_HANDOFF_INIT*` env vars at
-/// spawn time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandoffInit {
-    /// Init binary: absolute path inside the guest rootfs, or the
-    /// literal `"auto"` (resolved guest-side).
-    pub cmd: PathBuf,
-
-    /// Supplemental argv. `argv[0]` is implicitly `cmd`.
-    #[serde(default)]
-    pub args: Vec<String>,
-
-    /// Extra env vars merged on top of the inherited env.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-}
 
 /// Builder for the `args` + `env` portion of [`HandoffInit`].
 ///
@@ -63,6 +44,12 @@ pub struct InitOptionsBuilder {
     args: Vec<String>,
     env: Vec<(String, String)>,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::HandoffInit;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -195,6 +182,7 @@ fn validate_env_pair(key: &str, value: &str) -> MicrosandboxResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn ok(cmd: &str, args: &[&str], env: &[(&str, &str)]) -> HandoffInit {
         HandoffInit {

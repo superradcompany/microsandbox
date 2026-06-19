@@ -36,37 +36,6 @@ pub struct Snapshot {
     manifest: Manifest,
 }
 
-/// Where to place a new snapshot artifact.
-///
-/// `Name` resolves under the configured `snapshots_dir` (default
-/// `~/.microsandbox/snapshots/<name>`); `Path` writes to an explicit
-/// directory anywhere the user has access.
-#[derive(Debug, Clone)]
-pub enum SnapshotDestination {
-    /// Bare name resolved under the default snapshots directory.
-    Name(String),
-    /// Explicit absolute or relative path to the artifact directory.
-    Path(PathBuf),
-}
-
-/// Inputs to [`Snapshot::create`].
-#[derive(Debug, Clone)]
-pub struct SnapshotConfig {
-    /// Name of the source sandbox. Must be stopped.
-    pub source_sandbox: String,
-    /// Where to write the artifact.
-    pub destination: SnapshotDestination,
-    /// User-supplied labels (sorted in canonical form).
-    pub labels: Vec<(String, String)>,
-    /// Overwrite an existing artifact at the destination.
-    pub force: bool,
-    /// Compute and record upper-layer content integrity at creation time.
-    ///
-    /// Disabled by default so dense uppers do not make snapshot creation
-    /// unexpectedly linear in file size.
-    pub record_integrity: bool,
-}
-
 /// Builder for [`SnapshotConfig`].
 pub struct SnapshotBuilder {
     source_sandbox: String,
@@ -360,6 +329,7 @@ pub use archive::ExportOpts;
 pub use microsandbox_image::snapshot::{
     ImageRef, MANIFEST_FILENAME, Manifest, SnapshotFormat, UpperIntegrity, UpperLayer,
 };
+pub use microsandbox_types::{SnapshotDestination, SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------

@@ -107,7 +107,7 @@ pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsSetAttrs, FsWrite
 pub use handle::SandboxHandle;
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
-pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
+pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
@@ -115,9 +115,10 @@ pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
 pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
+pub use microsandbox_types::PullPolicy;
 pub use microsandbox_types::{
-    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxLogLevel, SandboxResources,
-    SandboxRuntimeOptions, SandboxSpec,
+    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
+    PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
 };
 #[cfg(feature = "ssh")]
 pub use ssh::{
@@ -461,7 +462,7 @@ pub(crate) async fn create_local(
     validate_rootfs_source(&config.spec.image)?;
     validate_env(&config.spec.env)?;
     validate_labels(&config.spec.labels)?;
-    if let Some(init) = &config.init {
+    if let Some(init) = &config.spec.init {
         init::validate(init)?;
     }
 
@@ -485,7 +486,7 @@ pub(crate) async fn create_local(
         let pull_result = pull_oci_image(
             local_backend,
             &reference,
-            config.pull_policy,
+            config.spec.pull_policy,
             overrides,
             progress,
         )
@@ -493,7 +494,7 @@ pub(crate) async fn create_local(
 
         // Merge image config defaults under user-provided config.
         config.merge_image_defaults(&pull_result.config);
-        if let Some(init) = &config.init {
+        if let Some(init) = &config.spec.init {
             init::validate(init)?;
         }
 
@@ -519,8 +520,8 @@ pub(crate) async fn create_local(
             .map(|d| cache.layer_erofs_path(d))
             .collect();
 
-        let upper_tree = if !config.patches.is_empty() {
-            Some(patch::build_upper_tree(&config.patches, &layer_erofs_paths).await?)
+        let upper_tree = if !config.spec.patches.is_empty() {
+            Some(patch::build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
         } else {
             None
         };
@@ -574,8 +575,8 @@ pub(crate) async fn create_local(
 
     // Apply rootfs patches before VM start (bind mounts only — OCI patches
     // are baked into upper.ext4 above).
-    if !config.patches.is_empty() && !matches!(config.spec.image, RootfsSource::Oci(_)) {
-        patch::apply_patches(&config.spec.image, &config.patches).await?;
+    if !config.spec.patches.is_empty() && !matches!(config.spec.image, RootfsSource::Oci(_)) {
+        patch::apply_patches(&config.spec.image, &config.spec.patches).await?;
     }
 
     // Insert the sandbox record and keep its stable database ID.
@@ -1956,6 +1957,14 @@ fn pid_is_dead_or_reaped(pid: i32) -> bool {
     !pid_is_alive(pid)
 }
 
+fn image_pull_policy(policy: PullPolicy) -> microsandbox_image::PullPolicy {
+    match policy {
+        PullPolicy::IfMissing => microsandbox_image::PullPolicy::IfMissing,
+        PullPolicy::Always => microsandbox_image::PullPolicy::Always,
+        PullPolicy::Never => microsandbox_image::PullPolicy::Never,
+    }
+}
+
 /// Derive a guest hostname from a sandbox name, fitting within
 /// [`MAX_HOSTNAME_BYTES`]. Names short enough pass through unchanged;
 /// longer names collapse to a deterministic `<prefix>-<hash>` form to
@@ -1989,7 +1998,7 @@ async fn pull_oci_image(
         crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
     })?;
     let options = PullOptions {
-        pull_policy,
+        pull_policy: image_pull_policy(pull_policy),
         ..Default::default()
     };
 

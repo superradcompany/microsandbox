@@ -1140,12 +1140,12 @@ pub(super) fn cloud_create_request_from_config(
     config: SandboxConfig,
 ) -> MicrosandboxResult<CloudCreateSandboxRequest> {
     reject_cloud_deferred(
-        !config.mounts.is_empty(),
+        !config.spec.mounts.is_empty(),
         "mounts",
         "when cloud volumes ship",
     )?;
     reject_cloud_deferred(
-        !config.patches.is_empty(),
+        !config.spec.patches.is_empty(),
         "patches",
         "when cloud volumes ship",
     )?;
@@ -1165,12 +1165,12 @@ pub(super) fn cloud_create_request_from_config(
         "when cloud sandbox replace semantics land",
     )?;
     reject_cloud_deferred(
-        config.init.is_some(),
+        config.spec.init.is_some(),
         "init",
         "when cloud init wrapper lands",
     )?;
     reject_cloud_deferred(
-        config.pull_policy != microsandbox_image::PullPolicy::IfMissing,
+        config.spec.pull_policy != crate::sandbox::PullPolicy::IfMissing,
         "pull_policy",
         "when cloud pull policy lands",
     )?;
@@ -1196,7 +1196,7 @@ pub(super) fn cloud_create_request_from_config(
         // settings, so comparing those would always trigger; instead we
         // catch the explicit-add fields (ports, secrets, custom DNS
         // resolvers, host-CA trust).
-        let net = &config.network;
+        let net = config.local_network_config()?;
         let has_custom_network = !net.ports.is_empty()
             || !net.secrets.secrets.is_empty()
             || !net.dns.nameservers.is_empty()
@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn cloud_create_request_rejects_init() {
         let mut config = base_cloud_config();
-        config.init = Some(crate::sandbox::HandoffInit {
+        config.spec.init = Some(crate::sandbox::HandoffInit {
             cmd: "/sbin/init".into(),
             args: Vec::new(),
             env: Vec::new(),
@@ -1386,7 +1386,7 @@ mod tests {
     #[test]
     fn cloud_create_request_rejects_non_default_pull_policy() {
         let mut config = base_cloud_config();
-        config.pull_policy = microsandbox_image::PullPolicy::Always;
+        config.spec.pull_policy = crate::sandbox::PullPolicy::Always;
         let err = cloud_create_request_from_config(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }
@@ -1425,13 +1425,14 @@ mod tests {
     fn cloud_create_request_rejects_published_ports() {
         let mut config = base_cloud_config();
         config
+            .spec
             .network
             .ports
-            .push(microsandbox_network::config::PublishedPort {
+            .push(microsandbox_types::PublishedPortSpec {
                 host_port: 8080,
                 guest_port: 80,
-                protocol: microsandbox_network::config::PortProtocol::Tcp,
-                host_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                protocol: microsandbox_types::PortProtocol::Tcp,
+                host_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).to_string(),
             });
         let err = cloud_create_request_from_config(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
