@@ -187,7 +187,7 @@ impl SandboxConfig {
         let mut config = self.clone();
         if config.initial_command_consumed_by_init
             && !config.initial_command_persistent
-            && let Some(init) = &mut config.init
+            && let Some(init) = &mut config.spec.init
         {
             init.args.clear();
         }
@@ -295,7 +295,7 @@ impl SandboxConfig {
             .as_mut()
             .expect("init was present at start of auto resolution");
         init.cmd = PathBuf::from(init_path);
-        init.env = merge_env_pairs(&self.env, &init.env);
+        init.env = merge_init_env(&self.spec.env, &init.env);
         if let Some(argv_tail) = init_argv_tail {
             init.args = argv_tail;
             self.initial_command_consumed_by_init = true;
@@ -389,6 +389,19 @@ pub(crate) fn merge_env_pairs(base: &[EnvVar], overrides: &[EnvVar]) -> Vec<EnvV
 
     merged.extend(overrides.iter().cloned());
     merged
+}
+
+fn merge_init_env(base: &[EnvVar], overrides: &[(String, String)]) -> Vec<(String, String)> {
+    let overrides = overrides
+        .iter()
+        .cloned()
+        .map(EnvVar::from)
+        .collect::<Vec<_>>();
+
+    merge_env_pairs(base, &overrides)
+        .into_iter()
+        .map(Into::into)
+        .collect()
 }
 
 /// Merge image env vars (OCI `KEY=VALUE` strings) with user env var pairs.
@@ -746,24 +759,31 @@ mod tests {
         };
 
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("auto"),
-                args: Vec::new(),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
+                    env: vec![
+                        ("PATH".to_string(), "/init/bin:/usr/bin:/bin".to_string()),
+                        ("INIT_ONLY".to_string(), "1".to_string()),
+                    ],
+                }),
                 env: vec![
-                    ("PATH".to_string(), "/init/bin:/usr/bin:/bin".to_string()),
-                    ("INIT_ONLY".to_string(), "1".to_string()),
+                    EnvVar::new("HERMES_DASHBOARD", "1"),
+                    EnvVar::new("OVERRIDE", "user"),
                 ],
-            }),
-            env: vec![
-                ("HERMES_DASHBOARD".to_string(), "1".to_string()),
-                ("OVERRIDE".to_string(), "user".to_string()),
-            ],
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
-        let init = config.init.as_ref().expect("init should remain configured");
+        let init = config
+            .spec
+            .init
+            .as_ref()
+            .expect("init should remain configured");
         assert_eq!(
             init.env,
             vec![
@@ -779,15 +799,18 @@ mod tests {
     #[test]
     fn test_clone_for_persistence_drops_consumed_init_args() {
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("/init"),
-                args: vec![
-                    "/opt/hermes/docker/main-wrapper.sh".to_string(),
-                    "gateway".to_string(),
-                    "run".to_string(),
-                ],
-                env: vec![("HERMES_DASHBOARD".to_string(), "1".to_string())],
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("/init"),
+                    args: vec![
+                        "/opt/hermes/docker/main-wrapper.sh".to_string(),
+                        "gateway".to_string(),
+                        "run".to_string(),
+                    ],
+                    env: vec![("HERMES_DASHBOARD".to_string(), "1".to_string())],
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
@@ -795,7 +818,7 @@ mod tests {
 
         let persisted = config.clone_for_persistence();
 
-        let runtime_init = config.init.as_ref().expect("runtime init");
+        let runtime_init = config.spec.init.as_ref().expect("runtime init");
         assert_eq!(
             runtime_init.args,
             vec![
@@ -804,7 +827,7 @@ mod tests {
                 "run".to_string(),
             ]
         );
-        let persisted_init = persisted.init.as_ref().expect("persisted init");
+        let persisted_init = persisted.spec.init.as_ref().expect("persisted init");
         assert!(persisted_init.args.is_empty());
         assert_eq!(
             persisted_init.env,
@@ -816,15 +839,18 @@ mod tests {
     #[test]
     fn test_clone_for_persistence_keeps_detached_startup_init_args() {
         let mut config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("/init"),
-                args: vec![
-                    "/opt/hermes/docker/main-wrapper.sh".to_string(),
-                    "gateway".to_string(),
-                    "run".to_string(),
-                ],
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("/init"),
+                    args: vec![
+                        "/opt/hermes/docker/main-wrapper.sh".to_string(),
+                        "gateway".to_string(),
+                        "run".to_string(),
+                    ],
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.set_persistent_initial_command(vec!["gateway".to_string(), "run".to_string()]);
@@ -832,7 +858,7 @@ mod tests {
 
         let persisted = config.clone_for_persistence();
 
-        let persisted_init = persisted.init.as_ref().expect("persisted init");
+        let persisted_init = persisted.spec.init.as_ref().expect("persisted init");
         assert_eq!(
             persisted_init.args,
             vec![
@@ -847,17 +873,20 @@ mod tests {
     #[test]
     fn test_clone_for_persistence_keeps_user_init_args() {
         let config = SandboxConfig {
-            init: Some(HandoffInit {
-                cmd: PathBuf::from("/lib/systemd/systemd"),
-                args: vec!["--unit=multi-user.target".to_string()],
-                env: Vec::new(),
-            }),
+            spec: SandboxSpec {
+                init: Some(HandoffInit {
+                    cmd: PathBuf::from("/lib/systemd/systemd"),
+                    args: vec!["--unit=multi-user.target".to_string()],
+                    env: Vec::new(),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         let persisted = config.clone_for_persistence();
 
-        let persisted_init = persisted.init.as_ref().expect("persisted init");
+        let persisted_init = persisted.spec.init.as_ref().expect("persisted init");
         assert_eq!(
             persisted_init.args,
             vec!["--unit=multi-user.target".to_string()]
