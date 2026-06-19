@@ -13,7 +13,7 @@ The agent client owns connection handshakes, correlation IDs, request/stream rou
 ## Layout
 
 ```text
-agent-client/
+packages/agent-client/
 ├── rust/
 └── typescript/
 ```

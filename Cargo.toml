@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "agent-client/rust",
     "crates/agentd",
     "crates/cli",
     "crates/db",
@@ -9,8 +8,9 @@ members = [
     "crates/image",
     "crates/metrics",
     "crates/metrics-collector",
+    "packages/agent-client/rust",
+    "packages/microsandbox-types/rust",
     "sdk/rust",
-    "crates/microsandbox-types",
     "crates/migration",
     "crates/protocol",
     "crates/runtime",
@@ -62,12 +62,12 @@ panic = "abort"
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
 microsandbox = { version = "0.5.7", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "0.5.7", path = "agent-client/rust" }
+microsandbox-agent-client = { version = "0.5.7", path = "packages/agent-client/rust" }
 microsandbox-db = { version = "0.5.7", path = "crates/db" }
 microsandbox-filesystem = { version = "0.5.7", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "0.5.7", path = "crates/image" }
 microsandbox-metrics = { version = "0.5.7", path = "crates/metrics" }
-microsandbox-types = { version = "0.5.7", path = "crates/microsandbox-types" }
+microsandbox-types = { version = "0.5.7", path = "packages/microsandbox-types/rust" }
 microsandbox-migration = { version = "0.5.7", path = "crates/migration" }
 microsandbox-network = { version = "0.5.7", path = "crates/network" }
 microsandbox-protocol = { version = "0.5.7", path = "crates/protocol" }

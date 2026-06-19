@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -31,25 +31,14 @@ fn main() {
 
 fn targets() -> Vec<Target> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
+    let package_root = manifest_dir
         .parent()
-        .and_then(Path::parent)
-        .expect("microsandbox-types should live under <workspace>/crates");
+        .expect("microsandbox-types rust crate should live under <package>/rust");
 
-    vec![
-        Target {
-            label: "crate TypeScript bindings",
-            path: manifest_dir.join("bindings/typescript/index.ts"),
-        },
-        Target {
-            label: "npm TypeScript bindings",
-            path: manifest_dir.join("bindings/npm/index.ts"),
-        },
-        Target {
-            label: "Node SDK generated bindings",
-            path: workspace_root.join("sdk/node-ts/src/generated/types.ts"),
-        },
-    ]
+    vec![Target {
+        label: "microsandbox-types TypeScript package bindings",
+        path: package_root.join("typescript/src/index.ts"),
+    }]
 }
 
 fn check_targets(targets: &[Target], generated: &str) {
