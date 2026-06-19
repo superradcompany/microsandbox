@@ -18,7 +18,7 @@
 //! +-----------------------------------------------------------------+ 0x000
 //! | HEADER (256 bytes)                                              |
 //! |  0x00  magic            u64   "MSBMET01" tag                    |
-//! |  0x08  version          u32   layout version (4)                |
+//! |  0x08  version          u32   layout version (3)                |
 //! |  0x0c  header_len       u32   = 256                             |
 //! |  0x10  slot_len         u32   = 512                             |
 //! |  0x14  capacity         u32   number of slots                   |
@@ -85,7 +85,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicU16, AtomicU32, At
 pub const REGISTRY_MAGIC: u64 = 0x3130_5445_4d42_534d;
 
 /// On-disk layout version. Bump on any incompatible layout change.
-pub const REGISTRY_VERSION: u32 = 4;
+pub const REGISTRY_VERSION: u32 = 3;
 
 /// Current shared-memory registry ABI version.
 ///
