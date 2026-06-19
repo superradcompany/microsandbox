@@ -34,7 +34,7 @@ use crate::session::{
     ExecSession, RawActivity, RawSessionCompletion, SessionOutput, resolve_default_user,
 };
 use crate::tcp::TcpSession;
-use crate::{clock, fs, heartbeat, serial};
+use crate::{clock, fs, handoff, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -192,6 +192,12 @@ pub async fn run(
                     match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
                         Ok(Ok(0)) => {
                             // EOF on serial — host disconnected.
+                            if !handoff::is_pid_1() {
+                                guard.clear_ready();
+                                drop(guard);
+                                time::sleep(Duration::from_millis(100)).await;
+                                break;
+                            }
                             break 'agent;
                         }
                         Ok(Ok(n)) => {
@@ -273,6 +279,12 @@ pub async fn run(
                             }
                         }
                         Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(_)) if !handoff::is_pid_1() => {
+                            guard.clear_ready();
+                            drop(guard);
+                            time::sleep(Duration::from_millis(100)).await;
+                            break;
+                        }
                         Ok(Err(e)) => return Err(e.into()),
                         Err(_would_block) => break,
                     }

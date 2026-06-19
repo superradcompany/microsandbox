@@ -12,7 +12,7 @@
 //! ```ignore
 //! Sandbox::builder("dev")
 //!     .image("debian:bookworm")
-//!     .init("/lib/systemd/systemd", ["--unit=multi-user.target"])
+//!     .init("/lib/systemd/systemd")
 //!     .build().await?;
 //!
 //! Sandbox::builder("dev")

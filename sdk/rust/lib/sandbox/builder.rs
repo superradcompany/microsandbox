@@ -314,6 +314,17 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the persisted startup command for detached CLI `run`.
+    #[doc(hidden)]
+    pub fn persistent_initial_command(
+        mut self,
+        command: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config
+            .set_persistent_initial_command(command.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// `cmd` is either an absolute path inside the guest rootfs or

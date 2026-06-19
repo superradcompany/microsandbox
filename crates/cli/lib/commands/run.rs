@@ -15,6 +15,12 @@ use super::common::{SandboxOpts, apply_sandbox_opts};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const INIT_ENTRYPOINT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -175,7 +181,9 @@ async fn run_new(
         args.sandbox.log_level = Some(log_level.to_string());
     }
     let mut builder = apply_sandbox_opts(builder, &args.sandbox)?;
-    if !args.detach {
+    if args.detach {
+        builder = builder.persistent_initial_command(args.command.clone());
+    } else {
         builder = builder.initial_command(args.command.clone());
     }
 
@@ -204,7 +212,9 @@ async fn run_new(
 
     // Detach mode: just print the name and exit.
     if args.detach {
-        warn_detached_command_ignored(&name, &args);
+        if !sandbox.config().initial_command_consumed_by_init() {
+            warn_detached_command_ignored(&name, &args);
+        }
         sandbox.detach().await;
         println!("{name}");
         return Ok(());
@@ -214,7 +224,7 @@ async fn run_new(
     if sandbox.config().initial_command_consumed_by_init() {
         let result = wait_for_init_entrypoint(&sandbox, &exec_opts).await;
         if !is_named {
-            let _ = Sandbox::remove(sandbox.name()).await;
+            remove_ephemeral_sandbox(sandbox.name()).await;
         }
         return handle_exit(result?);
     }
@@ -262,9 +272,7 @@ async fn wait_for_init_entrypoint(sandbox: &Sandbox, opts: &ExecOpts) -> anyhow:
         Some(duration) => match tokio::time::timeout(duration, wait_fut).await {
             Ok(result) => result.map_err(anyhow::Error::from),
             Err(_) => {
-                if let Err(e) = sandbox.stop().await {
-                    ui::warn(&format!("failed to stop sandbox after timeout: {e}"));
-                }
+                stop_init_entrypoint_after_timeout(sandbox).await;
                 Err(anyhow::anyhow!("command timed out after {duration:?}"))
             }
         },
@@ -323,6 +331,27 @@ async fn stream_init_entrypoint_logs(name: String, since: DateTime<Utc>) -> anyh
     }
 
     Ok(())
+}
+
+async fn stop_init_entrypoint_after_timeout(sandbox: &Sandbox) {
+    match Sandbox::get(sandbox.name()).await {
+        Ok(handle) => {
+            if let Err(e) = handle.stop_with_timeout(INIT_ENTRYPOINT_STOP_TIMEOUT).await {
+                ui::warn(&format!("failed to stop sandbox after timeout: {e}"));
+            }
+        }
+        Err(_) => {
+            if let Err(e) = sandbox.stop().await {
+                ui::warn(&format!("failed to stop sandbox after timeout: {e}"));
+            }
+        }
+    }
+}
+
+async fn remove_ephemeral_sandbox(name: &str) {
+    if let Err(e) = Sandbox::remove(name).await {
+        ui::warn(&format!("failed to remove ephemeral sandbox: {e}"));
+    }
 }
 
 async fn stop_init_entrypoint_log_task(mut task: tokio::task::JoinHandle<anyhow::Result<()>>) {

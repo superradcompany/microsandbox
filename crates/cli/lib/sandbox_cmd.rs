@@ -57,6 +57,10 @@ pub struct SandboxArgs {
     #[arg(long = "parent-watch-fd", hide = true)]
     pub parent_watch_fd: Option<i32>,
 
+    /// Write end of the startup JSON pipe.
+    #[arg(long = "startup-fd", hide = true)]
+    pub startup_fd: Option<i32>,
+
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
     pub forward_output: bool,
@@ -192,6 +196,13 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    let startup_fd = match args.startup_fd.map(startup_from_fd).transpose() {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
     let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&args.disk) {
         Ok(disks) => disks,
@@ -249,6 +260,7 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
+        startup_fd,
         parent_watchdog,
         forward_output: args.forward_output,
         idle_timeout_secs: args.idle_timeout,
@@ -277,26 +289,35 @@ pub fn run(args: SandboxArgs) -> ! {
 }
 
 fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
-    validate_parent_watchdog_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
+    validate_pipe_fd(
+        fd,
+        microsandbox_runtime::vm::PARENT_WATCH_FD,
+        "parent-watch-fd",
+    )?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn validate_parent_watchdog_fd(fd: i32, expected_fd: i32) -> Result<(), String> {
+fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_pipe_fd(fd, microsandbox_runtime::vm::STARTUP_FD, "startup-fd")?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
     if fd < 0 {
         return Err(format!(
-            "invalid --parent-watch-fd: fd must be non-negative, got {fd}"
+            "invalid --{arg_name}: fd must be non-negative, got {fd}"
         ));
     }
     if fd != expected_fd {
         return Err(format!(
-            "invalid --parent-watch-fd: expected {expected_fd}, got {fd}",
+            "invalid --{arg_name}: expected {expected_fd}, got {fd}",
         ));
     }
 
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(format!(
-            "invalid --parent-watch-fd {fd}: {}",
+            "invalid --{arg_name} {fd}: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -304,14 +325,14 @@ fn validate_parent_watchdog_fd(fd: i32, expected_fd: i32) -> Result<(), String> 
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
         return Err(format!(
-            "invalid --parent-watch-fd {fd}: {}",
+            "invalid --{arg_name} {fd}: {}",
             std::io::Error::last_os_error()
         ));
     }
     let stat = unsafe { stat.assume_init() };
     let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
     if file_type != libc::S_IFIFO as libc::mode_t {
-        return Err(format!("invalid --parent-watch-fd {fd}: fd is not a pipe"));
+        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
     }
 
     Ok(())

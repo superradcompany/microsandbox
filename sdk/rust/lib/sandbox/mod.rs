@@ -572,7 +572,8 @@ pub(crate) async fn create_local(
 
     // Insert the sandbox record and keep its stable database ID.
     let write_db = db.write();
-    let sandbox_id = insert_sandbox_record(write_db, &config).await?;
+    let persisted_config = config.clone_for_persistence();
+    let sandbox_id = insert_sandbox_record(write_db, &persisted_config).await?;
     tracing::debug!(sandbox_id, sandbox = %config.name, "create_local: db record inserted");
 
     // Spawn the sandbox process and create the bridge. On failure, mark the sandbox

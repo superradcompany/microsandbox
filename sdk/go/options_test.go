@@ -1,6 +1,7 @@
 package microsandbox
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -494,6 +495,36 @@ func TestWithInitFactories(t *testing.T) {
 	}
 	if o2.Init.Args[0] != "--daemon" || o2.Init.Env["FOO"] != "BAR" {
 		t.Errorf("Cmd init args/env: got %+v", o2.Init)
+	}
+}
+
+func TestSandboxConfigUnmarshalJSONIncludesPersistedInit(t *testing.T) {
+	var cfg SandboxConfig
+	data := []byte(`{
+		"name": "dev",
+		"image": "alpine",
+		"init": {
+			"cmd": "/sbin/init",
+			"args": ["--daemon"],
+			"env": [["FOO", "BAR"], ["PATH", "/usr/bin:/bin"]]
+		}
+	}`)
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if cfg.Init == nil {
+		t.Fatal("Init = nil, want persisted init config")
+	}
+	if cfg.Init.Cmd != "/sbin/init" {
+		t.Errorf("Init.Cmd = %q, want /sbin/init", cfg.Init.Cmd)
+	}
+	if !reflect.DeepEqual(cfg.Init.Args, []string{"--daemon"}) {
+		t.Errorf("Init.Args = %v, want [--daemon]", cfg.Init.Args)
+	}
+	wantEnv := map[string]string{"FOO": "BAR", "PATH": "/usr/bin:/bin"}
+	if !reflect.DeepEqual(cfg.Init.Env, wantEnv) {
+		t.Errorf("Init.Env = %v, want %v", cfg.Init.Env, wantEnv)
 	}
 }
 

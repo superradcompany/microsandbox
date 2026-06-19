@@ -57,25 +57,32 @@ type SandboxConfig struct {
 type SandboxOption func(*SandboxConfig)
 
 type persistedSandboxConfig struct {
-	Name            string            `json:"name"`
-	Image           json.RawMessage   `json:"image"`
-	ImageFstype     string            `json:"image_fstype"`
-	OCIUpperSizeMiB uint32            `json:"oci_upper_size_mib"`
-	MemoryMiB       uint32            `json:"memory_mib"`
-	CPUs            uint8             `json:"cpus"`
-	Workdir         string            `json:"workdir"`
-	Shell           string            `json:"shell"`
-	SecurityProfile SecurityProfile   `json:"security_profile"`
-	Hostname        string            `json:"hostname"`
-	User            string            `json:"user"`
-	Replace         bool              `json:"replace"`
-	Labels          map[string]string `json:"labels"`
-	Detached        bool              `json:"detached"`
-	Entrypoint      []string          `json:"entrypoint"`
-	LogLevel        LogLevel          `json:"log_level"`
-	QuietLogs       bool              `json:"quiet_logs"`
-	Scripts         map[string]string `json:"scripts"`
-	PullPolicy      PullPolicy        `json:"pull_policy"`
+	Name            string               `json:"name"`
+	Image           json.RawMessage      `json:"image"`
+	ImageFstype     string               `json:"image_fstype"`
+	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
+	MemoryMiB       uint32               `json:"memory_mib"`
+	CPUs            uint8                `json:"cpus"`
+	Workdir         string               `json:"workdir"`
+	Shell           string               `json:"shell"`
+	SecurityProfile SecurityProfile      `json:"security_profile"`
+	Hostname        string               `json:"hostname"`
+	User            string               `json:"user"`
+	Replace         bool                 `json:"replace"`
+	Labels          map[string]string    `json:"labels"`
+	Detached        bool                 `json:"detached"`
+	Entrypoint      []string             `json:"entrypoint"`
+	Init            *persistedInitConfig `json:"init"`
+	LogLevel        LogLevel             `json:"log_level"`
+	QuietLogs       bool                 `json:"quiet_logs"`
+	Scripts         map[string]string    `json:"scripts"`
+	PullPolicy      PullPolicy           `json:"pull_policy"`
+}
+
+type persistedInitConfig struct {
+	Cmd  string      `json:"cmd"`
+	Args []string    `json:"args"`
+	Env  [][2]string `json:"env"`
 }
 
 // UnmarshalJSON decodes the persisted Rust sandbox config into the Go SDK's
@@ -115,12 +122,30 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Labels:          raw.Labels,
 		Detached:        raw.Detached,
 		Entrypoint:      raw.Entrypoint,
+		Init:            decodePersistedInit(raw.Init),
 		LogLevel:        raw.LogLevel,
 		QuietLogs:       raw.QuietLogs,
 		Scripts:         raw.Scripts,
 		PullPolicy:      raw.PullPolicy,
 	}
 	return nil
+}
+
+func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
+	if raw == nil {
+		return nil
+	}
+	cfg := &InitConfig{
+		Cmd:  raw.Cmd,
+		Args: append([]string(nil), raw.Args...),
+	}
+	if len(raw.Env) > 0 {
+		cfg.Env = make(map[string]string, len(raw.Env))
+		for _, entry := range raw.Env {
+			cfg.Env[entry[0]] = entry[1]
+		}
+	}
+	return cfg
 }
 
 func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, bool, error) {

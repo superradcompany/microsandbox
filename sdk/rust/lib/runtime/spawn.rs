@@ -26,7 +26,10 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
-use tokio::{io::AsyncBufReadExt, process::Command};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt},
+    process::Command,
+};
 
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
@@ -79,7 +82,7 @@ struct MetricsReservation {
     generation: u64,
 }
 
-struct ParentWatchdogPipe {
+struct Pipe {
     read_fd: OwnedFd,
     write_fd: OwnedFd,
 }
@@ -179,6 +182,16 @@ pub async fn spawn_sandbox(
         },
         SpawnMode::Detached => None,
     };
+    let startup_pipe = match mode {
+        SpawnMode::Attached => None,
+        SpawnMode::Detached => match create_startup_pipe() {
+            Ok(pipe) => Some(pipe),
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        },
+    };
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
@@ -197,6 +210,9 @@ pub async fn spawn_sandbox(
         parent_watchdog
             .as_ref()
             .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
+        startup_pipe
+            .as_ref()
+            .map(|_| microsandbox_runtime::vm::STARTUP_FD),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -204,43 +220,36 @@ pub async fn spawn_sandbox(
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
 
-    if let Some(pipe) = parent_watchdog.as_ref() {
-        let read_fd = pipe.read_fd.as_raw_fd();
+    if parent_watchdog.is_some() || startup_pipe.is_some() {
+        let parent_watch_fd = parent_watchdog
+            .as_ref()
+            .map(|pipe| pipe.read_fd.as_raw_fd());
+        let startup_write_fd = startup_pipe.as_ref().map(|pipe| pipe.write_fd.as_raw_fd());
         unsafe {
             cmd.pre_exec(move || {
-                if libc::dup2(read_fd, microsandbox_runtime::vm::PARENT_WATCH_FD) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                if startup_write_fd.is_some() {
+                    detach_from_launcher_session()?;
                 }
-                if read_fd != microsandbox_runtime::vm::PARENT_WATCH_FD && libc::close(read_fd) < 0
-                {
-                    return Err(std::io::Error::last_os_error());
+                if let Some(fd) = parent_watch_fd {
+                    dup_inherited_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
                 }
-                let flags = libc::fcntl(microsandbox_runtime::vm::PARENT_WATCH_FD, libc::F_GETFD);
-                if flags < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::fcntl(
-                    microsandbox_runtime::vm::PARENT_WATCH_FD,
-                    libc::F_SETFD,
-                    flags & !libc::FD_CLOEXEC,
-                ) < 0
-                {
-                    return Err(std::io::Error::last_os_error());
+                if let Some(fd) = startup_write_fd {
+                    dup_inherited_fd(fd, microsandbox_runtime::vm::STARTUP_FD)?;
                 }
                 Ok(())
             });
         }
     }
 
-    if mode == SpawnMode::Detached {
-        // Detached sandboxes outlive the creating CLI process, so the
-        // sandbox must not stay coupled to the foreground job or terminal.
-        cmd.process_group(0);
+    // Capture stdout for attached startup JSON. Detached mode uses a
+    // dedicated startup fd so stdio can be severed from the launcher.
+    if startup_pipe.is_some() {
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    } else {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::inherit());
     }
-
-    // Capture stdout (for startup JSON), inherit stderr so errors are visible.
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
 
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
@@ -264,13 +273,24 @@ pub async fn spawn_sandbox(
     };
     tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
 
-    // Read the startup JSON from stdout.
-    let stdout = child.stdout.take().ok_or_else(|| {
-        release_metrics_reservation(config, metrics_reservation.as_ref());
-        crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
-    })?;
-
-    let mut reader = tokio::io::BufReader::new(stdout);
+    // Read the startup JSON from the dedicated startup pipe in detached
+    // mode, otherwise stdout.
+    let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
+        Some(pipe) => {
+            let Pipe { read_fd, write_fd } = pipe;
+            drop(write_fd);
+            Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                std::fs::File::from(read_fd),
+            )))
+        }
+        None => {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
+            })?;
+            Box::new(tokio::io::BufReader::new(stdout))
+        }
+    };
     let mut line = String::new();
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -371,7 +391,15 @@ fn reserve_metrics_slot(
     }
 }
 
-fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
+fn create_parent_watchdog_pipe() -> MicrosandboxResult<Pipe> {
+    create_pipe()
+}
+
+fn create_startup_pipe() -> MicrosandboxResult<Pipe> {
+    create_pipe()
+}
+
+fn create_pipe() -> MicrosandboxResult<Pipe> {
     let mut fds = [0; 2];
     let rc = create_cloexec_pipe(&mut fds);
     if rc != 0 {
@@ -387,7 +415,40 @@ fn create_parent_watchdog_pipe() -> MicrosandboxResult<ParentWatchdogPipe> {
         set_cloexec(&write_fd, true)?;
     }
 
-    Ok(ParentWatchdogPipe { read_fd, write_fd })
+    Ok(Pipe { read_fd, write_fd })
+}
+
+fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
+    if unsafe { libc::dup2(src, dst) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if src != dst && unsafe { libc::close(src) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let flags = unsafe { libc::fcntl(dst, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn detach_from_launcher_session() -> std::io::Result<()> {
+    if unsafe { libc::setsid() } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_IGN;
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -991,6 +1052,7 @@ fn sandbox_cli_args(
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
+    startup_fd: Option<i32>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -1014,6 +1076,10 @@ fn sandbox_cli_args(
     args.push(agent_sock_path.as_os_str().to_os_string());
     if let Some(fd) = parent_watch_fd {
         args.push(OsString::from("--parent-watch-fd"));
+        args.push(OsString::from(fd.to_string()));
+    }
+    if let Some(fd) = startup_fd {
+        args.push(OsString::from("--startup-fd"));
         args.push(OsString::from(fd.to_string()));
     }
 
@@ -1319,6 +1385,7 @@ fn sandbox_cli_args(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -1361,6 +1428,7 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -1388,6 +1456,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
             None,
             None,
         )
@@ -1446,6 +1515,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sandbox_cli_args_include_startup_fd_when_supplied() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        let local = test_local_backend();
+        let args = sandbox_cli_args(
+            &local,
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            None,
+            None,
+            Some(microsandbox_runtime::vm::STARTUP_FD),
+        );
+
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                OsString::from("--startup-fd"),
+                OsString::from(microsandbox_runtime::vm::STARTUP_FD.to_string()),
+            ]));
+    }
+
+    #[tokio::test]
     async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("msb-home");
@@ -1487,6 +1588,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
             None,
             None,
         );

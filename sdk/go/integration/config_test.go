@@ -127,6 +127,13 @@ func TestWithInitAuto(t *testing.T) {
 	if !strings.Contains(h.ConfigJSON(), `"auto"`) {
 		t.Errorf("Init.Auto not visible in ConfigJSON: %s", h.ConfigJSON())
 	}
+	parsed, err := h.Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if parsed.Init == nil || parsed.Init.Cmd != "auto" {
+		t.Errorf("Init.Auto not visible in parsed Config: %+v", parsed.Init)
+	}
 }
 
 // TestWithLogLevelRoundTrip verifies that WithLogLevel surfaces in the

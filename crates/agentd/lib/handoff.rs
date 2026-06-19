@@ -24,7 +24,7 @@
 //! don't move the fork point later.
 
 use std::ffi::{CString, OsString};
-use std::fs::OpenOptions;
+use std::fs::{Metadata, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
-use nix::unistd::{ForkResult, fork};
+use nix::unistd::{ForkResult, fork, setsid};
 
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_AUTO_CANDIDATES};
 
@@ -98,6 +98,7 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
             process::exit(127);
         }
         ForkResult::Child => {
+            isolate_child_from_init()?;
             redirect_child_stderr();
             Ok(())
         }
@@ -105,7 +106,7 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
 }
 
 /// Resolves the user-supplied cmd, expanding the `auto` sentinel
-/// into the first existing entry from
+/// into the first executable regular file from
 /// [`HANDOFF_INIT_AUTO_CANDIDATES`].
 ///
 /// Non-`auto` paths are returned unchanged; downstream `preflight`
@@ -115,16 +116,20 @@ fn resolve_cmd(cmd: &Path) -> AgentdResult<PathBuf> {
         return Ok(cmd.to_path_buf());
     }
 
-    for candidate in HANDOFF_INIT_AUTO_CANDIDATES {
+    resolve_auto_cmd(HANDOFF_INIT_AUTO_CANDIDATES)
+}
+
+fn resolve_auto_cmd(candidates: &[&str]) -> AgentdResult<PathBuf> {
+    for candidate in candidates {
         let p = Path::new(candidate);
-        if p.exists() {
+        if init_candidate_is_executable_file(p) {
             return Ok(p.to_path_buf());
         }
     }
 
     Err(AgentdError::Init(format!(
         "{HANDOFF_INIT_AUTO}: no init binary found, checked: {}",
-        HANDOFF_INIT_AUTO_CANDIDATES.join(", ")
+        candidates.join(", ")
     )))
 }
 
@@ -152,6 +157,18 @@ fn preflight(cmd: &Path) -> AgentdResult<()> {
         )));
     }
     Ok(())
+}
+
+fn init_candidate_is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata_is_executable_file(&metadata))
+        .unwrap_or(false)
+}
+
+fn metadata_is_executable_file(metadata: &Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 /// Builds the C argv list for execve.
@@ -241,6 +258,14 @@ fn reset_signals() {
     let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&empty), None);
 }
 
+/// Moves the surviving agentd process into a new session so init
+/// systems that manage their original session/process group do not
+/// accidentally signal the agent relay.
+fn isolate_child_from_init() -> AgentdResult<()> {
+    setsid().map_err(|e| AgentdError::Init(format!("failed to isolate agentd session: {e}")))?;
+    Ok(())
+}
+
 /// Redirects the child's stderr to the post-handoff log file. Best
 /// effort — a failure here just leaves stderr pointing at the serial
 /// console (interleaved with the new init's output). The agent loop
@@ -304,6 +329,17 @@ pub fn signal_init_term() -> AgentdResult<()> {
 mod tests {
     use super::*;
 
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "microsandbox-agentd-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
     #[test]
     fn resolve_cmd_passes_explicit_path_through() {
         let p = Path::new("/lib/systemd/systemd");
@@ -345,5 +381,30 @@ mod tests {
             }
             Err(e) => panic!("unexpected error variant: {e}"),
         }
+    }
+
+    #[test]
+    fn resolve_auto_cmd_skips_non_executable_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_test_dir("auto-skip");
+        let non_executable = dir.join("sbin-init");
+        let executable = dir.join("systemd");
+
+        std::fs::write(&non_executable, b"not executable").expect("write non-executable");
+        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod non-executable");
+        std::fs::write(&executable, b"#!/bin/sh\n").expect("write executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod executable");
+
+        let candidates = [
+            non_executable.to_str().expect("utf-8 temp path"),
+            executable.to_str().expect("utf-8 temp path"),
+        ];
+        let resolved = resolve_auto_cmd(&candidates).expect("resolve executable candidate");
+
+        assert_eq!(resolved, executable);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -59,6 +59,9 @@ const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1
 /// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
 pub const PARENT_WATCH_FD: i32 = 97;
 
+/// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
+pub const STARTUP_FD: i32 = 98;
+
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
@@ -95,6 +98,12 @@ pub struct Config {
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
+
+    /// Dedicated startup JSON write fd.
+    ///
+    /// When present, startup info is written here instead of stdout so
+    /// detached launchers can detach stdout/stderr from birth.
+    pub startup_fd: Option<OwnedFd>,
 
     /// Read end of the attached-parent watchdog pipe.
     pub parent_watchdog: Option<OwnedFd>,
@@ -362,7 +371,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let startup_json = serde_json::to_string(&startup)
         .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
 
-    write_startup_info(&startup_json)?;
+    write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -1157,8 +1166,20 @@ fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<
     Ok(())
 }
 
-/// Write startup info JSON to stdout.
-fn write_startup_info(json: &str) -> RuntimeResult<()> {
+/// Write startup info JSON to the dedicated startup fd when supplied,
+/// otherwise stdout.
+fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult<()> {
+    if let Some(fd) = startup_fd {
+        let dup = unsafe { libc::dup(fd.as_raw_fd()) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(dup) };
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        return Ok(());
+    }
+
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{json}")?;
     stdout.flush()?;
