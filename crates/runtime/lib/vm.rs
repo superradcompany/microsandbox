@@ -51,7 +51,7 @@ const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
 const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Startup grace before a missing heartbeat is considered an agentd failure.
-const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(60);
+const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(120);
 
 /// Short best-effort send budget once agentd is already considered unresponsive.
 const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
