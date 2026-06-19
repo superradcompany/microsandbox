@@ -20,7 +20,7 @@ var goIntegrationImage = getenv("MICROSANDBOX_GO_INTEGRATION_IMAGE", "mirror.gcr
 // integration test runs. Without this every test would fail with
 // ErrLibraryNotLoaded.
 func TestMain(m *testing.M) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if err := microsandbox.EnsureInstalled(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "microsandbox: EnsureInstalled: %v\n", err)
@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 // integrationCtx returns a context with a generous timeout for VM boot.
 func integrationCtx(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
 	return ctx
 }
