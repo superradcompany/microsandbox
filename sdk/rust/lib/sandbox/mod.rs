@@ -62,7 +62,7 @@ use self::exec::{ExecHandle, ExecOptions};
 pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
 
 /// Maximum time to wait for the sandbox process to expose the agent relay.
-const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation

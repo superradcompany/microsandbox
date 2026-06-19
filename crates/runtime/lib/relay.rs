@@ -226,7 +226,7 @@ impl AgentRelay {
     /// Must be called before [`run()`](Self::run). The ready frame is cached
     /// so it can be sent to clients during handshake.
     pub fn wait_ready(&mut self) -> RuntimeResult<()> {
-        const READY_TIMEOUT_SECS: i32 = 60;
+        const READY_TIMEOUT_SECS: i32 = 120;
 
         let mut buf = BytesMut::new();
         let mut init_resolved = false;
