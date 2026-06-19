@@ -99,6 +99,12 @@ async fn stop_and_remove(name: &str) {
 /// Timeout is 30s rather than 10s so a slow CI runner isn't the thing
 /// tipping a probe over on the TLS handshake.
 async fn probe_https(sb: &Sandbox, url: &str) -> String {
+    probe_https_result(sb, url)
+        .await
+        .unwrap_or_else(|err| format!("{CURL_FAIL} exec={err}"))
+}
+
+async fn probe_https_result(sb: &Sandbox, url: &str) -> Result<String, String> {
     // Capture curl's exit code and stderr alongside the http_code so a
     // FAIL surfaces the specific reason (DNS, TCP, TLS, etc.) instead
     // of an opaque sentinel.
@@ -112,8 +118,12 @@ async fn probe_https(sb: &Sandbox, url: &str) -> String {
              *) printf '%s' \"$code\" ;; \
          esac"
     );
-    let out = sb.shell(&cmd).await.expect("shell");
-    out.stdout().unwrap_or_default().trim().to_string()
+    collect_probe_output(sb, &cmd).await
+}
+
+async fn collect_probe_output(sb: &Sandbox, cmd: &str) -> Result<String, String> {
+    let out = sb.shell(cmd).await.map_err(|err| err.to_string())?;
+    Ok(out.stdout().unwrap_or_default().trim().to_string())
 }
 
 /// True when `probe_https` returned a 3-digit HTTP status (i.e. curl
@@ -138,7 +148,14 @@ fn curl_failed(probe_output: &str) -> bool {
 async fn probe_https_with_retry(sb: &Sandbox, url: &str) -> String {
     let mut last = String::new();
     for _ in 0..3 {
-        last = probe_https(sb, url).await;
+        last = match probe_https_result(sb, url).await {
+            Ok(output) => output,
+            // Retryable success probes should tolerate a single dropped
+            // exec stream the same way they tolerate a dropped TLS
+            // handshake. Persistent exec failures still surface in the
+            // final assertion with the original runtime error attached.
+            Err(err) => format!("{CURL_FAIL} exec={err}"),
+        };
         if reached_server(&last) {
             return last;
         }
@@ -179,6 +196,16 @@ fn host_resolved_ipv4(name: &str) -> String {
 /// Like [`probe_https`], but force curl to connect to `ip` while still
 /// sending `host` as the HTTP Host header and TLS SNI.
 async fn probe_https_with_resolve(sb: &Sandbox, host: &str, ip: &str) -> String {
+    probe_https_with_resolve_result(sb, host, ip)
+        .await
+        .unwrap_or_else(|err| format!("{CURL_FAIL} exec={err}"))
+}
+
+async fn probe_https_with_resolve_result(
+    sb: &Sandbox,
+    host: &str,
+    ip: &str,
+) -> Result<String, String> {
     let cmd = format!(
         "tmp=$(mktemp); \
          code=$(curl -sS --max-time 30 -o /dev/null \
@@ -192,14 +219,16 @@ async fn probe_https_with_resolve(sb: &Sandbox, host: &str, ip: &str) -> String 
              *) printf '%s' \"$code\" ;; \
          esac"
     );
-    let out = sb.shell(&cmd).await.expect("curl --resolve shell");
-    out.stdout().unwrap_or_default().trim().to_string()
+    collect_probe_output(sb, &cmd).await
 }
 
 async fn probe_https_with_resolve_retry(sb: &Sandbox, host: &str, ip: &str) -> String {
     let mut last = String::new();
     for _ in 0..3 {
-        last = probe_https_with_resolve(sb, host, ip).await;
+        last = match probe_https_with_resolve_result(sb, host, ip).await {
+            Ok(output) => output,
+            Err(err) => format!("{CURL_FAIL} exec={err}"),
+        };
         if reached_server(&last) {
             return last;
         }

@@ -442,10 +442,17 @@ echo "status=$?"
         .expect("curl wrong host");
 
     let stdout = out.stdout().unwrap_or_default();
-    assert!(
-        !stdout.trim_end().ends_with("status=0"),
-        "expected curl to fail when secret host does not match tunnel target; got: {stdout:?}"
-    );
+    if stdout.trim_end().ends_with("status=0") {
+        let auth =
+            tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;
+        let auth_val = match auth {
+            Ok(Ok(a)) => a,
+            _ => String::new(),
+        };
+        panic!(
+            "expected curl to fail when secret host does not match tunnel target; got: {stdout:?}; target auth: {auth_val:?}"
+        );
+    }
 
     let auth =
         tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;

@@ -25,7 +25,7 @@ Backend-private materialized state stays out: registry credentials, local CA pat
 
 ```toml
 [dependencies]
-microsandbox-types = "0.5.7"
+microsandbox-types = "0.5.8"
 ```
 
 ```rust

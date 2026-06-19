@@ -1,6 +1,6 @@
 {
   "name": "@microsandbox/agent-client",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {

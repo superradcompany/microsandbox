@@ -46,7 +46,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.5.7"
+version = "0.5.8"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -61,18 +61,18 @@ panic = "abort"
 # manifest; members reference them via `{ workspace = true }`.
 # `default-features = false` on crates whose consumers opt into features
 # explicitly (see each member manifest); other consumers re-enable defaults.
-microsandbox = { version = "0.5.7", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "0.5.7", path = "packages/agent-client/rust" }
-microsandbox-db = { version = "0.5.7", path = "crates/db" }
-microsandbox-filesystem = { version = "0.5.7", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "0.5.7", path = "crates/image" }
-microsandbox-metrics = { version = "0.5.7", path = "crates/metrics" }
-microsandbox-types = { version = "0.5.7", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "0.5.7", path = "crates/migration" }
-microsandbox-network = { version = "0.5.7", path = "crates/network" }
-microsandbox-protocol = { version = "0.5.7", path = "crates/protocol" }
-microsandbox-runtime = { version = "0.5.7", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "0.5.7", path = "crates/utils" }
+microsandbox = { version = "0.5.8", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "0.5.8", path = "packages/agent-client/rust" }
+microsandbox-db = { version = "0.5.8", path = "crates/db" }
+microsandbox-filesystem = { version = "0.5.8", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "0.5.8", path = "crates/image" }
+microsandbox-metrics = { version = "0.5.8", path = "crates/metrics" }
+microsandbox-types = { version = "0.5.8", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "0.5.8", path = "crates/migration" }
+microsandbox-network = { version = "0.5.8", path = "crates/network" }
+microsandbox-protocol = { version = "0.5.8", path = "crates/protocol" }
+microsandbox-runtime = { version = "0.5.8", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "0.5.8", path = "crates/utils" }
 msb_krun = { version = "0.1.17" }
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }

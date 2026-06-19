@@ -234,7 +234,7 @@ async fn tcp_proxy_task(
     }
 
     // Peek for HTTP CONNECT before dialing upstream; hand off if detected.
-    if let Some(tls_state) = tls_state {
+    if let Some(tls_state) = tls_state.clone() {
         if initial_buf.is_empty() {
             let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
             initial_buf = peeked;
@@ -250,6 +250,7 @@ async fn tcp_proxy_task(
                 network_policy,
                 tls_state,
                 proxy_connect,
+                None,
             )
             .await;
         }
@@ -284,6 +285,32 @@ async fn tcp_proxy_task(
         (initial_buf, false)
     };
 
+    if let Some(tls_state) = tls_state.clone()
+        && could_be_connect_request(&initial_buf)
+    {
+        // The pre-connect CONNECT peek can miss a client whose first bytes arrive
+        // after we dial upstream. Once classify_first_flight has captured that
+        // request, rejoin the already-open proxy socket and use the CONNECT path
+        // so intercepted tunnels still get TLS substitution and policy checks.
+        let proxy_stream = server_rx
+            .reunite(server_tx)
+            .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
+        return handle_connect_tunnel(
+            guest_dst,
+            connect_dst,
+            initial_buf,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            network_policy,
+            tls_state,
+            proxy_connect,
+            Some(proxy_stream),
+        )
+        .await;
+    }
+
+    let mut late_connect_state = tls_state;
     let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls {
         Some(match extract_http_host(&initial_buf) {
             Some(host) => SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared),
@@ -334,6 +361,30 @@ async fn tcp_proxy_task(
             data = from_smoltcp.recv() => {
                 match data {
                     Some(bytes) => {
+                        if let Some(tls_state) = late_connect_state.take()
+                            && could_be_connect_request(&bytes)
+                        {
+                            // The first guest bytes can arrive after both peek
+                            // windows have completed. Nothing has been written
+                            // to the proxy socket yet, so this is still a valid
+                            // point to switch into CONNECT tunnel handling.
+                            let proxy_stream = server_rx
+                                .reunite(server_tx)
+                                .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
+                            return handle_connect_tunnel(
+                                guest_dst,
+                                connect_dst,
+                                bytes.to_vec(),
+                                from_smoltcp,
+                                to_smoltcp,
+                                shared,
+                                network_policy,
+                                tls_state,
+                                proxy_connect,
+                                Some(proxy_stream),
+                            )
+                            .await;
+                        }
                         // No handler (no secrets / TLS) is the common path: forward
                         // the chunk borrowed, with no per-chunk allocation or copy.
                         let out: Cow<[u8]> = match secrets_handler.as_mut() {
@@ -370,6 +421,9 @@ async fn tcp_proxy_task(
                 match result {
                     Ok(0) => break, // Server closed connection.
                     Ok(n) => {
+                        // A server-first byte means this is not an HTTP CONNECT
+                        // tunnel to a proxy. Keep relaying normally afterward.
+                        late_connect_state = None;
                         let data = Bytes::copy_from_slice(&server_buf[..n]);
                         if to_smoltcp.send(data).await.is_err() {
                             // Channel closed — poll loop dropped the receiver.
@@ -407,6 +461,7 @@ async fn handle_connect_tunnel(
     network_policy: Arc<NetworkPolicy>,
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
+    preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
@@ -426,13 +481,16 @@ async fn handle_connect_tunnel(
     };
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
-    let mut proxy_stream = match TcpStream::connect(proxy_dst).await {
-        Ok(s) => s,
-        Err(e) => {
-            proxy_connect.mark_upstream_connect_failed();
-            shared.proxy_wake.wake();
-            return Err(e);
-        }
+    let mut proxy_stream = match preconnected_proxy {
+        Some(stream) => stream,
+        None => match TcpStream::connect(proxy_dst).await {
+            Ok(s) => s,
+            Err(e) => {
+                proxy_connect.mark_upstream_connect_failed();
+                shared.proxy_wake.wake();
+                return Err(e);
+            }
+        },
     };
 
     if !connect_req.target.is_intercepted(&tls_state) {
