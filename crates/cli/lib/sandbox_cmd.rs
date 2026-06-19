@@ -490,16 +490,24 @@ mod tests {
 
     #[test]
     fn test_validate_parent_watchdog_fd_rejects_negative_fd() {
-        let err =
-            validate_parent_watchdog_fd(-1, microsandbox_runtime::vm::PARENT_WATCH_FD).unwrap_err();
+        let err = validate_pipe_fd(
+            -1,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            "parent-watch-fd",
+        )
+        .unwrap_err();
 
         assert!(err.contains("non-negative"));
     }
 
     #[test]
     fn test_validate_parent_watchdog_fd_rejects_wrong_fd_number() {
-        let err =
-            validate_parent_watchdog_fd(0, microsandbox_runtime::vm::PARENT_WATCH_FD).unwrap_err();
+        let err = validate_pipe_fd(
+            0,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            "parent-watch-fd",
+        )
+        .unwrap_err();
 
         assert!(err.contains("expected 97"));
     }
@@ -509,7 +517,7 @@ mod tests {
         let file = tempfile::tempfile().unwrap();
         let fd = file.as_raw_fd();
 
-        let err = validate_parent_watchdog_fd(fd, fd).unwrap_err();
+        let err = validate_pipe_fd(fd, fd, "parent-watch-fd").unwrap_err();
 
         assert!(err.contains("not a pipe"));
     }
@@ -521,6 +529,6 @@ mod tests {
         let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let _write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        validate_parent_watchdog_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd()).unwrap();
+        validate_pipe_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd(), "parent-watch-fd").unwrap();
     }
 }
