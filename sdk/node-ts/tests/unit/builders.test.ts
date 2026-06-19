@@ -269,7 +269,7 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .memory(GiB(2))
       .build();
-    expect(cfg.memoryMib).toBe(2048);
+    expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
   });
 
   it("collects volumes through the MountBuilder callback", async () => {
@@ -309,7 +309,9 @@ describe("SandboxBuilder.build", () => {
 
   it("defaults metricsSampleIntervalMs to 1000", async () => {
     const cfg = await Sandbox.builder("x").image("alpine").build();
-    expect(cfg.metricsSampleIntervalMs).toBe(1000);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      1000,
+    );
   });
 
   it("metricsSampleIntervalMs sets the persisted value", async () => {
@@ -317,7 +319,9 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .metricsSampleIntervalMs(5000)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(5000);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      5000,
+    );
   });
 
   it("metricsSampleIntervalMs(0) disables sampling", async () => {
@@ -325,7 +329,9 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .metricsSampleIntervalMs(0)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(0);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number | null }).metricsSampleIntervalMs).toBe(
+      null,
+    );
   });
 
   it("disableMetricsSample overrides metricsSampleIntervalMs", async () => {
@@ -334,8 +340,10 @@ describe("SandboxBuilder.build", () => {
       .metricsSampleIntervalMs(5000)
       .disableMetricsSample()
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(5000);
-    expect(cfg.disableMetricsSample).toBe(true);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      5000,
+    );
+    expect((cfg.runtime as { disableMetricsSample: boolean }).disableMetricsSample).toBe(true);
   });
 });
 

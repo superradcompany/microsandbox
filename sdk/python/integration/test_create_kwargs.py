@@ -12,7 +12,7 @@ from microsandbox import Sandbox
 
 
 def _config_env(config: dict) -> dict[str, str]:
-    return {key: value for key, value in config["env"]}
+    return {entry["key"]: entry["value"] for entry in config["env"]}
 
 
 @pytest.mark.asyncio
@@ -89,24 +89,24 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         config = json.loads(handle.config_json)
 
         assert config["name"] == name
-        assert config["cpus"] == 1
-        assert config["memory_mib"] == 512
-        assert config["hostname"] == "py-sdk-config-host"
-        assert config["workdir"] == "/var"
-        assert config["shell"] == "/bin/sh"
-        assert config["user"] == "nobody"
+        assert config["resources"]["cpus"] == 1
+        assert config["resources"]["memory_mib"] == 512
+        assert config["runtime"]["hostname"] == "py-sdk-config-host"
+        assert config["runtime"]["workdir"] == "/var"
+        assert config["runtime"]["shell"] == "/bin/sh"
+        assert config["runtime"]["user"] == "nobody"
         assert _config_env(config)["PYTHON_CONFIG_KWARG"] == "persisted"
-        assert config["scripts"]["bootstrap"] == "echo bootstrap-from-python"
-        assert config["entrypoint"] == [
+        assert config["runtime"]["scripts"]["bootstrap"] == "echo bootstrap-from-python"
+        assert config["runtime"]["entrypoint"] == [
             "/bin/sh",
             "-c",
             "echo entrypoint-from-python",
         ]
         assert config["init"]["cmd"] == "auto"
         assert config["pull_policy"] == "IfMissing"
-        assert config["log_level"] == "info"
-        assert config["policy"]["max_duration_secs"] == 7200
-        assert config["policy"]["idle_timeout_secs"] == 1800
+        assert config["runtime"]["log_level"] == "info"
+        assert config["lifecycle"]["max_duration_secs"] == 7200
+        assert config["lifecycle"]["idle_timeout_secs"] == 1800
 
         sandbox = None
 
