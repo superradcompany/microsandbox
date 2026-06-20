@@ -91,9 +91,9 @@ fn ensure_scripts_profile_block(profile: &str) -> String {
 //--------------------------------------------------------------------------------------------------
 
 mod linux {
-    use std::fs;
     use std::os::unix::fs::{self as unix_fs, PermissionsExt};
     use std::path::Path;
+    use std::{fs, thread, time::Duration};
 
     use nix::mount::{self, MntFlags, MsFlags};
     use nix::sys::stat::Mode;
@@ -103,6 +103,8 @@ mod linux {
     use crate::error::{AgentdError, AgentdResult};
 
     const UPPER_METRICS_PATH: &str = "/sys/kernel/msb_metrics/upper_path";
+    const UPPER_METRICS_REGISTER_ATTEMPTS: usize = 100;
+    const UPPER_METRICS_REGISTER_RETRY: Duration = Duration::from_millis(10);
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
@@ -295,10 +297,21 @@ mod linux {
     }
 
     fn register_upper_metrics(upperfs_dir: &str) {
-        match fs::write(UPPER_METRICS_PATH, upperfs_dir) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => eprintln!("agentd: upper metrics registration failed: {err}"),
+        for attempt in 0..UPPER_METRICS_REGISTER_ATTEMPTS {
+            match fs::write(UPPER_METRICS_PATH, upperfs_dir) {
+                Ok(()) => return,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound
+                        && attempt + 1 < UPPER_METRICS_REGISTER_ATTEMPTS =>
+                {
+                    thread::sleep(UPPER_METRICS_REGISTER_RETRY);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+                Err(err) => {
+                    eprintln!("agentd: upper metrics registration failed: {err}");
+                    return;
+                }
+            }
         }
     }
 
