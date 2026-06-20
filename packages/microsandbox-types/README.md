@@ -1,37 +1,49 @@
-# microsandbox-types
+# microsandbox types
 
 Shared task and wire contract types for microsandbox.
 
-This directory holds one logical type library published in two languages. It is the single, agreed-upon vocabulary that microsandbox components use to talk about sandboxes: the durable description of a sandbox task and the HTTP shapes exchanged with the cloud backend. These are contracts, not machinery. Nothing here builds, schedules, or runs a sandbox; the types only describe what a sandbox is and what the wire looks like.
+These packages define the backend-neutral shapes that describe what a sandbox should be: its rootfs source, resources, mounts, patches, network, lifecycle, and the cloud HTTP request/response bodies that carry those specs over the wire. Everything that has to agree on a sandbox's shape (the Rust SDK, the CLI, the cloud API, and the TypeScript front end) depends on these contracts instead of redefining them.
+
+This is a contract layer, not a runtime. It does not create, start, or talk to sandboxes. It only models the data those operations exchange.
 
 ## Layout
 
 ```text
-microsandbox-types/
-|-- rust/        # `microsandbox-types` crate    -> the source of truth
-`-- typescript/  # `@microsandbox/types` package  -> generated from the crate
+packages/microsandbox-types/
+├── rust/
+└── typescript/
 ```
 
-The two packages are kept structurally identical by generation, not by hand: the Rust crate defines the types, and the TypeScript declarations are produced from them. See [`rust/README.md`](rust/README.md) and [`typescript/README.md`](typescript/README.md) for the details specific to each consumer.
+- `rust/` publishes as `microsandbox-types` (crate name `microsandbox_types`). It is the source of truth for every shared type.
+- `typescript/` publishes as `@microsandbox/types`. Its `src/index.ts` is generated from the Rust types, never hand-edited.
 
-## When to use these
+## Source Of Truth
 
-Reach for these packages when you are building something that sits alongside microsandbox and needs to speak its language: an SDK, a runtime integration, a cloud client, or a contribution to microsandbox itself. They give you the exact field names, shapes, and serialization that the rest of the system expects.
+The Rust crate owns the definitions. The TypeScript bindings are derived from them with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs) behind the crate's `ts` feature, so the two stay byte-for-byte aligned.
 
-If your goal is simply to create or run sandboxes, you do not need these packages directly. Use the microsandbox SDK or CLI, which build on top of these contracts and give you the higher-level, ergonomic surface.
+```text
+rust/lib/*.rs  ──(ts-rs)──▶  typescript/src/index.ts
+```
 
-## One source of truth
-
-The Rust crate is authoritative. The TypeScript package is generated from it with [`ts-rs`](https://crates.io/crates/ts-rs) (behind the crate's optional `ts` feature), so the two never drift apart by accident and the generated bindings are never edited by hand.
-
-Regenerate the TypeScript bindings whenever the Rust types change:
+To regenerate the bindings after changing a Rust type:
 
 ```bash
 cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate
 ```
 
-CI checks that the committed bindings are current. Run the same check locally before pushing; it exits non-zero and names the stale file if the checked-in TypeScript differs from a fresh render:
+CI runs the same generator with `--check` and fails when the checked-in bindings drift:
 
 ```bash
 cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
 ```
+
+## What Lives Here
+
+- Sandbox specs: `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, rootfs sources, mounts, patches, init, lifecycle policy.
+- Networking intent: `NetworkSpec`, published ports, protocols.
+- Volumes and snapshots: `VolumeSpec`, `SnapshotSpec`, and their kinds.
+- Exec and logging: `Rlimit`, `RlimitResource`, `LogSource`, `SandboxLogLevel`.
+- Cloud wire contracts: `CloudCreateSandboxRequest`, `CloudSandbox`, paginated/message/error bodies.
+- Validation helpers: sandbox-name and hostname rules shared across SDK, CLI, and cloud.
+
+Backend-private materialized state (registry credentials, local cache paths, DB rows, resolved manifest digests, process handles) deliberately stays out of these packages. See each language's README for details.

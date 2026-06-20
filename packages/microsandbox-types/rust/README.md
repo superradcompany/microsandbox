@@ -2,90 +2,69 @@
 
 Shared task and wire contract types for microsandbox.
 
-- Package: `microsandbox-types`
-- Library: `microsandbox_types`
+This crate is the source of truth for the backend-neutral shapes that describe a sandbox and the cloud HTTP bodies that carry them. The Rust SDK, the CLI, and the cloud backend all import these types so they agree on one definition instead of duplicating wire shapes. The generated `@microsandbox/types` TypeScript package is derived from this crate.
 
-This crate is the home of the data shapes that microsandbox components agree on, and it is the source of truth for the generated [`@microsandbox/types`](../typescript) TypeScript package. It defines a durable, backend-neutral description of a sandbox task, the HTTP wire shapes the cloud backend speaks, and a few validation helpers. It is contracts only: nothing in this crate creates, schedules, or runs a sandbox.
+It is a leaf dependency by design. It pulls in `serde`, `serde_json`, `chrono`, `sha2`, and `thiserror`, and nothing from the local VM machinery (no runtime, image, network, or database crates). That keeps it cheap enough for front-end generation, cloud API models, and SDK wrappers to all depend on.
 
-## When to reach for it
+## What This Crate Owns
 
-Depend on this crate when your code needs to construct, store, or exchange sandbox descriptions and cloud requests using the exact shapes the rest of microsandbox uses. If you only want to build and run sandboxes, use the higher-level microsandbox SDK or CLI instead; this crate is the vocabulary beneath them.
+The crate models durable user and wire intent: what the user wants to exist, not how a backend fulfills it.
 
-## What's inside
+- **Sandbox spec** (`domain` module): `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, `EnvVar`, `SandboxPolicy`.
+- **Rootfs sources**: `RootfsSource` (bind, OCI, disk image), `OciRootfsSource`, `DiskImageFormat`, `PullPolicy`.
+- **Mounts and patches**: `VolumeMount`, `MountOptions`, `StatVirtualization`, `HostPermissions`, `Patch`, `SecurityProfile`.
+- **Volumes and snapshots**: `VolumeSpec`, `VolumeKind`, `NamedVolumeCreate`, `NamedVolumeMode`, `SnapshotSpec`, `SnapshotDestination`.
+- **Networking**: `NetworkSpec`, `PublishedPortSpec`, `PortProtocol`.
+- **Exec and logs**: `Rlimit`, `RlimitResource`, `SandboxLogLevel`, `LogSource`, `HandoffInit`.
+- **Cloud wire contracts** (`cloud` module): `CloudCreateSandboxRequest`, `CloudSandbox`, `CloudSandboxStatus`, `CloudPaginated`, `CloudMessageResponse`, `CloudErrorBody`, `CloudErrorDetails`.
+- **Validation** (`validation` module): `validate_sandbox_name`, `validate_hostname`, `hostname_from_sandbox_name`, and the `MAX_SANDBOX_NAME_BYTES` / `MAX_HOSTNAME_BYTES` limits.
 
-**The sandbox task contract.** [`SandboxSpec`](lib/domain.rs) is the durable, backend-neutral description of a sandbox task. It is deliberately a description and nothing more: local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch is kept out of it. Its fields pull in the surrounding domain types:
-
-- Root filesystem: `RootfsSource`, `OciRootfsSource`, `DiskImageFormat`, `PullPolicy`.
-- Resources and runtime: `SandboxResources`, `SandboxRuntimeOptions`, `EnvVar`, `SandboxLogLevel`.
-- Storage and mounts: `VolumeMount`, `VolumeSpec`, `VolumeKind`, `NamedVolumeCreate`, `NamedVolumeMode`, `MountOptions`, `StatVirtualization`, `HostPermissions`.
-- Rootfs preparation: `Patch`.
-- Networking: `NetworkSpec`, `PublishedPortSpec`, `PortProtocol`.
-- Resource limits: `Rlimit`, `RlimitResource`.
-- Init and lifecycle: `HandoffInit`, `SandboxPolicy`, `SecurityProfile`.
-- Snapshots: `SnapshotSpec`, `SnapshotDestination`.
-- Logs: `LogSource`.
-
-**Cloud wire types.** The request, response, and error shapes used by the cloud backend's sandbox HTTP endpoints: [`CloudCreateSandboxRequest`](lib/cloud.rs), [`CloudSandbox`](lib/cloud.rs), [`CloudSandboxStatus`](lib/cloud.rs), the generic page envelope `CloudPaginated<T>`, the `CloudMessageResponse` acknowledgement, and the error envelopes `CloudErrorBody` / `CloudErrorDetails`.
-
-**Validation helpers.** [`validate_sandbox_name`](lib/validation.rs), [`validate_hostname`](lib/validation.rs), and [`hostname_from_sandbox_name`](lib/validation.rs), backed by the `MAX_SANDBOX_NAME_BYTES` and `MAX_HOSTNAME_BYTES` constants and the `TypesError` / `TypesResult` error types. The crate also exposes the `DEFAULT_SANDBOX_CPUS`, `DEFAULT_SANDBOX_MEMORY_MIB`, and `DEFAULT_METRICS_SAMPLE_INTERVAL_MS` defaults that `SandboxSpec::default()` relies on.
+Backend-private materialized state stays out: registry credentials, local CA paths, replace flags, pull-discovered manifest digests, snapshot upper paths, process handles, and DB rows belong to the SDK and backends, not the contract.
 
 ## Usage
 
-Build a spec from `Default` and fill in the fields you care about, then validate the name and derive a guest hostname:
+```toml
+[dependencies]
+microsandbox-types = "0.5.7"
+```
 
 ```rust
-use microsandbox_types::{
-    RootfsSource, SandboxSpec, hostname_from_sandbox_name, validate_sandbox_name,
-};
+use microsandbox_types::{RootfsSource, SandboxResources, SandboxSpec};
 
 let spec = SandboxSpec {
-    name: "agent-1".to_string(),
-    image: RootfsSource::oci("python:3.12"),
-    ..SandboxSpec::default()
+    name: "worker".into(),
+    image: RootfsSource::oci("python"),
+    resources: SandboxResources { cpus: 2, memory_mib: 1024 },
+    ..Default::default()
 };
-
-validate_sandbox_name(&spec.name).expect("valid sandbox name");
-assert_eq!(hostname_from_sandbox_name(&spec.name), "agent-1");
 ```
 
-The validation helpers encode rules worth knowing up front:
+The Rust SDK re-exports the contract types it accepts, so most SDK users get these through `microsandbox::*` and do not depend on this crate directly.
 
-- `validate_sandbox_name` requires a non-empty name of at most 128 bytes that starts with an ASCII alphanumeric and otherwise contains only ASCII alphanumerics, dots, hyphens, and underscores.
-- `validate_hostname` accepts `None`, but rejects an empty hostname and anything longer than 64 bytes.
-- `hostname_from_sandbox_name` returns names that already fit in 64 bytes unchanged. For longer names it truncates on a UTF-8 character boundary and appends a hyphen plus 8 hex characters derived from a SHA-256 of the original name, so the result is deterministic, collision-resistant, and always within 64 bytes.
+## Serialization Notes
 
-## Wire format notes
+- `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, `NetworkSpec`, and `MountOptions` use `#[serde(default)]`, so partial JSON fills missing fields from static defaults.
+- Lowercase-on-the-wire enums (`StatVirtualization`, `HostPermissions`, `SecurityProfile`, `SandboxLogLevel`, `LogSource`, `PortProtocol`) match the CLI grammar and the TypeScript string unions.
+- `VolumeMount` has hand-written `Serialize`/`Deserialize`. It tags variants with a `type` field and accepts a legacy top-level `readonly` flag, folding it into `MountOptions` on read.
+- Static defaults only. Nothing here reads process-global or profile config; the SDK and backends apply environment defaults before execution.
 
-These are the places where the serialized shape is more subtle than the Rust type suggests. They matter when you hand-write JSON or read persisted configs.
+## TypeScript Generation
 
-**Enum spellings are not uniform.** Some enums serialize as lower or snake case by serde configuration so persisted JSON lines up with the CLI grammar and the cloud wire format: `StatVirtualization` (`strict` / `relaxed` / `off`), `HostPermissions` (`private` / `mirror`), `SecurityProfile` (`default` / `restricted`), `PortProtocol` (`tcp` / `udp`), `SandboxLogLevel` (`error` / `warn` / `info` / `debug` / `trace`), `LogSource` (`stdout` / `stderr` / `output` / `system`), and `CloudSandboxStatus` (snake case). Others keep their Rust variant names on the wire: `RootfsSource` is externally tagged (`{ "Oci": ... }`), `DiskImageFormat` is `"Qcow2" | "Raw" | "Vmdk"`, `PullPolicy` is `"IfMissing" | "Always" | "Never"`, and `RlimitResource` keeps PascalCase variants. Do not assume a lowercase rule across the board.
-
-**`NetworkSpec` is partly opaque by design.** Its common, backend-visible fields (such as `enabled`, `ports`, `max_connections`, and `trust_host_cas`) are typed directly, but the rich local-engine subdocuments (`interface`, `policy`, `dns`, `tls`, `secrets`) are carried as `serde_json::Value`. That lets the shared contract round-trip those documents without depending on the local networking engine crate.
-
-**`VolumeMount::Named.create` is transient.** It is provisioning metadata used at sandbox-creation time and is intentionally skipped when a sandbox config is serialized or persisted. Restarting a sandbox mounts the already-created volume, so the field is absent from the persisted shape.
-
-## Generating the TypeScript bindings
-
-The TypeScript package is generated from this crate; this crate is the source of truth and the bindings are never hand-edited. Generation lives behind the optional `ts` feature, which pulls in `ts-rs`, and the `microsandbox-types-generate` binary requires it.
-
-Regenerate the checked-in bindings:
+The `ts` feature derives `ts_rs::TS` on every exported type and builds the `microsandbox-types-generate` binary, which writes `../typescript/src/index.ts`.
 
 ```bash
+# Regenerate the checked-in bindings.
 cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate
-```
 
-Verify they are current; this exits non-zero and names the stale target when the checked-in TypeScript differs from a fresh render:
-
-```bash
+# Verify they are current (used in CI; exits non-zero when stale).
 cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
 ```
 
-The renderer in [`lib/typescript.rs`](lib/typescript.rs) writes [`../typescript/src/index.ts`](../typescript/src/index.ts), prefixes it with `// @generated by microsandbox-types. Do not edit by hand.`, and configures `ts-rs` to map large integers to `number`.
+A unit test (`checked_in_bindings_match_generated_output`) also fails when `typescript/src/index.ts` drifts from the generator output, so `cargo test --features ts` catches stale bindings too.
 
-## Tests
+## Testing
 
 ```bash
 cargo test -p microsandbox-types
+cargo test -p microsandbox-types --features ts
 ```
-
-The suite covers the validation rules, serde round-trips for the domain and cloud types, and an assertion that the checked-in TypeScript bindings match freshly generated output.
