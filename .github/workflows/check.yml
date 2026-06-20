@@ -426,7 +426,7 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [check, changes]
+    needs: [check, changes, cli-smoke-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -512,7 +512,7 @@ jobs:
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, integration-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -648,7 +648,7 @@ jobs:
   # ---------------------------------------------------------------------------
   python-sdk-test:
     name: Python SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, node-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -722,7 +722,7 @@ jobs:
   # ---------------------------------------------------------------------------
   go-sdk-test:
     name: Go SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, python-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
