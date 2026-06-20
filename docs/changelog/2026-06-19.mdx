@@ -1,0 +1,73 @@
+---
+title: "Week of June 19, 2026"
+description: "Local and cloud backend routing in the SDKs, detached image init entrypoints, shared sandbox spec types, secret substitution through HTTP CONNECT tunnels and plain HTTP, and snapshot import hardening."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.5.7](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.7)
+</Tip>
+
+## New features
+
+**Local and cloud backend routing in the SDKs**
+
+The Rust, TypeScript, Python, and Go SDKs can now target a local microsandbox install or a hosted cloud backend from the same program. A profile-aware config under `~/.microsandbox/config.json` plus `MSB_BACKEND`, `MSB_API_URL`, `MSB_API_KEY`, and `MSB_PROFILE` environment variables select the backend, and per-sandbox overrides let you mix local and cloud sandboxes in one process. Cloud sandboxes support the create, start, get, list, stop, remove, collected exec, and live log streaming operations; streaming exec, attach, metrics, guest filesystem, volumes, snapshots, and bounded log snapshots remain local-only for now.
+
+```python
+from microsandbox import set_default_backend, PythonSandbox
+
+set_default_backend("cloud", profile="prod")
+
+async with PythonSandbox.create(name="hello") as sb:
+    print(await sb.run("print('hi from the cloud')"))
+```
+
+See the [Python SDK reference](/sdk/python/sandbox).
+
+**Detached image init entrypoints**
+
+`msb run --init auto` now boots Docker-style init entrypoints, including `/init` from s6-overlay images, in both attached and detached runs. Persisted detached sandboxes remember the init entrypoint across restarts, and attached runs stream startup logs while the image's PID 1 takes over the foreground command. Images like `nousresearch/hermes-agent` can be started directly without a separate wrapper.
+
+```bash
+msb run -d --init auto \
+  --name hermes --replace \
+  -p 8642:8642 \
+  nousresearch/hermes-agent \
+  -- gateway run
+```
+
+See the [sandbox commands reference](/cli/sandbox-commands).
+
+**Shared microsandbox type packages**
+
+A new `microsandbox-types` Rust crate is now the single source of truth for the sandbox spec and related runtime, resource, environment, and log-level types, with a matching type-only `@microsandbox/types` npm package generated from it. SDK and tooling authors can depend on one stable schema instead of redefining sandbox shapes per language, and the embedded `SandboxSpec` in the Rust SDK's `SandboxConfig` flows through the builder, local spawn, exec, attach, SSH, and cloud paths without duplication.
+
+See the [SDK overview](/sdk/overview).
+
+**Secret substitution through HTTP CONNECT tunnels**
+
+Outbound HTTPS that goes through an `HTTPS_PROXY=http://proxy:port` setting is now eligible for secret substitution. The proxy detects guest `CONNECT host:443` requests over plain TCP and hands the inner TLS stream to the existing interceptor, so placeholders inside the tunneled request get substituted and violation actions still apply. CONNECT metadata is validated, only configured target ports are intercepted, and the intercepted TLS ClientHello SNI must match the CONNECT authority before substitution runs.
+
+See the [TLS networking guide](/networking/tls).
+
+**Plain HTTP secret substitution, opt in per secret**
+
+`SecretsHandler` is now wired into the plain-HTTP relay in addition to the TLS path. Plain-HTTP substitution is opt-in per secret via `require_tls_identity(false)`, so existing secrets that require TLS keep their stricter behavior, and violation detection runs across both transports regardless. Server-first protocols such as SSH, SMTP, and databases are no longer delayed by the substitution layer, and full HTTP header blocks are read across TCP segments so host-scoped secrets match reliably.
+
+See the [secrets guide](/networking/security-model).
+
+**Other features**
+
+- **Byte-stream agent client transport.** The `microsandbox-agent-client` crate gains a `stream` feature with `connect_stream`, `connect_stream_with_timeout`, and `connect_stream_with_deadline`, so callers can drive an `AgentClient` over any `AsyncRead + AsyncWrite` they have already authenticated, such as a `Bearer`-authenticated relay connection. The existing UDS transport now layers on top of the same code path. See the [Rust agent client reference](/sdk/rust/agent-client).
+- **CONNECT secret boundary hardening.** Proxy metadata is parsed and buffered before the upstream dial, placeholders inside outer CONNECT headers are blocked, non-intercepted target ports stay opaque, and encoded body paths that cannot be safely rewritten now block instead of forwarding placeholders unchanged.
+
+## Bug fixes
+
+- Snapshot archive import now stages contents in a temporary directory, validates entry types, paths, image metadata, and cache digests, and rejects bundles whose manifest paths escape the artifact directory or whose resolved image digest does not match the snapshot pin.
+- IPv6 addresses inside the virtual network no longer get stuck in the `tentative` state, so guests with IPv6-capable hosts can send outbound IPv6 traffic instead of having the kernel drop it.
+- Memory metrics for idle sandboxes are now sourced from paced balloon stats, so an idle sandbox no longer pins a host core through the old virtio-balloon busy-spin path.
+- Sandbox names longer than 64 bytes no longer fail to boot with `sethostname: EINVAL`. The spawn path derives a UTS-compatible 64-byte hostname when no explicit hostname is set, while still honoring the 128-byte sandbox name limit.
+- `VolumeFs::remove_dir("/")` and `remove_dir("")` no longer delete the host-side backing directory for the entire volume; only child directories inside the volume can be removed.
+- Outbound proxy connections that are denied by SNI policy now close the guest socket cleanly instead of leaving clients like `wget` stuck until the host timeout fires. Upstream connect failures still RST the guest socket so clients fail fast.
+- `msb run --init auto` against images that ship an `ENTRYPOINT` init binary now preserves the user command through PID 1 instead of double-execing the wrapper after boot, and streams startup output back to attached runs.
