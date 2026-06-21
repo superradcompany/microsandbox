@@ -533,6 +533,8 @@ mod tests {
             "/tmp/logs",
             "--runtime-dir",
             "/tmp/runtime",
+            "--sandboxes-dir",
+            "/tmp/sandboxes",
             "--agent-sock",
             "/tmp/agent.sock",
             "--libkrunfw-path",
