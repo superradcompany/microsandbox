@@ -1074,6 +1074,8 @@ fn sandbox_cli_args(
     args.push(log_dir.as_os_str().to_os_string());
     args.push(OsString::from("--runtime-dir"));
     args.push(runtime_dir.as_os_str().to_os_string());
+    args.push(OsString::from("--sandboxes-dir"));
+    args.push(local.sandboxes_dir().as_os_str().to_os_string());
     args.push(OsString::from("--agent-sock"));
     args.push(agent_sock_path.as_os_str().to_os_string());
     if let Some(fd) = parent_watch_fd {

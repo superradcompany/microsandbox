@@ -504,6 +504,7 @@ mod tests {
             "config",
             "image_ref",
             "layer",
+            "maintenance_lease",
             "manifest",
             "manifest_layer",
             "run",

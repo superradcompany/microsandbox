@@ -3,6 +3,7 @@
 pub mod config;
 pub mod image_ref;
 pub mod layer;
+pub mod maintenance_lease;
 pub mod manifest;
 pub mod manifest_layer;
 pub mod run;

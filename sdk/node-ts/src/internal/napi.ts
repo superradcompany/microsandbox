@@ -144,6 +144,7 @@ export interface NapiSandboxBuilderSetters {
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
+  ephemeral(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;

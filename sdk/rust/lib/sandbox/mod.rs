@@ -1752,68 +1752,12 @@ pub(super) async fn update_sandbox_status(
     .await
 }
 
-//--------------------------------------------------------------------------------------------------
-// Functions: Reaper
-//--------------------------------------------------------------------------------------------------
-
-/// Reap all stale sandboxes in the global database.
-///
-/// Queries all sandboxes with status `Running` or `Draining`, checks whether
-/// their process is still alive via `kill(pid, 0)`, and marks dead ones as
-/// `Crashed`.
-///
-/// Designed to run once at startup as a fire-and-forget background task so
-/// that crashes (SIGSEGV, SIGKILL, etc.) that prevented the sandbox process
-/// from updating the database on exit are cleaned up without blocking the
-/// main path.
-pub async fn reap_stale_sandboxes() -> MicrosandboxResult<()> {
-    let backend = crate::backend::default_backend();
-    let local = match backend.as_local() {
-        Some(local) => local,
-        // No local backend installed — nothing to reap on this process.
-        None => return Ok(()),
-    };
-    let pools = local.db().await?;
-
-    let stale = sandbox_entity::Entity::find()
-        .filter(
-            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
-        )
-        .all(pools.read())
-        .await?;
-
-    for sandbox in stale {
-        // Best-effort: ignore per-sandbox errors so one bad record does not
-        // prevent the rest from being reaped.
-        let _ = reconcile_sandbox_runtime_state(pools, sandbox).await;
-    }
-
-    Ok(())
-}
-
-/// Spawn a one-shot background reaper task.
-///
-/// The task queries the global database for sandboxes that claim to be
-/// `Running` or `Draining` but whose process has already exited, and marks
-/// them as `Crashed`. Errors are silently ignored so the caller's hot path
-/// is never affected.
-///
-/// Safe to call multiple times — only the first invocation spawns a task.
-pub fn spawn_reaper() {
-    static SPAWNED: std::sync::Once = std::sync::Once::new();
-    SPAWNED.call_once(|| {
-        // Guard: tokio::spawn requires an active runtime. If called outside
-        // one (e.g., from synchronous SDK setup code), silently skip rather
-        // than panicking and poisoning the Once.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async {
-                if let Err(e) = reap_stale_sandboxes().await {
-                    tracing::debug!(error = %e, "background reaper failed");
-                }
-            });
-        }
-    });
-}
+// Stale-sandbox reaping is no longer owned by the SDK/CLI. Host runtime
+// processes (`msb sandbox`) now perform lifecycle maintenance: stale active
+// reconciliation and terminal ephemeral cleanup, on startup under a
+// read-gated DB lease (see `microsandbox_runtime::maintenance`). The lazy
+// read-time reconciliation in `reconcile_sandbox_runtime_state` below still
+// keeps `get`/`list`/`start` honest for the row they touch.
 
 //--------------------------------------------------------------------------------------------------
 // Functions: State Reconciliation
@@ -2391,6 +2335,7 @@ async fn insert_sandbox_record(
                 name: Set(config.spec.name.clone()),
                 config: Set(config_json),
                 status: Set(SandboxStatus::Running),
+                ephemeral: Set(config.spec.lifecycle.ephemeral),
                 created_at: Set(Some(now)),
                 updated_at: Set(Some(now)),
                 ..Default::default()

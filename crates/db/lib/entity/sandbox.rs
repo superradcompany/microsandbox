@@ -55,6 +55,12 @@ pub struct Model {
     pub name: String,
     pub config: String,
     pub status: SandboxStatus,
+    /// Denormalized copy of `config.policy.ephemeral`.
+    ///
+    /// Indexed alongside `status` so host-runtime lifecycle maintenance can
+    /// find terminal ephemeral cleanup candidates without scanning and
+    /// parsing every stopped sandbox's serialized config.
+    pub ephemeral: bool,
     pub created_at: Option<DateTime>,
     pub updated_at: Option<DateTime>,
 }

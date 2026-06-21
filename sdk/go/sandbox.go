@@ -61,6 +61,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Env:             o.Env,
 		Labels:          o.Labels,
 		Detached:        o.Detached,
+		Ephemeral:       o.Ephemeral,
 		Entrypoint:      o.Entrypoint,
 		LogLevel:        string(o.LogLevel),
 		QuietLogs:       o.QuietLogs,

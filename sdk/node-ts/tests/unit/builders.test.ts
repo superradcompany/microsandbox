@@ -300,6 +300,14 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.securityProfile).toBe("restricted");
   });
 
+  it("sets lifecycle ephemeral policy", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .ephemeral(true)
+      .build();
+    expect((cfg.lifecycle as { ephemeral: boolean }).ephemeral).toBe(true);
+  });
+
   it("invalid volume invocations defer to .build() / .create()", async () => {
     const builder = Sandbox.builder("x")
       .image("alpine")

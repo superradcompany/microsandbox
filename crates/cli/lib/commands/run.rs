@@ -170,6 +170,13 @@ async fn run_new(
         args.sandbox.log_level = Some(log_level.to_string());
     }
     let mut builder = apply_sandbox_opts(builder, &args.sandbox)?;
+    if !is_named {
+        // Unnamed `msb run` (including `--detach`) is a one-off: mark it
+        // ephemeral so the host runtime removes its persisted state on exit.
+        // Named runs stay persistent and inspectable. This sets policy intent
+        // only; cleanup is owned by the runtime, not this CLI.
+        builder = builder.ephemeral(true);
+    }
     if args.detach {
         builder = builder.persistent_initial_command(args.command.clone());
     } else {
@@ -222,23 +229,16 @@ async fn run_new(
             if let Err(e) = sandbox.stop().await {
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
-            if !is_named {
-                let _ = Sandbox::remove(sandbox.name()).await;
-            }
             return Ok(());
         }
     };
 
     let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await;
 
-    // Cleanup always runs, even on exec/attach/IO errors.
+    // Stop always runs, even on exec/attach/IO errors. Unnamed (ephemeral)
+    // sandboxes are removed by the host runtime on exit, not here.
     if let Err(e) = sandbox.stop().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
-    }
-
-    // Remove unnamed (ephemeral) sandboxes.
-    if !is_named {
-        let _ = Sandbox::remove(sandbox.name()).await;
     }
 
     handle_exit(result?)

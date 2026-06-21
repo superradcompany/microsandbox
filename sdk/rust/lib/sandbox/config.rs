@@ -1142,6 +1142,7 @@ mod tests {
             }],
             security_profile: SecurityProfile::Restricted,
             lifecycle: SandboxPolicy {
+                ephemeral: false,
                 max_duration_secs: Some(3600),
                 idle_timeout_secs: Some(120),
             },

@@ -567,6 +567,14 @@ func TestWithMaxDurationAndIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestWithEphemeral(t *testing.T) {
+	o := SandboxConfig{}
+	WithEphemeral(true)(&o)
+	if !o.Ephemeral {
+		t.Error("Ephemeral: got false")
+	}
+}
+
 func TestWithRegistryAuth(t *testing.T) {
 	o := SandboxConfig{}
 	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)

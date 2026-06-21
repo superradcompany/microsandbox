@@ -11,6 +11,8 @@ mod m20260527_000001_migrate_oci_rootfs_source;
 mod m20260531_000001_create_sandbox_labels;
 mod m20260531_000002_index_sandbox_labels_key_value;
 mod m20260606_000001_named_volume_kinds;
+mod m20260621_000001_add_sandbox_ephemeral;
+mod m20260621_000002_create_maintenance_lease;
 
 use sea_orm_migration::prelude::*;
 
@@ -46,6 +48,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260531_000001_create_sandbox_labels::Migration),
             Box::new(m20260531_000002_index_sandbox_labels_key_value::Migration),
             Box::new(m20260606_000001_named_volume_kinds::Migration),
+            Box::new(m20260621_000001_add_sandbox_ephemeral::Migration),
+            Box::new(m20260621_000002_create_maintenance_lease::Migration),
         ]
     }
 }

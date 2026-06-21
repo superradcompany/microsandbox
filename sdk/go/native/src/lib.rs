@@ -908,6 +908,8 @@ struct SandboxCreateOpts {
     env: Option<HashMap<String, String>>,
     #[serde(default)]
     detached: bool,
+    #[serde(default)]
+    ephemeral: bool,
     hostname: Option<String>,
     user: Option<String>,
     #[serde(default)]
@@ -1775,6 +1777,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
             } else if opts.replace {
                 builder = builder.replace();
+            }
+            if opts.ephemeral {
+                builder = builder.ephemeral(true);
             }
             if !opts.entrypoint.is_empty() {
                 builder = builder.entrypoint(opts.entrypoint);

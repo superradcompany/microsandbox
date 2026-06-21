@@ -49,6 +49,14 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub runtime_dir: PathBuf,
 
+    /// Root directory holding every sandbox's persisted state.
+    ///
+    /// Passed explicitly so runtime-owned lifecycle maintenance can remove
+    /// ephemeral sandbox directories without inferring the path from
+    /// `--log-dir`.
+    #[arg(long = "sandboxes-dir")]
+    pub sandboxes_dir: PathBuf,
+
     /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
     pub agent_sock: PathBuf,
@@ -279,6 +287,7 @@ pub fn run(args: SandboxArgs) -> ! {
         sandbox_db_connect_timeout_secs: args.sandbox_db_connect_timeout_secs,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
+        sandboxes_dir: args.sandboxes_dir,
         agent_sock_path: args.agent_sock,
         startup_command: args.startup_cmd.map(|cmd| StartupCommand {
             cmd,
@@ -524,6 +533,8 @@ mod tests {
             "/tmp/logs",
             "--runtime-dir",
             "/tmp/runtime",
+            "--sandboxes-dir",
+            "/tmp/sandboxes",
             "--agent-sock",
             "/tmp/agent.sock",
             "--libkrunfw-path",
