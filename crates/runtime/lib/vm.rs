@@ -46,6 +46,7 @@ const EXIT_REASON_SIGNAL: u8 = 3;
 const EXIT_REASON_PARENT_EXIT: u8 = 4;
 const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
 const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
+const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
 
 /// Host-observed stale heartbeat budget before agentd is considered unresponsive.
 const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -99,6 +100,9 @@ pub struct Config {
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
 
+    /// Startup command to execute after agentd reports ready.
+    pub startup_command: Option<StartupCommand>,
+
     /// Dedicated startup JSON write fd.
     ///
     /// When present, startup info is written here instead of stdout so
@@ -140,6 +144,25 @@ pub struct MetricsSlotHandoff {
     pub slot: u32,
     /// Generation paired with the reservation.
     pub generation: u64,
+}
+
+/// User workload that the sandbox process should start after boot.
+#[derive(Clone, Debug)]
+pub struct StartupCommand {
+    /// Path or command name to execute inside the guest.
+    pub cmd: String,
+
+    /// Arguments to pass to the command.
+    pub args: Vec<String>,
+
+    /// Environment variables as `KEY=VALUE` strings.
+    pub env: Vec<String>,
+
+    /// Working directory for the command.
+    pub cwd: Option<String>,
+
+    /// Guest user override for the command.
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -474,6 +497,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
                 EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
                 EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
+                EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
                 EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
                 EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
                 EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
@@ -692,6 +716,66 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
+        });
+    }
+
+    // Startup workload: detached `msb run -- CMD` makes the sandbox process
+    // own the command lifecycle. Once the command terminates, stop the VM so
+    // named sandboxes become stopped and ephemeral sandboxes can self-clean.
+    if let Some(startup_command) = config.startup_command.clone() {
+        let startup_agent_sock_path = config.agent_sock_path.clone();
+        let startup_shared = Arc::clone(&shared);
+        let startup_exit_handle = exit_handle.clone();
+        let startup_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            tracing::info!(
+                cmd = %startup_command.cmd,
+                args = ?startup_command.args,
+                "starting startup command"
+            );
+
+            match crate::startup::run_startup_command(&startup_agent_sock_path, startup_command)
+                .await
+            {
+                Ok(crate::startup::StartupCommandExit::Exited(0)) => {
+                    tracing::info!("startup command exited successfully");
+                }
+                Ok(crate::startup::StartupCommandExit::Exited(code)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(code, "startup command exited with non-zero status");
+                }
+                Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %failed.message, "startup command failed to spawn");
+                }
+                Err(err) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %err, "startup command failed");
+                }
+            }
+
+            match request_guest_shutdown(&startup_shared) {
+                Ok(()) => {
+                    tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                    tracing::info!("startup command shutdown flush window elapsed");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "startup command shutdown request failed, triggering host exit"
+                    );
+                }
+            }
+            startup_exit_handle.trigger();
         });
     }
 

@@ -354,6 +354,16 @@ pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
 /// - `MSB_HANDOFF_INIT_ARGS=WyItdW5pdD1tdWx0aS11c2VyLnRhcmdldCJd`
 pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
 
+/// Working directory for the handoff init binary.
+///
+/// Docker applies `WORKDIR` before executing `ENTRYPOINT + CMD`. Init handoff
+/// uses this optional path so image-declared init entrypoints receive the same
+/// process cwd as they would under container startup.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_CWD=/opt/app`
+pub const ENV_HANDOFF_INIT_CWD: &str = "MSB_HANDOFF_INIT_CWD";
+
 /// Extra environment variables for the handoff init binary.
 ///
 /// Format: base64url-no-padding encoded JSON array of `[key, value]`

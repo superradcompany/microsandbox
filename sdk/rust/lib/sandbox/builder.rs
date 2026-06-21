@@ -308,7 +308,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the transient initial command for attached CLI `run`.
+    /// Clear detached startup intent for attached CLI `run`.
     #[doc(hidden)]
     pub fn initial_command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config
@@ -883,24 +883,31 @@ impl SandboxBuilder {
     )> {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
+            let detached = self.detached;
             let config = self.build().await?;
             let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {
-                    crate::sandbox::create_local(
-                        backend,
-                        config,
-                        crate::runtime::SpawnMode::Attached,
-                        Some(sender),
-                    )
-                    .await
+                    let mode = if detached {
+                        crate::runtime::SpawnMode::Detached
+                    } else {
+                        crate::runtime::SpawnMode::Attached
+                    };
+                    crate::sandbox::create_local(backend, config, mode, Some(sender)).await
                 }
                 crate::backend::BackendKind::Cloud => {
                     drop(sender);
-                    backend
-                        .sandboxes()
-                        .create(backend.clone(), config, true)
-                        .await
+                    if detached {
+                        backend
+                            .sandboxes()
+                            .create_detached(backend.clone(), config)
+                            .await
+                    } else {
+                        backend
+                            .sandboxes()
+                            .create(backend.clone(), config, true)
+                            .await
+                    }
                 }
             }
         });

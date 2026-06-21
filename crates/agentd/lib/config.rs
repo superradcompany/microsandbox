@@ -21,9 +21,9 @@ use std::path::PathBuf;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
-    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
-    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
-    HANDOFF_INIT_AUTO, exec::ExecRlimit,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS,
+    ENV_HOSTNAME, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_SECURITY_PROFILE,
+    ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO, exec::ExecRlimit,
 };
 use serde::de::DeserializeOwned;
 
@@ -102,6 +102,9 @@ pub struct HandoffInit {
     /// argv past `argv[0]` — i.e., the supplemental arguments. Empty
     /// means the init is exec'd with `argv = [cmd]`.
     pub(crate) argv: Vec<OsString>,
+
+    /// Working directory to enter before execing the init binary.
+    pub(crate) cwd: Option<PathBuf>,
 
     /// Extra env vars merged on top of the inherited env. Empty means
     /// inherit-only.
@@ -993,6 +996,19 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
         _ => Vec::new(),
     };
 
+    let cwd = match read_env_raw(ENV_HANDOFF_INIT_CWD) {
+        Some(val) if !val.is_empty() => {
+            let cwd = PathBuf::from(&val);
+            if !cwd.is_absolute() {
+                return Err(AgentdError::Config(format!(
+                    "{ENV_HANDOFF_INIT_CWD} must be an absolute path, got: {val}"
+                )));
+            }
+            Some(cwd)
+        }
+        _ => None,
+    };
+
     let env = match read_env_raw(ENV_HANDOFF_INIT_ENV) {
         Some(val) if !val.is_empty() => {
             let entries = decode_handoff_json::<Vec<(String, String)>>(ENV_HANDOFF_INIT_ENV, &val)?;
@@ -1004,7 +1020,12 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
         _ => Vec::new(),
     };
 
-    Ok(Some(HandoffInit { cmd, argv, env }))
+    Ok(Some(HandoffInit {
+        cmd,
+        argv,
+        cwd,
+        env,
+    }))
 }
 
 fn decode_handoff_json<T: DeserializeOwned>(env_name: &str, value: &str) -> AgentdResult<T> {
@@ -1492,6 +1513,7 @@ mod tests {
     fn with_handoff_env<R>(
         cmd: Option<&str>,
         args: Option<&str>,
+        cwd: Option<&str>,
         env_var: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
@@ -1505,6 +1527,10 @@ mod tests {
                 Some(v) => env::set_var(ENV_HANDOFF_INIT_ARGS, v),
                 None => env::remove_var(ENV_HANDOFF_INIT_ARGS),
             }
+            match cwd {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT_CWD, v),
+                None => env::remove_var(ENV_HANDOFF_INIT_CWD),
+            }
             match env_var {
                 Some(v) => env::set_var(ENV_HANDOFF_INIT_ENV, v),
                 None => env::remove_var(ENV_HANDOFF_INIT_ENV),
@@ -1514,6 +1540,7 @@ mod tests {
         unsafe {
             env::remove_var(ENV_HANDOFF_INIT);
             env::remove_var(ENV_HANDOFF_INIT_ARGS);
+            env::remove_var(ENV_HANDOFF_INIT_CWD);
             env::remove_var(ENV_HANDOFF_INIT_ENV);
         }
         out
@@ -1528,21 +1555,27 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_unset_returns_none() {
-        let res = with_handoff_env(None, None, None, parse_handoff_init).unwrap();
+        let res = with_handoff_env(None, None, None, None, parse_handoff_init).unwrap();
         assert!(res.is_none());
     }
 
     #[test]
     fn test_parse_handoff_init_empty_returns_none() {
-        let res = with_handoff_env(Some(""), None, None, parse_handoff_init).unwrap();
+        let res = with_handoff_env(Some(""), None, None, None, parse_handoff_init).unwrap();
         assert!(res.is_none());
     }
 
     #[test]
     fn test_parse_handoff_init_cmd_only() {
-        let res = with_handoff_env(Some("/lib/systemd/systemd"), None, None, parse_handoff_init)
-            .unwrap()
-            .unwrap();
+        let res = with_handoff_env(
+            Some("/lib/systemd/systemd"),
+            None,
+            None,
+            None,
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(res.cmd, PathBuf::from("/lib/systemd/systemd"));
         assert!(res.argv.is_empty());
         assert!(res.env.is_empty());
@@ -1554,6 +1587,7 @@ mod tests {
         let res = with_handoff_env(
             Some("/lib/systemd/systemd"),
             Some(&argv),
+            None,
             None,
             parse_handoff_init,
         )
@@ -1571,9 +1605,15 @@ mod tests {
     #[test]
     fn test_parse_handoff_init_with_env() {
         let envs = encode_handoff_json(&vec![("container", "microsandbox"), ("LANG", "C.UTF-8")]);
-        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap()
-            .unwrap();
+        let res = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             res.env,
             vec![
@@ -1584,15 +1624,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_handoff_init_with_cwd() {
+        let res = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            Some("/opt/hermes"),
+            None,
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(res.cwd, Some(PathBuf::from("/opt/hermes")));
+    }
+
+    #[test]
     fn test_parse_handoff_init_argv_with_spaces_preserved() {
         let argv = encode_handoff_json(&vec![
             "--label=hello world",
             "--config=/etc/foo;bar",
             "old\x1fseparator",
         ]);
-        let res = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
-            .unwrap()
-            .unwrap();
+        let res = with_handoff_env(
+            Some("/sbin/init"),
+            Some(&argv),
+            None,
+            None,
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             res.argv,
             vec![
@@ -1605,7 +1665,8 @@ mod tests {
 
     #[test]
     fn test_parse_handoff_init_rejects_relative_path() {
-        let err = with_handoff_env(Some("sbin/init"), None, None, parse_handoff_init).unwrap_err();
+        let err =
+            with_handoff_env(Some("sbin/init"), None, None, None, parse_handoff_init).unwrap_err();
         assert!(err.to_string().contains("absolute path"));
     }
 
@@ -1613,6 +1674,7 @@ mod tests {
     fn test_parse_handoff_init_env_rejects_invalid_base64() {
         let err = with_handoff_env(
             Some("/sbin/init"),
+            None,
             None,
             Some("not base64!"),
             parse_handoff_init,
@@ -1622,18 +1684,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_handoff_init_cwd_rejects_relative_path() {
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            Some("opt/hermes"),
+            None,
+            parse_handoff_init,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
     fn test_parse_handoff_init_env_entry_empty_key_rejected() {
         let envs = encode_handoff_json(&vec![("", "value")]);
-        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap_err();
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("empty key"));
     }
 
     #[test]
     fn test_parse_handoff_init_arg_rejects_nul() {
         let argv = encode_handoff_json(&vec!["ok", "bad\0arg"]);
-        let err = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
-            .unwrap_err();
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            Some(&argv),
+            None,
+            None,
+            parse_handoff_init,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("entry #1"));
         assert!(err.to_string().contains("NUL"));
     }
@@ -1641,16 +1728,28 @@ mod tests {
     #[test]
     fn test_parse_handoff_init_env_key_rejects_equals() {
         let envs = encode_handoff_json(&vec![("BAD=KEY", "value")]);
-        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap_err();
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("must not contain '='"));
     }
 
     #[test]
     fn test_parse_handoff_init_env_key_rejects_nul() {
         let envs = encode_handoff_json(&vec![("BAD\0KEY", "value")]);
-        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap_err();
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("key"));
         assert!(err.to_string().contains("NUL"));
     }
@@ -1658,8 +1757,14 @@ mod tests {
     #[test]
     fn test_parse_handoff_init_env_value_rejects_nul() {
         let envs = encode_handoff_json(&vec![("KEY", "bad\0value")]);
-        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap_err();
+        let err = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("value for"));
         assert!(err.to_string().contains("NUL"));
     }
@@ -1667,9 +1772,15 @@ mod tests {
     #[test]
     fn test_parse_handoff_init_env_value_with_equals_is_value() {
         let envs = encode_handoff_json(&vec![("PATH", "/a:/b=/c")]);
-        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
-            .unwrap()
-            .unwrap();
+        let res = with_handoff_env(
+            Some("/sbin/init"),
+            None,
+            None,
+            Some(&envs),
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             res.env,
             vec![(OsString::from("PATH"), OsString::from("/a:/b=/c"))]

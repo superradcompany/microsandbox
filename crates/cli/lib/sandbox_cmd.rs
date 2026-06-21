@@ -11,7 +11,7 @@ use std::{os::fd::FromRawFd, os::fd::OwnedFd};
 use clap::Args;
 use microsandbox_runtime::{
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, MetricsSlotHandoff, VmConfig},
+    vm::{Config, DiskMountSpec, MetricsSlotHandoff, StartupCommand, VmConfig},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -60,6 +60,26 @@ pub struct SandboxArgs {
     /// Write end of the startup JSON pipe.
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
+
+    /// Startup workload command to execute after agentd is ready.
+    #[arg(long = "startup-cmd", hide = true)]
+    pub startup_cmd: Option<String>,
+
+    /// Startup workload arguments.
+    #[arg(long = "startup-arg", hide = true)]
+    pub startup_args: Vec<String>,
+
+    /// Startup workload environment variables as `KEY=VALUE`.
+    #[arg(long = "startup-env", hide = true)]
+    pub startup_env: Vec<String>,
+
+    /// Startup workload working directory.
+    #[arg(long = "startup-cwd", hide = true)]
+    pub startup_cwd: Option<String>,
+
+    /// Startup workload guest user.
+    #[arg(long = "startup-user", hide = true)]
+    pub startup_user: Option<String>,
 
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
@@ -260,6 +280,13 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
+        startup_command: args.startup_cmd.map(|cmd| StartupCommand {
+            cmd,
+            args: args.startup_args,
+            env: args.startup_env,
+            cwd: args.startup_cwd,
+            user: args.startup_user,
+        }),
         startup_fd,
         parent_watchdog,
         forward_output: args.forward_output,
@@ -405,7 +432,15 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+    use clap::Parser;
+
     use super::*;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: SandboxArgs,
+    }
 
     fn fmt(s: &str) -> String {
         format!(
@@ -473,6 +508,33 @@ mod tests {
         ];
         let err = parse_disk_args(&entries).unwrap_err();
         assert!(err.contains("invalid --disk entry"));
+    }
+
+    #[test]
+    fn test_hidden_startup_args_accept_hyphen_values() {
+        let parsed = TestCli::parse_from([
+            "test",
+            "--name",
+            "sandbox",
+            "--sandbox-id",
+            "7",
+            "--db-path",
+            "/tmp/msb.db",
+            "--log-dir",
+            "/tmp/logs",
+            "--runtime-dir",
+            "/tmp/runtime",
+            "--agent-sock",
+            "/tmp/agent.sock",
+            "--libkrunfw-path",
+            "/tmp/libkrunfw.dylib",
+            "--startup-cmd=/bin/sh",
+            "--startup-arg=-lc",
+            "--startup-arg=echo ok",
+        ]);
+
+        assert_eq!(parsed.args.startup_cmd.as_deref(), Some("/bin/sh"));
+        assert_eq!(parsed.args.startup_args, vec!["-lc", "echo ok"]);
     }
 
     #[test]

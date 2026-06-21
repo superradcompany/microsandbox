@@ -69,6 +69,9 @@ const POST_HANDOFF_STDERR: &str = "/run/microsandbox/agentd.log";
 pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
     let cmd = resolve_cmd(&spec.cmd)?;
     preflight(&cmd)?;
+    if let Some(ref cwd) = spec.cwd {
+        preflight_cwd(cwd)?;
+    }
 
     let argv = build_argv(&cmd, &spec.argv);
     let envp = build_envp(&spec.env);
@@ -84,6 +87,16 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
             // signal disposition + clear blocked mask before exec so
             // the new init starts with kernel defaults.
             reset_signals();
+            if let Some(ref cwd) = spec.cwd
+                && let Err(err) = nix::unistd::chdir(cwd)
+            {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agentd: chdir({}) before handoff failed: {err}",
+                    cwd.display()
+                );
+                process::exit(126);
+            }
             // SAFETY: arrays are NUL-terminated; pointers live until
             // execve consumes them or returns with an error.
             let err = nix::unistd::execve(&cmd_c, &argv, &envp).unwrap_err();
@@ -159,6 +172,22 @@ fn preflight(cmd: &Path) -> AgentdResult<()> {
     Ok(())
 }
 
+fn preflight_cwd(cwd: &Path) -> AgentdResult<()> {
+    let metadata = std::fs::metadata(cwd).map_err(|e| {
+        AgentdError::Init(format!(
+            "handoff init cwd not found at {}: {e}",
+            cwd.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(AgentdError::Init(format!(
+            "handoff init cwd is not a directory: {}",
+            cwd.display()
+        )));
+    }
+    Ok(())
+}
+
 fn init_candidate_is_executable_file(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata_is_executable_file(&metadata))
@@ -209,6 +238,7 @@ fn build_envp(extras: &[(OsString, OsString)]) -> Vec<CString> {
     for var in [
         microsandbox_protocol::ENV_HANDOFF_INIT,
         microsandbox_protocol::ENV_HANDOFF_INIT_ARGS,
+        microsandbox_protocol::ENV_HANDOFF_INIT_CWD,
         microsandbox_protocol::ENV_HANDOFF_INIT_ENV,
     ] {
         env.remove(&OsString::from(var));

@@ -22,6 +22,7 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 crossbeam-queue = { workspace = true }
 libc.workspace = true
+microsandbox-agent-client = { workspace = true, features = ["uds"] }
 microsandbox-db.workspace = true
 microsandbox-filesystem.workspace = true
 microsandbox-metrics.workspace = true
