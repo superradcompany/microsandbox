@@ -483,6 +483,17 @@ pub struct HandoffInit {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxPolicy {
+    /// Whether the sandbox is ephemeral.
+    ///
+    /// Ephemeral sandboxes are one-off: the host runtime that owns the
+    /// process removes the persisted DB row and on-disk state when the VM
+    /// reaches a terminal status, and other host runtimes opportunistically
+    /// clean up ephemeral leftovers from runtimes that died before they
+    /// could self-clean. Defaults to `false` (persistent); named and created
+    /// sandboxes stay inspectable and restartable after they stop.
+    #[serde(default)]
+    pub ephemeral: bool,
+
     /// Hard cap on total sandbox lifetime in seconds. `None` = run forever.
     pub max_duration_secs: Option<u64>,
 
@@ -1423,6 +1434,7 @@ mod tests {
     #[test]
     fn sandbox_policy_serde_roundtrip() {
         let policy = SandboxPolicy {
+            ephemeral: true,
             max_duration_secs: Some(3600),
             idle_timeout_secs: Some(120),
         };
@@ -1430,8 +1442,24 @@ mod tests {
         let json = serde_json::to_string(&policy).unwrap();
         let decoded: SandboxPolicy = serde_json::from_str(&json).unwrap();
 
+        assert!(decoded.ephemeral);
         assert_eq!(decoded.max_duration_secs, Some(3600));
         assert_eq!(decoded.idle_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn sandbox_policy_defaults_to_persistent() {
+        assert!(!SandboxPolicy::default().ephemeral);
+    }
+
+    #[test]
+    fn sandbox_policy_deserializes_missing_ephemeral_as_persistent() {
+        // `ephemeral` has a persistent default so partial policy payloads
+        // deserialize to the conservative behavior.
+        let decoded: SandboxPolicy =
+            serde_json::from_str(r#"{"max_duration_secs":60,"idle_timeout_secs":null}"#).unwrap();
+        assert!(!decoded.ephemeral);
+        assert_eq!(decoded.max_duration_secs, Some(60));
     }
 
     #[test]

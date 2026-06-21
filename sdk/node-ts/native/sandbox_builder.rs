@@ -155,6 +155,18 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Mark the sandbox as ephemeral (or persistent).
+    ///
+    /// Ephemeral sandboxes are removed by the host runtime after the VM
+    /// reaches a terminal status. Logs and captured output are removed with
+    /// the sandbox directory.
+    #[napi]
+    pub fn ephemeral(&mut self, ephemeral: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.ephemeral(ephemeral));
+        self
+    }
+
     /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
     #[napi(js_name = "metricsSampleIntervalMs")]
     pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {

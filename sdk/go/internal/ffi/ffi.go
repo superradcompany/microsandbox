@@ -1395,6 +1395,7 @@ type CreateOptions struct {
 	Env                  map[string]string    `json:"env,omitempty"`
 	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
+	Ephemeral            bool                 `json:"ephemeral,omitempty"`
 	Entrypoint           []string             `json:"entrypoint,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`
 	LogLevel             string               `json:"log_level,omitempty"`

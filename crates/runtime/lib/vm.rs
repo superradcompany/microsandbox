@@ -97,6 +97,12 @@ pub struct Config {
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,
 
+    /// Root directory holding every sandbox's persisted state
+    /// (`<sandboxes_dir>/<name>`). Passed explicitly so runtime-owned
+    /// lifecycle maintenance can remove ephemeral sandbox directories without
+    /// inferring the path from `log_dir`.
+    pub sandboxes_dir: PathBuf,
+
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
 
@@ -478,6 +484,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
@@ -531,6 +538,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
                     .exec(&exit_db)
                     .await;
+
+                // Self-clean: if this sandbox was created ephemeral, drop its
+                // persisted row + directory now that it is terminal. Reads
+                // `sandbox.ephemeral` from the DB (the runtime is handed
+                // discrete flags, not the full policy) and no-ops for
+                // persistent sandboxes. Best-effort; recovery sweeps from
+                // other runtimes cover any failure here.
+                match crate::maintenance::cleanup_terminal_ephemeral_sandbox(
+                    &exit_db,
+                    &exit_sandboxes_dir,
+                    exit_sandbox_id,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        tracing::debug!(?outcome, "ephemeral exit self-clean")
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "ephemeral exit self-clean failed")
+                    }
+                }
             });
 
             // Inject the exec.log lifecycle-stop marker before _exit().
@@ -647,6 +675,19 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let metrics_sandbox_id = config.sandbox_id;
     let metrics_sandbox_name = config.sandbox_name.clone();
     let metrics_pid = pid;
+
+    // Opportunistic host-runtime lifecycle maintenance: reconcile stale active
+    // sandboxes and clean terminal ephemeral leftovers from runtimes that died
+    // before they could self-clean. A read-gated DB lease keeps a burst of
+    // starts to one indexed read each; this runs as a bounded background task
+    // so it never delays boot.
+    {
+        let maintenance_db = db.clone();
+        let maintenance_dir = config.sandboxes_dir.clone();
+        tokio_rt.spawn(async move {
+            crate::maintenance::run_startup_maintenance(&maintenance_db, &maintenance_dir).await;
+        });
+    }
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);

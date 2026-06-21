@@ -903,6 +903,14 @@ export declare class SandboxBuilder {
   quietLogs(): this
   /** Create the sandbox in detached/background mode when enabled. */
   detached(detached: boolean): this
+  /**
+   * Mark the sandbox as ephemeral (or persistent).
+   *
+   * Ephemeral sandboxes are removed by the host runtime after the VM
+   * reaches a terminal status. Logs and captured output are removed with
+   * the sandbox directory.
+   */
+  ephemeral(ephemeral: boolean): this
   /** Override the metrics sampling interval in milliseconds; pass `0` to disable. */
   metricsSampleIntervalMs(ms: number): this
   /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */

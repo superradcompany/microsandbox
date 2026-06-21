@@ -556,11 +556,10 @@ fn run_async_command_anyhow(
         .build()?;
 
     runtime.block_on(async move {
-        // Fire-and-forget: reap sandboxes whose process crashed (SIGSEGV,
-        // SIGKILL, etc.) without updating the database. Runs in the
-        // background so it never delays the requested command.
-        microsandbox::sandbox::spawn_reaper();
-
+        // Stale-sandbox reaping and ephemeral cleanup are owned by host
+        // runtime processes (`msb sandbox`) now, not the CLI; see
+        // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
+        // reaper here.
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
 

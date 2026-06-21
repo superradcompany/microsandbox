@@ -223,6 +223,9 @@ pub fn sandbox_builder_from_args(
         }
         builder = builder.idle_timeout(idle_timeout as u64);
     }
+    if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
+        builder = builder.ephemeral(ephemeral);
+    }
 
     // Environment variables.
     if let Some(env) = kwargs.get_item("env")? {

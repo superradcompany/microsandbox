@@ -35,6 +35,7 @@ type SandboxConfig struct {
 	Env                map[string]string
 	Labels             map[string]string
 	Detached           bool
+	Ephemeral          bool
 	Entrypoint         []string
 	Init               *InitConfig
 	LogLevel           LogLevel
@@ -71,6 +72,7 @@ type persistedSandboxConfig struct {
 	Replace         bool                 `json:"replace"`
 	Labels          map[string]string    `json:"labels"`
 	Detached        bool                 `json:"detached"`
+	Lifecycle       *persistedLifecycle  `json:"lifecycle"`
 	Entrypoint      []string             `json:"entrypoint"`
 	Init            *persistedInitConfig `json:"init"`
 	LogLevel        LogLevel             `json:"log_level"`
@@ -83,6 +85,12 @@ type persistedInitConfig struct {
 	Cmd  string      `json:"cmd"`
 	Args []string    `json:"args"`
 	Env  [][2]string `json:"env"`
+}
+
+type persistedLifecycle struct {
+	Ephemeral       bool   `json:"ephemeral"`
+	MaxDurationSecs uint64 `json:"max_duration_secs"`
+	IdleTimeoutSecs uint64 `json:"idle_timeout_secs"`
 }
 
 // UnmarshalJSON decodes the persisted Rust sandbox config into the Go SDK's
@@ -121,14 +129,35 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Replace:         raw.Replace,
 		Labels:          raw.Labels,
 		Detached:        raw.Detached,
+		Ephemeral:       raw.lifecycleEphemeral(),
 		Entrypoint:      raw.Entrypoint,
 		Init:            decodePersistedInit(raw.Init),
 		LogLevel:        raw.LogLevel,
 		QuietLogs:       raw.QuietLogs,
 		Scripts:         raw.Scripts,
 		PullPolicy:      raw.PullPolicy,
+		MaxDuration:     time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
+		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
+}
+
+func (c persistedSandboxConfig) lifecycleEphemeral() bool {
+	return c.Lifecycle != nil && c.Lifecycle.Ephemeral
+}
+
+func (c persistedSandboxConfig) lifecycleMaxDurationSecs() uint64 {
+	if c.Lifecycle == nil {
+		return 0
+	}
+	return c.Lifecycle.MaxDurationSecs
+}
+
+func (c persistedSandboxConfig) lifecycleIdleTimeoutSecs() uint64 {
+	if c.Lifecycle == nil {
+		return 0
+	}
+	return c.Lifecycle.IdleTimeoutSecs
 }
 
 func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
@@ -339,6 +368,12 @@ func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 // running after the Go process exits. Reattach via GetSandbox.
 func WithDetached() SandboxOption {
 	return func(o *SandboxConfig) { o.Detached = true }
+}
+
+// WithEphemeral marks whether the runtime should remove the sandbox's DB row,
+// on-disk state, logs, and captured output after it reaches a terminal status.
+func WithEphemeral(ephemeral bool) SandboxOption {
+	return func(o *SandboxConfig) { o.Ephemeral = ephemeral }
 }
 
 // WithEntrypoint overrides the user-workload entrypoint baked into the image.

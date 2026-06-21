@@ -704,6 +704,22 @@ impl SandboxBuilder {
         self
     }
 
+    /// Mark the sandbox as ephemeral (or persistent).
+    ///
+    /// Ephemeral sandboxes are one-off: the host runtime that owns the
+    /// process removes the persisted DB row and on-disk state once the VM
+    /// reaches a terminal status, and other host runtimes opportunistically
+    /// clean up leftovers from runtimes that died first. This sets policy
+    /// intent only; enforcement is runtime-owned, never an SDK/CLI reaper.
+    /// Defaults to persistent (`false`).
+    ///
+    /// Note: removing an ephemeral sandbox also drops its logs and captured
+    /// output, since those live under the sandbox directory.
+    pub fn ephemeral(mut self, ephemeral: bool) -> Self {
+        self.config.spec.lifecycle.ephemeral = ephemeral;
+        self
+    }
+
     /// Set a maximum sandbox lifetime in seconds.
     pub fn max_duration(mut self, secs: u64) -> Self {
         self.config.spec.lifecycle.max_duration_secs = Some(secs);
@@ -1364,6 +1380,29 @@ mod tests {
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[tokio::test]
+    async fn test_builder_defaults_to_persistent() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!config.spec.lifecycle.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn test_builder_ephemeral_sets_policy() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .ephemeral(true)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(config.spec.lifecycle.ephemeral);
     }
 
     #[tokio::test]

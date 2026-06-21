@@ -74,6 +74,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         init="auto",
         max_duration=7200.0,
         idle_timeout=1800.0,
+        ephemeral=True,
         pull_policy="if_missing",
         log_level="info",
         detached=True,
@@ -107,6 +108,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["runtime"]["log_level"] == "info"
         assert config["lifecycle"]["max_duration_secs"] == 7200
         assert config["lifecycle"]["idle_timeout_secs"] == 1800
+        assert config["lifecycle"]["ephemeral"] is True
 
         sandbox = None
 

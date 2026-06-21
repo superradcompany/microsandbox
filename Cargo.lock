@@ -3466,6 +3466,7 @@ dependencies = [
  "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-metrics",
+ "microsandbox-migration",
  "microsandbox-network",
  "microsandbox-protocol",
  "microsandbox-types",

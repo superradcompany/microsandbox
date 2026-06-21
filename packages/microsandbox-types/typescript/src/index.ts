@@ -358,6 +358,17 @@ env: Array<[string, string]>, };
 
 export type SandboxPolicy = {
 /**
+ * Whether the sandbox is ephemeral.
+ *
+ * Ephemeral sandboxes are one-off: the host runtime that owns the
+ * process removes the persisted DB row and on-disk state when the VM
+ * reaches a terminal status, and other host runtimes opportunistically
+ * clean up ephemeral leftovers from runtimes that died before they
+ * could self-clean. Defaults to `false` (persistent); named and created
+ * sandboxes stay inspectable and restartable after they stop.
+ */
+ephemeral: boolean,
+/**
  * Hard cap on total sandbox lifetime in seconds. `None` = run forever.
  */
 max_duration_secs: number | null,

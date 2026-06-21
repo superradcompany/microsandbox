@@ -1124,6 +1124,7 @@ fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
             .map(|(key, value)| EnvVar::new(key, value))
             .collect(),
         lifecycle: SandboxPolicy {
+            ephemeral: cloud.config.ephemeral,
             max_duration_secs: cloud.config.max_duration_secs,
             idle_timeout_secs: cloud.config.idle_timeout_secs,
         },
@@ -1237,7 +1238,7 @@ pub(super) fn cloud_create_request_from_config(
         vcpus: resources.cpus,
         memory_mib: resources.memory_mib,
         env: env.into_iter().map(Into::into).collect(),
-        ephemeral: true,
+        ephemeral: lifecycle.ephemeral,
         workdir: runtime.workdir,
         shell: runtime.shell,
         entrypoint: runtime.entrypoint,
