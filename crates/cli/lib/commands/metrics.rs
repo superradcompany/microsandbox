@@ -120,6 +120,9 @@ fn metrics_json(name: &str, metrics: &SandboxMetrics) -> serde_json::Value {
         "disk_write_bytes": metrics.disk_write_bytes,
         "net_rx_bytes": metrics.net_rx_bytes,
         "net_tx_bytes": metrics.net_tx_bytes,
+        "upper_used_bytes": metrics.upper_used_bytes,
+        "upper_free_bytes": metrics.upper_free_bytes,
+        "upper_host_allocated_bytes": metrics.upper_host_allocated_bytes,
         "uptime_secs": metrics.uptime.as_secs_f64(),
     })
 }

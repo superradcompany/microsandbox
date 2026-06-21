@@ -703,6 +703,9 @@ pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetric
         disk_write_bytes: m.disk_write_bytes as f64,
         net_rx_bytes: m.net_rx_bytes as f64,
         net_tx_bytes: m.net_tx_bytes as f64,
+        upper_used_bytes: m.upper_used_bytes.map(|bytes| bytes as f64),
+        upper_free_bytes: m.upper_free_bytes.map(|bytes| bytes as f64),
+        upper_host_allocated_bytes: m.upper_host_allocated_bytes.map(|bytes| bytes as f64),
         uptime_ms: m.uptime.as_millis() as f64,
         timestamp_ms: datetime_to_ms(&m.timestamp),
     }

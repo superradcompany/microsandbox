@@ -51,7 +51,7 @@ const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
 const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Startup grace before a missing heartbeat is considered an agentd failure.
-const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(60);
+const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(180);
 
 /// Short best-effort send budget once agentd is already considered unresponsive.
 const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
@@ -554,6 +554,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
+    let upper_host_path = oci_upper_host_path(&config.vm);
 
     if let Some(parent_watchdog) = config.parent_watchdog
         && let Err(e) = spawn_parent_watchdog(
@@ -585,11 +586,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
-        (None, _) => tracing::debug!(
-            sandbox = %config.sandbox_name,
-            "metrics sampling disabled; not spawning sampler"
-        ),
+    let metrics_sampler = match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                "metrics sampling disabled; not spawning sampler"
+            );
+            None
+        }
         (Some(_), None) => {
             // Distinguish "host did not reserve a slot" from "host reserved
             // but runtime activation failed" so operators reading the warn
@@ -605,24 +609,20 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
                 );
             }
+            None
         }
-        (Some(interval_ms), Some(writer)) => {
-            tracing::debug!(
-                sandbox = %config.sandbox_name,
-                interval_ms = interval_ms.get(),
-                "starting metrics sampler"
-            );
-            tokio_rt.spawn(run_metrics_sampler(
-                writer,
-                config.sandbox_id,
-                pid,
-                interval_ms,
-                krun_metrics_handle,
-                network_metrics_handle
-                    .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-            ));
-        }
-    }
+        (Some(interval_ms), Some(writer)) => Some((
+            writer,
+            interval_ms,
+            krun_metrics_handle,
+            network_metrics_handle
+                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            upper_host_path,
+        )),
+    };
+    let metrics_sandbox_id = config.sandbox_id;
+    let metrics_sandbox_name = config.sandbox_name.clone();
+    let metrics_pid = pid;
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -637,6 +637,29 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
         match ready_result {
             Ok(Ok(relay)) => {
+                if let Some((
+                    writer,
+                    interval_ms,
+                    krun_metrics_handle,
+                    network_metrics_handle,
+                    upper_host_path,
+                )) = metrics_sampler
+                {
+                    tracing::debug!(
+                        sandbox = %metrics_sandbox_name,
+                        interval_ms = interval_ms.get(),
+                        "starting metrics sampler after agent ready"
+                    );
+                    tokio::spawn(run_metrics_sampler(
+                        writer,
+                        metrics_sandbox_id,
+                        metrics_pid,
+                        interval_ms,
+                        krun_metrics_handle,
+                        network_metrics_handle,
+                        upper_host_path,
+                    ));
+                }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
                 }
@@ -789,6 +812,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             Err(RuntimeError::Custom(format!("VM enter: {e}")))
         }
     }
+}
+
+fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
+    vm.rootfs_vmdk.as_ref()?;
+
+    vm.rootfs_upper_spec
+        .as_ref()
+        .map(|spec| spec.primary.clone())
+        .or_else(|| vm.rootfs_upper.clone())
 }
 
 //--------------------------------------------------------------------------------------------------

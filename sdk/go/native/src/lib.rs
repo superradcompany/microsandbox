@@ -3225,6 +3225,25 @@ pub unsafe extern "C" fn msb_sandbox_exec(
 // Output: {cpu_percent,memory_bytes,memory_limit_bytes,disk_*,net_*,uptime_secs}
 // ---------------------------------------------------------------------------
 
+fn metrics_json(m: &microsandbox::sandbox::SandboxMetrics) -> serde_json::Value {
+    serde_json::json!({
+        "cpu_percent": m.cpu_percent,
+        "vcpu_time_ns": m.vcpu_time_ns,
+        "memory_bytes": m.memory_bytes,
+        "memory_available_bytes": m.memory_available_bytes,
+        "memory_host_resident_bytes": m.memory_host_resident_bytes,
+        "memory_limit_bytes": m.memory_limit_bytes,
+        "disk_read_bytes": m.disk_read_bytes,
+        "disk_write_bytes": m.disk_write_bytes,
+        "net_rx_bytes": m.net_rx_bytes,
+        "net_tx_bytes": m.net_tx_bytes,
+        "upper_used_bytes": m.upper_used_bytes,
+        "upper_free_bytes": m.upper_free_bytes,
+        "upper_host_allocated_bytes": m.upper_host_allocated_bytes,
+        "uptime_secs": m.uptime.as_secs(),
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_metrics(
     cancel_id: u64,
@@ -3236,17 +3255,7 @@ pub unsafe extern "C" fn msb_sandbox_metrics(
         let sb = get(handle)?;
         Ok(Box::pin(async move {
             let m = sb.metrics().await.map_err(FfiError::from)?;
-            Ok(serde_json::json!({
-                "cpu_percent": m.cpu_percent,
-                "memory_bytes": m.memory_bytes,
-                "memory_limit_bytes": m.memory_limit_bytes,
-                "disk_read_bytes": m.disk_read_bytes,
-                "disk_write_bytes": m.disk_write_bytes,
-                "net_rx_bytes": m.net_rx_bytes,
-                "net_tx_bytes": m.net_tx_bytes,
-                "uptime_secs": m.uptime.as_secs(),
-            })
-            .to_string())
+            Ok(metrics_json(&m).to_string())
         }))
     })
 }
@@ -3730,17 +3739,7 @@ pub unsafe extern "C" fn msb_metrics_recv(
                 item = recv.recv() => {
                     match item {
                         None => Ok(r#"{"done":true}"#.to_string()),
-                        Some(Ok(m)) => Ok(format!(
-                            r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{net_rx},"net_tx_bytes":{net_tx},"uptime_secs":{up}}}"#,
-                            cpu = m.cpu_percent,
-                            mem = m.memory_bytes,
-                            lim = m.memory_limit_bytes,
-                            dr = m.disk_read_bytes,
-                            dw = m.disk_write_bytes,
-                            net_rx = m.net_rx_bytes,
-                            net_tx = m.net_tx_bytes,
-                            up = m.uptime.as_secs(),
-                        )),
+                        Some(Ok(m)) => Ok(metrics_json(&m).to_string()),
                         Some(Err(e)) => Err(FfiError::from(e)),
                     }
                 }
@@ -4324,24 +4323,11 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
             let map = all_sandbox_metrics(local).await.map_err(FfiError::from)?;
-            let mut entries = String::new();
-            for (name, m) in &map {
-                if !entries.is_empty() {
-                    entries.push(',');
-                }
-                entries.push_str(&format!(
-                    r#""{name}":{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
-                    cpu = m.cpu_percent,
-                    mem = m.memory_bytes,
-                    lim = m.memory_limit_bytes,
-                    dr  = m.disk_read_bytes,
-                    dw  = m.disk_write_bytes,
-                    rx  = m.net_rx_bytes,
-                    tx  = m.net_tx_bytes,
-                    up  = m.uptime.as_secs(),
-                ));
+            let mut sandboxes = serde_json::Map::with_capacity(map.len());
+            for (name, metrics) in &map {
+                sandboxes.insert(name.clone(), metrics_json(metrics));
             }
-            Ok(format!(r#"{{"sandboxes":{{{entries}}}}}"#))
+            Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
         }))
     })
 }

@@ -61,6 +61,9 @@ use self::exec::{ExecHandle, ExecOptions};
 /// Prefixes reserved for built-in identity/resource attributes.
 pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox.", "service."];
 
+/// Maximum time to wait for the sandbox process to expose the agent relay.
+const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation
 //--------------------------------------------------------------------------------------------------
@@ -1506,7 +1509,7 @@ async fn wait_for_relay(
         pid = handle.pid(),
         "wait_for_relay: waiting for agent socket"
     );
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
     let max_backoff = std::time::Duration::from_millis(10);
     let mut backoff = std::time::Duration::from_millis(1);
     let mut attempts = 0u32;

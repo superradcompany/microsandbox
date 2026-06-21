@@ -1187,6 +1187,9 @@ Point-in-time resource usage snapshot returned by [`Metrics`](#metrics).
 | DiskWriteBytes   | `uint64`        | Total bytes written to disk since boot           |
 | NetRxBytes       | `uint64`        | Total bytes received over the network since boot |
 | NetTxBytes       | `uint64`        | Total bytes sent over the network since boot     |
+| UpperUsedBytes   | `*uint64`       | Guest-visible OCI upper filesystem used bytes when the protected reporter is available and fresh |
+| UpperFreeBytes   | `*uint64`       | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
+| UpperHostAllocatedBytes | `*uint64` | Host-allocated bytes for the writable OCI upper image when available |
 | Uptime           | `time.Duration` | Time since the sandbox was created               |
 
 ### MetricsStreamHandle

@@ -2765,6 +2765,9 @@ type Metrics struct {
 	DiskWriteBytes          uint64        `json:"disk_write_bytes"`
 	NetRxBytes              uint64        `json:"net_rx_bytes"`
 	NetTxBytes              uint64        `json:"net_tx_bytes"`
+	UpperUsedBytes          *uint64       `json:"upper_used_bytes"`
+	UpperFreeBytes          *uint64       `json:"upper_free_bytes"`
+	UpperHostAllocatedBytes *uint64       `json:"upper_host_allocated_bytes"`
 	UptimeSecs              uint64        `json:"uptime_secs"`
 	Uptime                  time.Duration `json:"-"`
 }
@@ -2844,6 +2847,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -2863,6 +2869,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}
@@ -3437,6 +3446,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -3453,6 +3465,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}, nil

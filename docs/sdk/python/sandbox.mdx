@@ -405,7 +405,7 @@ Get a point-in-time snapshot of the sandbox's resource usage.
 
 | Type | Description |
 |------|-------------|
-| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
+| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network, and optional upper disk metrics |
 
 ---
 
@@ -1041,5 +1041,8 @@ Point-in-time resource usage snapshot.
 | memory_limit_bytes | `int` | Memory limit in bytes |
 | net_rx_bytes | `int` | Total bytes received over the network since boot |
 | net_tx_bytes | `int` | Total bytes sent over the network since boot |
+| upper_used_bytes | `int \| None` | Guest-visible OCI upper filesystem used bytes when the protected reporter is available and fresh |
+| upper_free_bytes | `int \| None` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
+| upper_host_allocated_bytes | `int \| None` | Host-allocated bytes for the writable OCI upper image when available |
 | timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
 | uptime_ms | `int` | Time since the sandbox was created (ms) |

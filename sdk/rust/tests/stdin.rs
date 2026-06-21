@@ -4,7 +4,7 @@
 //! attribute marks them `#[ignore]`, so plain `cargo test --workspace`
 //! skips them. Run them via:
 //!
-//!     cargo nextest run -p microsandbox --test stdin --run-ignored=only
+//!     cargo nextest run -p microsandbox --test stdin --run-ignored=only --test-threads 1
 
 use microsandbox::{ExecEvent, Sandbox};
 use sha2::{Digest, Sha256};

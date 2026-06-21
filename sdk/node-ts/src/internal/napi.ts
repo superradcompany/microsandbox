@@ -680,6 +680,9 @@ export interface NapiSandboxMetrics {
   readonly diskWriteBytes: number;
   readonly netRxBytes: number;
   readonly netTxBytes: number;
+  readonly upperUsedBytes?: number;
+  readonly upperFreeBytes?: number;
+  readonly upperHostAllocatedBytes?: number;
   readonly uptimeMs: number;
   readonly timestampMs: number;
 }

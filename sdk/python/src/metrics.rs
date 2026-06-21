@@ -35,6 +35,12 @@ pub struct PySandboxMetrics {
     #[pyo3(get)]
     pub net_tx_bytes: u64,
     #[pyo3(get)]
+    pub upper_used_bytes: Option<u64>,
+    #[pyo3(get)]
+    pub upper_free_bytes: Option<u64>,
+    #[pyo3(get)]
+    pub upper_host_allocated_bytes: Option<u64>,
+    #[pyo3(get)]
     pub uptime_ms: u64,
     #[pyo3(get)]
     pub timestamp_ms: f64,
@@ -107,6 +113,9 @@ pub fn convert_metrics(m: &microsandbox::sandbox::SandboxMetrics) -> PySandboxMe
         disk_write_bytes: m.disk_write_bytes,
         net_rx_bytes: m.net_rx_bytes,
         net_tx_bytes: m.net_tx_bytes,
+        upper_used_bytes: m.upper_used_bytes,
+        upper_free_bytes: m.upper_free_bytes,
+        upper_host_allocated_bytes: m.upper_host_allocated_bytes,
         uptime_ms: m.uptime.as_millis() as u64,
         timestamp_ms: m.timestamp.timestamp_millis() as f64,
     }
