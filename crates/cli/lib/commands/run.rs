@@ -1,24 +1,13 @@
 //! `msb run` command — create and start a new sandbox.
 
 use std::io::{IsTerminal, Write};
-use std::pin::pin;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use clap::Args;
-use futures::StreamExt;
-use microsandbox::MicrosandboxError;
-use microsandbox::logs::{self, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
 use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{SandboxOpts, apply_sandbox_opts};
 use crate::ui;
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-const INIT_ENTRYPOINT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -188,7 +177,12 @@ async fn run_new(
     }
 
     // Create sandbox with pull progress — select attached vs detached mode.
-    let (mut progress, task) = builder.detached(args.detach).create_with_pull_progress()?;
+    let builder = builder.detached(args.detach);
+    let (mut progress, task) = if args.detach {
+        builder.create_detached_with_pull_progress()?
+    } else {
+        builder.create_with_pull_progress()?
+    };
 
     let display_label = args
         .snapshot
@@ -212,23 +206,12 @@ async fn run_new(
 
     // Detach mode: just print the name and exit.
     if args.detach {
-        if !sandbox.config().initial_command_consumed_by_init() {
-            warn_detached_command_ignored(&name, &args);
-        }
         sandbox.detach().await;
         println!("{name}");
         return Ok(());
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    if sandbox.config().initial_command_consumed_by_init() {
-        let result = wait_for_init_entrypoint(&sandbox, &exec_opts).await;
-        if !is_named {
-            remove_ephemeral_sandbox(sandbox.name()).await;
-        }
-        return handle_exit(result?);
-    }
-
     let interactive = std::io::stdin().is_terminal();
 
     let (cmd, cmd_args) =
@@ -259,132 +242,6 @@ async fn run_new(
     }
 
     handle_exit(result?)
-}
-
-/// Wait for an image-declared init entrypoint to own the foreground command.
-async fn wait_for_init_entrypoint(sandbox: &Sandbox, opts: &ExecOpts) -> anyhow::Result<i32> {
-    let log_task = tokio::spawn(stream_init_entrypoint_logs(
-        sandbox.name().to_string(),
-        Utc::now(),
-    ));
-    let wait_fut = sandbox.wait();
-    let wait_result = match opts.timeout {
-        Some(duration) => match tokio::time::timeout(duration, wait_fut).await {
-            Ok(result) => result.map_err(anyhow::Error::from),
-            Err(_) => {
-                stop_init_entrypoint_after_timeout(sandbox).await;
-                Err(anyhow::anyhow!("command timed out after {duration:?}"))
-            }
-        },
-        None => wait_fut.await.map_err(anyhow::Error::from),
-    };
-    stop_init_entrypoint_log_task(log_task).await;
-
-    let status = wait_result?;
-
-    Ok(if status.success() {
-        0
-    } else {
-        status.code().unwrap_or(1)
-    })
-}
-
-/// Stream the sandbox log path while an init-owned foreground command runs.
-async fn stream_init_entrypoint_logs(name: String, since: DateTime<Utc>) -> anyhow::Result<()> {
-    let sources = vec![
-        LogSource::Stdout,
-        LogSource::Stderr,
-        LogSource::Output,
-        LogSource::System,
-    ];
-    let snapshot_opts = LogOptions {
-        tail: None,
-        since: Some(since),
-        until: None,
-        sources: sources.clone(),
-    };
-    let snapshot = logs::read_logs_snapshot(&name, &snapshot_opts).await?;
-    for entry in &snapshot.entries {
-        render_init_entrypoint_log(entry)?;
-    }
-
-    let stream_opts = LogStreamOptions {
-        sources,
-        start: LogStreamStart::From(snapshot.cursor),
-        until: None,
-        follow: true,
-    };
-    let mut stream = pin!(logs::log_stream(&name, &stream_opts).await?);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(entry) => render_init_entrypoint_log(&entry)?,
-            Err(MicrosandboxError::MissedRotation {
-                dropped_from_offset,
-            }) => {
-                ui::warn(&format!(
-                    "log follower fell behind at offset {dropped_from_offset}; output is still available with `msb logs --source all {name}`"
-                ));
-                return Ok(());
-            }
-            Err(err) => return Err(anyhow::Error::from(err)),
-        }
-    }
-
-    Ok(())
-}
-
-async fn stop_init_entrypoint_after_timeout(sandbox: &Sandbox) {
-    match Sandbox::get(sandbox.name()).await {
-        Ok(handle) => {
-            if let Err(e) = handle.stop_with_timeout(INIT_ENTRYPOINT_STOP_TIMEOUT).await {
-                ui::warn(&format!("failed to stop sandbox after timeout: {e}"));
-            }
-        }
-        Err(_) => {
-            if let Err(e) = sandbox.stop().await {
-                ui::warn(&format!("failed to stop sandbox after timeout: {e}"));
-            }
-        }
-    }
-}
-
-async fn remove_ephemeral_sandbox(name: &str) {
-    if let Err(e) = Sandbox::remove(name).await {
-        ui::warn(&format!("failed to remove ephemeral sandbox: {e}"));
-    }
-}
-
-async fn stop_init_entrypoint_log_task(mut task: tokio::task::JoinHandle<anyhow::Result<()>>) {
-    let result = tokio::select! {
-        result = &mut task => result,
-        _ = tokio::time::sleep(Duration::from_millis(250)) => {
-            task.abort();
-            task.await
-        }
-    };
-
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => ui::warn(&format!("failed to stream init-owned command logs: {err}")),
-        Err(err) if err.is_cancelled() => {}
-        Err(err) => ui::warn(&format!("init-owned command log task failed: {err}")),
-    }
-}
-
-fn render_init_entrypoint_log(entry: &microsandbox::logs::LogEntry) -> anyhow::Result<()> {
-    match entry.source {
-        LogSource::Stdout | LogSource::Output => {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&entry.data)?;
-            stdout.flush()?;
-        }
-        LogSource::Stderr | LogSource::System => {
-            let mut stderr = std::io::stderr().lock();
-            stderr.write_all(&entry.data)?;
-            stderr.flush()?;
-        }
-    }
-    Ok(())
 }
 
 /// Execute or attach to a command in a sandbox.
@@ -482,14 +339,14 @@ fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
     }
 }
 
-/// Warn when a detached run includes an explicit command.
+/// Warn when a detached run reuses an existing sandbox and includes a command.
 fn warn_detached_command_ignored(name: &str, args: &RunArgs) {
     if args.command.is_empty() {
         return;
     }
 
     ui::warn(&format!(
-        "command after -- is not run in --detach mode; sandbox '{name}' is running in the background (use `msb exec {name} -- ...`)"
+        "command after -- is not applied when reusing existing sandbox '{name}' in --detach mode (use `msb exec {name} -- ...`)"
     ));
 }
 

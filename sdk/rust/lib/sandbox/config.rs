@@ -131,26 +131,13 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
-    /// Initial command requested by a CLI `msb run` invocation.
-    ///
-    /// This is transient CLI intent. It lets `--init auto` decide before VM
-    /// spawn whether an image-declared init entrypoint should receive the OCI
-    /// command as argv.
+    /// Whether `runtime.cmd` should be launched by the sandbox process after boot.
+    #[serde(skip)]
+    pub(crate) startup_command_requested: bool,
+
+    /// One-shot foreground command requested by attached `msb run`.
     #[serde(skip)]
     pub(crate) initial_command: Option<Vec<String>>,
-
-    /// Whether a consumed initial command should become persisted startup argv.
-    ///
-    /// Attached `msb run` commands are one-shot foreground intent; detached
-    /// `msb run -d` commands are startup intent when an image init consumes
-    /// them.
-    #[serde(skip)]
-    pub(crate) initial_command_persistent: bool,
-
-    /// Whether [`initial_command`](Self::initial_command) was consumed by
-    /// the handoff init instead of being executed through agentd.
-    #[serde(skip)]
-    pub(crate) initial_command_consumed_by_init: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -170,45 +157,33 @@ impl SandboxConfig {
         }
     }
 
-    /// Return whether the attached initial command was launched by the
-    /// handoff init rather than through agentd.
-    #[doc(hidden)]
-    pub fn initial_command_consumed_by_init(&self) -> bool {
-        self.initial_command_consumed_by_init
-    }
-
     /// Return the config shape that should be persisted for future starts.
     ///
-    /// Attached `msb run --init auto` may pass a one-off foreground command to
-    /// an image-declared init entrypoint. Detached `msb run -d --init auto`
-    /// uses the same handoff path for startup intent. Only the latter should
-    /// be replayed by `msb start`.
+    /// Attached `msb run` commands are one-shot foreground intent. Detached startup intent stays
+    /// in `runtime.cmd` and is either executed by the host runtime after agentd is ready or, for
+    /// image-declared init entrypoints, passed to the init handoff as the container startup argv.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
-        if config.initial_command_consumed_by_init
-            && !config.initial_command_persistent
-            && let Some(init) = &mut config.spec.init
-        {
-            init.args.clear();
-        }
+        config.startup_command_requested = false;
         config.initial_command = None;
-        config.initial_command_persistent = false;
-        config.initial_command_consumed_by_init = false;
         config
     }
 
-    /// Set one-shot initial command intent for attached `msb run`.
+    /// Clear detached startup intent for attached `msb run`.
     pub(crate) fn set_initial_command(&mut self, command: Vec<String>) {
-        self.initial_command = Some(command);
-        self.initial_command_persistent = false;
-        self.initial_command_consumed_by_init = false;
+        self.initial_command = (!command.is_empty()).then_some(command);
+        self.startup_command_requested = false;
     }
 
     /// Set startup initial command intent for detached `msb run -d`.
     pub(crate) fn set_persistent_initial_command(&mut self, command: Vec<String>) {
-        self.initial_command = Some(command);
-        self.initial_command_persistent = true;
-        self.initial_command_consumed_by_init = false;
+        if !command.is_empty() {
+            self.spec.runtime.cmd = Some(command.clone());
+            self.startup_command_requested = true;
+        } else {
+            self.startup_command_requested = false;
+        }
+        self.initial_command = None;
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -253,12 +228,9 @@ impl SandboxConfig {
     /// Resolve `init = "auto"` from a known init path declared as the
     /// image entrypoint.
     ///
-    /// When an attached `msb run` provided an initial command, and the
-    /// image declares a container-init entrypoint such as `/init`, the
-    /// remaining OCI process vector is passed to the init as argv. The
-    /// image init token is still stripped from the persisted workload
-    /// entrypoint so later agentd exec command resolution never tries
-    /// to direct-exec `/init`.
+    /// Docker starts containers by appending CMD to the image ENTRYPOINT. If that ENTRYPOINT is an
+    /// init binary, the init handoff must own the resolved argv; launching the same command later
+    /// through agentd skips init-established state such as s6's PATH.
     fn resolve_auto_init_from_image_entrypoint(
         &mut self,
         image_entrypoint: Option<&[String]>,
@@ -270,8 +242,6 @@ impl SandboxConfig {
         if init.cmd.as_os_str() != HANDOFF_INIT_AUTO {
             return;
         }
-        let init_args_empty = init.args.is_empty();
-
         let Some(entrypoint) = image_entrypoint else {
             return;
         };
@@ -283,25 +253,14 @@ impl SandboxConfig {
             return;
         };
 
-        let init_argv_tail = if inherited_entrypoint && init_args_empty {
-            self.image_init_entrypoint_argv_tail(init_path, entrypoint)
-        } else {
-            None
-        };
-
-        let init = self
-            .spec
-            .init
-            .as_mut()
-            .expect("init was present at start of auto resolution");
-        init.cmd = PathBuf::from(init_path);
-        init.env = merge_init_env(&self.spec.env, &init.env);
-        if let Some(argv_tail) = init_argv_tail {
-            init.args = argv_tail;
-            self.initial_command_consumed_by_init = true;
-        }
-
         if !inherited_entrypoint {
+            let init = self
+                .spec
+                .init
+                .as_mut()
+                .expect("init was present at start of auto resolution");
+            init.cmd = PathBuf::from(init_path);
+            init.env = merge_init_env(&self.spec.env, &init.env);
             return;
         }
 
@@ -314,28 +273,27 @@ impl SandboxConfig {
         {
             entrypoint.remove(0);
         }
+        let runtime_cmd = self
+            .initial_command
+            .as_deref()
+            .or(self.spec.runtime.cmd.as_deref());
+        let init_args = resolved_container_argv(&entrypoint, runtime_cmd);
+
+        let init = self
+            .spec
+            .init
+            .as_mut()
+            .expect("init was present at start of auto resolution");
+        init.cmd = PathBuf::from(init_path);
+        init.args.extend(init_args);
+        init.env = merge_init_env(&self.spec.env, &init.env);
+
+        // The startup command is now part of the PID 1 argv. Running it again through agentd would
+        // both duplicate execution and bypass any state the image init establishes before execing.
+        if self.startup_command_requested {
+            self.startup_command_requested = false;
+        }
         self.spec.runtime.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
-    }
-
-    fn image_init_entrypoint_argv_tail(
-        &self,
-        init_path: &str,
-        image_entrypoint: &[String],
-    ) -> Option<Vec<String>> {
-        let initial_command = self.initial_command.as_ref()?;
-        if init_path != "/init" && image_entrypoint.len() <= 1 {
-            return None;
-        }
-
-        let mut process = image_entrypoint.to_vec();
-        if initial_command.is_empty() {
-            process.extend(self.spec.runtime.cmd.iter().flatten().cloned());
-        } else {
-            process.extend(initial_command.iter().cloned());
-        }
-
-        let argv_tail: Vec<_> = process.into_iter().skip(1).collect();
-        (!argv_tail.is_empty()).then_some(argv_tail)
     }
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
@@ -401,6 +359,14 @@ fn merge_init_env(base: &[EnvVar], overrides: &[(String, String)]) -> Vec<(Strin
     merge_env_pairs(base, &overrides)
         .into_iter()
         .map(Into::into)
+        .collect()
+}
+
+fn resolved_container_argv(entrypoint_tail: &[String], cmd: Option<&[String]>) -> Vec<String> {
+    entrypoint_tail
+        .iter()
+        .chain(cmd.into_iter().flatten())
+        .cloned()
         .collect()
 }
 
@@ -535,9 +501,8 @@ impl Default for SandboxConfig {
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
+            startup_command_requested: false,
             initial_command: None,
-            initial_command_persistent: false,
-            initial_command_consumed_by_init: false,
         }
     }
 }
@@ -691,7 +656,10 @@ mod tests {
             .as_ref()
             .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/init"));
-        assert!(init.args.is_empty());
+        assert_eq!(
+            init.args,
+            vec!["/opt/hermes/docker/main-wrapper.sh".to_string()]
+        );
         assert_eq!(
             config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
@@ -699,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_image_defaults_passes_initial_command_to_init_entrypoint() {
+    fn test_merge_image_defaults_keeps_attached_command_out_of_init_entrypoint() {
         let image = ImageConfig {
             entrypoint: Some(vec![
                 "/init".to_string(),
@@ -733,10 +701,9 @@ mod tests {
             vec![
                 "/opt/hermes/docker/main-wrapper.sh".to_string(),
                 "gateway".to_string(),
-                "run".to_string()
+                "run".to_string(),
             ]
         );
-        assert!(config.initial_command_consumed_by_init());
         assert_eq!(
             config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
@@ -797,56 +764,20 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_for_persistence_drops_consumed_init_args() {
-        let mut config = SandboxConfig {
-            spec: SandboxSpec {
-                init: Some(HandoffInit {
-                    cmd: PathBuf::from("/init"),
-                    args: vec![
-                        "/opt/hermes/docker/main-wrapper.sh".to_string(),
-                        "gateway".to_string(),
-                        "run".to_string(),
-                    ],
-                    env: vec![("HERMES_DASHBOARD".to_string(), "1".to_string())],
-                }),
-                ..Default::default()
-            },
+    fn test_merge_image_defaults_passes_detached_startup_cmd_to_init_args() {
+        let image = ImageConfig {
+            entrypoint: Some(vec![
+                "/init".to_string(),
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+            ]),
             ..Default::default()
         };
-        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.initial_command_consumed_by_init = true;
 
-        let persisted = config.clone_for_persistence();
-
-        let runtime_init = config.spec.init.as_ref().expect("runtime init");
-        assert_eq!(
-            runtime_init.args,
-            vec![
-                "/opt/hermes/docker/main-wrapper.sh".to_string(),
-                "gateway".to_string(),
-                "run".to_string(),
-            ]
-        );
-        let persisted_init = persisted.spec.init.as_ref().expect("persisted init");
-        assert!(persisted_init.args.is_empty());
-        assert_eq!(
-            persisted_init.env,
-            vec![("HERMES_DASHBOARD".to_string(), "1".to_string())]
-        );
-        assert!(!persisted.initial_command_consumed_by_init());
-    }
-
-    #[test]
-    fn test_clone_for_persistence_keeps_detached_startup_init_args() {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("/init"),
-                    args: vec![
-                        "/opt/hermes/docker/main-wrapper.sh".to_string(),
-                        "gateway".to_string(),
-                        "run".to_string(),
-                    ],
+                    cmd: PathBuf::from("auto"),
+                    args: Vec::new(),
                     env: Vec::new(),
                 }),
                 ..Default::default()
@@ -854,20 +785,65 @@ mod tests {
             ..Default::default()
         };
         config.set_persistent_initial_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.initial_command_consumed_by_init = true;
+        config.merge_image_defaults(&image);
 
-        let persisted = config.clone_for_persistence();
-
-        let persisted_init = persisted.spec.init.as_ref().expect("persisted init");
+        let init = config.spec.init.as_ref().expect("runtime init");
+        assert_eq!(init.cmd, PathBuf::from("/init"));
         assert_eq!(
-            persisted_init.args,
+            init.args,
             vec![
                 "/opt/hermes/docker/main-wrapper.sh".to_string(),
                 "gateway".to_string(),
                 "run".to_string(),
             ]
         );
-        assert!(!persisted.initial_command_consumed_by_init());
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
+        );
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["gateway".to_string(), "run".to_string()])
+        );
+        assert!(!config.startup_command_requested);
+    }
+
+    #[test]
+    fn test_persistent_initial_command_sets_runtime_cmd() {
+        let mut config = SandboxConfig::default();
+
+        config.set_persistent_initial_command(vec![
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            "echo detached".to_string(),
+        ]);
+
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "echo detached".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_empty_persistent_initial_command_keeps_runtime_cmd() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    cmd: Some(vec!["python3".to_string()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.set_persistent_initial_command(Vec::new());
+
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
     }
 
     #[test]
@@ -894,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_image_defaults_passes_image_cmd_to_init_entrypoint() {
+    fn test_merge_image_defaults_passes_image_cmd_to_init_args() {
         let image = ImageConfig {
             entrypoint: Some(vec!["/init".to_string()]),
             cmd: Some(vec!["/app/server".to_string(), "--serve".to_string()]),
@@ -925,12 +901,15 @@ mod tests {
             init.args,
             vec!["/app/server".to_string(), "--serve".to_string()]
         );
-        assert!(config.initial_command_consumed_by_init());
         assert_eq!(config.spec.runtime.entrypoint, None);
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["/app/server".to_string(), "--serve".to_string()])
+        );
     }
 
     #[test]
-    fn test_merge_image_defaults_bare_systemd_does_not_consume_initial_command() {
+    fn test_merge_image_defaults_resolves_bare_systemd_init_entrypoint() {
         let image = ImageConfig {
             entrypoint: Some(vec!["/lib/systemd/systemd".to_string()]),
             ..Default::default()
@@ -956,8 +935,7 @@ mod tests {
             .as_ref()
             .expect("init should remain configured");
         assert_eq!(init.cmd, PathBuf::from("/lib/systemd/systemd"));
-        assert!(init.args.is_empty());
-        assert!(!config.initial_command_consumed_by_init());
+        assert_eq!(init.args, vec!["bash".to_string()]);
         assert_eq!(config.spec.runtime.entrypoint, None);
     }
 
@@ -1000,7 +978,6 @@ mod tests {
             config.spec.runtime.entrypoint,
             Some(vec!["/bin/sh".to_string()])
         );
-        assert!(!config.initial_command_consumed_by_init());
     }
 
     #[test]

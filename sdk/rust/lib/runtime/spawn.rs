@@ -35,8 +35,8 @@ use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
-    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_SECURITY_PROFILE, ENV_TMPFS,
-    ENV_USER,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME,
+    ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
 };
 use microsandbox_types::SandboxLogLevel;
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
@@ -1084,6 +1084,7 @@ fn sandbox_cli_args(
         args.push(OsString::from("--startup-fd"));
         args.push(OsString::from(fd.to_string()));
     }
+    push_startup_command_args(&mut args, config);
 
     let sp = &config.spec.lifecycle;
     if let Some(max_dur) = sp.max_duration_secs {
@@ -1367,6 +1368,11 @@ fn sandbox_cli_args(
             )));
         }
 
+        if let Some(ref workdir) = config.spec.runtime.workdir {
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!("{ENV_HANDOFF_INIT_CWD}={workdir}")));
+        }
+
         if !init.env.is_empty() {
             let env_val = encode_handoff_json(&init.env);
             args.push(OsString::from("--env"));
@@ -1380,6 +1386,53 @@ fn sandbox_cli_args(
     }
 
     args
+}
+
+fn push_startup_command_args(args: &mut Vec<OsString>, config: &SandboxConfig) {
+    let Some((cmd, cmd_args)) = resolve_startup_command(config) else {
+        return;
+    };
+
+    args.push(OsString::from(format!("--startup-cmd={cmd}")));
+    for arg in cmd_args {
+        args.push(OsString::from(format!("--startup-arg={arg}")));
+    }
+    for var in &config.spec.env {
+        args.push(OsString::from(format!(
+            "--startup-env={}={}",
+            var.key, var.value
+        )));
+    }
+    if let Some(workdir) = &config.spec.runtime.workdir {
+        args.push(OsString::from(format!("--startup-cwd={workdir}")));
+    }
+    if let Some(user) = &config.spec.runtime.user {
+        args.push(OsString::from(format!("--startup-user={user}")));
+    }
+}
+
+fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String>)> {
+    if !config.startup_command_requested {
+        return None;
+    }
+
+    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
+        (Some(entrypoint), cmd) if !entrypoint.is_empty() => {
+            let bin = entrypoint[0].clone();
+            let args = entrypoint[1..]
+                .iter()
+                .chain(cmd.iter().flatten())
+                .cloned()
+                .collect();
+            Some((bin, args))
+        }
+        (_, Some(cmd)) if !cmd.is_empty() => {
+            let bin = cmd[0].clone();
+            let args = cmd[1..].to_vec();
+            Some((bin, args))
+        }
+        _ => None,
+    }
 }
 
 fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
@@ -1403,6 +1456,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use microsandbox_types::HandoffInit;
     use serde::de::DeserializeOwned;
     use tempfile::tempdir;
 
@@ -1558,6 +1612,74 @@ mod tests {
                 OsString::from("--startup-fd"),
                 OsString::from(microsandbox_runtime::vm::STARTUP_FD.to_string()),
             ]));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_detached_startup_command() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .entrypoint(["/entrypoint"])
+            .env("APP_ENV", "test")
+            .workdir("/workspace")
+            .user("nobody")
+            .persistent_initial_command(["/bin/sh", "-lc", "echo detached"])
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(rendered.contains(&"--startup-cmd=/entrypoint".to_string()));
+        assert!(rendered.contains(&"--startup-arg=/bin/sh".to_string()));
+        assert!(rendered.contains(&"--startup-arg=-lc".to_string()));
+        assert!(rendered.contains(&"--startup-arg=echo detached".to_string()));
+        assert!(rendered.contains(&"--startup-env=APP_ENV=test".to_string()));
+        assert!(rendered.contains(&"--startup-cwd=/workspace".to_string()));
+        assert!(rendered.contains(&"--startup-user=nobody".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_skip_startup_exec_when_init_owns_argv() {
+        let mut config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .workdir("/opt/hermes")
+            .persistent_initial_command(["gateway", "run"])
+            .build()
+            .await
+            .unwrap();
+        config.spec.init = Some(HandoffInit {
+            cmd: PathBuf::from("/init"),
+            args: vec![
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+                "gateway".to_string(),
+                "run".to_string(),
+            ],
+            env: Vec::new(),
+        });
+        config.startup_command_requested = false;
+
+        let rendered = render_args(&config);
+
+        assert_eq!(
+            find_env(&rendered, "MSB_HANDOFF_INIT").as_deref(),
+            Some("/init")
+        );
+        let argv = find_env(&rendered, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
+        let decoded: Vec<String> = decode_handoff_json(&argv);
+        assert_eq!(
+            decoded,
+            vec![
+                "/opt/hermes/docker/main-wrapper.sh".to_string(),
+                "gateway".to_string(),
+                "run".to_string(),
+            ]
+        );
+        assert_eq!(
+            find_env(&rendered, "MSB_HANDOFF_INIT_CWD").as_deref(),
+            Some("/opt/hermes")
+        );
+        assert!(!rendered.iter().any(|arg| arg.starts_with("--startup-cmd")));
+        assert!(!rendered.iter().any(|arg| arg.starts_with("--startup-arg")));
     }
 
     #[tokio::test]
@@ -2094,7 +2216,26 @@ mod tests {
             Some("/lib/systemd/systemd")
         );
         assert!(find_env(&args, "MSB_HANDOFF_INIT_ARGS").is_none());
+        assert!(find_env(&args, "MSB_HANDOFF_INIT_CWD").is_none());
         assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handoff_init_emits_cwd_when_workdir_set() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init("/init")
+            .workdir("/opt/hermes")
+            .build()
+            .await
+            .unwrap();
+
+        let args = render_args(&config);
+
+        assert_eq!(
+            find_env(&args, "MSB_HANDOFF_INIT_CWD").as_deref(),
+            Some("/opt/hermes")
+        );
     }
 
     #[tokio::test]

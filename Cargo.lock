@@ -3462,6 +3462,7 @@ dependencies = [
  "clap",
  "crossbeam-queue",
  "libc",
+ "microsandbox-agent-client",
  "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-metrics",
