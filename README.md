@@ -118,7 +118,12 @@
 
 ##
 
-> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.<br />
+> **Requirements**:
+>
+> - <img height="14" src="https://api.iconify.design/simple-icons:linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
+> - <img height="14" src="https://api.iconify.design/simple-icons:apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
+> - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: Windows Hypervisor Platform enabled.
+>
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />
