@@ -151,7 +151,7 @@ enum Commands {
     Uninstall(uninstall::UninstallArgs),
 
     /// Check local runtime and host prerequisites.
-    Doctor,
+    Doctor(self_cmd::DoctorArgs),
 
     /// Manage the msb installation.
     #[command(name = "self")]
@@ -622,7 +622,7 @@ fn run_async_command_anyhow(
             Commands::Snapshot(args) => snapshot::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor => self_cmd::run_doctor(),
+            Commands::Doctor(args) => self_cmd::run_doctor(args),
             Commands::Self_(args) => self_cmd::run(args).await,
         }
     })

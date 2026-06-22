@@ -378,6 +378,7 @@ Manage the msb installation itself.
 
 ```bash
 msb doctor                   # Alias for msb self doctor
+msb doctor --fix             # Try supported host setup fixes
 msb self doctor              # Check runtime and host prerequisites
 msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
@@ -394,5 +395,6 @@ msb self uninstall --yes      # Skip confirmation
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
+| `--fix` | `doctor` | Try supported host setup fixes; on Windows this opens an elevated PowerShell prompt to enable Windows Hypervisor Platform without forcing an immediate reboot |
 | `-f`, `--force` | `update` | Re-download even if already on the latest version |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |

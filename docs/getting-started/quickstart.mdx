@@ -48,10 +48,10 @@ icon: "bolt"
     On Windows, enable the Windows Hypervisor Platform optional feature from an elevated PowerShell before starting local sandboxes:
 
     ```powershell
-    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
     ```
 
-    Reboot if Windows asks. `HypervisorPlatform` exposes the WHP API used by libkrun; it is separate from `VirtualMachinePlatform`, which Docker Desktop and WSL2 commonly enable.
+    Reboot after the command completes. `HypervisorPlatform` exposes the WHP API used by libkrun; it is separate from `VirtualMachinePlatform`, which Docker Desktop and WSL2 commonly enable.
   </Step>
 
   <Step title="Run code in a sandbox">

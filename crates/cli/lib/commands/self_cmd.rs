@@ -3,6 +3,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
 
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
@@ -39,7 +41,7 @@ pub struct SelfArgs {
 pub enum SelfCommand {
     /// Check local runtime and host prerequisites.
     #[command(visible_alias = "check")]
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
@@ -55,6 +57,14 @@ pub struct SelfUpdateArgs {
     /// Re-download even if already on the latest version.
     #[arg(short, long)]
     pub force: bool,
+}
+
+/// Arguments for `msb doctor` and `msb self doctor`.
+#[derive(Debug, Args, Clone, Copy)]
+pub struct DoctorArgs {
+    /// Attempt supported host setup fixes.
+    #[arg(long)]
+    pub fix: bool,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -124,14 +134,14 @@ impl UninstallCategory {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
-        SelfCommand::Doctor => run_doctor(),
+        SelfCommand::Doctor(args) => run_doctor(args),
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,
     }
 }
 
 /// Check local runtime files and host prerequisites.
-pub fn run_doctor() -> anyhow::Result<()> {
+pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
     if microsandbox::setup::is_installed() {
         done("Runtime dependencies are installed.");
     } else {
@@ -140,15 +150,75 @@ pub fn run_doctor() -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        match microsandbox::setup::verify_windows_host_prerequisites() {
-            Ok(()) => done("Windows Hypervisor Platform is available."),
-            Err(err) => {
-                return Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into());
-            }
+        check_windows_host_prerequisites(args.fix)?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        if args.fix {
+            ui::warn("No automatic host setup fixes are available for this platform yet.");
         }
     }
 
     done("Host setup is ready.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn check_windows_host_prerequisites(fix: bool) -> anyhow::Result<()> {
+    match microsandbox::setup::verify_windows_host_prerequisites() {
+        Ok(()) => {
+            done("Windows Hypervisor Platform is available.");
+            Ok(())
+        }
+        Err(err) if fix => {
+            ui::warn(&format!(
+                "Windows Hypervisor Platform is unavailable: {}",
+                err.cause()
+            ));
+            enable_windows_hypervisor_platform()?;
+
+            match microsandbox::setup::verify_windows_host_prerequisites() {
+                Ok(()) => {
+                    done("Windows Hypervisor Platform is available.");
+                    Ok(())
+                }
+                Err(err) => {
+                    ui::warn("Windows may require a reboot before WHP is available.");
+                    Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into())
+                }
+            }
+        }
+        Err(err) => Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into()),
+    }
+}
+
+#[cfg(windows)]
+fn enable_windows_hypervisor_platform() -> anyhow::Result<()> {
+    let command = microsandbox::setup::ENABLE_HYPERVISOR_PLATFORM_COMMAND;
+    let script = format!(
+        "$p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','{}') -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        command.replace('\'', "''")
+    );
+
+    info("Opening elevated PowerShell to enable Windows Hypervisor Platform.");
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "failed to enable Windows Hypervisor Platform (status: {status}); rerun without --fix for manual instructions"
+        );
+    }
+
+    done("Windows Hypervisor Platform enable command completed.");
     Ok(())
 }
 

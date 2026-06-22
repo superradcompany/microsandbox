@@ -15,7 +15,7 @@ pub const HYPERVISOR_PLATFORM_FEATURE: &str = "HypervisorPlatform";
 
 /// Elevated PowerShell command that enables the WHP optional feature.
 pub const ENABLE_HYPERVISOR_PLATFORM_COMMAND: &str =
-    "Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All";
+    "Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart";
 
 const WINHV_PLATFORM_DLL: &str = "WinHvPlatform.dll";
 const WHV_GET_CAPABILITY: &[u8] = b"WHvGetCapability\0";

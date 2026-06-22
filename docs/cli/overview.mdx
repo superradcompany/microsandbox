@@ -22,10 +22,10 @@ The installer writes the runtime to `~/.microsandbox/` and creates command links
 On Windows, run the following from an elevated PowerShell if the first sandbox start reports that Windows Hypervisor Platform is unavailable:
 
 ```powershell
-Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
 ```
 
-Reboot if Windows asks. `HypervisorPlatform` is the WHP API surface used by libkrun and is separate from `VirtualMachinePlatform`, which WSL2 and Docker Desktop often enable.
+Reboot after the command completes. `HypervisorPlatform` is the WHP API surface used by libkrun and is separate from `VirtualMachinePlatform`, which WSL2 and Docker Desktop often enable.
 
 ## Quick reference
 
@@ -77,6 +77,7 @@ msb uninstall ubuntu     # Remove installed command
 
 # Self-management
 msb doctor               # Alias for 'msb self doctor'
+msb doctor --fix         # Try supported host setup fixes
 msb self doctor          # Check runtime and host prerequisites
 msb self update          # Update msb to latest
 msb self uninstall       # Remove msb
