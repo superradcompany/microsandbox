@@ -162,6 +162,16 @@ struct InboundRelay {
     close_attempts: u16,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BindExposure {
+    /// Listener is reachable only through host loopback.
+    Loopback,
+    /// Listener is reachable through every host interface in that address family.
+    Wildcard,
+    /// Listener is reachable through one non-loopback host interface address.
+    Interface,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -542,7 +552,7 @@ async fn tcp_listener_task(
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
-    tracing::debug!(bind = %bind_addr, guest_port, "published port listener started");
+    log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -586,7 +596,7 @@ async fn udp_listener_task(
     guest_mac: EthernetAddress,
 ) -> std::io::Result<()> {
     let socket = UdpSocket::bind(bind_addr).await?;
-    tracing::debug!(bind = %bind_addr, guest_port, "published UDP port listener started");
+    log_published_port_listener("UDP", bind_addr, guest_port);
 
     let mut buf = vec![0u8; UDP_RELAY_BUF_SIZE];
     loop {
@@ -638,6 +648,47 @@ async fn udp_listener_task(
     }
 
     Ok(())
+}
+
+fn log_published_port_listener(protocol: &'static str, bind_addr: SocketAddr, guest_port: u16) {
+    match bind_exposure(bind_addr.ip()) {
+        BindExposure::Loopback => {
+            tracing::debug!(
+                protocol,
+                bind = %bind_addr,
+                guest_port,
+                "published port listener started on host loopback",
+            );
+        }
+        BindExposure::Wildcard => {
+            tracing::warn!(
+                protocol,
+                bind = %bind_addr,
+                guest_port,
+                windows_firewall_prompt = cfg!(windows),
+                "published port is listening on all host interfaces",
+            );
+        }
+        BindExposure::Interface => {
+            tracing::warn!(
+                protocol,
+                bind = %bind_addr,
+                guest_port,
+                windows_firewall_prompt = cfg!(windows),
+                "published port is listening on a non-loopback host interface",
+            );
+        }
+    }
+}
+
+fn bind_exposure(ip: IpAddr) -> BindExposure {
+    if ip.is_loopback() {
+        BindExposure::Loopback
+    } else if ip.is_unspecified() {
+        BindExposure::Wildcard
+    } else {
+        BindExposure::Interface
+    }
 }
 
 async fn queue_inbound_connection<T>(
@@ -1049,5 +1100,29 @@ mod tests {
         );
 
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn bind_exposure_keeps_loopback_distinct_from_lan_binds() {
+        assert_eq!(
+            bind_exposure(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            BindExposure::Loopback
+        );
+        assert_eq!(
+            bind_exposure(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            BindExposure::Loopback
+        );
+        assert_eq!(
+            bind_exposure(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            BindExposure::Wildcard
+        );
+        assert_eq!(
+            bind_exposure(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            BindExposure::Wildcard
+        );
+        assert_eq!(
+            bind_exposure(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            BindExposure::Interface
+        );
     }
 }

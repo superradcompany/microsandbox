@@ -2750,6 +2750,16 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn port_with_explicit_loopback_stays_loopback() {
+        let (bind, host, guest, udp) = parse_port_mapping("127.0.0.1:8080:80").unwrap();
+        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn port_with_ipv4_bind() {
         let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
         assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());

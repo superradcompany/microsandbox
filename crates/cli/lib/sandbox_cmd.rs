@@ -363,6 +363,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     use super::*;
@@ -449,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_negative_fd() {
         let err = validate_pipe_fd(
             -1,
@@ -461,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_wrong_fd_number() {
         let err = validate_pipe_fd(
             0,
@@ -473,6 +476,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_regular_file() {
         let file = tempfile::tempfile().unwrap();
         let fd = file.as_raw_fd();
@@ -483,6 +487,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_accepts_pipe() {
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
