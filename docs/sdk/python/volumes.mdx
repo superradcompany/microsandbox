@@ -3,20 +3,77 @@ title: Volumes
 description: Python SDK - Volume API reference
 ---
 
-See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+Create and manage named persistent volumes, and build the mount configs that attach storage to a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-## Volume
+<div className="msb-glance">
 
-Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+  <p className="msb-gl"><span className="msb-dot static"></span>Static · Volume<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#volume-create"><span className="msb-rn">Volume.create()</span><span className="msb-rg">create a named volume</span></a>
+  <a className="msb-row" href="#volume-get"><span className="msb-rn">Volume.get()</span><span className="msb-rg">handle to an existing one</span></a>
+  <a className="msb-row" href="#volume-list"><span className="msb-rn">Volume.list()</span><span className="msb-rg">all volumes</span></a>
+  <a className="msb-row" href="#volume-remove"><span className="msb-rn">Volume.remove()</span><span className="msb-rg">delete a volume</span></a>
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Mount factories · Volume<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#volume-bind"><span className="msb-rn">Volume.bind()</span><span className="msb-rg">mount a host directory</span></a>
+  <a className="msb-row" href="#volume-named"><span className="msb-rn">Volume.named()</span><span className="msb-rg">mount a named volume</span></a>
+  <a className="msb-row" href="#volume-tmpfs"><span className="msb-rn">Volume.tmpfs()</span><span className="msb-rg">in-memory filesystem</span></a>
+  <a className="msb-row" href="#volume-disk"><span className="msb-rn">Volume.disk()</span><span className="msb-rg">mount a disk image</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · Volume<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#volume-name"><span className="msb-rn">volume.name</span><span className="msb-rg">volume name</span></a>
+  <a className="msb-row" href="#volume-path"><span className="msb-rn">volume.path</span><span className="msb-rg">host path</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · VolumeFs<span className="msb-ct">7</span></p>
+  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.read()</span><span className="msb-rg">read bytes</span></a>
+  <a className="msb-row" href="#fs-read_text"><span className="msb-rn">fs.read_text()</span><span className="msb-rg">read UTF-8 text</span></a>
+  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.write()</span><span className="msb-rg">write bytes</span></a>
+  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.list()</span><span className="msb-rg">list a directory</span></a>
+  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.mkdir()</span><span className="msb-rg">create a directory</span></a>
+  <a className="msb-row" href="#fs-remove_file"><span className="msb-rn">fs.remove_file()</span><span className="msb-rg">remove a file</span></a>
+  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.exists()</span><span className="msb-rg">check a path exists</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
+    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
+    <a className="msb-typepill" href="#mountconfig">MountConfig</a>
+    <a className="msb-typepill" href="#mountkind">MountKind</a>
+    <a className="msb-typepill" href="#diskimageformat">DiskImageFormat</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```python
+from microsandbox import Sandbox, Volume
+
+# 1. create a persistent named volume
+await Volume.create("pip-cache", quota_mib=2048)
+
+# 2. mount it into a sandbox via a mount factory
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={"/root/.cache/pip": Volume.named("pip-cache")},
+)
+
+# 3. inspect or edit the volume from the host, no sandbox required
+handle = await Volume.get("pip-cache")
+print(handle.used_bytes)
+```
 
 ## Static methods
 
+Static methods on `Volume` that manage named persistent volumes. Volumes live independently of any sandbox, stored by default under `~/.microsandbox/volumes/<name>/`.
+
 ---
 
-#### Volume.create()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def Volume.create(
+async def create(
     name: str,
     *,
     kind: str = "dir",
@@ -26,224 +83,340 @@ async def Volume.create(
 ) -> Volume
 ```
 
-Create a new named volume.
+Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volume is a backing disk image that requires `size_mib`.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Volume name (required) |
-| kind | `str` | Volume kind: `"dir"` or `"disk"` |
-| size_mib | `int \| None` | Disk capacity in MiB; required with `kind="disk"` |
-| quota_mib | `int \| None` | Recorded quota metadata for directory volumes |
-| labels | `dict[str, str] \| None` | Metadata labels |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>kind</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Volume kind: <code>"dir"</code> (default) or <code>"disk"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Disk capacity in MiB; required with <code>kind="disk"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>quota_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Quota in MiB recorded for directory volumes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
+    <div className="msb-param-desc">Metadata labels.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `Volume` | Created volume with `name` and `path` properties |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-properties">Volume</a></div>
+    <div className="msb-param-desc">Created volume, exposing <code>name</code> and <code>path</code>.</div>
+  </div>
+</div>
 
----
-
-#### Volume.get()
+<p className="msb-label">Example</p>
 
 ```python
-async def Volume.get(name: str) -> VolumeHandle
+await Volume.create("pip-cache", quota_mib=2048)
+await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
 ```
 
-Get a handle to an existing named volume.
+---
 
-**Parameters**
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Volume name |
+```python
+async def get(name: str) -> VolumeHandle
+```
 
-**Returns**
+Get a lightweight handle to an existing named volume, with its metadata and a host-side filesystem handle.
 
-| Type | Description |
-|------|-------------|
-| [`VolumeHandle`](#volumehandle) | Volume handle |
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">VolumeHandle</a></div>
+    <div className="msb-param-desc">Handle with metadata and a filesystem accessor.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+handle = await Volume.get("pip-cache")
+print(handle.kind, handle.used_bytes)
+```
 
 ---
 
-#### Volume.list()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def Volume.list() -> list[VolumeHandle]
+async def list() -> list[VolumeHandle]
 ```
 
 List all named volumes.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `list[`[`VolumeHandle`](#volumehandle)`]` | All volumes |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">list[VolumeHandle]</a></div>
+    <div className="msb-param-desc">All volume handles.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+for v in await Volume.list():
+    print(v.name, v.used_bytes)
+```
 
 ---
 
-#### Volume.remove()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def Volume.remove(name: str) -> None
+async def remove(name: str) -> None
 ```
 
 Delete a named volume and its contents. Fails if the volume is currently mounted.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Volume name |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
 
----
-
-## Volume instance properties
-
-| Property | Type | Description |
-|----------|------|-------------|
-| name | `str` | Volume name |
-| path | `str` | Host path to the volume directory |
-
----
-
-## Mount config factories
-
-Static factory methods on `Volume` for creating mount configurations used in sandbox volume config.
-
----
-
-#### Volume.bind()
+<p className="msb-label">Example</p>
 
 ```python
-def Volume.bind(
+await Volume.remove("pip-cache")
+```
+
+---
+
+## Mount factories
+
+Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). Pass the result as a value in the `volumes` dict when creating a sandbox, keyed by the guest mount point.
+
+---
+
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">bind()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
+
+```python
+def bind(
     path: str,
     *,
     readonly: bool = False,
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
-) -> dict
+) -> MountConfig
 ```
 
 Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Directory path on the host |
-| readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
-| noexec | `bool` | Prevent direct execution from the mount |
-| nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| nodev | `bool` | Ignore device files on the mount |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Directory path on the host.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>readonly</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>noexec</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Prevent direct execution from the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nosuid</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore setuid and setgid privilege elevation from files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `dict` | Mount configuration dictionary |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#mountconfig">MountConfig</a></div>
+    <div className="msb-param-desc">Mount configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create(
+    "build",
+    image="python",
+    volumes={"/src": Volume.bind("/home/me/project", readonly=True)},
+)
+```
 
 ---
 
-#### Volume.named()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
-def Volume.named(
+def named(
     name: str,
     *,
-    mode: str | None = None,
-    kind: str | None = None,
-    size_mib: int | None = None,
-    quota_mib: int | None = None,
     readonly: bool = False,
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
-) -> dict
+) -> MountConfig
 ```
 
-Mount a named volume. By default, the volume must already exist (create it with [`Volume.create()`](#volumecreate)). Pass `mode="create"` to create the volume and fail if it already exists, or `mode="ensure-exists"` to create it if missing and reuse it if compatible.
+Mount an existing named volume. The volume must already exist; create it first with [`Volume.create()`](#volume-create).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>readonly</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>noexec</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Prevent direct execution from the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nosuid</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore setuid and setgid privilege elevation from files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#mountconfig">MountConfig</a></div>
+    <div className="msb-param-desc">Mount configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
 
 ```python
 sb = await Sandbox.create(
     "worker",
     image="python",
     volumes={
-        "/cache": Volume.named("pip-cache", mode="ensure-exists"),
-        "/var/lib/docker": Volume.named(
-            "docker-data",
-            mode="ensure-exists",
-            kind="disk",
-            size_mib=20 * 1024,
-        ),
+        "/root/.cache/pip": Volume.named("pip-cache"),
+        "/etc/config": Volume.named("shared-config", readonly=True),
     },
 )
 ```
 
-The ensure-exists mode validates existing volume metadata. It errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Volume name |
-| mode | `str \| None` | Named volume behavior: `"existing"` (default), `"create"`, or `"ensure-exists"` |
-| kind | `str \| None` | Storage kind for create or ensure-exists: `"dir"` (default) or `"disk"` |
-| size_mib | `int \| None` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
-| quota_mib | `int \| None` | Directory volume quota in MiB |
-| readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
-| noexec | `bool` | Prevent direct execution from the mount |
-| nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| nodev | `bool` | Ignore device files on the mount |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `dict` | Mount configuration dictionary |
-
 ---
 
-#### Volume.tmpfs()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">tmpfs()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
-def Volume.tmpfs(
+def tmpfs(
     *,
     size_mib: int | None = None,
     readonly: bool = False,
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
-) -> dict
+) -> MountConfig
 ```
 
 Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| size_mib | `int \| None` | Maximum size in MiB |
-| readonly | `bool` | Mount as read-only |
-| noexec | `bool` | Prevent direct execution from the mount |
-| nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| nodev | `bool` | Ignore device files on the mount |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Maximum size in MiB.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>readonly</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Mount as read-only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>noexec</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Prevent direct execution from the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nosuid</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore setuid and setgid privilege elevation from files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `dict` | Mount configuration dictionary |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#mountconfig">MountConfig</a></div>
+    <div className="msb-param-desc">Mount configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create(
+    "scratch",
+    image="python",
+    volumes={"/tmp/work": Volume.tmpfs(size_mib=256)},
+)
+```
 
 ---
 
-#### Volume.disk()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
-def Volume.disk(
+def disk(
     path: str,
     *,
     format: str | None = None,
@@ -252,34 +425,302 @@ def Volume.disk(
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
-) -> dict
+) -> MountConfig
 ```
 
-Mount a host disk image as a virtio-blk device. `format` may be `"raw"`, `"qcow2"`, or `"vmdk"`; when omitted it defaults from the file extension. `fstype` is the inner filesystem type such as `"ext4"`; when omitted agentd auto-detects.
+Mount a host disk image as a virtio-blk device. `format` is the disk image format (`"qcow2"`, `"raw"`, or `"vmdk"`); when omitted it is inferred from the file extension. `fstype` (e.g. `"ext4"`) is the inner filesystem agentd mounts; when omitted, agentd probes `/proc/filesystems` for a type that mounts cleanly.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Host path to the disk image |
-| format | `str \| None` | Disk image format hint |
-| fstype | `str \| None` | Inner filesystem type |
-| readonly | `bool` | Mount as read-only |
-| noexec | `bool` | Prevent direct execution from the mount |
-| nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| nodev | `bool` | Ignore device files on the mount |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Host path to the disk image.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>format</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Disk image format hint. See <a href="#diskimageformat">DiskImageFormat</a>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>fstype</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Inner filesystem type.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>readonly</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Mount as read-only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>noexec</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Prevent direct execution from the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nosuid</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore setuid and setgid privilege elevation from files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `dict` | Mount configuration dictionary |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#mountconfig">MountConfig</a></div>
+    <div className="msb-param-desc">Mount configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create(
+    "db",
+    image="postgres",
+    volumes={"/var/lib/postgresql": Volume.disk("/data/pg.qcow2", fstype="ext4")},
+)
+```
 
 ---
 
-## VolumeHandle
+## Instance properties
 
-Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and [`Volume.list()`](#volumelist).
+Read-only properties on a [`Volume`](#volume-create) returned by [`Volume.create()`](#volume-create).
+
+---
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
+
+```python
+name: str
+```
+
+Volume name.
+
+---
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
+
+```python
+path: str
+```
+
+Host path to the volume's directory.
+
+---
+
+## VolumeFs methods
+
+Host-side filesystem operations on a named volume, obtained via the `fs` property on a [`VolumeHandle`](#volumehandle). These run directly on the host filesystem; no running sandbox is required. All paths are relative to the volume root.
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def read(path: str) -> bytes
+```
+
+Read the entire contents of a file as raw bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">File contents as raw bytes.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+handle = await Volume.get("pip-cache")
+data = await handle.fs.read("index.json")
+```
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def read_text(path: str) -> str
+```
+
+Read the entire contents of a file and decode it as UTF-8.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">File contents as a string.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def write(path: str, data: bytes) -> None
+```
+
+Write content to a file, creating it if it doesn't exist and overwriting if it does.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">File content.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+handle = await Volume.get("pip-cache")
+await handle.fs.write("seed.txt", b"hello")
+```
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def list(path: str) -> list[FsEntry]
+```
+
+List the entries in a directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem#fsentry">list[FsEntry]</a></div>
+    <div className="msb-param-desc">Directory entries.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def mkdir(path: str) -> None
+```
+
+Create a directory and all parent directories.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">remove_file()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def remove_file(path: str) -> None
+```
+
+Remove a file.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def exists(path: str) -> bool
+```
+
+Check whether a path exists within the volume.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>True</code> if the path exists.</div>
+  </div>
+</div>
+
+---
+
+## Types
+
+### VolumeHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a>, <a href="#volume-list">Volume.list()</a></p>
+
+A lightweight handle to a named volume, with its database metadata and a host-side filesystem accessor.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
@@ -295,187 +736,76 @@ Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and
 | fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
 | remove() | *(async)* `None` | Delete this volume |
 
----
+### VolumeFs
 
-## VolumeFs
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-Host-side filesystem operations on a named volume. Obtained via the `fs` property on [`VolumeHandle`](#volumehandle). These operations run directly on the host filesystem - no running sandbox is required.
+<p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
 
----
+Host-side filesystem operations on a named volume. No running sandbox is required. See the [VolumeFs methods](#volumefs-methods) above for the full API.
 
-#### read()
-
-```python
-async def read(path: str) -> bytes
-```
-
-Read the entire contents of a file as raw bytes.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `bytes` | File contents as raw bytes |
-
----
-
-#### read_text()
-
-```python
-async def read_text(path: str) -> str
-```
-
-Read the entire contents of a file and decode as UTF-8.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `str` | File contents as a string |
-
----
-
-#### write()
-
-```python
-async def write(path: str, data: bytes) -> None
-```
-
-Write content to a file, creating it if it doesn't exist and overwriting if it does.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-| data | `bytes` | File content |
-
----
-
-#### list()
-
-```python
-async def list(path: str) -> list[FsEntry]
-```
-
-List the entries in a directory.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `list[`[`FsEntry`](/sdk/python/filesystem#fsentry)`]` | Directory entries |
-
----
-
-#### mkdir()
-
-```python
-async def mkdir(path: str) -> None
-```
-
-Create a directory and all parent directories.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
----
-
-#### remove_file()
-
-```python
-async def remove_file(path: str) -> None
-```
-
-Remove a file.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
----
-
-#### exists()
-
-```python
-async def exists(path: str) -> bool
-```
-
-Check whether a path exists within the volume.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Path relative to the volume root |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `bool` | `True` if the path exists |
-
----
-
-## Types
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| [read](#fs-read) | `read(path) -> bytes` | Read a file as raw bytes |
+| [read_text](#fs-read_text) | `read_text(path) -> str` | Read a file as UTF-8 text |
+| [write](#fs-write) | `write(path, data) -> None` | Write bytes to a file |
+| [list](#fs-list) | `list(path) -> list[FsEntry]` | List a directory |
+| [mkdir](#fs-mkdir) | `mkdir(path) -> None` | Create a directory |
+| [remove_file](#fs-remove_file) | `remove_file(path) -> None` | Remove a file |
+| [exists](#fs-exists) | `exists(path) -> bool` | Check a path exists |
 
 ### MountConfig
 
-Frozen dataclass representing a mount configuration.
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
-```python
-MountConfig(
-    kind: MountKind,
-    bind: str | None = None,
-    named: str | None = None,
-    size_mib: int | None = None,
-    readonly: bool = False,
-    noexec: bool = False,
-    nosuid: bool = False,
-    nodev: bool = False,
-)
-```
+<p className="msb-backref">Returned by <a href="#volume-bind">Volume.bind()</a>, <a href="#volume-named">Volume.named()</a>, <a href="#volume-tmpfs">Volume.tmpfs()</a>, <a href="#volume-disk">Volume.disk()</a></p>
+
+Frozen dataclass representing a mount configuration. Build one with a [mount factory](#mount-factories) and pass it as a value in the sandbox `volumes` dict. `stat_virtualization` and `host_permissions` apply only to virtiofs-backed mounts (`BIND` and `NAMED`); setting either on a `TMPFS` or `DISK` mount raises `ValueError`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | kind | [`MountKind`](#mountkind) | - | Type of mount (required) |
 | bind | `str \| None` | `None` | Host path for bind mounts |
 | named | `str \| None` | `None` | Volume name for named mounts |
-| size_mib | `int \| None` | `None` | Size limit for tmpfs mounts |
+| named_mode | `"existing" \| "create" \| "ensure-exists" \| None` | `None` | Named-volume creation behavior |
+| named_kind | `"dir" \| "directory" \| "disk" \| None` | `None` | Storage kind for created named volumes |
+| quota_mib | `int \| None` | `None` | Quota in MiB for directory named volumes |
+| size_mib | `int \| None` | `None` | Size limit for tmpfs, or capacity for disk named volumes |
 | readonly | `bool` | `False` | Whether the mount is read-only |
 | noexec | `bool` | `False` | Whether direct execution from the mount is disabled |
-| nosuid | `bool` | `False` | Whether setuid/setgid privilege elevation from files on the mount is ignored |
+| nosuid | `bool` | `False` | Whether setuid/setgid privilege elevation is ignored |
 | nodev | `bool` | `False` | Whether device files on the mount are ignored |
+| disk | `str \| None` | `None` | Host path to a disk image for disk mounts |
+| format | [`DiskImageFormat`](#diskimageformat)` \| str \| None` | `None` | Disk image format for disk mounts |
+| fstype | `str \| None` | `None` | Inner filesystem type for disk mounts |
+| stat_virtualization | `StatVirtualization \| str \| None` | `None` | Per-mount stat-virtualization policy (virtiofs-backed only) |
+| host_permissions | `HostPermissions \| str \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
 
 ### MountKind
 
-String enum representing the type of mount.
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#mountconfig">MountConfig</a></p>
+
+String enum (`StrEnum`) for the type of mount.
 
 | Value | Description |
 |-------|-------------|
 | `"bind"` | Host bind mount |
 | `"named"` | Named volume mount |
 | `"tmpfs"` | In-memory filesystem |
+| `"disk"` | Host disk image mount |
+
+### DiskImageFormat
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#volume-disk">Volume.disk()</a>, <a href="#mountconfig">MountConfig</a></p>
+
+String enum (`StrEnum`) for the format of a backing disk image.
+
+| Value | Description |
+|-------|-------------|
+| `"qcow2"` | QEMU copy-on-write v2 image |
+| `"raw"` | Raw disk image |
+| `"vmdk"` | VMware disk image |

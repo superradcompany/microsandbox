@@ -3,34 +3,104 @@ title: SSH
 description: Python SDK - SSH API reference
 ---
 
-See [SSH](/sandboxes/ssh) for usage flows.
+Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable server endpoint that serves connections over stdin/stdout. See [SSH](/sandboxes/ssh) for usage flows.
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Sandbox<span className="msb-ct">1</span></p>
+  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH namespace for this sandbox</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SandboxSshOps<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#ssh-open_client"><span className="msb-rn">ssh.open_client()</span><span className="msb-rg">open a client</span></a>
+  <a className="msb-row" href="#ssh-prepare_server"><span className="msb-rn">ssh.prepare_server()</span><span className="msb-rg">prepare a server endpoint</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SshClient<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#client-exec"><span className="msb-rn">client.exec()</span><span className="msb-rg">run a command</span></a>
+  <a className="msb-row" href="#client-attach"><span className="msb-rn">client.attach()</span><span className="msb-rg">interactive shell</span></a>
+  <a className="msb-row" href="#client-sftp"><span className="msb-rn">client.sftp()</span><span className="msb-rg">open an SFTP session</span></a>
+  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the session</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SshServer<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#server-serve_connection"><span className="msb-rn">server.serve_connection()</span><span className="msb-rg">serve one connection over stdin/stdout</span></a>
+  <a className="msb-row" href="#server-close"><span className="msb-rn">server.close()</span><span className="msb-rg">release the endpoint</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SftpClient<span className="msb-ct">10</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#sftpclient">read()</a>
+    <a className="msb-chip" href="#sftpclient">write()</a>
+    <a className="msb-chip" href="#sftpclient">mkdir()</a>
+    <a className="msb-chip" href="#sftpclient">remove_file()</a>
+    <a className="msb-chip" href="#sftpclient">remove_dir()</a>
+    <a className="msb-chip" href="#sftpclient">rename()</a>
+    <a className="msb-chip" href="#sftpclient">real_path()</a>
+    <a className="msb-chip" href="#sftpclient">read_link()</a>
+    <a className="msb-chip" href="#sftpclient">symlink()</a>
+    <a className="msb-chip" href="#sftpclient">close()</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#sandboxsshops">SandboxSshOps</a>
+    <a className="msb-typepill" href="#sshclient">SshClient</a>
+    <a className="msb-typepill" href="#sshserver">SshServer</a>
+    <a className="msb-typepill" href="#sftpclient">SftpClient</a>
+    <a className="msb-typepill" href="#sshoutput">SshOutput</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```python
+from microsandbox import Sandbox
+
+async with await Sandbox.create("api", image="python") as sb:
+    client = await sb.ssh().open_client()      # 1. open an SSH client
+    out = await client.exec("python -V")        # 2. run a command
+    print(out.stdout_text)
+
+    await client.close()                        # 3. close the session
+```
 
 ## Sandbox
 
 ---
 
-#### ssh()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def ssh() -> SandboxSshOps
 ```
 
-Return the SSH namespace for this sandbox.
+Return the SSH namespace for this sandbox. The namespace holds the SSH client and server helpers; nothing connects until you call [`open_client()`](#ssh-open_client) or [`prepare_server()`](#ssh-prepare_server). This method is synchronous; the helpers it returns are async.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxSshOps`](#sandboxssh) | SSH client and server helpers |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxsshops">SandboxSshOps</a></div>
+    <div className="msb-param-desc">SSH namespace for this sandbox.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+client = await sb.ssh().open_client()
+```
 
 ## SandboxSshOps
 
+SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). SSH is only supported on local sandboxes.
+
 ---
 
-#### connect()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def connect(
+async def open_client(
     *,
     user: str = "root",
     term: str | None = None,
@@ -38,28 +108,48 @@ async def connect(
 ) -> SshClient
 ```
 
-Connect a native in-process SSH client to the sandbox.
+Connect a native in-process SSH client to this sandbox. Generates an ephemeral client and host key pair, stands up an internal server bound to an in-memory stream, and authenticates over public key.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| user | `str` | SSH login user |
-| term | `str \| None` | Terminal name for interactive sessions |
-| sftp | `bool` | Enable or disable SFTP on the internal server |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">SSH login user. Default <code>"root"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>term</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Terminal name for interactive sessions. Defaults to <code>$TERM</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sftp</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Enable or disable SFTP on the internal server. Default <code>True</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshClient`](#sshclient) | Native SSH client session |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshclient">SshClient</a></div>
+    <div className="msb-param-desc">Connected SSH client session.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+client = await sb.ssh().open_client(user="app", term="xterm-256color")
+out = await client.exec("uname -a")
+```
 
 ---
 
-#### server()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def server(
+async def prepare_server(
     *,
     host_key_path: str | os.PathLike[str] | None = None,
     authorized_keys_path: str | os.PathLike[str] | None = None,
@@ -68,51 +158,97 @@ async def server(
 ) -> SshServer
 ```
 
-Prepare a reusable SSH server endpoint.
+Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the host key and resolves authorized keys, falling back to the default authorized-keys file when no path is given. The returned [`SshServer`](#sshserver) serves one connection over this process's stdin/stdout.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| host_key_path | `str \| os.PathLike[str] \| None` | Override the host private key path |
-| authorized_keys_path | `str \| os.PathLike[str] \| None` | Override the authorized-keys path |
-| user | `str \| None` | Override the guest user used for exec requests |
-| sftp | `bool` | Enable or disable SFTP |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_key_path</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
+    <div className="msb-param-desc">Override the host private key path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>authorized_keys_path</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
+    <div className="msb-param-desc">Override the authorized-keys path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Override the guest user used for exec requests.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sftp</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Enable or disable SFTP. Default <code>True</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshServer`](#sshserver) | Server endpoint |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshserver">SshServer</a></div>
+    <div className="msb-param-desc">Reusable SSH server endpoint.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+server = await sb.ssh().prepare_server(
+    authorized_keys_path="/home/me/.ssh/authorized_keys",
+    user="app",
+    sftp=False,
+)
+await server.serve_connection()
+```
 
 ## SshClient
 
+A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
+
 ---
 
-#### exec()
+#### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exec(command: str, *, tty: bool = False) -> SshOutput
 ```
 
-Run an SSH exec request and collect stdout, stderr, and exit status.
+Run an SSH exec request and collect stdout, stderr, and the exit status. The command runs through the sandbox's configured shell. When `tty=True` a PTY is allocated and stderr is folded into stdout.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| command | `str` | Command string sent through SSH |
-| tty | `bool` | Request a PTY for the exec channel |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>command</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Command string sent through SSH.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tty</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Request a PTY for the exec channel. Default <code>False</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshOutput`](#sshoutput) | Captured output and status |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshoutput">SshOutput</a></div>
+    <div className="msb-param-desc">Captured output and exit status.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+out = await client.exec("echo hello")
+print(f"exit {out.status}: {out.stdout_text}")
+```
 
 ---
 
-#### attach()
+#### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach(
@@ -122,93 +258,193 @@ async def attach(
 ) -> int
 ```
 
-Attach the local terminal to an interactive SSH shell.
+Attach the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, and returns when the shell exits or the detach key sequence is typed.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| term | `str \| None` | Terminal name for the shell |
-| detach_keys | `str \| None` | Detach key sequence |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>term</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Terminal name for the shell. Defaults to <code>$TERM</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detach_keys</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Detach key sequence, e.g. <code>"ctrl-p,ctrl-q"</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `int` | Exit code |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+code = await client.attach(term="xterm-256color", detach_keys="ctrl-p,ctrl-q")
+print(f"shell exited with {code}")
+```
 
 ---
 
-#### sftp()
+#### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def sftp() -> SftpClient
 ```
 
-Open an SFTP session over this SSH connection.
+Open an SFTP client session over this SSH connection. Requests the `sftp` subsystem and returns a high-level session for reading, writing, and listing files inside the guest.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SftpClient`](#sftpclient) | SFTP client session |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sftpclient">SftpClient</a></div>
+    <div className="msb-param-desc">SFTP client session.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sftp = await client.sftp()
+await sftp.write("/tmp/hello.txt", b"hi")
+data = await sftp.read("/tmp/hello.txt")
+```
 
 ---
 
-#### close()
+#### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def close() -> None
 ```
 
-Close the native SSH client session.
+Close this native SSH client session. Sends a disconnect and aborts the internal server task.
 
-## SftpClient
+<p className="msb-label">Example</p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| read(path) | `bytes` | Read a file into memory |
-| write(path, data) | `None` | Create or truncate a file |
-| mkdir(path) | `None` | Create a directory |
-| remove_file(path) | `None` | Remove a file |
-| remove_dir(path) | `None` | Remove an empty directory |
-| rename(old_path, new_path) | `None` | Rename a file or directory |
-| real_path(path) | `str` | Resolve a canonical path |
-| read_link(path) | `str` | Read a symlink target |
-| symlink(target, link_path) | `None` | Create a symlink |
-| close() | `None` | Close the SFTP session |
+```python
+await client.close()
+```
 
 ## SshServer
 
+A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server()`](#ssh-prepare_server).
+
 ---
 
-#### serve_connection()
+#### <span className="msb-recv">server.</span><span className="msb-hn">serve_connection()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def serve_connection() -> None
 ```
 
-Serve one SSH transport over stdin/stdout.
+Serve one SSH transport over this process's stdin/stdout. Runs the SSH handshake and session loop to completion, returning when the connection closes. Use this to bridge an SSH connection over the parent process's standard streams.
+
+<p className="msb-label">Example</p>
+
+```python
+server = await sb.ssh().prepare_server()
+await server.serve_connection()
+```
 
 ---
 
-#### close()
+#### <span className="msb-recv">server.</span><span className="msb-hn">close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def close() -> None
 ```
 
-Release the prepared server endpoint.
+Release this prepared server endpoint. This method is synchronous.
+
+<p className="msb-label">Example</p>
+
+```python
+server.close()
+```
 
 ## Types
 
+### SandboxSshOps
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
+
+SSH namespace for a sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`open_client()`](#ssh-open_client) | [`SshClient`](#sshclient) | *(async)* Open a client. |
+| [`prepare_server()`](#ssh-prepare_server) | [`SshServer`](#sshserver) | *(async)* Prepare a server endpoint. |
+
+### SshClient
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#ssh-open_client">ssh.open_client()</a></p>
+
+Native in-process SSH client session.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`exec(command, *, tty=False)`](#client-exec) | [`SshOutput`](#sshoutput) | *(async)* Run a command. |
+| [`attach(*, term=None, detach_keys=None)`](#client-attach) | `int` | *(async)* Interactive shell. |
+| [`sftp()`](#client-sftp) | [`SftpClient`](#sftpclient) | *(async)* Open an SFTP session. |
+| [`close()`](#client-close) | `None` | *(async)* Close the session. |
+
+### SshServer
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#ssh-prepare_server">ssh.prepare_server()</a></p>
+
+Reusable SSH server endpoint for a sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`serve_connection()`](#server-serve_connection) | `None` | *(async)* Serve one connection over stdin/stdout. |
+| [`close()`](#server-close) | `None` | Release the prepared endpoint. |
+
+### SftpClient
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
+
+High-level SFTP client session over an SSH connection. All methods are async.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| read(path) | `bytes` | Read a file into memory. |
+| write(path, data) | `None` | Write a file, creating or truncating it. |
+| mkdir(path) | `None` | Create a directory. |
+| remove_file(path) | `None` | Remove a file. |
+| remove_dir(path) | `None` | Remove an empty directory. |
+| rename(old_path, new_path) | `None` | Rename a file or directory. |
+| real_path(path) | `str` | Resolve a path to its canonical absolute form. |
+| read_link(path) | `str` | Read a symlink target. |
+| symlink(target, link_path) | `None` | Create a symlink. |
+| close() | `None` | Close the SFTP session. |
+
 ### SshOutput
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#client-exec">client.exec()</a></p>
+
+Output from an SSH exec request.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| status | `int` | Exit status code |
-| success | `bool` | `True` if status is `0` |
-| stdout_text | `str` | Captured stdout decoded as UTF-8 |
-| stderr_text | `str` | Captured stderr decoded as UTF-8 |
-| stdout_bytes | `bytes` | Captured stdout bytes |
-| stderr_bytes | `bytes` | Captured stderr bytes |
+| status | `int` | Exit status code. |
+| success | `bool` | Whether the command exited successfully. |
+| stdout_text | `str` | Stdout as UTF-8 text. |
+| stderr_text | `str` | Stderr as UTF-8 text. |
+| stdout_bytes | `bytes` | Stdout as raw bytes. |
+| stderr_bytes | `bytes` | Stderr as raw bytes. |

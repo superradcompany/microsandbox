@@ -3,35 +3,443 @@ title: Snapshots
 description: Go SDK - Snapshot API reference
 ---
 
-Disk-only snapshots of a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
+Disk-only snapshots of a sandbox that is not running. Create artifacts from a stopped sandbox, list and verify them, export to an archive, and import elsewhere. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
+
+<Note>
+  Snapshots are **disk-only** and require a sandbox that is stopped or crashed.
+</Note>
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions · Snapshot<span className="msb-ct">9</span></p>
+  <a className="msb-row" href="#snapshot-create"><span className="msb-rn">Snapshot.Create()</span><span className="msb-rg">snapshot a stopped sandbox</span></a>
+  <a className="msb-row" href="#snapshot-open"><span className="msb-rn">Snapshot.Open()</span><span className="msb-rg">open an artifact by name/path</span></a>
+  <a className="msb-row" href="#snapshot-get"><span className="msb-rn">Snapshot.Get()</span><span className="msb-rg">index handle by name/digest</span></a>
+  <a className="msb-row" href="#snapshot-list"><span className="msb-rn">Snapshot.List()</span><span className="msb-rg">indexed snapshots</span></a>
+  <a className="msb-row" href="#snapshot-listdir"><span className="msb-rn">Snapshot.ListDir()</span><span className="msb-rg">walk a directory</span></a>
+  <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.Remove()</span><span className="msb-rg">delete artifact + index row</span></a>
+  <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.Reindex()</span><span className="msb-rg">rebuild the local index</span></a>
+  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.Export()</span><span className="msb-rg">bundle into an archive</span></a>
+  <a className="msb-row" href="#snapshot-import"><span className="msb-rn">Snapshot.Import()</span><span className="msb-rg">unpack an archive</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SandboxHandle<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#h-snapshot"><span className="msb-rn">h.Snapshot()</span><span className="msb-rg">snapshot to a bare name</span></a>
+  <a className="msb-row" href="#h-snapshotto"><span className="msb-rn">h.SnapshotTo()</span><span className="msb-rg">snapshot to a directory</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SnapshotArtifact<span className="msb-ct">12</span></p>
+  <a className="msb-row" href="#s-verify"><span className="msb-rn">s.Verify()</span><span className="msb-rg">recompute content integrity</span></a>
+  <a className="msb-row" href="#s-path"><span className="msb-rn">s.Path()</span><span className="msb-rg">artifact directory</span></a>
+  <a className="msb-row" href="#s-digest"><span className="msb-rn">s.Digest()</span><span className="msb-rg">manifest digest</span></a>
+  <a className="msb-row" href="#s-sizebytes"><span className="msb-rn">s.SizeBytes()</span><span className="msb-rg">upper-layer size</span></a>
+  <a className="msb-row" href="#s-imageref"><span className="msb-rn">s.ImageRef()</span><span className="msb-rg">source image reference</span></a>
+  <a className="msb-row" href="#s-imagemanifestdigest"><span className="msb-rn">s.ImageManifestDigest()</span><span className="msb-rg">pinned OCI manifest digest</span></a>
+  <a className="msb-row" href="#s-format"><span className="msb-rn">s.Format()</span><span className="msb-rg">raw or qcow2</span></a>
+  <a className="msb-row" href="#s-fstype"><span className="msb-rn">s.Fstype()</span><span className="msb-rg">upper filesystem type</span></a>
+  <a className="msb-row" href="#s-parent"><span className="msb-rn">s.Parent()</span><span className="msb-rg">parent digest, or nil</span></a>
+  <a className="msb-row" href="#s-createdat"><span className="msb-rn">s.CreatedAt()</span><span className="msb-rg">RFC 3339 timestamp</span></a>
+  <a className="msb-row" href="#s-labels"><span className="msb-rn">s.Labels()</span><span className="msb-rg">user labels</span></a>
+  <a className="msb-row" href="#s-sourcesandbox"><span className="msb-rn">s.SourceSandbox()</span><span className="msb-rg">source sandbox name</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SnapshotHandle<span className="msb-ct">10</span></p>
+  <a className="msb-row" href="#h-open"><span className="msb-rn">h.Open()</span><span className="msb-rg">open the artifact</span></a>
+  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.Remove()</span><span className="msb-rg">delete this snapshot</span></a>
+  <a className="msb-row" href="#h-digest"><span className="msb-rn">h.Digest()</span><span className="msb-rg">manifest digest</span></a>
+  <a className="msb-row" href="#h-name"><span className="msb-rn">h.Name()</span><span className="msb-rg">bare-name alias, or nil</span></a>
+  <a className="msb-row" href="#h-parentdigest"><span className="msb-rn">h.ParentDigest()</span><span className="msb-rg">parent digest, or nil</span></a>
+  <a className="msb-row" href="#h-imageref"><span className="msb-rn">h.ImageRef()</span><span className="msb-rg">pinned image reference</span></a>
+  <a className="msb-row" href="#h-format"><span className="msb-rn">h.Format()</span><span className="msb-rg">raw or qcow2</span></a>
+  <a className="msb-row" href="#h-sizebytes"><span className="msb-rn">h.SizeBytes()</span><span className="msb-rg">upper size at index time</span></a>
+  <a className="msb-row" href="#h-path"><span className="msb-rn">h.Path()</span><span className="msb-rg">artifact directory</span></a>
+  <a className="msb-row" href="#h-createdat"><span className="msb-rn">h.CreatedAt()</span><span className="msb-rg">creation time</span></a>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Options<span className="msb-ct">1</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="/sdk/go/sandbox#withsnapshot">WithSnapshot()</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#snapshotartifactstruct">SnapshotArtifact</a>
+    <a className="msb-typepill" href="#snapshothandlestruct">SnapshotHandle</a>
+    <a className="msb-typepill" href="#snapshotcreateoptionsstruct">SnapshotCreateOptions</a>
+    <a className="msb-typepill" href="#snapshotexportoptionsstruct">SnapshotExportOptions</a>
+    <a className="msb-typepill" href="#snapshotverifyreportstruct">SnapshotVerifyReport</a>
+    <a className="msb-typepill" href="#snapshotupperverifystatusstruct">SnapshotUpperVerifyStatus</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
+
+// 1. stop the sandbox; snapshots are disk-only
+_ = sb.Stop(ctx)
+_ = sb.Close()
+
+// 2. snapshot it under a bare name
+snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
+    Name:            "after-pip-install",
+    RecordIntegrity: true,
+})
+if err != nil {
+    return err
+}
+
+// 3. boot a fresh sandbox from the snapshot
+sb2, err := m.CreateSandbox(ctx, "worker",
+    m.WithSnapshot("after-pip-install"),
+)
 ```
 
-<Note>
-  Snapshots are **disk-only** and require a sandbox that is not running.
-</Note>
+## Snapshot functions
 
-## Boot from snapshot
+Package-level helpers for snapshot artifacts. Access them through the exported `Snapshot` value, e.g. `m.Snapshot.Create(ctx, ...)`.
 
-Pass [`WithSnapshot`](#withsnapshot) to [`CreateSandbox`](/sdk/go/sandbox#createsandbox). It is mutually exclusive with [`WithImage`](/sdk/go/sandbox#withimage).
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Create()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithSnapshot("after-pip-install"),
+func (snapshotFactory) Create(ctx context.Context, sourceSandbox string, opts SnapshotCreateOptions) (*SnapshotArtifact, error)
+```
+
+Create a snapshot from a stopped or crashed sandbox. Set exactly one of [`SnapshotCreateOptions.Name`](#snapshotcreateoptionsstruct) (resolved under the default snapshots directory) or [`SnapshotCreateOptions.Path`](#snapshotcreateoptionsstruct) (an explicit artifact directory).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sourceSandbox</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Name of the stopped or crashed sandbox to snapshot.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#snapshotcreateoptionsstruct">SnapshotCreateOptions</a></div>
+    <div className="msb-param-desc">Destination, labels, and integrity options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The created artifact on disk.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
+    Name:            "after-pip-install",
+    Labels:          map[string]string{"stage": "post-deps"},
+    RecordIntegrity: true,
+})
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Open()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error)
+```
+
+Open an existing artifact by bare name or filesystem path. This validates metadata only; call [`s.Verify()`](#s-verify) for content checks.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name (resolved under the default snapshots directory) or artifact directory path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The artifact on disk.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+snap, err := m.Snapshot.Open(ctx, "after-pip-install")
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error)
+```
+
+Look up a lightweight handle in the local index by name, digest, or path.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nameOrDigest</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name, manifest digest, or artifact path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
+    <div className="msb-param-desc">Index-backed handle.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+h, err := m.Snapshot.Get(ctx, "after-pip-install")
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">List()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error)
+```
+
+List indexed snapshots from the local DB cache.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">[]*SnapshotHandle</a></div>
+    <div className="msb-param-desc">All indexed handles.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+handles, err := m.Snapshot.List(ctx)
+for _, h := range handles {
+    fmt.Println(h.Digest(), h.ImageRef())
+}
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">ListDir()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error)
+```
+
+Walk a directory and parse each subdirectory's manifest without touching the index.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dir</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory holding snapshot artifact subdirectories.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">[]*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">One artifact per parsed subdirectory.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error
+```
+
+Remove a snapshot artifact and its index row. Refuses to delete a snapshot with indexed children unless `force` is true.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name or artifact path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Delete even if the snapshot has indexed children.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+err := m.Snapshot.Remove(ctx, "after-pip-install", false)
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Reindex()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error)
+```
+
+Walk `dir` and rebuild the local index from the artifacts it finds.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dir</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory to scan for snapshot artifacts.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Number of artifacts indexed.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
+fmt.Printf("indexed %d snapshots\n", n)
+```
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Export()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Export(ctx context.Context, nameOrPath, outPath string, opts SnapshotExportOptions) error
+```
+
+Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotExportOptions.PlainTar`](#snapshotexportoptionsstruct) to skip compression.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nameOrPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name or artifact path to export.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>outPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination archive path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#snapshotexportoptionsstruct">SnapshotExportOptions</a></div>
+    <div className="msb-param-desc">Whether to include parents, the base image, and compression.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+err := m.Snapshot.Export(ctx, "after-pip-install", "/tmp/snap.tar.zst",
+    m.SnapshotExportOptions{WithParents: true},
 )
 ```
 
 ---
 
-#### WithSnapshot()
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Import()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
-func WithSnapshot(pathOrName string) SandboxOption
+func (snapshotFactory) Import(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
 ```
 
-Boot from a snapshot artifact by bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path.
+Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>archive</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to the snapshot archive.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dest</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination directory, or <code>""</code> for the default snapshots directory.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
+    <div className="msb-param-desc">Handle to the imported snapshot.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
+```
 
 ## SandboxHandle methods
 
@@ -50,7 +458,8 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 
 ---
 
-#### Snapshot()
+#### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
@@ -58,9 +467,38 @@ func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArt
 
 Snapshot this sandbox under a bare name in the default snapshots directory. The sandbox must be stopped or crashed.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name for the artifact.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The created artifact.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+snap, err := h.Snapshot(ctx, "after-pip-install")
+```
+
 ---
 
-#### SnapshotTo()
+#### <span className="msb-recv">h.</span><span className="msb-hn">SnapshotTo()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error)
@@ -68,190 +506,425 @@ func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotA
 
 Snapshot this sandbox to an explicit artifact directory. The sandbox must be stopped or crashed.
 
-## Snapshot
+<p className="msb-label">Parameters</p>
 
-Helpers for snapshot artifact operations. Access via the package-level `Snapshot` value.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination artifact directory.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The created artifact.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+snap, err := h.SnapshotTo(ctx, "/srv/snapshots/baseline")
+```
+
+## SnapshotArtifact methods
+
+An artifact on disk. The accessors below are plain field reads; only [`Verify`](#s-verify) touches the filesystem.
 
 ---
 
-#### Snapshot.Create()
-
-```go
-func (snapshotFactory) Create(
-    ctx context.Context,
-    sourceSandbox string,
-    opts SnapshotCreateOptions,
-) (*SnapshotArtifact, error)
-```
-
-Create a snapshot from a stopped or crashed sandbox. Set exactly one of `SnapshotCreateOptions.Name` or `SnapshotCreateOptions.Path`.
-
-```go
-snap, err := m.Snapshot.Create(ctx, "baseline",
-    m.SnapshotCreateOptions{
-        Name:            "after-pip-install",
-        Labels:          map[string]string{"stage": "post-deps"},
-        RecordIntegrity: true,
-    },
-)
-```
-
----
-
-#### Snapshot.Open()
-
-```go
-func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error)
-```
-
-Open an existing artifact by bare name or path. This validates metadata only; call [`Verify`](#verify) for content checks.
-
----
-
-#### Snapshot.Get()
-
-```go
-func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error)
-```
-
-Look up a handle in the local index by name, digest, or path.
-
----
-
-#### Snapshot.List()
-
-```go
-func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error)
-```
-
-List indexed snapshots from the local DB cache.
-
----
-
-#### Snapshot.ListDir()
-
-```go
-func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error)
-```
-
-Walk a directory and parse each subdirectory's manifest without touching the index.
-
----
-
-#### Snapshot.Remove()
-
-```go
-func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error
-```
-
-Remove a snapshot artifact and its index row. Refuses indexed children unless `force` is true.
-
----
-
-#### Snapshot.Reindex()
-
-```go
-func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error)
-```
-
-Walk `dir` and rebuild the local index. Returns the number of artifacts indexed.
-
----
-
-#### Snapshot.Export()
-
-```go
-func (snapshotFactory) Export(
-    ctx context.Context,
-    nameOrPath string,
-    outPath string,
-    opts SnapshotExportOptions,
-) error
-```
-
-Bundle a snapshot into a `.tar.zst` archive. Set `PlainTar` to skip compression.
-
----
-
-#### Snapshot.Import()
-
-```go
-func (snapshotFactory) Import(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
-```
-
-Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
-
-## SnapshotArtifact
-
-An artifact on disk, returned by `Snapshot.Create`, `Snapshot.Open`, `Snapshot.ListDir`, and `SandboxHandle.Snapshot`.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Path()` | `string` | Artifact directory |
-| `Digest()` | `string` | Canonical manifest digest (`sha256:...`) |
-| `SizeBytes()` | `uint64` | Apparent upper-layer size |
-| `ImageRef()` | `string` | Image reference the snapshot was taken from |
-| `ImageManifestDigest()` | `string` | Pinned OCI manifest digest |
-| `Format()` | `string` | `"raw"` or `"qcow2"` |
-| `Fstype()` | `string` | Filesystem type inside the upper layer |
-| `Parent()` | `*string` | Parent digest, or nil |
-| `CreatedAt()` | `string` | RFC 3339 timestamp |
-| `Labels()` | `map[string]string` | User labels |
-| `SourceSandbox()` | `*string` | Best-effort source sandbox name |
-
----
-
-#### Verify()
+#### <span className="msb-recv">s.</span><span className="msb-hn">Verify()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute recorded content integrity for this snapshot.
+Recompute recorded content integrity for this snapshot. Requires that the artifact was created with [`RecordIntegrity`](#snapshotcreateoptionsstruct) set.
 
-## SnapshotHandle
+<p className="msb-label">Returns</p>
 
-Lightweight handle backed by the local index. Returned by `Snapshot.Get`, `Snapshot.List`, and `Snapshot.Import`.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreportstruct">*SnapshotVerifyReport</a></div>
+    <div className="msb-param-desc">Recomputed digest and upper-layer status.</div>
+  </div>
+</div>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Digest()` | `string` | Manifest digest |
-| `Name()` | `*string` | Bare-name alias, if indexed with one |
-| `ParentDigest()` | `*string` | Parent digest, or nil |
-| `ImageRef()` | `string` | Pinned image reference |
-| `Format()` | `string` | `"raw"` or `"qcow2"` |
-| `SizeBytes()` | `*uint64` | Apparent upper size at index time |
-| `CreatedAt()` | `time.Time` | Snapshot creation time |
-| `Path()` | `string` | Artifact directory |
-| `Open(ctx)` | `(*SnapshotArtifact, error)` | Open the artifact metadata |
-| `Remove(ctx, force)` | `error` | Remove this snapshot |
+<p className="msb-label">Example</p>
+
+```go
+report, err := snap.Verify(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(report.Upper.Digest)
+```
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Path()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Path() string
+```
+
+Artifact directory on disk.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Digest()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Digest() string
+```
+
+Canonical manifest digest (`sha256:...`).
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">SizeBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) SizeBytes() uint64
+```
+
+Apparent upper-layer size in bytes.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ImageRef()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) ImageRef() string
+```
+
+Image reference the snapshot was taken from.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ImageManifestDigest()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) ImageManifestDigest() string
+```
+
+Pinned OCI manifest digest of the base image.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Format()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Format() string
+```
+
+Upper-layer disk format: `"raw"` or `"qcow2"`.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Fstype()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Fstype() string
+```
+
+Filesystem type inside the upper layer.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Parent()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Parent() *string
+```
+
+Parent digest, or `nil` if this snapshot has no parent. Returns a defensive copy.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">CreatedAt()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) CreatedAt() string
+```
+
+RFC 3339 creation timestamp.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Labels()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) Labels() map[string]string
+```
+
+User labels recorded at creation. Returns a defensive copy.
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">SourceSandbox()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *SnapshotArtifact) SourceSandbox() *string
+```
+
+Best-effort source sandbox name, or `nil`. Returns a defensive copy.
+
+## SnapshotHandle methods
+
+A lightweight handle backed by the local index. The accessors below are plain field reads; [`Open`](#h-open) and [`Remove`](#h-remove) take a context.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Open()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error)
+```
+
+Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot-open) on this handle's path.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The opened artifact.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+snap, err := h.Open(ctx)
+```
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error
+```
+
+Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on this handle's digest.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Delete even if the snapshot has indexed children.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+err := h.Remove(ctx, false)
+```
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Digest()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Digest() string
+```
+
+Manifest digest.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Name() *string
+```
+
+Bare-name alias, if the snapshot was indexed with one; otherwise `nil`. Returns a defensive copy.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ParentDigest()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) ParentDigest() *string
+```
+
+Parent digest, or `nil`. Returns a defensive copy.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ImageRef()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) ImageRef() string
+```
+
+Pinned image reference.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Format()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Format() string
+```
+
+Upper-layer disk format: `"raw"` or `"qcow2"`.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">SizeBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) SizeBytes() *uint64
+```
+
+Apparent upper size at index time, or `nil` if unknown. Returns a defensive copy.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Path()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) Path() string
+```
+
+Artifact directory on disk.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *SnapshotHandle) CreatedAt() time.Time
+```
+
+Snapshot creation time, decoded from the index's Unix timestamp.
 
 ## Types
 
-```go
-type SnapshotCreateOptions struct {
-    Name            string
-    Path            string
-    Labels          map[string]string
-    Force           bool
-    RecordIntegrity bool
-}
+### SnapshotArtifact<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
-type SnapshotExportOptions struct {
-    WithParents bool
-    WithImage   bool
-    PlainTar    bool
-}
+<p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-snapshotto">h.SnapshotTo()</a> · <a href="#h-open">h.Open()</a></p>
 
-type SnapshotVerifyReport struct {
-    Digest string
-    Path   string
-    Upper  SnapshotUpperVerifyStatus
-}
+A snapshot artifact on disk. Fields are unexported; read them through the accessor methods below.
 
-type SnapshotUpperVerifyStatus struct {
-    Kind      string
-    Algorithm string
-    Digest    string
-}
-```
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Path()`](#s-path) | `string` | Artifact directory |
+| [`Digest()`](#s-digest) | `string` | Canonical manifest digest (`sha256:...`) |
+| [`SizeBytes()`](#s-sizebytes) | `uint64` | Apparent upper-layer size |
+| [`ImageRef()`](#s-imageref) | `string` | Image reference the snapshot was taken from |
+| [`ImageManifestDigest()`](#s-imagemanifestdigest) | `string` | Pinned OCI manifest digest |
+| [`Format()`](#s-format) | `string` | `"raw"` or `"qcow2"` |
+| [`Fstype()`](#s-fstype) | `string` | Filesystem type inside the upper layer |
+| [`Parent()`](#s-parent) | `*string` | Parent digest, or nil |
+| [`CreatedAt()`](#s-createdat) | `string` | RFC 3339 timestamp |
+| [`Labels()`](#s-labels) | `map[string]string` | User labels |
+| [`SourceSandbox()`](#s-sourcesandbox) | `*string` | Best-effort source sandbox name |
+| [`Verify(ctx)`](#s-verify) | `(*SnapshotVerifyReport, error)` | Recompute content integrity |
+
+### SnapshotHandle<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.Get()</a> · <a href="#snapshot-list">Snapshot.List()</a> · <a href="#snapshot-import">Snapshot.Import()</a></p>
+
+A lightweight handle backed by the local snapshot index. Fields are unexported; read them through the accessor methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Digest()`](#h-digest) | `string` | Manifest digest |
+| [`Name()`](#h-name) | `*string` | Bare-name alias, if indexed with one |
+| [`ParentDigest()`](#h-parentdigest) | `*string` | Parent digest, or nil |
+| [`ImageRef()`](#h-imageref) | `string` | Pinned image reference |
+| [`Format()`](#h-format) | `string` | `"raw"` or `"qcow2"` |
+| [`SizeBytes()`](#h-sizebytes) | `*uint64` | Apparent upper size at index time |
+| [`Path()`](#h-path) | `string` | Artifact directory |
+| [`CreatedAt()`](#h-createdat) | `time.Time` | Snapshot creation time |
+| [`Open(ctx)`](#h-open) | `(*SnapshotArtifact, error)` | Open the artifact metadata |
+| [`Remove(ctx, force)`](#h-remove) | `error` | Remove this snapshot |
+
+### SnapshotCreateOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Accepted by <a href="#snapshot-create">Snapshot.Create()</a></p>
+
+Configures [`Snapshot.Create`](#snapshot-create). Set exactly one of `Name` or `Path`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Name | `string` | Bare name; the artifact is written under the default snapshots directory |
+| Path | `string` | Explicit artifact directory (mutually exclusive with `Name`) |
+| Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
+| Force | `bool` | Overwrite an existing artifact at the destination |
+| RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
+
+### SnapshotExportOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Accepted by <a href="#snapshot-export">Snapshot.Export()</a></p>
+
+Configures [`Snapshot.Export`](#snapshot-export).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| WithParents | `bool` | Include the snapshot's parent chain in the archive |
+| WithImage | `bool` | Include the base OCI image in the archive |
+| PlainTar | `bool` | Write an uncompressed `.tar` instead of `.tar.zst` |
+
+### SnapshotVerifyReport<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Returned by <a href="#s-verify">s.Verify()</a></p>
+
+Result of [`Verify`](#s-verify).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Digest | `string` | Recomputed manifest digest |
+| Path | `string` | Artifact directory that was verified |
+| Upper | [`SnapshotUpperVerifyStatus`](#snapshotupperverifystatusstruct) | Upper-layer integrity status |
+
+### SnapshotUpperVerifyStatus<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Field of <a href="#snapshotverifyreportstruct">SnapshotVerifyReport</a></p>
+
+Upper-layer integrity details inside a [`SnapshotVerifyReport`](#snapshotverifyreportstruct).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Kind | `string` | Integrity record kind |
+| Algorithm | `string` | Hash algorithm used |
+| Digest | `string` | Recomputed upper-layer digest |

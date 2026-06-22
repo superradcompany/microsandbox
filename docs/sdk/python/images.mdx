@@ -3,133 +3,477 @@ title: Images
 description: Python SDK - Image cache API reference
 ---
 
-The Python SDK exposes local OCI image-cache operations through `Image`.
-These APIs inspect and prune images that have already been pulled by sandbox
-creation. `Image` also remains the namespace for explicit rootfs source
-configuration such as `Image.oci(...)`, `Image.bind(...)`, and `Image.disk(...)`.
+`Image` is the static namespace for two related things: configuring an explicit rootfs source for a sandbox (`Image.oci`, `Image.bind`, `Image.disk`), and managing the local OCI image cache that sandbox creation pulls into (`get`, `list`, `inspect`, `remove`, `prune`). Cache operations require a local backend. See [Sandbox](/sdk/python/sandbox) for the `image=` and `pull_policy=` creation kwargs.
 
 ```python
 from microsandbox import Image
 ```
 
-## Image
+<div className="msb-glance">
 
----
+  <p className="msb-gl"><span className="msb-dot static"></span>Source factory<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#image-oci"><span className="msb-rn">Image.oci()</span><span className="msb-rg">OCI image rootfs source</span></a>
+  <a className="msb-row" href="#image-bind"><span className="msb-rn">Image.bind()</span><span className="msb-rg">bind a host directory</span></a>
+  <a className="msb-row" href="#image-disk"><span className="msb-rn">Image.disk()</span><span className="msb-rg">boot from a disk image</span></a>
 
-#### Image.get()
+  <p className="msb-gl"><span className="msb-dot static"></span>Cache management<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#image-get"><span className="msb-rn">Image.get()</span><span className="msb-rg">one cached image</span></a>
+  <a className="msb-row" href="#image-list"><span className="msb-rn">Image.list()</span><span className="msb-rg">all cached images</span></a>
+  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.inspect()</span><span className="msb-rg">config + layer detail</span></a>
+  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.remove()</span><span className="msb-rg">delete a cached image</span></a>
+  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.prune()</span><span className="msb-rg">reclaim unused data</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#imagesource">ImageSource</a>
+    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
+    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
+    <a className="msb-typepill" href="#imageconfigdetail">ImageConfigDetail</a>
+    <a className="msb-typepill" href="#imagelayerdetail">ImageLayerDetail</a>
+    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+    <a className="msb-typepill" href="#diskimageformat">DiskImageFormat</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python
-async def Image.get(reference: str) -> ImageHandle
-```
+from microsandbox import Image, Sandbox
 
-Fetch one cached image by reference. Raises `ImageNotFoundError` when the image
-is not present in the local cache.
+# Pull happens implicitly on creation
+async with await Sandbox.create("api", image="python:3.12") as sb:
+    await sb.exec("python", ["-V"])
 
----
-
-#### Image.list()
-
-```python
-async def Image.list() -> list[ImageHandle]
-```
-
-Return every cached image, ordered newest first.
-
-```python
-images = await Image.list()
-for image in images:
+# Later, inspect and prune the local cache
+for image in await Image.list():
     print(image.reference, image.layer_count)
+
+report = await Image.prune()
+print(f"reclaimed {report.bytes_reclaimed} bytes")
+```
+
+## Source factory
+
+These static methods return an [`ImageSource`](#imagesource) you can pass as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A plain string also works (`image="python:3.12"`); use the factory when you need OCI-only options like the writable upper size, or to be explicit about a bind or disk source.
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
+
+```python
+@staticmethod
+def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource
+```
+
+Create an OCI image rootfs source. Use `upper_size_mib` to size the writable overlay upper layer; otherwise the default applies.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">OCI image reference, e.g. <code>"python:3.12"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>upper_size_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Writable overlay upper size in MiB. <code>None</code> keeps the default.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagesource">ImageSource</a></div>
+    <div className="msb-param-desc">Rootfs source for <code>image=</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create(
+    "api",
+    image=Image.oci("python:3.12", upper_size_mib=8192),
+)
 ```
 
 ---
 
-#### Image.inspect()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">bind()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
-async def Image.inspect(reference: str) -> ImageDetail
+@staticmethod
+def bind(path: str) -> ImageSource
 ```
 
-Return handle metadata plus parsed OCI config and layer details.
+Create a rootfs source that binds a host directory as the guest root filesystem.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Host directory to use as the rootfs.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagesource">ImageSource</a></div>
+    <div className="msb-param-desc">Rootfs source for <code>image=</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
+```
 
 ---
 
-#### Image.remove()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">disk()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
-async def Image.remove(reference: str, *, force: bool = False) -> None
+@staticmethod
+def disk(path: str, *, fstype: str | None = None) -> ImageSource
 ```
 
-Delete a cached image. When `force` is false, sandboxes still referencing the
-image raise `ImageInUseError`.
+Create a rootfs source backed by a disk image. The format is inferred from the file extension. Pass `fstype` when the filesystem type cannot be auto-detected.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path to the disk image (e.g. <code>.qcow2</code>, <code>.raw</code>, <code>.vmdk</code>).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>fstype</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Filesystem type, e.g. <code>"ext4"</code>. <code>None</code> auto-detects.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagesource">ImageSource</a></div>
+    <div className="msb-param-desc">Rootfs source for <code>image=</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+sb = await Sandbox.create(
+    "api",
+    image=Image.disk("/data/root.qcow2", fstype="ext4"),
+)
+```
+
+## Cache management
+
+These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
 
 ---
 
-#### Image.prune()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def Image.prune() -> ImagePruneReport
+@staticmethod
+async def get(reference: str) -> ImageHandle
 ```
 
-Remove cached image data that is not used by any sandbox or indexed snapshot.
-The returned report includes the count of removed refs, manifests, layers,
-fsmeta files, VMDK files, and any measured bytes reclaimed.
+Fetch one cached image by reference. Raises [`ImageNotFoundError`](#errors) when the image is not present in the local cache.
 
-## ImageHandle
+<p className="msb-label">Parameters</p>
 
-Returned by `Image.get()` and `Image.list()`.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Image reference to look up.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">ImageHandle</a></div>
+    <div className="msb-param-desc">Handle to the cached image.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+handle = await Image.get("python:3.12")
+print(handle.reference, handle.layer_count)
+```
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def list() -> list[ImageHandle]
+```
+
+Return every cached image.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">list[ImageHandle]</a></div>
+    <div className="msb-param-desc">All cached image handles.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+for image in await Image.list():
+    print(image.reference, image.size_bytes)
+```
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">inspect()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def inspect(reference: str) -> ImageDetail
+```
+
+Return handle metadata plus the parsed OCI config and per-layer detail.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Image reference to inspect.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagedetail">ImageDetail</a></div>
+    <div className="msb-param-desc">Handle, OCI config, and layers.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+detail = await Image.inspect("python:3.12")
+print(detail.handle.reference)
+for layer in detail.layers:
+    print(layer.position, layer.diff_id)
+```
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def remove(reference: str, *, force: bool = False) -> None
+```
+
+Delete a cached image. When `force` is `False`, an image still referenced by one or more sandboxes raises [`ImageInUseError`](#errors); pass `force=True` to remove it anyway.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Image reference to delete.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Remove even if still referenced. Default <code>False</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+await Image.remove("python:3.12", force=True)
+```
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">prune()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def prune() -> ImagePruneReport
+```
+
+Remove cached image data that is not used by any sandbox or indexed snapshot. The returned report counts the removed refs, manifests, layers, fsmeta files, and VMDK files, plus any measured bytes reclaimed.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imageprunereport">ImagePruneReport</a></div>
+    <div className="msb-param-desc">Counts of removed data and bytes reclaimed.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+report = await Image.prune()
+print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
+```
+
+## Types
+
+### ImageSource
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-oci">oci()</a> · <a href="#image-bind">bind()</a> · <a href="#image-disk">disk()</a></p>
+
+Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Image.bind()`](#image-bind), or [`Image.disk()`](#image-disk), then pass it as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A frozen dataclass; treat its fields as opaque.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_type` | `str` | Source kind: `"oci"`, `"bind"`, or `"disk"` |
+| `_path` | `str \| None` | Host path for `bind` / `disk` sources |
+| `_reference` | `str \| None` | OCI reference for `oci` sources |
+| `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
+| `_fstype` | `str \| None` | Filesystem type for `disk` sources |
+| `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
+
+### ImageHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+
+A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get) and [`Image.list()`](#image-list). Properties are read-only attributes; the two methods are async.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | `reference` | `str` | Image reference |
+| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
 | `manifest_digest` | `str \| None` | Content-addressable manifest digest |
 | `architecture` | `str \| None` | Resolved architecture |
 | `os` | `str \| None` | Resolved operating system |
 | `layer_count` | `int` | Number of layers |
-| `size_bytes` | `int \| None` | Total size, or `None` when unknown |
-| `created_at` | `float \| None` | First-pulled time as milliseconds since epoch |
-| `last_used_at` | `float \| None` | Last referenced time as milliseconds since epoch |
-| `await remove(force=False)` | `None` | Delete this image |
-| `await inspect()` | `ImageDetail` | Fetch full detail for this image |
+| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
+| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
+| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
+| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
 
-## ImageDetail
+### ImageDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a> · <a href="#imagehandle">ImageHandle.inspect()</a></p>
+
+Full detail for a cached image: the core handle, the parsed OCI config block, and per-layer metadata.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `handle` | `ImageHandle` | Core cached image metadata |
-| `config` | `ImageConfigDetail \| None` | Parsed OCI config block |
-| `layers` | `list[ImageLayerDetail]` | Layers in bottom-to-top order |
+| `handle` | [`ImageHandle`](#imagehandle) | Core cached image metadata |
+| `config` | [`ImageConfigDetail`](#imageconfigdetail)` \| None` | Parsed OCI config block |
+| `layers` | `list[`[`ImageLayerDetail`](#imagelayerdetail)`]` | Layers in bottom-to-top order |
 
 ### ImageConfigDetail
 
-| Property | Type |
-|----------|------|
-| `digest` | `str` |
-| `env` | `list[str]` |
-| `cmd` | `list[str] \| None` |
-| `entrypoint` | `list[str] \| None` |
-| `working_dir` | `str \| None` |
-| `user` | `str \| None` |
-| `labels` | `dict[str, Any] \| None` |
-| `stop_signal` | `str \| None` |
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.config</a></p>
+
+OCI image config fields extracted from the local cache.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `digest` | `str` | Config blob digest |
+| `env` | `list[str]` | Environment variables (`KEY=value`) |
+| `cmd` | `list[str] \| None` | Default command |
+| `entrypoint` | `list[str] \| None` | Image entrypoint |
+| `working_dir` | `str \| None` | Default working directory |
+| `user` | `str \| None` | Default user |
+| `labels` | `dict[str, Any] \| None` | OCI labels |
+| `stop_signal` | `str \| None` | Configured stop signal |
 
 ### ImageLayerDetail
 
-| Property | Type |
-|----------|------|
-| `diff_id` | `str` |
-| `blob_digest` | `str` |
-| `media_type` | `str \| None` |
-| `compressed_size_bytes` | `int \| None` |
-| `erofs_size_bytes` | `int \| None` |
-| `position` | `int` |
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.layers</a></p>
+
+Metadata for a single image layer.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `diff_id` | `str` | Uncompressed layer diff id |
+| `blob_digest` | `str` | Compressed blob digest |
+| `media_type` | `str \| None` | Layer media type |
+| `compressed_size_bytes` | `int \| None` | Compressed size in bytes |
+| `erofs_size_bytes` | `int \| None` | Size of the generated EROFS sidecar in bytes |
+| `position` | `int` | Layer position (bottom to top) |
 
 ### ImagePruneReport
 
-| Property | Type |
-|----------|------|
-| `image_refs_removed` | `int` |
-| `manifests_removed` | `int` |
-| `layers_removed` | `int` |
-| `fsmeta_removed` | `int` |
-| `vmdk_removed` | `int` |
-| `bytes_reclaimed` | `int \| None` |
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
+
+Summary of cached image data removed by [`Image.prune()`](#image-prune).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `image_refs_removed` | `int` | Number of image refs removed |
+| `manifests_removed` | `int` | Number of manifests removed |
+| `layers_removed` | `int` | Number of layer blobs removed |
+| `fsmeta_removed` | `int` | Number of fsmeta sidecar files removed |
+| `vmdk_removed` | `int` | Number of VMDK files removed |
+| `bytes_reclaimed` | `int \| None` | Measured bytes reclaimed, or `None` when not measured |
+
+### DiskImageFormat
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#imagesource">ImageSource._format</a></p>
+
+Disk image container format. A `StrEnum`, so the string values are accepted directly.
+
+| Value | Description |
+|-------|-------------|
+| `"qcow2"` | QEMU copy-on-write v2 |
+| `"raw"` | Raw block image |
+| `"vmdk"` | VMware disk image |
+
+### Errors
+
+Image operations raise these typed exceptions, all subclasses of `MicrosandboxError`.
+
+| Exception | Raised when |
+|-----------|-------------|
+| `ImageNotFoundError` | The image reference could not be resolved in the local cache |
+| `ImageInUseError` | The image is still referenced by one or more sandboxes (and `force` was not set) |
+| `ImagePullFailedError` | An image pull failed |
+| `UnsupportedError` | Cache operations were attempted on a backend that lacks a local cache |

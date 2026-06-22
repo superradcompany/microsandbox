@@ -3,21 +3,49 @@ title: Agent client
 description: Python SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/python/sandbox), [`exec`](/sdk/python/execution), and [`fs`](/sdk/python/filesystem) instead. Use this API when you are building protocol-level tools or higher-level SDK helpers.
+`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/python/sandbox), [`exec`](/sdk/python/execution), and [`fs`](/sdk/python/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
 
-All request bodies and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you.
+All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload.
 
-The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`. It is not just the inner payload.
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Constructors<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#agentclient-connect_sandbox"><span className="msb-rn">AgentClient.connect_sandbox()</span><span className="msb-rg">connect to a running sandbox by name</span></a>
+  <a className="msb-row" href="#agentclient-connect"><span className="msb-rn">AgentClient.connect()</span><span className="msb-rg">connect to a relay socket by path</span></a>
+  <a className="msb-row" href="#agentclient-socket_path"><span className="msb-rn">AgentClient.socket_path()</span><span className="msb-rg">resolve the socket path, don't connect</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#client-request"><span className="msb-rn">client.request()</span><span className="msb-rg">one frame, one response</span></a>
+  <a className="msb-row" href="#client-stream"><span className="msb-rn">client.stream()</span><span className="msb-rg">open a streaming session</span></a>
+  <a className="msb-row" href="#client-send"><span className="msb-rn">client.send()</span><span className="msb-rg">follow-up frame on a session</span></a>
+  <a className="msb-row" href="#client-ready_bytes"><span className="msb-rn">client.ready_bytes()</span><span className="msb-rg">cached handshake frame</span></a>
+  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the client</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Constants</p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#constants">FLAG_TERMINAL</a>
+    <a className="msb-chip" href="#constants">FLAG_SESSION_START</a>
+    <a className="msb-chip" href="#constants">FLAG_SHUTDOWN</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#rawframe">RawFrame</a>
+    <a className="msb-typepill" href="#agentstream">AgentStream</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python
 from microsandbox import AgentClient
 
-client = await AgentClient.connect_sandbox("dev")
-ready = client.ready_bytes()
-await client.close()
+client = await AgentClient.connect_sandbox("dev")  # 1. connect
+ready = client.ready_bytes()                        # 2. inspect handshake
+frame = await client.request(0, body)               # 3. raw request/response
+await client.close()                                # 4. close
 ```
-
----
 
 ## Constants
 
@@ -27,42 +55,133 @@ await client.close()
 | `FLAG_SESSION_START` | `0b0000_0010` | First frame of a streaming session |
 | `FLAG_SHUTDOWN` | `0b0000_0100` | Shutdown frame |
 
+## Constructors
+
 ---
 
-#### AgentClient.connect_sandbox()
+#### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect_sandbox()</span>
+<div className="msb-tags"><span className="msb-tag is-static">classmethod</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @classmethod
-async def connect_sandbox(cls, name: str) -> AgentClient
+async def connect_sandbox(cls, name: str, *, timeout: float | None = None) -> AgentClient
 ```
 
 Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 bytes.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Connection timeout in seconds. <code>None</code> uses the default.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">AgentClient</span></div>
+    <div className="msb-param-desc">Connected client.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+client = await AgentClient.connect_sandbox("dev", timeout=5.0)
+```
+
 ---
 
-#### AgentClient.connect()
+#### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
+<div className="msb-tags"><span className="msb-tag is-static">classmethod</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @classmethod
-async def connect(cls, path: str) -> AgentClient
+async def connect(cls, path: str, *, timeout: float | None = None) -> AgentClient
 ```
 
-Connect to an agent relay socket by path.
+Connect to an agent relay socket by path. Use this when you already know the socket path, for example one returned by [`socket_path()`](#agentclient-socket_path).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path to the agentd relay socket.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Connection timeout in seconds. <code>None</code> uses the default.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">AgentClient</span></div>
+    <div className="msb-param-desc">Connected client.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+path = AgentClient.socket_path("dev")
+client = await AgentClient.connect(path)
+```
 
 ---
 
-#### AgentClient.socket_path()
+#### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socket_path()</span>
+<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
 def socket_path(name: str) -> str
 ```
 
-Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path `connect_sandbox` would dial, so you can talk to `agentd` over a raw byte transport (e.g. a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
+Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`connect_sandbox()`](#agentclient-connect_sandbox) would dial, so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Filesystem path to the relay socket.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+path = AgentClient.socket_path("dev")
+```
 
 ---
 
-#### request()
+## Instance methods
+
+---
+
+#### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def request(self, flags: int, body: bytes) -> RawFrame
@@ -70,17 +189,73 @@ async def request(self, flags: int, body: bytes) -> RawFrame
 
 Send one raw frame and wait for one response frame.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Frame flag byte, e.g. a combination of <code>FLAG_*</code> constants.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#rawframe">RawFrame</a></div>
+    <div className="msb-param-desc">The response frame.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+frame = await client.request(0, body)
+print(frame["id"], frame["flags"])
+```
+
 ---
 
-#### stream()
+#### <span className="msb-recv">client.</span><span className="msb-hn">stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def stream(self, flags: int, body: bytes) -> AgentStream
 ```
 
-Open a raw streaming session. The returned stream carries the protocol correlation id and is also an async iterator of raw frames.
+Open a raw streaming session. The returned [`AgentStream`](#agentstream) carries the protocol correlation id and is also an async iterator of raw frames.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Frame flag byte; pass <code>FLAG_SESSION_START</code> to open a session.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#agentstream">AgentStream</a></div>
+    <div className="msb-param-desc">Open streaming session.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
 
 ```python
+from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
+
 stream = await client.stream(FLAG_SESSION_START, body)
 async for frame in stream:
     if frame["flags"] & FLAG_TERMINAL:
@@ -89,17 +264,43 @@ async for frame in stream:
 
 ---
 
-#### send()
+#### <span className="msb-recv">client.</span><span className="msb-hn">send()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def send(self, id: int, flags: int, body: bytes) -> None
 ```
 
-Send a follow-up frame on an existing correlation id. Use this with the `id` on the [`AgentStream`](#agentstream) returned by [`stream()`](#stream).
+Send a follow-up frame on an existing correlation id. Use the `id` from the [`AgentStream`](#agentstream) returned by [`stream()`](#client-stream).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>id</code><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Correlation id of an open session, from <code>stream.id</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Frame flag byte.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+stream = await client.stream(FLAG_SESSION_START, body)
+await client.send(stream.id, 0, follow_up_body)
+```
 
 ---
 
-#### ready_bytes()
+#### <span className="msb-recv">client.</span><span className="msb-hn">ready_bytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def ready_bytes(self) -> bytes
@@ -107,9 +308,25 @@ def ready_bytes(self) -> bytes
 
 Return the cached handshake `core.ready` frame body as CBOR bytes.
 
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">CBOR-encoded <code>core.ready</code> frame body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```python
+ready = client.ready_bytes()
+```
+
 ---
 
-#### close()
+#### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def close(self) -> None
@@ -117,9 +334,23 @@ async def close(self) -> None
 
 Close the client. Calling it more than once is safe.
 
+<p className="msb-label">Example</p>
+
+```python
+await client.close()
+```
+
 ---
 
-## RawFrame
+## Types
+
+### RawFrame
+
+<div className="msb-tags"><span className="msb-tag is-type">TypedDict</span></div>
+
+<p className="msb-backref">Returned by <a href="#client-request">request()</a> · yielded by <a href="#agentstream">AgentStream</a></p>
+
+A raw protocol frame with a CBOR-encoded body.
 
 ```python
 class RawFrame(TypedDict):
@@ -128,17 +359,35 @@ class RawFrame(TypedDict):
     body: bytes
 ```
 
-`id` is the protocol correlation id, `flags` is the frame flag byte, and `body` is the CBOR-encoded protocol message body.
+| Field | Type | Description |
+|-------|------|-------------|
+| id | `int` | Protocol correlation id |
+| flags | `int` | Frame flag byte (combination of `FLAG_*` constants) |
+| body | `bytes` | CBOR-encoded protocol message body |
 
----
+### AgentStream
 
-## AgentStream
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
+
+An open raw agent stream. Carries the protocol correlation id and is both an async context manager and an async iterator of [`RawFrame`](#rawframe). Iteration stops once a frame with `FLAG_TERMINAL` set is delivered or the stream reaches EOF.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| id | `int` | Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames |
+| next() | `Awaitable[`[`RawFrame`](#rawframe)` \| None]` | Read the next frame; returns `None` at EOF |
+| close() | `Awaitable[None]` | Release the stream handle early; safe to call more than once |
+| `async with` | [`AgentStream`](#agentstream) | Async context manager; closes the stream on exit |
+| `async for` | [`RawFrame`](#rawframe) | Async iterator over frames until terminal or EOF |
+
+<p className="msb-label">Example</p>
 
 ```python
-class AgentStream:
-    id: int
-    async def next(self) -> RawFrame | None: ...
-    async def close(self) -> None: ...
-```
+from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
 
-`id` is the protocol correlation id. Pass it to [`AgentClient.send()`](#send) for follow-up frames in the same session. `close()` releases the stream handle early. `next()` returns `None` at EOF.
+async with await client.stream(FLAG_SESSION_START, body) as stream:
+    async for frame in stream:
+        if frame["flags"] & FLAG_TERMINAL:
+            break
+```

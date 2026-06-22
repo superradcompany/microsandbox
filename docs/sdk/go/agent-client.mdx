@@ -3,15 +3,153 @@ title: Agent client
 description: Go SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/go/sandbox), [`Exec`](/sdk/go/execution), and filesystem helpers instead. Use this API when you are building protocol-level tools or higher-level SDK helpers.
+`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/go/sandbox), [`Exec`](/sdk/go/execution), and filesystem helpers instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
 
-All request bodies and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you.
+All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `fxamacker/cbor`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 
-The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`. It is not just the inner payload.
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Constants<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#flagterminal"><span className="msb-rn">FlagTerminal</span><span className="msb-rg">last frame for a correlation id</span></a>
+  <a className="msb-row" href="#flagsessionstart"><span className="msb-rn">FlagSessionStart</span><span className="msb-rg">first frame of a session</span></a>
+  <a className="msb-row" href="#flagshutdown"><span className="msb-rn">FlagShutdown</span><span className="msb-rg">request sandbox shutdown</span></a>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#m-connectagentsandbox"><span className="msb-rn">m.ConnectAgentSandbox()</span><span className="msb-rg">connect by sandbox name</span></a>
+  <a className="msb-row" href="#m-connectagentpath"><span className="msb-rn">m.ConnectAgentPath()</span><span className="msb-rg">connect by socket path</span></a>
+  <a className="msb-row" href="#m-agentsocketpath"><span className="msb-rn">m.AgentSocketPath()</span><span className="msb-rg">resolve socket path only</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · AgentClient<span className="msb-ct">6</span></p>
+  <a className="msb-row" href="#c-request"><span className="msb-rn">c.Request()</span><span className="msb-rg">one frame, one response</span></a>
+  <a className="msb-row" href="#c-stream"><span className="msb-rn">c.Stream()</span><span className="msb-rg">open a streaming session</span></a>
+  <a className="msb-row" href="#c-send"><span className="msb-rn">c.Send()</span><span className="msb-rg">follow-up frame on an id</span></a>
+  <a className="msb-row" href="#c-readybytes"><span className="msb-rn">c.ReadyBytes()</span><span className="msb-rg">cached handshake frame</span></a>
+  <a className="msb-row" href="#c-close"><span className="msb-rn">c.Close()</span><span className="msb-rg">close the connection</span></a>
+  <a className="msb-row" href="#c-closectx"><span className="msb-rn">c.CloseCtx()</span><span className="msb-rg">close with a context</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · AgentStream<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#s-next"><span className="msb-rn">s.Next()</span><span className="msb-rg">pull the next frame</span></a>
+  <a className="msb-row" href="#s-id"><span className="msb-rn">s.ID()</span><span className="msb-rg">protocol correlation id</span></a>
+  <a className="msb-row" href="#s-close"><span className="msb-rn">s.Close()</span><span className="msb-rg">release the stream handle</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#agentclient">AgentClient</a>
+    <a className="msb-typepill" href="#agentstream">AgentStream</a>
+    <a className="msb-typepill" href="#rawframe">RawFrame</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
+import (
+    "context"
+
+    "github.com/fxamacker/cbor/v2"
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+ctx := context.Background()
+
+client, err := m.ConnectAgentSandbox(ctx, "dev")   // 1. connect
+if err != nil {
+    return err
+}
+defer client.Close()
+
+body, err := cbor.Marshal(map[string]any{          // 2. build a CBOR Message
+    "v": 1,
+    "t": "core.fs.request",
+    "p": fsRequestBytes,
+})
+if err != nil {
+    return err
+}
+
+frame, err := client.Request(ctx, m.FlagSessionStart, body)  // 3. request / response
+if err != nil {
+    return err
+}
+_ = frame.Body
 ```
+
+## Constants
+
+---
+
+#### <span className="msb-hn">FlagTerminal</span>
+<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
+
+```go
+const FlagTerminal uint8 = 0b0000_0001
+```
+
+Frame flag: this is the last message for the given correlation id. When a frame on an open stream carries this bit, no further frames will arrive for that id. Also available as `FLAG_TERMINAL`, the cross-SDK constant spelling.
+
+---
+
+#### <span className="msb-hn">FlagSessionStart</span>
+<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
+
+```go
+const FlagSessionStart uint8 = 0b0000_0010
+```
+
+Frame flag: this is the first message of a new session. Set it on the opening frame of a request/response RPC or a streaming session. Also available as `FLAG_SESSION_START`.
+
+---
+
+#### <span className="msb-hn">FlagShutdown</span>
+<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
+
+```go
+const FlagShutdown uint8 = 0b0000_0100
+```
+
+Frame flag: this message requests sandbox shutdown. Also available as `FLAG_SHUTDOWN`.
+
+## Functions
+
+---
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentSandbox()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
+```
+
+Connect to a running sandbox by name. Resolves the sandbox's relay socket path and performs the `core.ready` handshake. Sandbox names are limited to 128 UTF-8 bytes. Use `context.WithTimeout` to override the default 10s handshake timeout.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Bounds the handshake; defaults to a 10s timeout if none is set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#agentclient">*AgentClient</a></div>
+    <div className="msb-param-desc">Connected client.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
 
 ```go
 client, err := m.ConnectAgentSandbox(ctx, "dev")
@@ -19,73 +157,202 @@ if err != nil {
     return err
 }
 defer client.Close()
-
-ready, err := client.ReadyBytes()
-if err != nil {
-    return err
-}
-_ = ready
 ```
 
 ---
 
-## Constants
-
-| Name | Type | Description |
-|------|------|-------------|
-| `FlagTerminal` / `FLAG_TERMINAL` | `uint8` | Last frame for a correlation id |
-| `FlagSessionStart` / `FLAG_SESSION_START` | `uint8` | First frame of a streaming session |
-| `FlagShutdown` / `FLAG_SHUTDOWN` | `uint8` | Shutdown frame |
-
----
-
-#### ConnectAgentSandbox()
-
-```go
-func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
-```
-
-Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 bytes.
-
----
-
-#### ConnectAgentPath()
+#### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentPath()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error)
 ```
 
-Connect to an agent relay socket by path.
+Connect to an `agentd` relay socket by path. Use this when you already have the socket path, for example one returned by [`AgentSocketPath()`](#m-agentsocketpath). Use `context.WithTimeout` to override the default 10s handshake timeout.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Bounds the handshake; defaults to a 10s timeout if none is set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Filesystem path of the relay socket.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#agentclient">*AgentClient</a></div>
+    <div className="msb-param-desc">Connected client.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+path, err := m.AgentSocketPath("dev")
+if err != nil {
+    return err
+}
+
+client, err := m.ConnectAgentPath(ctx, path)
+if err != nil {
+    return err
+}
+defer client.Close()
+```
 
 ---
 
-#### AgentSocketPath()
+#### <span className="msb-recv">m.</span><span className="msb-hn">AgentSocketPath()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func AgentSocketPath(name string) (string, error)
 ```
 
-Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path `ConnectAgentSandbox` would dial, so you can talk to `agentd` over a raw byte transport (e.g. a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
+Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`ConnectAgentSandbox()`](#m-connectagentsandbox) would dial internally (preferring the hashed path, falling back to the legacy name-derived path), so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes between a WebSocket and the socket) instead of this frame client. The sandbox need not be running; the path is derived from the name and the configured home directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Relay socket path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+path, err := m.AgentSocketPath("dev")
+if err != nil {
+    return err
+}
+fmt.Println(path)
+```
+
+## AgentClient methods
 
 ---
 
-#### Request()
+#### <span className="msb-recv">c.</span><span className="msb-hn">Request()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*RawFrame, error)
 ```
 
-Send one raw frame and wait for one response frame.
+Send one frame and await a single response frame. Use for request/response RPCs that produce exactly one terminal response (for example a `core.fs.request` to its `core.fs.response`).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the request.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">uint8</span></div>
+    <div className="msb-param-desc">Frame flag byte, e.g. <code>FlagSessionStart</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#rawframe">*RawFrame</a></div>
+    <div className="msb-param-desc">The single response frame.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+frame, err := client.Request(ctx, m.FlagSessionStart, body)
+if err != nil {
+    return err
+}
+
+var msg map[string]any
+if err := cbor.Unmarshal(frame.Body, &msg); err != nil {
+    return err
+}
+```
 
 ---
 
-#### Stream()
+#### <span className="msb-recv">c.</span><span className="msb-hn">Stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Stream(ctx context.Context, flags uint8, body []byte) (*AgentStream, error)
 ```
 
-Open a raw streaming session.
+Open a streaming session. The returned [`AgentStream`](#agentstream) carries the protocol correlation id (read it with [`ID()`](#s-id) and pass it to [`Send()`](#c-send) for follow-up frames), and yields frames one at a time via [`Next()`](#s-next).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels opening the stream.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">uint8</span></div>
+    <div className="msb-param-desc">Frame flag byte for the opening frame, e.g. <code>FlagSessionStart</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#agentstream">*AgentStream</a></div>
+    <div className="msb-param-desc">Open stream of raw frames.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
 
 ```go
 stream, err := client.Stream(ctx, m.FlagSessionStart, body)
@@ -107,66 +374,310 @@ for {
 
 ---
 
-#### Send()
+#### <span className="msb-recv">c.</span><span className="msb-hn">Send()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Send(ctx context.Context, id uint32, flags uint8, body []byte) error
 ```
 
-Send a follow-up frame on an existing correlation id. Use this with the id returned by `AgentStream.ID()`.
+Send a follow-up frame on an existing correlation id (for example stdin, a signal, a resize, or data chunks on an open session). Use the id returned by [`AgentStream.ID()`](#s-id).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the send.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>id</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Correlation id of an open session.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>flags</code><span className="msb-type">uint8</span></div>
+    <div className="msb-param-desc">Frame flag byte.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>body</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">CBOR-encoded protocol message body.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+if err := client.Send(ctx, stream.ID(), 0, stdinBytes); err != nil {
+    return err
+}
+```
 
 ---
 
-#### ReadyBytes()
+#### <span className="msb-recv">c.</span><span className="msb-hn">ReadyBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) ReadyBytes() ([]byte, error)
 ```
 
-Return the cached handshake `core.ready` frame body as CBOR bytes.
+Return the cached handshake `core.ready` frame body as CBOR bytes. Captured during connect, so this reads from the cached handshake rather than producing protocol traffic.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">CBOR-encoded <code>core.ready</code> frame body.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+ready, err := client.ReadyBytes()
+if err != nil {
+    return err
+}
+
+var msg map[string]any
+if err := cbor.Unmarshal(ready, &msg); err != nil {
+    return err
+}
+```
 
 ---
 
-#### Close()
+#### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Close() error
 ```
 
-Release the client handle. Calling it more than once is safe.
+Release the client handle. Idempotent: calling it more than once is safe.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+defer client.Close()
+```
 
 ---
 
-#### CloseCtx()
+#### <span className="msb-recv">c.</span><span className="msb-hn">CloseCtx()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) CloseCtx(ctx context.Context) error
 ```
 
-Release the client handle with a caller-controlled context.
+Release the client handle with a caller-controlled context. Like [`Close()`](#c-close), but lets you bound or cancel the teardown.
 
----
+<p className="msb-label">Parameters</p>
 
-## RawFrame
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the close.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
 
 ```go
-type RawFrame struct {
-    ID    uint32
-    Flags uint8
-    Body  []byte
+if err := client.CloseCtx(ctx); err != nil {
+    return err
 }
 ```
 
-`ID` is the protocol correlation id, `Flags` is the frame flag byte, and `Body` is the CBOR-encoded protocol message body.
+## AgentStream methods
 
 ---
 
-## AgentStream
+#### <span className="msb-recv">s.</span><span className="msb-hn">Next()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *AgentStream) Next(ctx context.Context) (*RawFrame, error)
+```
+
+Pull the next frame from the stream. Returns `nil, nil` at EOF, so loop until the frame is `nil` or carries [`FlagTerminal`](#flagterminal).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels waiting for the next frame.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#rawframe">*RawFrame</a></div>
+    <div className="msb-param-desc">Next frame, or <code>nil</code> at EOF.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+for {
+    frame, err := stream.Next(ctx)
+    if err != nil {
+        return err
+    }
+    if frame == nil {
+        break
+    }
+}
+```
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *AgentStream) ID() uint32
-func (s *AgentStream) Next(ctx context.Context) (*RawFrame, error)
+```
+
+Return the protocol correlation id for this stream. Pass it to [`AgentClient.Send()`](#c-send) for follow-up frames in the session.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Correlation id for this session.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+id := stream.ID()
+if err := client.Send(ctx, id, 0, stdinBytes); err != nil {
+    return err
+}
+```
+
+---
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">Close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
 func (s *AgentStream) Close(ctx context.Context) error
 ```
 
-`ID()` returns the protocol correlation id. Pass it to [`AgentClient.Send()`](#send) for follow-up frames in the same session. `Next()` returns `nil, nil` at EOF.
+Release the stream handle.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the close.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
+<p className="msb-label">Example</p>
+
+```go
+defer stream.Close(ctx)
+```
+
+## Types
+
+### AgentClient
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#m-connectagentsandbox">ConnectAgentSandbox()</a> · <a href="#m-connectagentpath">ConnectAgentPath()</a></p>
+
+Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `fxamacker/cbor`, and build typed convenience methods on top of this client. Construct it with one of the package-level connect functions.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Request(ctx, flags, body)`](#c-request) | `(`[`*RawFrame`](#rawframe)`, error)` | Send one frame, await one response |
+| [`Stream(ctx, flags, body)`](#c-stream) | `(`[`*AgentStream`](#agentstream)`, error)` | Open a streaming session |
+| [`Send(ctx, id, flags, body)`](#c-send) | `error` | Send a follow-up frame on a correlation id |
+| [`ReadyBytes()`](#c-readybytes) | `([]byte, error)` | Cached `core.ready` handshake frame body |
+| [`Close()`](#c-close) | `error` | Release the handle (idempotent) |
+| [`CloseCtx(ctx)`](#c-closectx) | `error` | Release the handle with a context |
+
+### AgentStream
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#c-stream">Stream()</a></p>
+
+An open raw agent streaming session. Drive it by calling [`Next()`](#s-next) until it returns `nil`, which happens after a frame carrying [`FlagTerminal`](#flagterminal) or when the underlying stream is exhausted.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Next(ctx)`](#s-next) | `(`[`*RawFrame`](#rawframe)`, error)` | Pull the next frame; `nil` at EOF |
+| [`ID()`](#s-id) | `uint32` | Protocol correlation id; pass to [`Send()`](#c-send) for follow-up frames |
+| [`Close(ctx)`](#s-close) | `error` | Release the stream handle |
+
+### RawFrame
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#c-request">Request()</a> · yielded by <a href="#s-next">Next()</a></p>
+
+A raw protocol frame. `Body` is the CBOR-encoded `Message` body (`v`, `t`, `p`) as it appeared on the wire; decode it with a CBOR library such as `fxamacker/cbor`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ID | `uint32` | Correlation id from the frame header |
+| Flags | `uint8` | Frame flags (`FlagTerminal`, `FlagSessionStart`, ...) |
+| Body | `[]byte` | Raw CBOR-encoded body bytes |
