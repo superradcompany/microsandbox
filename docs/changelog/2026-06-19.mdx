@@ -1,11 +1,11 @@
 ---
 title: "Week of June 19, 2026"
-description: "Local and cloud backend routing in the SDKs, detached image init entrypoints, shared sandbox spec types, secret substitution through HTTP CONNECT tunnels and plain HTTP, and snapshot import hardening."
+description: "Local and cloud backend routing in the SDKs, detached image init entrypoints, upper disk usage metrics, runtime-owned ephemeral cleanup, shared sandbox spec types, secret substitution through HTTP CONNECT tunnels and plain HTTP, and snapshot import hardening."
 icon: "bolt"
 ---
 
 <Tip>
-  **Released this week:** [v0.5.7](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.7)
+  **Released this week:** [v0.5.8](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.8)
 </Tip>
 
 ## New features
@@ -39,6 +39,34 @@ msb run -d --init auto \
 
 See the [sandbox commands reference](/cli/sandbox-commands).
 
+**Upper disk usage metrics**
+
+Sandbox metrics now include optional upper filesystem usage fields for OCI-backed roots: `upper_used_bytes`, `upper_free_bytes`, and `upper_host_allocated_bytes`. The CLI exposes them in `msb metrics --format json`, the Rust, Python, TypeScript, and Go SDKs surface them on sandbox metrics objects, and the metrics collector exports matching OTel gauges for live monitoring. The runtime starts sampling after `core.ready`, so early boot does not poll krun metrics before the guest metrics path is available.
+
+```json
+{
+  "upper_used_bytes": 53248,
+  "upper_free_bytes": 450527232,
+  "upper_host_allocated_bytes": 2506752
+}
+```
+
+See the [sandbox metrics guide](/sandboxes/metrics).
+
+**Runtime-owned ephemeral sandbox cleanup**
+
+Unnamed `msb run` sandboxes are now treated as ephemeral, including detached runs, and the host runtime owns their cleanup after the VM exits. Runtime startup also performs a bounded maintenance sweep for stale active rows and missed ephemeral cleanup, so one-off sandboxes do not depend on the CLI process staying alive. SDK callers can opt into the same policy explicitly with the Rust builder's `ephemeral(true)` setting.
+
+```rust
+let sandbox = Sandbox::builder("one-off")
+    .image("alpine")
+    .ephemeral(true)
+    .build()
+    .await?;
+```
+
+See the [sandbox lifecycle guide](/sandboxes/lifecycle).
+
 **Shared microsandbox type packages**
 
 A new `microsandbox-types` Rust crate is now the single source of truth for the sandbox spec and related runtime, resource, environment, and log-level types, with a matching type-only `@microsandbox/types` npm package generated from it. SDK and tooling authors can depend on one stable schema instead of redefining sandbox shapes per language, and the embedded `SandboxSpec` in the Rust SDK's `SandboxConfig` flows through the builder, local spawn, exec, attach, SSH, and cloud paths without duplication.
@@ -70,4 +98,5 @@ See the [secrets guide](/networking/security-model).
 - Sandbox names longer than 64 bytes no longer fail to boot with `sethostname: EINVAL`. The spawn path now derives a UTS-compatible 64-byte hostname when none is set explicitly, and the 128-byte sandbox name limit still applies.
 - `VolumeFs::remove_dir("/")` and `remove_dir("")` no longer delete the host-side backing directory for the entire volume; only child directories inside the volume can be removed.
 - Outbound proxy connections that are denied by SNI policy now close the guest socket cleanly instead of leaving clients like `wget` stuck until the host timeout fires. Upstream connect failures still RST the guest socket so clients fail fast.
+- Detached `msb run -- CMD` now persists the startup command as runtime-owned startup intent, runs it after `agentd` is ready, and shuts down the VM when that startup workload exits instead of dropping the command when the CLI exits.
 - `msb run --init auto` against images that ship an `ENTRYPOINT` init binary now preserves the user command through PID 1 instead of double-execing the wrapper after boot, and streams startup output back to attached runs.
