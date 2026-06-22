@@ -16,8 +16,16 @@ curl -fsSL https://install.microsandbox.dev | sh
 The installer writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it.
 
 <Note>
-  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
+  microsandbox requires Linux with KVM enabled, macOS with Apple Silicon (M-series chip), or Windows with Windows Hypervisor Platform enabled. Local sandboxes use hardware virtualization.
 </Note>
+
+On Windows, run the following from an elevated PowerShell if the first sandbox start reports that Windows Hypervisor Platform is unavailable:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+```
+
+Reboot if Windows asks. `HypervisorPlatform` is the WHP API surface used by libkrun and is separate from `VirtualMachinePlatform`, which WSL2 and Docker Desktop often enable.
 
 ## Quick reference
 

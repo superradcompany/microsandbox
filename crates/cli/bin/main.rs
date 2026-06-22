@@ -451,6 +451,18 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
         return 1;
     }
+    #[cfg(windows)]
+    if let Some(setup_err) = find_windows_host_setup_in_chain(err) {
+        let cause = setup_err.cause();
+        let hints = setup_err.hints();
+        let mut lines = Vec::with_capacity(hints.len() + 1);
+        lines.push(microsandbox_cli::ui::ErrorLine::Cause(&cause));
+        for hint in &hints {
+            lines.push(microsandbox_cli::ui::ErrorLine::Hint(hint));
+        }
+        microsandbox_cli::ui::error_with_lines(setup_err.title(), &lines);
+        return 1;
+    }
     if find_unsupported_feature_in_chain(err) {
         microsandbox_cli::ui::error_with_lines(
             "this sandbox's runtime is too old for the requested feature",
@@ -478,6 +490,25 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
     }
     microsandbox_cli::ui::error(&err.to_string());
     1
+}
+
+/// Walk the chain looking for a Windows host setup failure.
+#[cfg(windows)]
+fn find_windows_host_setup_in_chain(
+    err: &anyhow::Error,
+) -> Option<microsandbox::setup::WindowsHostSetupError> {
+    for cause in err.chain() {
+        if let Some(microsandbox::MicrosandboxError::WindowsHostSetup(setup_err)) =
+            cause.downcast_ref::<microsandbox::MicrosandboxError>()
+        {
+            return Some(setup_err.clone());
+        }
+        if let Some(setup_err) = cause.downcast_ref::<microsandbox::setup::WindowsHostSetupError>()
+        {
+            return Some(setup_err.clone());
+        }
+    }
+    None
 }
 
 /// Walk the anyhow chain looking for a `MicrosandboxError::BootStart`.
@@ -591,4 +622,23 @@ fn run_async_command_anyhow(
             Commands::Self_(args) => self_cmd::run(args).await,
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_windows_host_setup_error_in_anyhow_chain() {
+        let source = microsandbox::setup::WindowsHostSetupError::HypervisorNotPresent;
+        let err = anyhow::Error::new(microsandbox::MicrosandboxError::WindowsHostSetup(
+            source.clone(),
+        ))
+        .context("starting sandbox");
+
+        let found =
+            find_windows_host_setup_in_chain(&err).expect("setup error should be in the chain");
+
+        assert_eq!(found, source);
+    }
 }

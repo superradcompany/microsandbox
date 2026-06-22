@@ -150,6 +150,8 @@ pub async fn spawn_sandbox(
     let global = local.config();
     let msb_path = config::resolve_msb_path(global)?;
     let libkrunfw_path = config::resolve_libkrunfw_path(global)?;
+    #[cfg(windows)]
+    crate::setup::verify_windows_host_prerequisites()?;
     tracing::debug!(
         msb = %msb_path.display(),
         libkrunfw = %libkrunfw_path.display(),
