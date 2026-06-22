@@ -87,12 +87,14 @@ Return the SSH namespace for this sandbox. The returned object exposes [`openCli
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const ssh = sandbox.ssh();
 const client = await ssh.openClient();
 ```
+
+</Accordion>
 
 ---
 
@@ -123,11 +125,13 @@ Open a native in-process SSH client connected to the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const client = await sandbox.ssh().openClient({ user: "root" });
 ```
+
+</Accordion>
 
 ---
 
@@ -158,12 +162,14 @@ Prepare a reusable SSH server endpoint backed by the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const server = await sandbox.ssh().prepareServer({ user: "root" });
 await server.serveConnection();
 ```
+
+</Accordion>
 
 ## SshClient
 
@@ -202,12 +208,14 @@ Run an SSH exec request and collect stdout, stderr, and the exit status.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const out = await client.exec("uname -a");
 console.log(out.status, out.stdout.toString());
 ```
+
+</Accordion>
 
 ---
 
@@ -238,12 +246,14 @@ Attach the local terminal to an interactive SSH shell. Resolves with the shell's
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const code = await client.attach({ detachKeys: "ctrl-p,ctrl-q" });
 console.log(`shell exited with ${code}`);
 ```
+
+</Accordion>
 
 ---
 
@@ -265,13 +275,15 @@ Open an SFTP session over this SSH connection for file transfer and remote files
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sftp = await client.sftp();
 await sftp.write("/tmp/data.bin", Buffer.from([1, 2, 3]));
 await sftp.close();
 ```
+
+</Accordion>
 
 ---
 
@@ -284,11 +296,13 @@ close(): Promise<void>
 
 Close the native SSH client session.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await client.close();
 ```
+
+</Accordion>
 
 ## SftpClient
 
@@ -323,12 +337,14 @@ Read a remote file into memory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const data = await sftp.read("/etc/hostname");
 console.log(data.toString().trim());
 ```
+
+</Accordion>
 
 ---
 
@@ -354,11 +370,13 @@ Create or truncate a remote file and write the given bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.write("/tmp/config.json", Buffer.from(JSON.stringify({ ok: true })));
 ```
+
+</Accordion>
 
 ---
 
@@ -380,11 +398,13 @@ Create a remote directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.mkdir("/tmp/uploads");
 ```
+
+</Accordion>
 
 ---
 
@@ -406,11 +426,13 @@ Remove a remote file.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.removeFile("/tmp/config.json");
 ```
+
+</Accordion>
 
 ---
 
@@ -432,11 +454,13 @@ Remove an empty remote directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.removeDir("/tmp/uploads");
 ```
+
+</Accordion>
 
 ---
 
@@ -462,11 +486,13 @@ Rename or move a remote file or directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.rename("/tmp/data.bin", "/tmp/data.old");
 ```
+
+</Accordion>
 
 ---
 
@@ -497,12 +523,14 @@ Resolve a remote path to its canonical, absolute form.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const abs = await sftp.realPath("./logs");
 console.log(abs);
 ```
+
+</Accordion>
 
 ---
 
@@ -533,12 +561,14 @@ Read the target of a remote symlink.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const target = await sftp.readLink("/etc/localtime");
 console.log(target);
 ```
+
+</Accordion>
 
 ---
 
@@ -564,11 +594,13 @@ Create a remote symlink at `linkPath` pointing to `target`.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.symlink("/tmp/data.bin", "/tmp/latest");
 ```
+
+</Accordion>
 
 ---
 
@@ -581,11 +613,13 @@ close(): Promise<void>
 
 Close the SFTP session.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sftp.close();
 ```
+
+</Accordion>
 
 ## SshServer
 
@@ -602,13 +636,15 @@ serveConnection(): Promise<void>
 
 Serve one SSH transport over stdin/stdout. Resolves when the connection ends.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const server = await sandbox.ssh().prepareServer();
 await server.serveConnection();
 await server.close();
 ```
+
+</Accordion>
 
 ---
 
@@ -621,11 +657,13 @@ close(): Promise<void>
 
 Release the prepared server endpoint.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await server.close();
 ```
+
+</Accordion>
 
 ## Types
 

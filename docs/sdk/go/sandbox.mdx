@@ -98,20 +98,20 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-sb, err := m.CreateSandbox(ctx, "api",   // 1. configure + boot
+sb, err := m.CreateSandbox(ctx, "api",              // 1. configure + boot
     m.WithImage("python"),
     m.WithMemory(1024),
 )
 if err != nil {
     return err
 }
-defer sb.Close()                         // 4. shut down
+defer sb.Close()                                    // 4. shut down
 
 out, err := sb.Exec(ctx, "python", []string{"-V"})  // 2. run
 if err != nil {
     return err
 }
-fmt.Println(out.Stdout())                // 3. read output
+fmt.Println(out.Stdout())                           // 3. read output
 ```
 
 ## Functions
@@ -157,7 +157,7 @@ Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -174,6 +174,8 @@ defer func() {
     _ = sb.Close()
 }()
 ```
+
+</Accordion>
 
 ---
 
@@ -204,7 +206,7 @@ Look up a sandbox by name and return a metadata handle without connecting to it.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := m.GetSandbox(ctx, "api")
@@ -213,6 +215,8 @@ if err != nil {
 }
 fmt.Println(h.Status())
 ```
+
+</Accordion>
 
 ---
 
@@ -234,7 +238,7 @@ Return metadata for every known sandbox (running, stopped, draining, crashed), o
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 handles, err := m.ListSandboxes(ctx)
@@ -245,6 +249,8 @@ for _, h := range handles {
     fmt.Printf("%s — %s\n", h.Name(), h.Status())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -275,12 +281,14 @@ Return sandbox metadata narrowed by a [`SandboxFilter`](#sandboxfilter). Label s
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 filter := m.NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"})
 handles, err := m.ListSandboxesWith(ctx, filter)
 ```
+
+</Accordion>
 
 ---
 
@@ -331,11 +339,13 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.StartSandbox(ctx, "api")
 ```
+
+</Accordion>
 
 ---
 
@@ -386,11 +396,13 @@ Delete a stopped sandbox and all its persisted state from disk. Fails if the san
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := m.RemoveSandbox(ctx, "api")
 ```
+
+</Accordion>
 
 ---
 
@@ -412,7 +424,7 @@ Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox,
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 all, err := m.AllSandboxMetrics(ctx)
@@ -420,6 +432,8 @@ for name, metrics := range all {
     fmt.Printf("%s: %.1f%% CPU\n", name, metrics.CPUPercent)
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -445,13 +459,15 @@ Optional. Ensure msb + libkrunfw are present under `~/.microsandbox/`, downloadi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 if err := m.EnsureInstalled(ctx); err != nil {
     log.Fatal(err)
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -559,11 +575,13 @@ Return a filesystem accessor for reading and writing files inside the running sa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := sb.FS().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 ```
+
+</Accordion>
 
 ---
 
@@ -585,11 +603,13 @@ Return an SSH accessor for opening a native in-process SSH client or preparing a
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 client, err := sb.SSH().OpenClient(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -620,7 +640,7 @@ Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 entries, err := sb.Logs(ctx, m.LogOptions{
@@ -630,6 +650,8 @@ for _, e := range entries {
     fmt.Printf("[%s] %s", e.Source, e.Text())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -660,7 +682,7 @@ Start a streaming log subscription against a live sandbox. Pass `LogStreamOption
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 stream, err := sb.LogStream(ctx, m.LogStreamOptions{Follow: true})
@@ -676,6 +698,8 @@ for {
     fmt.Print(entry.Text())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -697,13 +721,15 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 metrics, err := sb.Metrics(ctx)
 fmt.Printf("cpu %.1f%% · mem %d MiB\n",
     metrics.CPUPercent, metrics.MemoryBytes/(1<<20))
 ```
+
+</Accordion>
 
 ---
 
@@ -734,7 +760,7 @@ Start a streaming metrics subscription that delivers a [`Metrics`](#metrics) sna
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 stream, err := sb.MetricsStream(ctx, 500*time.Millisecond)
@@ -750,6 +776,8 @@ for {
     fmt.Printf("CPU: %.1f%%\n", metrics.CPUPercent)
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -824,11 +852,13 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
 ```
+
+</Accordion>
 
 ---
 
@@ -861,11 +891,13 @@ Force-terminate the sandbox with SIGKILL and wait until stopped state is observe
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := sb.Kill(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -909,12 +941,14 @@ Block until the sandbox is observed in a terminal state, then return how it ende
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 result, err := sb.WaitUntilStopped(ctx)
 fmt.Printf("ended as %s\n", result.Status)
 ```
+
+</Accordion>
 
 ---
 
@@ -927,11 +961,13 @@ func (s *Sandbox) Detach(ctx context.Context) error
 
 Release the Rust-side handle **without** stopping the VM. Use on sandboxes created with [`WithDetached`](#withdetached) once the caller is done with the handle but the sandbox should keep running in the background. After `Detach`, the handle is invalid; a subsequent `Close` returns an error with `Kind == ErrInvalidHandle`. Reconnect later with [`GetSandbox`](#m-getsandbox).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := sb.Detach(ctx) // keeps running in the background
 ```
+
+</Accordion>
 
 ---
 
@@ -944,11 +980,13 @@ func (s *Sandbox) Close() error
 
 Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM, use [`Detach`](#sb-detach) instead to leave it running.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 defer sb.Close()
 ```
+
+</Accordion>
 
 ---
 
@@ -1386,7 +1424,7 @@ Hand off PID 1 inside the guest to a custom init binary after agentd finishes bo
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
@@ -1394,6 +1432,8 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithInit(m.Init.Auto()),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -1606,7 +1646,7 @@ Configure the network stack: preset, custom rules, DNS, and TLS interception. Bu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -1614,6 +1654,8 @@ sb, err := m.CreateSandbox(ctx, "api",
     m.WithNetwork(m.NetworkPolicy.PublicOnly()),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -1655,7 +1697,7 @@ Append rootfs patches applied before the VM boots. Patches go into the writable 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -1666,6 +1708,8 @@ sb, err := m.CreateSandbox(ctx, "api",
     ),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -1687,7 +1731,7 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -1698,6 +1742,8 @@ sb, err := m.CreateSandbox(ctx, "api",
     }),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -1962,11 +2008,13 @@ Use a known init at the start of the image ENTRYPOINT when present, preserving a
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithInit(m.Init.Auto())
 ```
+
+</Accordion>
 
 ---
 
@@ -1992,7 +2040,7 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithInit(m.Init.Cmd(
@@ -2003,6 +2051,8 @@ m.WithInit(m.Init.Cmd(
     },
 ))
 ```
+
+</Accordion>
 
 ---
 

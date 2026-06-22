@@ -81,7 +81,7 @@ Create and manage named persistent volumes, read and write their data directly o
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-vol, err := m.CreateVolume(ctx, "my-data",        // 1. create a named volume
+vol, err := m.CreateVolume(ctx, "my-data",         // 1. create a named volume
     m.WithVolumeQuota(64),
     m.WithVolumeLabels(map[string]string{"env": "prod"}),
 )
@@ -138,7 +138,7 @@ Create a named volume and return a populated [`*Volume`](#volume) with its name 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 vol, err := m.CreateVolume(ctx, "docker-data",
@@ -146,6 +146,8 @@ vol, err := m.CreateVolume(ctx, "docker-data",
     m.WithVolumeSize(20*1024),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -180,12 +182,14 @@ Look up a volume by name and return its metadata. Returns `ErrVolumeNotFound` if
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := m.GetVolume(ctx, "my-data")
 fmt.Println(h.Path(), h.UsedBytes())
 ```
+
+</Accordion>
 
 ---
 
@@ -216,7 +220,7 @@ Return metadata for every named volume on the host.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 vols, err := m.ListVolumes(ctx)
@@ -224,6 +228,8 @@ for _, h := range vols {
     fmt.Printf("%s — %s\n", h.Name(), h.Kind())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -249,11 +255,13 @@ Delete a volume by name. All sandboxes referencing the volume must be stopped fi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := m.RemoveVolume(ctx, "my-data")
 ```
+
+</Accordion>
 
 ## Volume methods
 
@@ -301,12 +309,14 @@ Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this v
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 vfs := vol.FS()
 err := vfs.WriteString("seed.txt", "hello")
 ```
+
+</Accordion>
 
 ---
 
@@ -319,11 +329,13 @@ func (v *Volume) Remove(ctx context.Context) error
 
 Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, v.Name())`](#removevolume).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := vol.Remove(ctx)
 ```
+
+</Accordion>
 
 ## VolumeHandle methods
 
@@ -741,11 +753,13 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 "/host": m.Mount.Bind("/var/data", m.MountOptions{Readonly: true})
 ```
+
+</Accordion>
 
 ---
 
@@ -771,11 +785,13 @@ Mount an existing named persistent volume. The volume must already exist (create
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 "/data": m.Mount.Named("my-data", m.MountOptions{})
 ```
+
+</Accordion>
 
 ---
 
@@ -805,7 +821,7 @@ Mount a named persistent volume with explicit sandbox-time existence behavior. [
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
@@ -822,6 +838,8 @@ sb, err := m.CreateSandbox(ctx, "worker",
     }),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -843,11 +861,13 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 "/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128})
 ```
+
+</Accordion>
 
 ---
 
@@ -873,7 +893,7 @@ Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk fo
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 "/img": m.Mount.Disk("./data.qcow2", m.DiskOptions{
@@ -882,6 +902,8 @@ Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk fo
     Readonly: true,
 })
 ```
+
+</Accordion>
 
 ## Types
 

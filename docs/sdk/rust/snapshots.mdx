@@ -131,7 +131,7 @@ Start configuring a new snapshot of `source_sandbox`. The builder lets you set t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let snap = Snapshot::builder("api")
@@ -139,6 +139,8 @@ let snap = Snapshot::builder("api")
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -169,13 +171,15 @@ Create a snapshot artifact from a stopped sandbox. Writes `manifest.json` and th
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let snap = Snapshot::create(
     Snapshot::builder("api").name("baseline").build()?
 ).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -206,12 +210,14 @@ Open an existing artifact by path or bare name. Bare names (no path separator, n
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let snap = Snapshot::open("baseline").await?;
 println!("{}", snap.manifest().image.reference);
 ```
+
+</Accordion>
 
 ---
 
@@ -242,12 +248,14 @@ Look up a lightweight [`SnapshotHandle`](#snapshothandle) in the local index by 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Snapshot::get("after-pip-install").await?;
 println!("{} from {}", h.digest(), h.image_ref());
 ```
+
+</Accordion>
 
 ---
 
@@ -269,13 +277,15 @@ List indexed snapshots from the local DB cache, newest first. External-path arti
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 for h in Snapshot::list().await? {
     println!("{:?} — {}", h.name(), h.digest());
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -306,12 +316,14 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let snaps = Snapshot::list_dir("/data/snapshots").await?;
 println!("{} artifacts", snaps.len());
 ```
+
+</Accordion>
 
 ---
 
@@ -337,11 +349,13 @@ Remove a snapshot artifact (by digest, name, or path) and its index row. Refuses
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 Snapshot::remove("after-pip-install", false).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -372,12 +386,14 @@ Rebuild the local index from the artifacts in `dir`. Upserts an index row for ev
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let n = Snapshot::reindex("/data/snapshots").await?;
 println!("indexed {n} snapshots");
 ```
+
+</Accordion>
 
 ---
 
@@ -407,7 +423,7 @@ Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. The head
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::snapshot::ExportOpts;
@@ -419,6 +435,8 @@ Snapshot::export(
     ExportOpts { with_parents: true, with_image: true, ..Default::default() },
 ).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -453,7 +471,7 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use std::path::Path;
@@ -461,6 +479,8 @@ use std::path::Path;
 let h = Snapshot::import(Path::new("/tmp/baseline.tar.zst"), None).await?;
 println!("imported {}", h.digest());
 ```
+
+</Accordion>
 
 ---
 
@@ -528,13 +548,15 @@ The parsed [`Manifest`](#manifest): schema, format, fstype, image reference, par
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let snap = Snapshot::open("baseline").await?;
 let m = snap.manifest();
 println!("{} @ {}", m.image.reference, m.image.manifest_digest);
 ```
+
+</Accordion>
 
 ---
 
@@ -576,7 +598,7 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::snapshot::UpperVerifyStatus;
@@ -587,6 +609,8 @@ match snap.verify().await?.upper {
     UpperVerifyStatus::NotRecorded => println!("no integrity hash recorded"),
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -711,13 +735,15 @@ Open the underlying artifact metadata, upgrading this lightweight handle to a fu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Snapshot::get("baseline").await?;
 let snap = h.open().await?;
 snap.verify().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -739,12 +765,14 @@ Remove this snapshot. Delegates to [`Snapshot::remove(self.digest(), force)`](#s
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Snapshot::get("baseline").await?;
 h.remove(false).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -772,7 +800,7 @@ fn from_snapshot(self, path_or_name: impl Into<String>) -> Self
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let sb = Sandbox::builder("api-restored")
@@ -780,6 +808,8 @@ let sb = Sandbox::builder("api-restored")
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -810,13 +840,15 @@ async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Sandbox::get("api").await?;
 h.stop().await?;
 let snap = h.snapshot("baseline").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -847,13 +879,15 @@ async fn snapshot_to(&self, path: impl AsRef<Path>) -> MicrosandboxResult<Snapsh
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Sandbox::get("api").await?;
 h.stop().await?;
 let snap = h.snapshot_to("/data/snapshots/baseline").await?;
 ```
+
+</Accordion>
 
 ---
 

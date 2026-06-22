@@ -126,13 +126,15 @@ Begin building a new sandbox. Configure it with chainable setters, then call `.c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await using sandbox = await Sandbox.builder("api")
   .image("python")
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -163,12 +165,14 @@ Get a live handle to an existing sandbox (running or stopped). The handle provid
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const handle = await Sandbox.get("api");
 console.log(handle.status);
 ```
+
+</Accordion>
 
 ---
 
@@ -190,13 +194,15 @@ List all sandboxes (running, stopped, and crashed). Handles returned from `list(
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 for (const h of await Sandbox.list()) {
   console.log(`${h.name} — ${h.status}`);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -227,11 +233,13 @@ List sandboxes filtered to those carrying all of the given labels (AND-matched).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const workers = await Sandbox.listWith({ labels: { role: "worker" } });
 ```
+
+</Accordion>
 
 ---
 
@@ -253,11 +261,13 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await Sandbox.remove("api");
 ```
+
+</Accordion>
 
 ---
 
@@ -288,11 +298,13 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await using sandbox = await Sandbox.start("api");
 ```
+
+</Accordion>
 
 ---
 
@@ -323,11 +335,13 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.startDetached("worker");
 ```
+
+</Accordion>
 
 ---
 
@@ -357,12 +371,14 @@ Get the full configuration the sandbox was created with - image, cpus, memory, e
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const config = await sandbox.config();
 console.log(`${config.memoryMib} MiB`);
 ```
+
+</Accordion>
 
 ---
 
@@ -375,11 +391,13 @@ detach(): Promise<void>
 
 Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.detach(); // keeps running in the background
 ```
+
+</Accordion>
 
 ---
 
@@ -401,11 +419,13 @@ Get a filesystem handle for reading and writing files inside the running sandbox
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.fs().writeFile("/tmp/hello.txt", "hi");
 ```
+
+</Accordion>
 
 ---
 
@@ -418,11 +438,13 @@ kill(): Promise<void>
 
 Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown - use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sandbox-stop) for graceful shutdown that gives the workload a chance to flush.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.kill(); // no graceful shutdown
 ```
+
+</Accordion>
 
 ---
 
@@ -444,11 +466,13 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.killWithTimeout(2000);
 ```
+
+</Accordion>
 
 ---
 
@@ -481,7 +505,7 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { Sandbox } from "microsandbox";
@@ -510,6 +534,8 @@ const recent = await handle.logs({
   sources: ["stdout", "stderr", "output", "system"],
 });
 ```
+
+</Accordion>
 
 ---
 
@@ -540,7 +566,7 @@ Stream captured output as it appears, with optional follow. Backed by the same o
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await using stream = await sandbox.logStream({ follow: true });
@@ -548,6 +574,8 @@ for await (const e of stream) {
   console.log(e.text().trimEnd());
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -569,12 +597,14 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const m = await sandbox.metrics();
 console.log(`cpu ${m.cpuPercent.toFixed(1)}% · mem ${Math.round(m.memoryBytes / 1048576)} MiB`);
 ```
+
+</Accordion>
 
 ---
 
@@ -605,7 +635,7 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await using stream = await sandbox.metricsStream(1000);
@@ -613,6 +643,8 @@ for await (const snapshot of stream) {
   console.log(`${snapshot.cpuPercent.toFixed(1)}%`);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -625,12 +657,14 @@ requestDrain(): Promise<void>
 
 Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `stopped` when all in-flight commands finish. Use [`waitUntilStopped()`](#sandbox-waituntilstopped) when the caller needs stopped-state observation. Useful for zero-downtime rotation of worker sandboxes.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.requestDrain();
 await sandbox.waitUntilStopped();
 ```
+
+</Accordion>
 
 ---
 
@@ -643,11 +677,13 @@ requestKill(): Promise<void>
 
 Request force termination and return once the signal is sent, without waiting for the stopped state to be observed.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.requestKill();
 ```
+
+</Accordion>
 
 ---
 
@@ -660,11 +696,13 @@ requestStop(): Promise<void>
 
 Request graceful shutdown and return once the request is sent, without waiting for the stopped state to be observed.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.requestStop();
 ```
+
+</Accordion>
 
 ---
 
@@ -697,11 +735,13 @@ stop(): Promise<void>
 
 Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to 10_000 ms for a clean exit; if the sandbox is still running after that, it is force-killed.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.stop();
 ```
+
+</Accordion>
 
 ---
 
@@ -723,11 +763,13 @@ Gracefully shut down the sandbox with an explicit observation timeout before for
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await sandbox.stopWithTimeout(5000);
 ```
+
+</Accordion>
 
 ---
 
@@ -749,12 +791,14 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const result = await sandbox.waitUntilStopped();
 console.log(result.status, result.exitCode);
 ```
+
+</Accordion>
 
 ---
 
@@ -767,7 +811,7 @@ console.log(result.status, result.exitCode);
 
 Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) - but only if `ownsLifecycle` is `true`.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 {
@@ -775,6 +819,8 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
   await sandbox.exec("python", ["-V"]);
 } // sandbox.stop() runs here, automatically
 ```
+
+</Accordion>
 
 ---
 
@@ -842,7 +888,7 @@ Build and boot the sandbox. By default the sandbox is attached - it stops when t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
@@ -851,6 +897,8 @@ const sandbox = await Sandbox.builder("worker")
   .create();
 await sandbox.detach();
 ```
+
+</Accordion>
 
 ---
 
@@ -872,7 +920,7 @@ Build and boot while streaming image pull progress. Returns a [`PullProgressCrea
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const creation = await Sandbox.builder("demo")
@@ -887,6 +935,8 @@ for await (const ev of creation) {
 
 const sandbox = await creation.awaitSandbox();
 ```
+
+</Accordion>
 
 ---
 
@@ -1114,13 +1164,15 @@ Configure an explicit rootfs source. Use this for OCI-only settings such as the 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
   .imageWith((i) => i.oci("python:3.12").upperSize(8192))
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -1146,7 +1198,7 @@ Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time set
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
@@ -1154,6 +1206,8 @@ const sandbox = await Sandbox.builder("worker")
   .init("auto")
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -1179,7 +1233,7 @@ Like [`init`](#init), but with a closure-builder for argv and env vars. The buil
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
@@ -1188,6 +1242,8 @@ const sandbox = await Sandbox.builder("worker")
     i.args(["--unit=multi-user.target"]).env("container", "microsandbox"))
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -1373,7 +1429,7 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
@@ -1381,6 +1437,8 @@ const sandbox = await Sandbox.builder("worker")
   .patch((p) => p.text("/etc/app.conf", "mode=prod\n", { mode: 0o644 }))
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -1537,7 +1595,7 @@ Configure the OCI registry connection: authentication, insecure transport, and C
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
@@ -1545,6 +1603,8 @@ const sandbox = await Sandbox.builder("worker")
   .registry((r) => r.auth("user", "token"))
   .create();
 ```
+
+</Accordion>
 
 ---
 

@@ -41,7 +41,7 @@ All request and response bodies are raw CBOR bytes. The SDK handles framing and 
 ```python
 from microsandbox import AgentClient
 
-client = await AgentClient.connect_sandbox("dev")  # 1. connect
+client = await AgentClient.connect_sandbox("dev")   # 1. connect
 ready = client.ready_bytes()                        # 2. inspect handshake
 frame = await client.request(0, body)               # 3. raw request/response
 await client.close()                                # 4. close
@@ -91,11 +91,13 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 client = await AgentClient.connect_sandbox("dev", timeout=5.0)
 ```
+
+</Accordion>
 
 ---
 
@@ -131,12 +133,14 @@ Connect to an agent relay socket by path. Use this when you already know the soc
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 path = AgentClient.socket_path("dev")
 client = await AgentClient.connect(path)
 ```
+
+</Accordion>
 
 ---
 
@@ -168,11 +172,13 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 path = AgentClient.socket_path("dev")
 ```
+
+</Accordion>
 
 ---
 
@@ -211,12 +217,14 @@ Send one raw frame and wait for one response frame.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 frame = await client.request(0, body)
 print(frame["id"], frame["flags"])
 ```
+
+</Accordion>
 
 ---
 
@@ -251,7 +259,7 @@ Open a raw streaming session. The returned [`AgentStream`](#agentstream) carries
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
@@ -261,6 +269,8 @@ async for frame in stream:
     if frame["flags"] & FLAG_TERMINAL:
         break
 ```
+
+</Accordion>
 
 ---
 
@@ -290,12 +300,14 @@ Send a follow-up frame on an existing correlation id. Use the `id` from the [`Ag
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 stream = await client.stream(FLAG_SESSION_START, body)
 await client.send(stream.id, 0, follow_up_body)
 ```
+
+</Accordion>
 
 ---
 
@@ -317,11 +329,13 @@ Return the cached handshake `core.ready` frame body as CBOR bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 ready = client.ready_bytes()
 ```
+
+</Accordion>
 
 ---
 
@@ -334,11 +348,13 @@ async def close(self) -> None
 
 Close the client. Calling it more than once is safe.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 await client.close()
 ```
+
+</Accordion>
 
 ---
 
@@ -381,7 +397,7 @@ An open raw agent stream. Carries the protocol correlation id and is both an asy
 | `async with` | [`AgentStream`](#agentstream) | Async context manager; closes the stream on exit |
 | `async for` | [`RawFrame`](#rawframe) | Async iterator over frames until terminal or EOF |
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
@@ -391,3 +407,5 @@ async with await client.stream(FLAG_SESSION_START, body) as stream:
         if frame["flags"] & FLAG_TERMINAL:
             break
 ```
+
+</Accordion>

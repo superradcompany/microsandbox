@@ -170,7 +170,7 @@ Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). The primary co
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::NetworkPolicy;
@@ -180,6 +180,8 @@ let policy = NetworkPolicy::builder()
     .egress(|e| e.tcp().port(443).allow_public().allow_private())
     .build()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -242,11 +244,13 @@ fn allow_domain<S: AsRef<str>>(self, name: S) -> Result<NetworkPolicy, DomainNam
 
 Prepend a single allow-[`Domain`](#destination) egress rule. Single-name sugar over [`allow_domains()`](#policy-allow_domains).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let policy = NetworkPolicy::public_only().allow_domain("api.openai.com")?;
 ```
+
+</Accordion>
 
 ---
 
@@ -282,12 +286,14 @@ Prepend one allow-[`Domain`](#destination) egress rule per name.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let policy = NetworkPolicy::default()
     .allow_domains(["pypi.org", "files.pythonhosted.org"])?;
 ```
+
+</Accordion>
 
 ---
 
@@ -303,12 +309,14 @@ where
 
 Prepend one deny-[`Domain`](#destination) egress rule per name. Prepending lets the denies outrank catch-all allows.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let policy = NetworkPolicy::allow_all()
     .deny_domains(["evil.com", "tracker.example"])?;
 ```
+
+</Accordion>
 
 ---
 
@@ -360,12 +368,14 @@ where
 
 Prepend one deny-[`DomainSuffix`](#destination) egress rule per suffix.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let policy = NetworkPolicy::allow_all()
     .deny_domain_suffixes([".ads.example", ".doubleclick.net"])?;
 ```
+
+</Accordion>
 
 ---
 
@@ -450,7 +460,7 @@ where
 
 Sugar for [`rule()`](#rule) with direction pre-set to [`Egress`](#direction).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 NetworkPolicy::builder()
@@ -458,6 +468,8 @@ NetworkPolicy::builder()
     .egress(|e| e.tcp().port(443).allow_public())
     .build()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -498,13 +510,15 @@ where
 
 Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](#rb-egress), [`.ingress()`](#rb-ingress), or [`.any()`](#rb-any) before any rule-adder, otherwise [`build()`](#build) returns [`BuildError::DirectionNotSet`](#builderror).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 NetworkPolicy::builder()
     .rule(|r| r.egress().tcp().port(443).allow().domain("api.example.com"))
     .build()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -798,7 +812,7 @@ where
 
 Add one allow-[`Domain`](#destination) rule per name, inheriting the closure's current direction / protocol / port state. Lazy-parse: invalid names surface as [`BuildError::InvalidDomain`](#builderror) from [`build()`](#build).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 NetworkPolicy::builder()
@@ -808,6 +822,8 @@ NetworkPolicy::builder()
         .deny_domain_suffixes([".ads.example", ".doubleclick.net"]))
     .build()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -864,7 +880,7 @@ fn allow(&mut self) -> RuleDestinationBuilder<'_>
 
 Begin an explicit-destination rule with action [`Allow`](#action). The returned [`RuleDestinationBuilder`](#ruledestinationbuilder) requires exactly one destination call to commit; dropping it without one adds no rule.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 NetworkPolicy::builder()
@@ -872,6 +888,8 @@ NetworkPolicy::builder()
     .any(|a| a.deny().cidr("198.51.100.0/24"))
     .build()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -996,11 +1014,13 @@ Set the network access policy. Pass a preset or a builder-constructed [`NetworkP
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 .network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
 ```
+
+</Accordion>
 
 ---
 
@@ -1089,7 +1109,7 @@ fn dns(self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self
 
 Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox_network::dns::Nameserver;
@@ -1099,6 +1119,8 @@ use microsandbox_network::dns::Nameserver;
         .nameservers(["1.1.1.1".parse::<Nameserver>()?])
         .query_timeout_ms(3000)))
 ```
+
+</Accordion>
 
 ---
 
@@ -1218,7 +1240,7 @@ fn on_secret_violation(
 
 Set the sandbox-wide action taken when a secret placeholder is detected in traffic to a host not in the secret's allow list. See [`ViolationActionBuilder`](#violationactionbuilder).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 .network(|n| n.on_secret_violation(|v| v
@@ -1226,6 +1248,8 @@ Set the sandbox-wide action taken when a secret placeholder is detected in traff
     .passthrough_host("api.anthropic.com")
     .passthrough_host_pattern("*.example.com")))
 ```
+
+</Accordion>
 
 Passthrough hosts receive the placeholder unchanged. They do **not** receive real secret values.
 

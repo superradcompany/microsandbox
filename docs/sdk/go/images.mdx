@@ -100,7 +100,7 @@ Fetch one cached image by reference. Returns `ErrImageNotFound` when no image wi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 img, err := m.Image.Get(ctx, "python:3.12")
@@ -109,6 +109,8 @@ if err != nil {
 }
 fmt.Println(img.ManifestDigest())
 ```
+
+</Accordion>
 
 ---
 
@@ -143,7 +145,7 @@ Return every cached image, ordered by creation time (newest first).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 images, err := m.Image.List(ctx)
@@ -154,6 +156,8 @@ for _, img := range images {
     fmt.Println(img.Reference(), img.LayerCount())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -192,7 +196,7 @@ Return the full detail for a cached image: the [`ImageHandle`](#imagehandle) plu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 detail, err := m.Image.Inspect(ctx, "python:3.12")
@@ -201,6 +205,8 @@ if err != nil {
 }
 fmt.Println(detail.Config.Entrypoint, len(detail.Layers), "layers")
 ```
+
+</Accordion>
 
 ---
 
@@ -239,13 +245,15 @@ Delete a cached image. When `force` is false, sandboxes that still reference the
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -280,7 +288,7 @@ Remove cached image data that is not used by any sandbox. Returns a report tally
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 report, err := m.Image.Prune(ctx)
@@ -289,6 +297,8 @@ if err != nil {
 }
 fmt.Println(report.LayersRemoved, "layers removed")
 ```
+
+</Accordion>
 
 ---
 
@@ -489,7 +499,7 @@ Delete this image. Equivalent to [`Image.Remove(ctx, h.Reference(), force)`](#im
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 img, err := m.Image.Get(ctx, "old:tag")
@@ -500,6 +510,8 @@ if err := img.Remove(ctx, false); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -534,7 +546,7 @@ Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Refe
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 img, err := m.Image.Get(ctx, "python:3.12")
@@ -547,6 +559,8 @@ if err != nil {
 }
 fmt.Println(detail.Config.WorkingDir)
 ```
+
+</Accordion>
 
 ---
 

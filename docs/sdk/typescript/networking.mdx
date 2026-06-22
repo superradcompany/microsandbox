@@ -137,7 +137,7 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
 ```typescript
 import { NetworkPolicy, Sandbox } from "microsandbox";
 
-const policy = NetworkPolicy.builder()          // 1. compose a policy
+const policy = NetworkPolicy.builder()           // 1. compose a policy
   .defaultDeny()
   .egress((e) => e.tcp().port(443).allowPublic())
   .rule((r) => r.any().deny((d) => d.ip("198.51.100.5")))
@@ -227,7 +227,7 @@ Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { NetworkPolicy } from "microsandbox";
@@ -237,6 +237,8 @@ const policy = NetworkPolicy.builder()
   .egress((e) => e.tcp().port(443).allowPublic().allowPrivate())
   .build();
 ```
+
+</Accordion>
 
 ---
 
@@ -308,13 +310,15 @@ Allow rule with direction `egress`. Empty protocols and ports mean "any".
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { Rule, Destination } from "microsandbox";
 
 const r = Rule.allowEgress(Destination.domain("api.example.com"));
 ```
+
+</Accordion>
 
 ---
 
@@ -429,7 +433,7 @@ Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process 
 
 DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { NetworkPolicy, Rule } from "microsandbox";
@@ -440,6 +444,8 @@ const policy: NetworkPolicy = {
   rules: [Rule.allowDns()],
 };
 ```
+
+</Accordion>
 
 ---
 
@@ -602,7 +608,7 @@ Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy-2) literal or factory
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { NetworkPolicy, Sandbox } from "microsandbox";
@@ -612,6 +618,8 @@ const sb = await Sandbox.builder("api")
   .network((n) => n.policy(NetworkPolicy.publicOnly()))
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -737,11 +745,13 @@ Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 .network((n) => n.dns((d) => d.rebindProtection(true).queryTimeoutMs(2000)))
 ```
+
+</Accordion>
 
 ---
 
@@ -863,11 +873,13 @@ Override per-sandbox interface attributes (MAC, MTU, fixed IPv4 / IPv6 address).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 .network((n) => n.interface((i) => i.mtu(1400).ipv4("172.16.0.2")))
 ```
+
+</Accordion>
 
 ---
 
@@ -909,7 +921,7 @@ Configure the action taken when a secret reaches a disallowed host. See [`Violat
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 .network((n) =>
@@ -918,6 +930,8 @@ Configure the action taken when a secret reaches a disallowed host. See [`Violat
   ),
 )
 ```
+
+</Accordion>
 
 Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
 
@@ -1001,13 +1015,15 @@ Three-arg auto-placeholder shorthand. Auto-generates the placeholder as `$MSB_<e
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 .network((n) =>
   n.secretEnvSimple("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com"),
 )
 ```
+
+</Accordion>
 
 ---
 

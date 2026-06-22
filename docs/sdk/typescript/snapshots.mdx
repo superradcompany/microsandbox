@@ -121,13 +121,15 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image(
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sb = await Sandbox.builder("worker")
   .fromSnapshot("after-pip-install")
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -158,13 +160,15 @@ Snapshot this sandbox under a bare name in the default snapshots directory (`~/.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const h = await Sandbox.get("baseline");
 await h.stop();
 const snap = await h.snapshot("after-pip-install");
 ```
+
+</Accordion>
 
 ---
 
@@ -195,11 +199,13 @@ Snapshot this sandbox to an explicit filesystem path. Called on a [`SandboxHandl
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
 ```
+
+</Accordion>
 
 ---
 
@@ -234,7 +240,7 @@ Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fl
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const snap = await Snapshot.builder("baseline")
@@ -243,6 +249,8 @@ const snap = await Snapshot.builder("baseline")
   .recordIntegrity()
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -273,12 +281,14 @@ Open an existing snapshot artifact. Bare names resolve under the default snapsho
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const snap = await Snapshot.open("after-pip-install");
 console.log(snap.digest);
 ```
+
+</Accordion>
 
 ---
 
@@ -309,12 +319,14 @@ Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`Sn
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const h = await Snapshot.get("after-pip-install");
 console.log(h.digest, h.createdAt);
 ```
+
+</Accordion>
 
 ---
 
@@ -336,13 +348,15 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 for (const h of await Snapshot.list()) {
   console.log(h.name ?? h.digest, h.sizeBytes);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -373,12 +387,14 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const found = await Snapshot.listDir("/mnt/external/snapshots");
 console.log(`${found.length} artifacts`);
 ```
+
+</Accordion>
 
 ---
 
@@ -404,11 +420,13 @@ Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await Snapshot.remove("after-pip-install", { force: true });
 ```
+
+</Accordion>
 
 ---
 
@@ -439,12 +457,14 @@ Walk the snapshots directory (default: the configured snapshots dir) and rebuild
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const count = await Snapshot.reindex();
 console.log(`reindexed ${count} snapshots`);
 ```
+
+</Accordion>
 
 ---
 
@@ -474,13 +494,15 @@ Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
   withImage: true,
 });
 ```
+
+</Accordion>
 
 ---
 
@@ -515,12 +537,14 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, v
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const h = await Snapshot.import("./baseline.tar.zst");
 console.log("imported", h.digest);
 ```
+
+</Accordion>
 
 ---
 
@@ -669,7 +693,7 @@ Recompute the upper layer's content hash and compare against the manifest. Walks
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const report = await snap.verify();
@@ -679,6 +703,8 @@ if (report.upper.kind === "verified") {
   console.log("no integrity hash recorded");
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -792,7 +818,7 @@ Capture the configured snapshot and return the resulting artifact.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const snap = await Snapshot.builder("baseline")
@@ -801,6 +827,8 @@ const snap = await Snapshot.builder("baseline")
   .recordIntegrity()
   .create();
 ```
+
+</Accordion>
 
 ---
 

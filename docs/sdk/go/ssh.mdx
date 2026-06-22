@@ -101,12 +101,14 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 ssh := sb.SSH()
 client, err := ssh.OpenClient(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -145,7 +147,7 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 client, err := sb.SSH().OpenClient(ctx,
@@ -157,6 +159,8 @@ if err != nil {
 }
 defer client.Close(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -195,7 +199,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 srv, err := sb.SSH().PrepareServer(ctx,
@@ -206,6 +210,8 @@ if err != nil {
 }
 defer srv.Close(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -248,7 +254,7 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := client.Exec(ctx, "python -V")
@@ -260,6 +266,8 @@ if !out.Success() {
 }
 fmt.Printf("%s", out.Stdout)
 ```
+
+</Accordion>
 
 ---
 
@@ -298,7 +306,7 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 code, err := client.Attach(ctx,
@@ -310,6 +318,8 @@ if err != nil {
 }
 fmt.Printf("shell exited with %d\n", code)
 ```
+
+</Accordion>
 
 ---
 
@@ -344,7 +354,7 @@ Open an SFTP session over this SSH connection. Returns a high-level SFTP client 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sftp, err := client.SFTP(ctx)
@@ -357,6 +367,8 @@ if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -387,11 +399,13 @@ Close this SSH client session. The handle is consumed; do not use it after closi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 defer client.Close(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -422,7 +436,7 @@ Serve one SSH transport over this process's stdin and stdout. Returns when the c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 srv, err := sb.SSH().PrepareServer(ctx)
@@ -435,6 +449,8 @@ if err := srv.ServeConnection(ctx); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -465,11 +481,13 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 defer srv.Close(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -491,7 +509,7 @@ Report whether the command exited with status `0`.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := client.Exec(ctx, "test -f /etc/passwd")
@@ -500,6 +518,8 @@ if err != nil {
 }
 fmt.Println("present:", out.Success())
 ```
+
+</Accordion>
 
 ---
 

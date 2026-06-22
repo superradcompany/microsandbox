@@ -65,7 +65,7 @@ from microsandbox import (
     Sandbox,
 )
 
-policy = NetworkPolicy(                            # 1. compose a policy
+policy = NetworkPolicy(                             # 1. compose a policy
     default_egress=Action.DENY,
     rules=(
         *Rule.allow_dns(),
@@ -114,11 +114,13 @@ Deny all traffic. No network interface is created; the guest is fully offline. `
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create("offline", image="python", network=Network.none())
 ```
+
+</Accordion>
 
 ---
 
@@ -244,13 +246,15 @@ Create a rule that permits matching traffic. All filters are keyword-only.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 from microsandbox import Destination, Protocol, Rule
 
 r = Rule.allow(protocol=Protocol.TCP, port=443, destination=Destination.domain("api.example.com"))
 ```
+
+</Accordion>
 
 ---
 
@@ -323,7 +327,7 @@ Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 from microsandbox import Action, DestGroup, Destination, NetworkPolicy, Protocol, Rule
@@ -340,6 +344,8 @@ policy = NetworkPolicy(
     ),
 )
 ```
+
+</Accordion>
 
 ## Destination factory
 

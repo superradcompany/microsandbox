@@ -99,7 +99,7 @@ Set the network configuration for the sandbox. Pass a preset from the [`NetworkP
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
@@ -107,6 +107,8 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithNetwork(m.NetworkPolicy.PublicOnly()),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -137,7 +139,7 @@ Make TCP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -145,6 +147,8 @@ sb, err := m.CreateSandbox(ctx, "api",
     m.WithPorts(map[uint16]uint16{8080: 8080}),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -175,7 +179,7 @@ Make UDP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "dns",
@@ -183,6 +187,8 @@ sb, err := m.CreateSandbox(ctx, "dns",
     m.WithPortsUDP(map[uint16]uint16{5353: 53}),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -213,7 +219,7 @@ Make services running in the sandbox reachable on explicit host addresses and po
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
@@ -224,6 +230,8 @@ sb, err := m.CreateSandbox(ctx, "api",
     ),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -251,11 +259,13 @@ Allow only public internet traffic; RFC-1918 private ranges are blocked. This is
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithNetwork(m.NetworkPolicy.PublicOnly())
 ```
+
+</Accordion>
 
 ---
 
@@ -277,11 +287,13 @@ Block all network access. No network interface is created; the guest is fully of
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithNetwork(m.NetworkPolicy.None())
 ```
+
+</Accordion>
 
 ---
 
@@ -303,11 +315,13 @@ Permit all network traffic, including private addresses and the host machine.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithNetwork(m.NetworkPolicy.AllowAll())
 ```
+
+</Accordion>
 
 ---
 
@@ -329,11 +343,13 @@ Allow public internet plus private/LAN egress; block loopback, link-local, and m
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 m.WithNetwork(m.NetworkPolicy.NonLocal())
 ```
+
+</Accordion>
 
 ---
 

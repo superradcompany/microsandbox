@@ -178,11 +178,13 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let vol = Volume::builder("pip-cache").create().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -213,7 +215,7 @@ Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the acti
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::volume::{VolumeConfig, VolumeKind};
@@ -227,6 +229,8 @@ let vol = Volume::create(VolumeConfig {
 })
 .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -257,12 +261,14 @@ Get a handle to an existing named volume. Use the handle to access the volume's 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Volume::get("pip-cache").await?;
 println!("{} — {} bytes used", h.name(), h.used_bytes());
 ```
+
+</Accordion>
 
 ---
 
@@ -284,13 +290,15 @@ List all named volumes, newest first.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 for h in Volume::list().await? {
     println!("{} — {:?}", h.name(), h.kind());
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -312,11 +320,13 @@ Delete a named volume and its contents from disk. Locally the database record is
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 Volume::remove("pip-cache").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -384,11 +394,13 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().write("/seed.txt", "hello").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -410,11 +422,13 @@ The host-side directory where this volume's data is stored (local backend only).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 println!("{}", vol.path()?.display());
 ```
+
+</Accordion>
 
 ---
 
@@ -622,12 +636,14 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let h = Volume::get("pip-cache").await?;
 let names = h.fs().list("/").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -640,11 +656,13 @@ async fn remove(&self) -> MicrosandboxResult<()>
 
 Delete this volume and its contents. Locally the database record is removed first, then the directory.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 Volume::get("pip-cache").await?.remove().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -901,11 +919,13 @@ Read an entire file into memory as raw bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let data = vol.fs().read("/seed.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -936,11 +956,13 @@ Read an entire file into memory as a UTF-8 string.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let text = vol.fs().read_to_string("/seed.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -971,7 +993,7 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut stream = vol.fs().read_stream("/model.bin").await?;
@@ -979,6 +1001,8 @@ while let Some(chunk) = stream.recv().await? {
     // process chunk
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -1004,11 +1028,13 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1039,13 +1065,15 @@ Open a file for streaming writes. Returns a [`VolumeFsWriteSink`](#volumefswrite
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut sink = vol.fs().write_stream("/upload.bin").await?;
 sink.write(&chunk).await?;
 sink.close().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1076,13 +1104,15 @@ List the immediate children of a directory (non-recursive). Each entry includes 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 for entry in vol.fs().list("/").await? {
     println!("{} ({} bytes)", entry.path, entry.size);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -1104,11 +1134,13 @@ Create a directory and any missing parents.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().mkdir("/data/incoming").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1130,11 +1162,13 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().remove("/data/stale.tmp").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1156,11 +1190,13 @@ Remove a directory and its contents recursively. Targeting the volume root is re
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().remove_dir("/data/incoming").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1186,11 +1222,13 @@ Copy a file within the volume. Creates the destination's parent directories as n
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1216,11 +1254,13 @@ Rename or move a file or directory. Creates the destination's parent directories
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1251,12 +1291,14 @@ Get metadata for a file or directory: kind, size, permission bits, read-only fla
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let meta = vol.fs().stat("/seed.txt").await?;
 println!("{} bytes", meta.size);
 ```
+
+</Accordion>
 
 ---
 
@@ -1287,13 +1329,15 @@ Check whether a file or directory exists at the given path. Returns `false` rath
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 if !vol.fs().exists("/seed.txt").await? {
     vol.fs().write("/seed.txt", "hello").await?;
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -1343,7 +1387,7 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::size::SizeExt;
@@ -1354,6 +1398,8 @@ let vol = Volume::builder("docker-data")
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1443,7 +1489,7 @@ Create the volume on the active backend. Equivalent to `Volume::create(self.buil
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let vol = Volume::builder("pip-cache")
@@ -1452,6 +1498,8 @@ let vol = Volume::builder("pip-cache")
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -1527,7 +1575,7 @@ Mount a named volume with explicit sandbox-time existence behavior, configured v
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::size::SizeExt;
@@ -1541,6 +1589,8 @@ let sb = Sandbox::builder("worker")
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 

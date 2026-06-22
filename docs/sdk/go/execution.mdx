@@ -121,7 +121,7 @@ Run a command in the sandbox and return its collected output. Blocks until the c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := sb.Exec(ctx, "make", []string{"build"},
@@ -129,6 +129,8 @@ out, err := sb.Exec(ctx, "make", []string{"build"},
     m.WithExecEnv(map[string]string{"DEBUG": "1"}),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -167,7 +169,7 @@ Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := sb.Shell(ctx, "echo $HOME && ls /tmp")
@@ -176,6 +178,8 @@ if err != nil {
 }
 fmt.Print(out.Stdout())
 ```
+
+</Accordion>
 
 ---
 
@@ -220,7 +224,7 @@ Start a streaming exec session and return an [`*ExecHandle`](#exechandle). The h
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
@@ -229,6 +233,8 @@ if err != nil {
 }
 defer h.Close()
 ```
+
+</Accordion>
 
 ---
 
@@ -267,7 +273,7 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := sb.ShellStream(ctx, "tail -f /var/log/app.log")
@@ -289,6 +295,8 @@ for {
     }
 }
 ```
+
+</Accordion>
 
 ## ExecHandle methods
 
@@ -334,13 +342,15 @@ Return the stdin sink for this exec session. Single-take: returns `nil` if the s
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sink := h.TakeStdin()
 sink.Write([]byte("hello\n"))
 sink.Close()
 ```
+
+</Accordion>
 
 ---
 
@@ -371,7 +381,7 @@ Block until the next event arrives or the stream ends. Returns an event with `Ki
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 for {
@@ -393,6 +403,8 @@ for {
     }
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -423,7 +435,7 @@ Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#ex
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := h.Collect(ctx)
@@ -432,6 +444,8 @@ if err != nil {
 }
 fmt.Print(out.Stdout())
 ```
+
+</Accordion>
 
 ---
 
@@ -506,7 +520,7 @@ Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 import "syscall"
@@ -515,6 +529,8 @@ if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -527,11 +543,13 @@ func (h *ExecHandle) Close() error
 
 Release the Rust-side exec handle. Does not kill the running process; call [`Signal`](#h-signal) or [`Kill`](#h-kill) first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 defer h.Close()
 ```
+
+</Accordion>
 
 ## ExecOutput methods
 
@@ -690,7 +708,7 @@ Send data to the process stdin. Implements `io.Writer`. Uses `context.Background
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
@@ -706,6 +724,8 @@ sink.Close()
 out, _ := h.Collect(ctx)
 fmt.Print(out.Stdout()) // "hello\n"
 ```
+
+</Accordion>
 
 ---
 
@@ -751,11 +771,13 @@ func (sk *ExecSink) Close() error
 
 Close the stdin pipe, sending EOF to the process. Implements `io.Closer`.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 sink.Close()
 ```
+
+</Accordion>
 
 ## Types
 
@@ -955,7 +977,7 @@ Set a per-command timeout. When exceeded, the guest terminates the process and t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := sb.Shell(ctx, "long-running-task",
@@ -964,6 +986,8 @@ if m.IsKind(err, m.ErrExecTimeout) {
     log.Println("timed out")
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -1016,7 +1040,7 @@ Add per-command environment variables. Called repeatedly, maps merge; later keys
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 out, err := sb.Exec(ctx, "make", []string{"build"},
@@ -1024,3 +1048,5 @@ out, err := sb.Exec(ctx, "make", []string{"build"},
     m.WithExecEnv(map[string]string{"DEBUG": "1"}),
 )
 ```
+
+</Accordion>

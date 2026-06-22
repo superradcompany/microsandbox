@@ -97,10 +97,18 @@ body {
   text-transform: uppercase; opacity: .55; margin: 16px 0 6px;
 }
 
-/* parameter + return rows */
-.msb-params { margin: 4px 0 0; }
+/* parameter + return rows
+ * The key column auto-sizes to its content (param name + type) and stays
+ * aligned across rows via subgrid, capped so a long type can't crowd out the
+ * description. */
+.msb-params {
+  margin: 4px 0 0;
+  display: grid;
+  grid-template-columns: minmax(170px, min(34%, 320px)) minmax(0, 1fr);
+  column-gap: 18px;
+}
 .msb-param {
-  display: grid; grid-template-columns: 180px 1fr; gap: 4px 18px;
+  display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; row-gap: 4px;
   padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
 }
 .msb-param-key code { font-size: 13px; }
@@ -111,8 +119,28 @@ body {
 .msb-backref { font-size: 13px; opacity: .7; margin: 4px 0 12px; }
 .msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
 
+/* ----------------------------------------------------------------------------
+ * Table columns — hand the slack to the column that needs it (content-driven
+ * layout) instead of splitting width evenly, and keep name-ish first columns
+ * on one line. Width is unchanged: tables stay within the prose column.
+ * -------------------------------------------------------------------------- */
+table { table-layout: auto; }
+table th, table td { vertical-align: top; overflow-wrap: anywhere; }
+table td:first-child { white-space: nowrap; }
+
+/* ----------------------------------------------------------------------------
+ * Example collapsibles — Mintlify wraps the code block in prose margins
+ * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
+ * leaves a lot of dead space inside the accordion. Trim it to an even, tight
+ * inset. Scoped to accordions that hold a code block so prose accordions are
+ * left alone.
+ * -------------------------------------------------------------------------- */
+details.accordion:has(.code-block) > *:not(summary) { margin: 0 0.75rem 0.75rem !important; }
+details.accordion:has(.code-block) .code-block { margin: 0 !important; }
+
 @media (max-width: 640px) {
   .msb-row { grid-template-columns: 1fr; gap: 0; }
   .msb-rg { font-size: 11.5px; opacity: .6; }
-  .msb-param { grid-template-columns: 1fr; gap: 2px; }
+  .msb-params { grid-template-columns: 1fr; }
+  .msb-param { row-gap: 2px; }
 }
