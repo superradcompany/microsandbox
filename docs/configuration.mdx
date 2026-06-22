@@ -90,6 +90,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 
 All path fields are optional. When `null`, they resolve relative to `home`.
 
+On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings can use escaped backslashes such as `"C:\\Users\\you\\.microsandbox\\lib\\libkrunfw.dll"` or forward slashes such as `"C:/Users/you/.microsandbox/lib/libkrunfw.dll"`.
+
 | Field | Default | Description |
 |-------|---------|-------------|
 | `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |

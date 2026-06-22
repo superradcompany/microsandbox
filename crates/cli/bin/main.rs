@@ -150,7 +150,7 @@ enum Commands {
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Check local runtime and host prerequisites.
+    /// Check local runtime and host virtualization prerequisites.
     Doctor(self_cmd::DoctorArgs),
 
     /// Manage the msb installation.

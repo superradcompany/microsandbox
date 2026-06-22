@@ -199,9 +199,9 @@ git push origin v0.X.Y
 
 The release workflow (`.github/workflows/release.yml`) will:
 
-1. Build `msb`, `agentd`, and `libkrunfw` for all platforms (linux-x86_64, linux-aarch64, darwin-aarch64)
-2. Create platform bundles (`.tar.gz`) with SHA256 checksums
-3. Create a GitHub release with the bundles
+1. Build `msb`, `agentd`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
+2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
+3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
 4. Publish the Node.js SDK to npm (`microsandbox` + platform packages)
 5. Publish the MCP server to npm (`microsandbox-mcp`)
 6. Publish Rust crates to crates.io (in dependency order, 10 crates)

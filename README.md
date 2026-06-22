@@ -68,6 +68,14 @@
 > npx microsandbox run debian
 > ```
 >
+> [!NOTE]
+>
+> Windows support is currently in preview. A Windows MSI or winget package is not published yet; use the PowerShell installer from the latest GitHub release:
+>
+> ```powershell
+> irm https://github.com/superradcompany/microsandbox/releases/latest/download/install.ps1 | iex
+> ```
+>
 > ##
 >
 > Or install the `msb` command globally:
@@ -109,7 +117,7 @@
 
 ##
 
-> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.<br />
+> **Requirements**: Linux with KVM enabled, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform enabled.<br />
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />

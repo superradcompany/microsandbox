@@ -39,7 +39,7 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Check local runtime and host prerequisites.
+    /// Check local runtime and host virtualization prerequisites.
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
 
@@ -62,7 +62,7 @@ pub struct SelfUpdateArgs {
 /// Arguments for `msb doctor` and `msb self doctor`.
 #[derive(Debug, Args, Clone, Copy)]
 pub struct DoctorArgs {
-    /// Attempt supported host setup fixes.
+    /// Attempt supported host virtualization setup fixes.
     #[arg(long)]
     pub fix: bool,
 }
@@ -140,7 +140,7 @@ pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Check local runtime files and host prerequisites.
+/// Check local runtime files and host virtualization prerequisites.
 pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
     if microsandbox::setup::is_installed() {
         done("Runtime dependencies are installed.");
