@@ -394,6 +394,15 @@ jobs:
     needs: [check, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -429,6 +438,15 @@ jobs:
     needs: [check, changes, cli-smoke-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -515,6 +533,15 @@ jobs:
     needs: [check, changes, integration-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -651,6 +678,15 @@ jobs:
     needs: [check, changes, node-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -725,6 +761,15 @@ jobs:
     needs: [check, changes, python-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
