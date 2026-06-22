@@ -234,6 +234,9 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
 
+      - name: Check generated microsandbox types
+        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+
       # -- Checks (agentd — Linux-only) --
       - name: Format agentd
         if: matrix.os == 'linux'
@@ -247,6 +250,14 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
+
+      - name: Build agent client package
+        working-directory: packages/agent-client/typescript
+        run: npm ci && npm run build && npm run typecheck && npm test
+
+      - name: Build microsandbox types package
+        working-directory: packages/microsandbox-types/typescript
+        run: npm ci && npm run build && npm run typecheck
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
@@ -415,7 +426,7 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [check, changes]
+    needs: [check, changes, cli-smoke-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -437,7 +448,7 @@ jobs:
         with:
           cache-bin: false
 
-      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-nextest
 
@@ -470,17 +481,17 @@ jobs:
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
-      # (see crates/test-utils), so nextest can run tests in parallel without
-      # sqlite/image-cache contention.
-      # Keep real microVM/network concurrency bounded even on large self-hosted
-      # runners; num-cpus fan-out can overwhelm guest package installs.
+      # (see crates/test-utils), so tests avoid sqlite/image-cache contention.
+      # Run the VM integration suite serially on the shared self-hosted KVM
+      # runner; overlapping microVM boots and stdin-heavy exec tests can
+      # intermittently lose relay/session readiness under CI load.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
+          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 1
 
       - name: Disk usage
         if: always()
@@ -501,7 +512,7 @@ jobs:
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, integration-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -595,7 +606,20 @@ jobs:
       # setup-bun downloads a zipped release; unzip isn't preinstalled on
       # the self-hosted runner.
       - name: Install unzip
-        run: sudo apt-get update && sudo apt-get install -y unzip
+        run: |
+          if command -v unzip >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          for attempt in {1..10}; do
+            if sudo apt-get update && sudo apt-get install -y unzip; then
+              exit 0
+            fi
+            echo "apt-get install unzip failed on attempt ${attempt}; retrying..."
+            sleep 10
+          done
+
+          exit 1
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
@@ -624,7 +648,7 @@ jobs:
   # ---------------------------------------------------------------------------
   python-sdk-test:
     name: Python SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, node-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
@@ -698,7 +722,7 @@ jobs:
   # ---------------------------------------------------------------------------
   go-sdk-test:
     name: Go SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, python-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:

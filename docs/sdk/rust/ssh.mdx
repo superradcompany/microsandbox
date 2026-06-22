@@ -3,51 +3,181 @@ title: SSH
 description: Rust SDK - SSH API reference
 ---
 
-See [SSH](/sandboxes/ssh) for usage flows.
+Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable SSH server endpoint. Requires the `ssh` feature. See [SSH](/sandboxes/ssh) for usage flows.
 
 ```toml
-microsandbox = { version = "0.4.6", features = ["ssh"] }
+microsandbox = { version = "0.5.8", features = ["ssh"] }
+```
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Sandbox<span className="msb-ct">1</span></p>
+  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH namespace for this sandbox</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SandboxSsh<span className="msb-ct">8</span></p>
+  <a className="msb-row" href="#ssh-connect"><span className="msb-rn">ssh.connect()</span><span className="msb-rg">open a client</span></a>
+  <a className="msb-row" href="#ssh-open_client"><span className="msb-rn">ssh.open_client()</span><span className="msb-rg">alias of connect()</span></a>
+  <a className="msb-row" href="#ssh-connect_with"><span className="msb-rn">ssh.connect_with()</span><span className="msb-rg">open a client with options</span></a>
+  <a className="msb-row" href="#ssh-open_client_with"><span className="msb-rn">ssh.open_client_with()</span><span className="msb-rg">alias of connect_with()</span></a>
+  <a className="msb-row" href="#ssh-server"><span className="msb-rn">ssh.server()</span><span className="msb-rg">prepare a server endpoint</span></a>
+  <a className="msb-row" href="#ssh-prepare_server"><span className="msb-rn">ssh.prepare_server()</span><span className="msb-rg">alias of server()</span></a>
+  <a className="msb-row" href="#ssh-server_with"><span className="msb-rn">ssh.server_with()</span><span className="msb-rg">server endpoint with options</span></a>
+  <a className="msb-row" href="#ssh-prepare_server_with"><span className="msb-rn">ssh.prepare_server_with()</span><span className="msb-rg">alias of server_with()</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SshClient<span className="msb-ct">6</span></p>
+  <a className="msb-row" href="#client-exec"><span className="msb-rn">client.exec()</span><span className="msb-rg">run a command</span></a>
+  <a className="msb-row" href="#client-exec_with"><span className="msb-rn">client.exec_with()</span><span className="msb-rg">run with options</span></a>
+  <a className="msb-row" href="#client-attach"><span className="msb-rn">client.attach()</span><span className="msb-rg">interactive shell</span></a>
+  <a className="msb-row" href="#client-attach_with"><span className="msb-rn">client.attach_with()</span><span className="msb-rg">attach with options</span></a>
+  <a className="msb-row" href="#client-sftp"><span className="msb-rn">client.sftp()</span><span className="msb-rg">open an SFTP session</span></a>
+  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the session</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>SshServer · SshStdioStream<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#server-serve"><span className="msb-rn">server.serve()</span><span className="msb-rg">serve one connection</span></a>
+  <a className="msb-row" href="#server-serve_connection"><span className="msb-rn">server.serve_connection()</span><span className="msb-rg">alias of serve()</span></a>
+  <a className="msb-row" href="#sshstdiostreamnew"><span className="msb-rn">SshStdioStream::new()</span><span className="msb-rg">stdin/stdout transport</span></a>
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Option builders<span className="msb-ct">16</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#sshclientoptionsbuilder">client.user()</a>
+    <a className="msb-chip" href="#sshclientoptionsbuilder">client.term()</a>
+    <a className="msb-chip" href="#sshclientoptionsbuilder">client.sftp()</a>
+    <a className="msb-chip" href="#sshexecoptionsbuilder">exec.tty()</a>
+    <a className="msb-chip" href="#sshattachoptionsbuilder">attach.term()</a>
+    <a className="msb-chip" href="#sshattachoptionsbuilder">attach.detach_keys()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.host_key_path()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.host_key()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.authorized_keys_path()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.authorized_key()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.user()</a>
+    <a className="msb-chip" href="#sshserveroptionsbuilder">srv.sftp()</a>
+    <a className="msb-more" href="#sshserveroptionsbuilder">+ build() on each builder</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Constants<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#default_ssh_host"><span className="msb-rn">DEFAULT_SSH_HOST</span><span className="msb-rg">default listener host</span></a>
+  <a className="msb-row" href="#default_ssh_port"><span className="msb-rn">DEFAULT_SSH_PORT</span><span className="msb-rg">default listener port</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#sandboxssh">SandboxSsh</a>
+    <a className="msb-typepill" href="#sshclient">SshClient</a>
+    <a className="msb-typepill" href="#sshserver">SshServer</a>
+    <a className="msb-typepill" href="#sshoutput">SshOutput</a>
+    <a className="msb-typepill" href="#sftpclient">SftpClient</a>
+    <a className="msb-typepill" href="#sshstdiostream">SshStdioStream</a>
+    <a className="msb-typepill" href="#sshclientoptionsbuilder">SshClientOptionsBuilder</a>
+    <a className="msb-typepill" href="#sshexecoptionsbuilder">SshExecOptionsBuilder</a>
+    <a className="msb-typepill" href="#sshattachoptionsbuilder">SshAttachOptionsBuilder</a>
+    <a className="msb-typepill" href="#sshserveroptionsbuilder">SshServerOptionsBuilder</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("api")
+    .image("python")
+    .create()
+    .await?;
+
+let client = sb.ssh().connect().await?;      // 1. open an SSH client
+let out = client.exec("python -V").await?;   // 2. run a command
+println!("{}", String::from_utf8_lossy(&out.stdout));
+
+client.close().await?;                       // 3. close the session
 ```
 
 ## Sandbox
 
 ---
 
-#### ssh()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
-fn ssh(&self) -> SandboxSshOps
+fn ssh(&self) -> SandboxSsh
 ```
 
-Return the SSH namespace for this sandbox.
+Return the SSH namespace for this sandbox. The namespace holds the SSH client and server helpers; nothing connects until you call [`connect`](#ssh-connect) or [`server`](#ssh-server).
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxSshOps`](#sandboxssh) | SSH client and server helpers |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxssh">SandboxSsh</a></div>
+    <div className="msb-param-desc">SSH namespace for this sandbox.</div>
+  </div>
+</div>
 
-## SandboxSshOps
+<Accordion title="Example">
+
+```rust
+let client = sb.ssh().connect().await?;
+```
+
+</Accordion>
+
+## SandboxSsh
+
+SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). SSH is only supported on local sandboxes; calls error with `Unsupported` against a cloud backend.
 
 ---
 
-#### connect()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">connect()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn connect(&self) -> MicrosandboxResult<SshClient>
 ```
 
-Connect a native in-process SSH client to the sandbox.
+Connect a native in-process SSH client to this sandbox. Generates an ephemeral Ed25519 client and host key pair, stands up an internal server bound to a duplex stream, and authenticates over public key. Uses default client options (user `root`, terminal from `$TERM`, SFTP enabled).
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshClient`](#sshclient) | Native SSH client session |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshclient">SshClient</a></div>
+    <div className="msb-param-desc">Connected SSH client session.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let client = sb.ssh().connect().await?;
+let out = client.exec("uname -a").await?;
+```
+
+</Accordion>
 
 ---
 
-#### connect_with()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn open_client(&self) -> MicrosandboxResult<SshClient>
+```
+
+Alias for [`connect`](#ssh-connect).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshclient">SshClient</a></div>
+    <div className="msb-param-desc">Connected SSH client session.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">connect_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn connect_with(
@@ -56,39 +186,122 @@ async fn connect_with(
 ) -> MicrosandboxResult<SshClient>
 ```
 
-Connect a native SSH client with custom client options.
+Connect a native in-process SSH client with custom options. The closure configures the login user, terminal name, and whether SFTP is enabled on the internal server.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| f | `FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder` | Configure user, terminal, and SFTP support |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshclientoptionsbuilder">FnOnce(SshClientOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure user, terminal, and SFTP support.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshClient`](#sshclient) | Native SSH client session |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshclient">SshClient</a></div>
+    <div className="msb-param-desc">Connected SSH client session.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let client = sb.ssh().connect_with(|opts| opts
+    .user("app")
+    .term("xterm-256color")).await?;
+```
+
+</Accordion>
 
 ---
 
-#### server()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn open_client_with(
+    &self,
+    f: impl FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder,
+) -> MicrosandboxResult<SshClient>
+```
+
+Alias for [`connect_with`](#ssh-connect_with).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshclientoptionsbuilder">FnOnce(SshClientOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure user, terminal, and SFTP support.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshclient">SshClient</a></div>
+    <div className="msb-param-desc">Connected SSH client session.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">server()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn server(&self) -> MicrosandboxResult<SshServer>
 ```
 
-Prepare a reusable SSH server endpoint for this sandbox.
+Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the host key and resolves authorized keys from the default authorized-keys file. The returned [`SshServer`](#sshserver) is cloneable and can serve many connections.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshServer`](#sshserver) | Reusable SSH server endpoint |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshserver">SshServer</a></div>
+    <div className="msb-param-desc">Reusable SSH server endpoint.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let server = sb.ssh().server().await?;
+let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+server.serve(server_io).await?;
+```
+
+</Accordion>
 
 ---
 
-#### server_with()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn prepare_server(&self) -> MicrosandboxResult<SshServer>
+```
+
+Alias for [`server`](#ssh-server).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshserver">SshServer</a></div>
+    <div className="msb-param-desc">Reusable SSH server endpoint.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">server_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn server_with(
@@ -97,47 +310,115 @@ async fn server_with(
 ) -> MicrosandboxResult<SshServer>
 ```
 
-Prepare a server endpoint with custom host-key, authorization, user, or SFTP options.
+Prepare a server endpoint with custom host-key, authorization, guest-user, or SFTP options. If no authorized keys are configured, the default authorized-keys file is loaded; an empty key set is an error.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| f | `FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder` | Configure server options |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshserveroptionsbuilder">FnOnce(SshServerOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure host key, authorized keys, guest user, and SFTP.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshServer`](#sshserver) | Reusable SSH server endpoint |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshserver">SshServer</a></div>
+    <div className="msb-param-desc">Reusable SSH server endpoint.</div>
+  </div>
+</div>
 
-## SshClient
+<Accordion title="Example">
+
+```rust
+let server = sb.ssh().server_with(|opts| opts
+    .authorized_key("ssh-ed25519 AAAAC3Nza...")
+    .user("app")
+    .sftp(false)).await?;
+```
+
+</Accordion>
 
 ---
 
-#### exec()
+#### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn prepare_server_with(
+    &self,
+    f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
+) -> MicrosandboxResult<SshServer>
+```
+
+Alias for [`server_with`](#ssh-server_with).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshserveroptionsbuilder">FnOnce(SshServerOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure host key, authorized keys, guest user, and SFTP.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshserver">SshServer</a></div>
+    <div className="msb-param-desc">Reusable SSH server endpoint.</div>
+  </div>
+</div>
+
+## SshClient
+
+A connected, native in-process SSH client session, obtained from [`connect`](#ssh-connect) or [`connect_with`](#ssh-connect_with). Aborts its internal server task on drop.
+
+---
+
+#### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn exec(&self, command: impl Into<String>) -> MicrosandboxResult<SshOutput>
 ```
 
-Run an SSH exec request and collect stdout, stderr, and exit status.
+Run an SSH exec request and collect stdout, stderr, and the exit status. The command is run through the sandbox's configured shell (default `/bin/sh -c`). No PTY is requested.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| command | `impl Into<String>` | Command string sent through SSH |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>command</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command string sent through SSH.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshOutput`](#sshoutput) | Captured output and status |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshoutput">SshOutput</a></div>
+    <div className="msb-param-desc">Captured output and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let out = client.exec("echo hello").await?;
+println!("exit {}: {}", out.status, String::from_utf8_lossy(&out.stdout));
+```
+
+</Accordion>
 
 ---
 
-#### exec_with()
+#### <span className="msb-recv">client.</span><span className="msb-hn">exec_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn exec_with(
@@ -147,40 +428,71 @@ async fn exec_with(
 ) -> MicrosandboxResult<SshOutput>
 ```
 
-Run an SSH exec request with options.
+Run an SSH exec request with options. The closure can request a PTY via [`tty`](#sshexecoptionsbuilder); when a PTY is allocated, stderr is folded into stdout.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| command | `impl Into<String>` | Command string sent through SSH |
-| f | `FnOnce(SshExecOptionsBuilder) -> SshExecOptionsBuilder` | Configure exec options |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>command</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command string sent through SSH.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshexecoptionsbuilder">FnOnce(SshExecOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure exec options.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SshOutput`](#sshoutput) | Captured output and status |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshoutput">SshOutput</a></div>
+    <div className="msb-param-desc">Captured output and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let out = client.exec_with("top -bn1", |opts| opts.tty(true)).await?;
+```
+
+</Accordion>
 
 ---
 
-#### attach()
+#### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn attach(&self) -> MicrosandboxResult<i32>
 ```
 
-Attach the local terminal to an interactive SSH shell.
+Attach the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, relays window-resize events, and returns when the shell exits or the default detach key sequence is typed.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `i32` | Exit code |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">i32</span></div>
+    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let code = client.attach().await?;
+println!("shell exited with {code}");
+```
+
+</Accordion>
 
 ---
 
-#### attach_with()
+#### <span className="msb-recv">client.</span><span className="msb-hn">attach_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn attach_with(
@@ -189,108 +501,334 @@ async fn attach_with(
 ) -> MicrosandboxResult<i32>
 ```
 
-Attach with terminal options.
+Attach an interactive shell with custom terminal and detach-key options.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| f | `FnOnce(SshAttachOptionsBuilder) -> SshAttachOptionsBuilder` | Configure terminal and detach keys |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#sshattachoptionsbuilder">FnOnce(SshAttachOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure terminal name and detach keys.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `i32` | Exit code |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">i32</span></div>
+    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let code = client.attach_with(|opts| opts
+    .term("xterm-256color")
+    .detach_keys("ctrl-p,ctrl-q")).await?;
+```
+
+</Accordion>
 
 ---
 
-#### sftp()
+#### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn sftp(&self) -> MicrosandboxResult<SftpClient>
 ```
 
-Open an SFTP session over this SSH connection.
+Open an SFTP client session over this SSH connection. Requests the `sftp` subsystem and returns a high-level SFTP session for reading, writing, and listing files inside the guest.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SftpClient`](#sftpclient) | SFTP client session |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sftpclient">SftpClient</a></div>
+    <div className="msb-param-desc">SFTP client session.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let sftp = client.sftp().await?;
+let mut file = sftp.create("/tmp/hello.txt").await?;
+```
+
+</Accordion>
 
 ---
 
-#### close()
+#### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn close(self) -> MicrosandboxResult<()>
 ```
 
-Close the native SSH client session.
+Close this native SSH client session. Sends a disconnect and aborts the internal server task. Consumes the client.
+
+<Accordion title="Example">
+
+```rust
+client.close().await?;
+```
+
+</Accordion>
 
 ## SshServer
 
+A reusable SSH server endpoint for a sandbox, obtained from [`server`](#ssh-server) or [`server_with`](#ssh-server_with). Cloneable; each call to [`serve`](#server-serve) handles one connection.
+
 ---
 
-#### serve()
+#### <span className="msb-recv">server.</span><span className="msb-hn">serve()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn serve<S>(&self, stream: S) -> MicrosandboxResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 ```
 
-Serve one SSH connection over an ordered duplex stream.
+Serve one SSH connection over an ordered duplex stream. Runs the SSH handshake and session loop to completion. Returns when the connection closes.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| stream | `S` | Ordered duplex SSH transport |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stream</code><span className="msb-type">S: AsyncRead + AsyncWrite</span></div>
+    <div className="msb-param-desc">Ordered duplex SSH transport.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let server = sb.ssh().server().await?;
+let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+tokio::spawn(async move { server.serve(server_io).await });
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">server.</span><span className="msb-hn">serve_connection()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn serve_connection<S>(&self, stream: S) -> MicrosandboxResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+```
+
+Alias for [`serve`](#server-serve).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stream</code><span className="msb-type">S: AsyncRead + AsyncWrite</span></div>
+    <div className="msb-param-desc">Ordered duplex SSH transport.</div>
+  </div>
+</div>
+
+## SshStdioStream
+
+---
+
+#### <span className="msb-recv">SshStdioStream::</span><span className="msb-hn">new()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
+
+```rust
+fn new() -> Self
+```
+
+Create a stdio SSH transport stream backed by this process's stdin and stdout. Implements [`AsyncRead`](#sshstdiostream) and `AsyncWrite`, so it can be passed straight to [`serve`](#server-serve) to bridge an SSH connection over the parent process's standard streams. Also available via `Default`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sshstdiostream">SshStdioStream</a></div>
+    <div className="msb-param-desc">Duplex stream over stdin/stdout.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::SshStdioStream;
+
+let server = sb.ssh().server().await?;
+server.serve(SshStdioStream::new()).await?;
+```
+
+</Accordion>
+
+## Constants
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">DEFAULT_SSH_HOST</span>
+<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
+
+```rust
+pub const DEFAULT_SSH_HOST: &str = "127.0.0.1";
+```
+
+Default SSH listener host used by the CLI adapter when binding a sandbox SSH endpoint.
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">DEFAULT_SSH_PORT</span>
+<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
+
+```rust
+pub const DEFAULT_SSH_PORT: u16 = 2222;
+```
+
+Default SSH listener port used by the CLI adapter when binding a sandbox SSH endpoint.
 
 ## Types
 
 ### SshOutput
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#client-exec">client.exec()</a>, <a href="#client-exec_with">client.exec_with()</a></p>
+
+Output from an SSH exec request.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| status | `i32` | Exit status code |
-| stdout | `Bytes` | Captured stdout bytes |
-| stderr | `Bytes` | Captured stderr bytes |
+| `status` | `i32` | Exit status code. |
+| `stdout` | `Bytes` | Captured stdout bytes. |
+| `stderr` | `Bytes` | Captured stderr bytes (folded into stdout when a PTY is allocated). |
+
+### SandboxSsh
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
+
+SSH namespace for a sandbox. Cheap to clone; holds a clone of the sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`connect()`](#ssh-connect) | `SshClient` | Open a client with defaults. |
+| [`open_client()`](#ssh-open_client) | `SshClient` | Alias of `connect()`. |
+| [`connect_with()`](#ssh-connect_with) | `SshClient` | Open a client with options. |
+| [`open_client_with()`](#ssh-open_client_with) | `SshClient` | Alias of `connect_with()`. |
+| [`server()`](#ssh-server) | `SshServer` | Prepare a server endpoint. |
+| [`prepare_server()`](#ssh-prepare_server) | `SshServer` | Alias of `server()`. |
+| [`server_with()`](#ssh-server_with) | `SshServer` | Server endpoint with options. |
+| [`prepare_server_with()`](#ssh-prepare_server_with) | `SshServer` | Alias of `server_with()`. |
+
+### SshClient
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#ssh-connect">ssh.connect()</a>, <a href="#ssh-connect_with">ssh.connect_with()</a></p>
+
+Native in-process SSH client session. Aborts its internal server task on drop.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`exec()`](#client-exec) | `SshOutput` | Run a command. |
+| [`exec_with()`](#client-exec_with) | `SshOutput` | Run with options. |
+| [`attach()`](#client-attach) | `i32` | Interactive shell. |
+| [`attach_with()`](#client-attach_with) | `i32` | Attach with options. |
+| [`sftp()`](#client-sftp) | `SftpClient` | Open an SFTP session. |
+| [`close()`](#client-close) | `()` | Close the session. |
+
+### SshServer
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#ssh-server">ssh.server()</a>, <a href="#ssh-server_with">ssh.server_with()</a></p>
+
+Reusable SSH server endpoint for a sandbox. Cloneable.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`serve()`](#server-serve) | `()` | Serve one connection. |
+| [`serve_connection()`](#server-serve_connection) | `()` | Alias of `serve()`. |
 
 ### SftpClient
+<div className="msb-tags"><span className="msb-tag is-type">alias</span></div>
 
-Alias for `russh_sftp::client::SftpSession`.
+<p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
+
+High-level SFTP client session.
+
+```rust
+pub type SftpClient = russh_sftp::client::SftpSession;
+```
+
+### SshStdioStream
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#server-serve">server.serve()</a></p>
+
+Ordered duplex stream backed by this process's stdin and stdout. Implements `AsyncRead` and `AsyncWrite`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`new()`](#sshstdiostreamnew) | `SshStdioStream` | Create a stdio transport stream. |
 
 ### SshClientOptionsBuilder
+<div className="msb-tags"><span className="msb-tag is-type">builder</span></div>
+
+<p className="msb-backref">Used by <a href="#ssh-connect_with">ssh.connect_with()</a></p>
+
+Builder for SSH client options. Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled.
 
 | Method | Parameters | Description |
 |--------|------------|-------------|
-| user() | `impl Into<String>` | SSH login user. Defaults to `root` |
-| term() | `impl Into<String>` | Terminal name for interactive sessions |
-| sftp() | `bool` | Enable or disable SFTP on the internal server |
+| `user()` | `impl Into<String>` | SSH login user. Default `root`. |
+| `term()` | `impl Into<String>` | Terminal name for interactive sessions. |
+| `sftp()` | `bool` | Enable or disable SFTP on the internal server. Default `true`. |
+| `build()` | | Finalize the options. |
 
 ### SshExecOptionsBuilder
+<div className="msb-tags"><span className="msb-tag is-type">builder</span></div>
+
+<p className="msb-backref">Used by <a href="#client-exec_with">client.exec_with()</a></p>
+
+Builder for SSH exec options.
 
 | Method | Parameters | Description |
 |--------|------------|-------------|
-| tty() | `bool` | Request a PTY for the exec channel |
+| `tty()` | `bool` | Request a PTY for the exec channel. Default `false`. |
+| `build()` | | Finalize the options. |
 
 ### SshAttachOptionsBuilder
+<div className="msb-tags"><span className="msb-tag is-type">builder</span></div>
+
+<p className="msb-backref">Used by <a href="#client-attach_with">client.attach_with()</a></p>
+
+Builder for interactive SSH attach options. Default terminal comes from `$TERM` (falling back to `xterm`); detach keys default to the standard sequence.
 
 | Method | Parameters | Description |
 |--------|------------|-------------|
-| term() | `impl Into<String>` | Terminal name for the shell |
-| detach_keys() | `impl Into<String>` | Detach key sequence |
+| `term()` | `impl Into<String>` | Terminal name for the shell. |
+| `detach_keys()` | `impl Into<String>` | Detach key sequence. |
+| `build()` | | Finalize the options. |
 
 ### SshServerOptionsBuilder
+<div className="msb-tags"><span className="msb-tag is-type">builder</span></div>
+
+<p className="msb-backref">Used by <a href="#ssh-server_with">ssh.server_with()</a></p>
+
+Builder for SSH server options. SFTP is enabled by default; when no authorized keys are provided, the default authorized-keys file is loaded.
 
 | Method | Parameters | Description |
 |--------|------------|-------------|
-| host_key_path() | `impl Into<PathBuf>` | Override the host private key path |
-| host_key() | `PrivateKey` | Use an in-memory host private key |
-| authorized_keys_path() | `impl Into<PathBuf>` | Override the authorized-keys path |
-| authorized_key() | `impl Into<String>` | Add one in-memory authorized public key |
-| user() | `impl Into<String>` | Override the guest user used for exec requests |
-| sftp() | `bool` | Enable or disable SFTP |
+| `host_key_path()` | `impl Into<PathBuf>` | Override the host private key path. |
+| `host_key()` | `PrivateKey` | Use an in-memory host private key. |
+| `authorized_keys_path()` | `impl Into<PathBuf>` | Override the authorized-keys path. |
+| `authorized_key()` | `impl Into<String>` | Add one in-memory authorized public key. |
+| `user()` | `impl Into<String>` | Override the guest user used for exec requests. |
+| `sftp()` | `bool` | Enable or disable SFTP. Default `true`. |
+| `build()` | | Finalize the options. |

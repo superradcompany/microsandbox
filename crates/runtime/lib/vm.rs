@@ -25,7 +25,7 @@ use microsandbox_protocol::{
 };
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
@@ -44,20 +44,23 @@ const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
 const EXIT_REASON_MAX_DURATION: u8 = 2;
 const EXIT_REASON_SIGNAL: u8 = 3;
 const EXIT_REASON_PARENT_EXIT: u8 = 4;
+/// Termination reason when agentd never signals readiness within the relay's
+/// boot window (the guest failed to come up). Reused for the boot-failure exit
+/// triggered from the relay's `wait_ready` path.
 const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
 const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
+const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
 
-/// Host-observed stale heartbeat budget before agentd is considered unresponsive.
-const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Startup grace before a missing heartbeat is considered an agentd failure.
-const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(60);
-
-/// Short best-effort send budget once agentd is already considered unresponsive.
-const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
+/// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
+/// NUL-terminated argument records. Keeps the network-config blob and the
+/// repeated `--env` flags off the process argv — see issue #997.
+pub const CONFIG_FD: i32 = 96;
 
 /// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
 pub const PARENT_WATCH_FD: i32 = 97;
+
+/// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
+pub const STARTUP_FD: i32 = 98;
 
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
@@ -93,8 +96,23 @@ pub struct Config {
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,
 
+    /// Root directory holding every sandbox's persisted state
+    /// (`<sandboxes_dir>/<name>`). Passed explicitly so runtime-owned
+    /// lifecycle maintenance can remove ephemeral sandbox directories without
+    /// inferring the path from `log_dir`.
+    pub sandboxes_dir: PathBuf,
+
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
+
+    /// Startup command to execute after agentd reports ready.
+    pub startup_command: Option<StartupCommand>,
+
+    /// Dedicated startup JSON write fd.
+    ///
+    /// When present, startup info is written here instead of stdout so
+    /// detached launchers can detach stdout/stderr from birth.
+    pub startup_fd: Option<OwnedFd>,
 
     /// Read end of the attached-parent watchdog pipe.
     pub parent_watchdog: Option<OwnedFd>,
@@ -123,7 +141,7 @@ pub struct Config {
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this
 /// sandbox.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricsSlotHandoff {
     /// Name of the POSIX shared-memory object holding the registry.
     pub shm_name: String,
@@ -131,6 +149,25 @@ pub struct MetricsSlotHandoff {
     pub slot: u32,
     /// Generation paired with the reservation.
     pub generation: u64,
+}
+
+/// User workload that the sandbox process should start after boot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StartupCommand {
+    /// Path or command name to execute inside the guest.
+    pub cmd: String,
+
+    /// Arguments to pass to the command.
+    pub args: Vec<String>,
+
+    /// Environment variables as `KEY=VALUE` strings.
+    pub env: Vec<String>,
+
+    /// Working directory for the command.
+    pub cwd: Option<String>,
+
+    /// Guest user override for the command.
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -362,7 +399,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let startup_json = serde_json::to_string(&startup)
         .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
 
-    write_startup_info(&startup_json)?;
+    write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -446,6 +483,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
@@ -465,6 +503,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
                 EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
                 EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
+                EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
                 EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
                 EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
                 EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
@@ -498,6 +537,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
                     .exec(&exit_db)
                     .await;
+
+                // Self-clean: if this sandbox was created ephemeral, drop its
+                // persisted row + directory now that it is terminal. Reads
+                // `sandbox.ephemeral` from the DB (the runtime is handed
+                // discrete flags, not the full policy) and no-ops for
+                // persistent sandboxes. Best-effort; recovery sweeps from
+                // other runtimes cover any failure here.
+                match crate::maintenance::cleanup_terminal_ephemeral_sandbox(
+                    &exit_db,
+                    &exit_sandboxes_dir,
+                    exit_sandbox_id,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        tracing::debug!(?outcome, "ephemeral exit self-clean")
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "ephemeral exit self-clean failed")
+                    }
+                }
             });
 
             // Inject the exec.log lifecycle-stop marker before _exit().
@@ -545,6 +605,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
+    let upper_host_path = oci_upper_host_path(&config.vm);
 
     if let Some(parent_watchdog) = config.parent_watchdog
         && let Err(e) = spawn_parent_watchdog(
@@ -576,11 +637,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
-        (None, _) => tracing::debug!(
-            sandbox = %config.sandbox_name,
-            "metrics sampling disabled; not spawning sampler"
-        ),
+    let metrics_sampler = match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                "metrics sampling disabled; not spawning sampler"
+            );
+            None
+        }
         (Some(_), None) => {
             // Distinguish "host did not reserve a slot" from "host reserved
             // but runtime activation failed" so operators reading the warn
@@ -596,23 +660,32 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
                 );
             }
+            None
         }
-        (Some(interval_ms), Some(writer)) => {
-            tracing::debug!(
-                sandbox = %config.sandbox_name,
-                interval_ms = interval_ms.get(),
-                "starting metrics sampler"
-            );
-            tokio_rt.spawn(run_metrics_sampler(
-                writer,
-                config.sandbox_id,
-                pid,
-                interval_ms,
-                krun_metrics_handle,
-                network_metrics_handle
-                    .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-            ));
-        }
+        (Some(interval_ms), Some(writer)) => Some((
+            writer,
+            interval_ms,
+            krun_metrics_handle,
+            network_metrics_handle
+                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            upper_host_path,
+        )),
+    };
+    let metrics_sandbox_id = config.sandbox_id;
+    let metrics_sandbox_name = config.sandbox_name.clone();
+    let metrics_pid = pid;
+
+    // Opportunistic host-runtime lifecycle maintenance: reconcile stale active
+    // sandboxes and clean terminal ephemeral leftovers from runtimes that died
+    // before they could self-clean. A read-gated DB lease keeps a burst of
+    // starts to one indexed read each; this runs as a bounded background task
+    // so it never delays boot.
+    {
+        let maintenance_db = db.clone();
+        let maintenance_dir = config.sandboxes_dir.clone();
+        tokio_rt.spawn(async move {
+            crate::maintenance::run_startup_maintenance(&maintenance_db, &maintenance_dir).await;
+        });
     }
 
     // Spawn background tasks.
@@ -622,18 +695,62 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Relay: spawn a blocking task for wait_ready, then run the accept loop.
     // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
     // so it runs on a background thread, not blocking the main thread.
+    let relay_exit_handle = exit_handle.clone();
+    let relay_exit_reason = Arc::clone(&exit_reason);
     tokio_rt.spawn(async move {
         let ready_result =
             tokio::task::spawn_blocking(move || relay.wait_ready().map(|()| relay)).await;
 
         match ready_result {
             Ok(Ok(relay)) => {
+                if let Some((
+                    writer,
+                    interval_ms,
+                    krun_metrics_handle,
+                    network_metrics_handle,
+                    upper_host_path,
+                )) = metrics_sampler
+                {
+                    tracing::debug!(
+                        sandbox = %metrics_sandbox_name,
+                        interval_ms = interval_ms.get(),
+                        "starting metrics sampler after agent ready"
+                    );
+                    tokio::spawn(run_metrics_sampler(
+                        writer,
+                        metrics_sandbox_id,
+                        metrics_pid,
+                        interval_ms,
+                        krun_metrics_handle,
+                        network_metrics_handle,
+                        upper_host_path,
+                    ));
+                }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
                 }
             }
-            Ok(Err(e)) => tracing::error!("agent relay wait_ready failed: {e}"),
-            Err(e) => tracing::error!("agent relay wait_ready task panicked: {e}"),
+            Ok(Err(e)) => {
+                tracing::error!("agent relay wait_ready failed: {e}");
+                // agentd never signalled readiness within the relay's boot window
+                // — the guest failed to come up. Reclaim the VM. This is the boot-
+                // failure backstop that used to live in the heartbeat monitor's
+                // boot-grace path (same 180s deadline), now owned by the relay so
+                // the heartbeat monitor can be purely about idle detection.
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
+            Err(e) => {
+                tracing::error!("agent relay wait_ready task panicked: {e}");
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
         }
     });
 
@@ -663,8 +780,70 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         });
     }
 
-    // Heartbeat health monitor. Idle reclamation is optional, but missing or stale
-    // heartbeat data means the in-guest agent is not healthy.
+    // Startup workload: detached `msb run -- CMD` makes the sandbox process
+    // own the command lifecycle. Once the command terminates, stop the VM so
+    // named sandboxes become stopped and ephemeral sandboxes can self-clean.
+    if let Some(startup_command) = config.startup_command.clone() {
+        let startup_agent_sock_path = config.agent_sock_path.clone();
+        let startup_shared = Arc::clone(&shared);
+        let startup_exit_handle = exit_handle.clone();
+        let startup_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            tracing::info!(
+                cmd = %startup_command.cmd,
+                args = ?startup_command.args,
+                "starting startup command"
+            );
+
+            match crate::startup::run_startup_command(&startup_agent_sock_path, startup_command)
+                .await
+            {
+                Ok(crate::startup::StartupCommandExit::Exited(0)) => {
+                    tracing::info!("startup command exited successfully");
+                }
+                Ok(crate::startup::StartupCommandExit::Exited(code)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(code, "startup command exited with non-zero status");
+                }
+                Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %failed.message, "startup command failed to spawn");
+                }
+                Err(err) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %err, "startup command failed");
+                }
+            }
+
+            match request_guest_shutdown(&startup_shared) {
+                Ok(()) => {
+                    tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                    tracing::info!("startup command shutdown flush window elapsed");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "startup command shutdown request failed, triggering host exit"
+                    );
+                }
+            }
+            startup_exit_handle.trigger();
+        });
+    }
+
+    // Idle monitor. Reclaims the sandbox only when an optional idle timeout is
+    // configured and the guest has been inactive that long. A stale or missing
+    // heartbeat is NOT treated as a failure here — a busy agent is still healthy,
+    // and a guest that never boots is reclaimed by the relay's wait_ready path.
     {
         let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
         let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
@@ -675,8 +854,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let decision =
-                    heartbeat_reader.check(idle_timeout, STALE_HEARTBEAT_TIMEOUT, HEARTBEAT_BOOT_GRACE);
+                let decision = heartbeat_reader.check(idle_timeout);
 
                 match decision {
                     HeartbeatDecision::Idle(status) => {
@@ -697,7 +875,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         );
                         match request_guest_shutdown(&heartbeat_shared) {
                             Ok(()) => {
-                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT)
+                                    .await;
                                 tracing::info!(
                                     "idle shutdown flush window elapsed, triggering host exit"
                                 );
@@ -706,39 +885,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                                 tracing::warn!(
                                     error = %err,
                                     "idle shutdown request failed, triggering host exit"
-                                );
-                            }
-                        }
-                        heartbeat_exit_handle.trigger();
-                        break;
-                    }
-                    HeartbeatDecision::AgentUnresponsive(status) => {
-                        tracing::warn!(
-                            heartbeat_seq = ?status.heartbeat_seq,
-                            activity_seq = ?status.activity_seq,
-                            heartbeat_stale_for = ?status.heartbeat_stale_for,
-                            active_exec_sessions = status.active_exec_sessions,
-                            active_fs_streams = status.active_fs_streams,
-                            active_tcp_streams = status.active_tcp_streams,
-                            "agent heartbeat stale, triggering host exit"
-                        );
-                        heartbeat_reason.store(
-                            EXIT_REASON_AGENT_UNRESPONSIVE,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        match request_guest_shutdown_with_timeout(
-                            &heartbeat_shared,
-                            AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT,
-                        ) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "agent-unresponsive shutdown request sent, triggering host exit"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "agent-unresponsive shutdown request failed, triggering host exit"
                                 );
                             }
                         }
@@ -782,6 +928,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 }
 
+fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
+    vm.rootfs_vmdk.as_ref()?;
+
+    vm.rootfs_upper_spec
+        .as_ref()
+        .map(|spec| spec.primary.clone())
+        .or_else(|| vm.rootfs_upper.clone())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
@@ -795,6 +950,9 @@ fn build_vm(
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
+    let balloon_stats_interval = config
+        .metrics_sample_interval_ms
+        .map(|interval_ms| Duration::from_millis(interval_ms.get()));
     let mut bind_identity_map = BindIdentityMapRegistration {
         handle: None,
         mount_count: 0,
@@ -802,7 +960,10 @@ fn build_vm(
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
-            let m = m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize);
+            let m = m
+                .vcpus(vm.vcpus)
+                .memory_mib(vm.memory_mib as usize)
+                .balloon_stats_interval(balloon_stats_interval);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
@@ -1151,8 +1312,20 @@ fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<
     Ok(())
 }
 
-/// Write startup info JSON to stdout.
-fn write_startup_info(json: &str) -> RuntimeResult<()> {
+/// Write startup info JSON to the dedicated startup fd when supplied,
+/// otherwise stdout.
+fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult<()> {
+    if let Some(fd) = startup_fd {
+        let dup = unsafe { libc::dup(fd.as_raw_fd()) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(dup) };
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        return Ok(());
+    }
+
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{json}")?;
     stdout.flush()?;

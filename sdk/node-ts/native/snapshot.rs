@@ -134,7 +134,10 @@ impl JsSnapshot {
     pub async fn reindex(dir: Option<String>) -> Result<u32> {
         let dir = match dir {
             Some(p) => PathBuf::from(p),
-            None => microsandbox::config::config().snapshots_dir(),
+            None => microsandbox::backend::default_backend()
+                .as_local()
+                .map(|l| l.snapshots_dir())
+                .unwrap_or_else(|| PathBuf::from(".")),
         };
         let n = RustSnapshot::reindex(&dir).await.map_err(to_napi_error)?;
         Ok(n as u32)

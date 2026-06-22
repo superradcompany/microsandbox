@@ -366,6 +366,9 @@ class SandboxMetrics:
     disk_write_bytes: int
     net_rx_bytes: int
     net_tx_bytes: int
+    upper_used_bytes: int | None
+    upper_free_bytes: int | None
+    upper_host_allocated_bytes: int | None
     uptime_ms: int
     timestamp_ms: float
 

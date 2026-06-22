@@ -18,7 +18,7 @@
 //! +-----------------------------------------------------------------+ 0x000
 //! | HEADER (256 bytes)                                              |
 //! |  0x00  magic            u64   "MSBMET01" tag                    |
-//! |  0x08  version          u32   layout version (2)                |
+//! |  0x08  version          u32   layout version (3)                |
 //! |  0x0c  header_len       u32   = 256                             |
 //! |  0x10  slot_len         u32   = 512                             |
 //! |  0x14  capacity         u32   number of slots                   |
@@ -52,10 +52,13 @@
 //! |  0x78  disk_write_bytes AU64                                    |
 //! |  0x80  net_rx_bytes     AU64                                    |
 //! |  0x88  net_tx_bytes     AU64                                    |
-//! |  0x90  name_len         AU16                                    |
-//! |  0x92  _pad1            [AU8; 6]                                |
-//! |  0x98  name_bytes       [AU8; 128]                              |
-//! |  0x118 _tail            [u8; 232]                               |
+//! |  0x90  upper_used       AU64  guest-visible upper used bytes    |
+//! |  0x98  upper_free       AU64  guest-visible upper free bytes    |
+//! |  0xa0  upper_host_alloc AU64  allocated bytes on host upper     |
+//! |  0xa8  name_len         AU16                                    |
+//! |  0xaa  _pad1            [AU8; 6]                                |
+//! |  0xb0  name_bytes       [AU8; 128]                              |
+//! |  0x130 _tail            [u8; 208]                               |
 //! +-----------------------------------------------------------------+ 0x300
 //! | SLOT 1 ... SLOT capacity-1                                      |
 //! ~                                                                 ~
@@ -82,7 +85,7 @@ use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicU16, AtomicU32, At
 pub const REGISTRY_MAGIC: u64 = 0x3130_5445_4d42_534d;
 
 /// On-disk layout version. Bump on any incompatible layout change.
-pub const REGISTRY_VERSION: u32 = 2;
+pub const REGISTRY_VERSION: u32 = 3;
 
 /// Current shared-memory registry ABI version.
 ///
@@ -146,6 +149,12 @@ pub const SAMPLE_FLAG_MEMORY_USED: u32 = 1 << 1;
 pub const SAMPLE_FLAG_MEMORY_AVAILABLE: u32 = 1 << 2;
 /// Sample flag: `memory_host_resident_bytes` contains a valid host diagnostic.
 pub const SAMPLE_FLAG_MEMORY_HOST_RESIDENT: u32 = 1 << 3;
+/// Sample flag: `upper_used_bytes` contains a valid protected guest filesystem value.
+pub const SAMPLE_FLAG_UPPER_USED: u32 = 1 << 4;
+/// Sample flag: `upper_free_bytes` contains a valid protected guest filesystem value.
+pub const SAMPLE_FLAG_UPPER_FREE: u32 = 1 << 5;
+/// Sample flag: `upper_host_allocated_bytes` contains a valid host diagnostic.
+pub const SAMPLE_FLAG_UPPER_HOST_ALLOCATED: u32 = 1 << 6;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -222,6 +231,13 @@ pub struct Slot {
     pub net_rx_bytes: AtomicU64,
     /// Cumulative network bytes transmitted.
     pub net_tx_bytes: AtomicU64,
+    /// Guest-visible OCI upper filesystem used bytes when `SAMPLE_FLAG_UPPER_USED` is set.
+    pub upper_used_bytes: AtomicU64,
+    /// Guest-visible OCI upper filesystem free bytes when `SAMPLE_FLAG_UPPER_FREE` is set.
+    pub upper_free_bytes: AtomicU64,
+    /// Host-allocated bytes for the writable upper image when
+    /// `SAMPLE_FLAG_UPPER_HOST_ALLOCATED` is set.
+    pub upper_host_allocated_bytes: AtomicU64,
     /// Length of the bytes in `name_bytes` that are valid UTF-8 name data.
     pub name_len: AtomicU16,
     /// Padding before the byte array so trailing atomics align cleanly.
@@ -240,8 +256,9 @@ pub struct Slot {
 //   sample_flags(4) + pad(4) + memory_limit_bytes(8) + vcpu_time_ns(8)      = +24  -> 80
 //   cpu_percent_bits(4) + pad(4) + memory fields(24)                        = +32  -> 112
 //   disk_read(8) + disk_write(8) + net_rx(8) + net_tx(8)                    = +32  -> 144
+//   upper_used_bytes(8) + upper_free_bytes(8) + upper_host_allocated(8)      = +24  -> 168
 //   name_len(2) + _pad1(6) + name_bytes(NAME_BYTES)                         = +8 + NAME_BYTES
-const SLOT_BASE_BYTES: usize = 152 + NAME_BYTES;
+const SLOT_BASE_BYTES: usize = 176 + NAME_BYTES;
 
 const SLOT_TAIL_PAD: usize = SLOT_SIZE - SLOT_BASE_BYTES;
 

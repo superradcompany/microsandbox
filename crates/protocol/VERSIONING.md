@@ -197,7 +197,7 @@ CBOR { v, t, p }                   <- the envelope: version, message type, paylo
   compile until you assign its generation (and bump `PROTOCOL_VERSION` to match). Core and exec
   types are generation 1 (the pre-0.5 legacy runtime handles them); the `Fs*` types are generation
   2, because filesystem streaming did not exist in the legacy protocol.
-- **The send gate** lives on the host client (`agent-client/rust/lib/client.rs`). At
+- **The send gate** lives on the host client (`packages/agent-client/rust/lib/client.rs`). At
   handshake the client computes `negotiated_version = min(our PROTOCOL_VERSION, the generation the
 sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_version()` against it
   and rejects too-old sandboxes with `AgentClientError::UnsupportedOperation`. The error's message

@@ -338,7 +338,7 @@ impl GlobalCache {
     }
 
     /// Write cached metadata for an image reference using async filesystem I/O.
-    pub(crate) async fn write_image_metadata_async(
+    pub async fn write_image_metadata_async(
         &self,
         reference: &Reference,
         metadata: &CachedImageMetadata,
@@ -383,7 +383,7 @@ impl GlobalCache {
     }
 
     /// Path to the cached metadata file for an image reference.
-    fn image_metadata_path(&self, reference: &Reference) -> PathBuf {
+    pub fn image_metadata_path(&self, reference: &Reference) -> PathBuf {
         self.manifests_dir
             .join(format!("{}.json", image_cache_key(reference)))
     }

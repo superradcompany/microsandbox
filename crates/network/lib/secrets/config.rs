@@ -216,6 +216,17 @@ impl SecretsConfig {
                     || secret.injection.body)
         })
     }
+
+    /// Whether any secret restricts itself to specific hosts (a non-`Any` host
+    /// pattern). Such a secret's plain-HTTP eligibility — substitute, forward
+    /// the placeholder unchanged, or block as a violation — depends on the
+    /// request `Host`, so the peek must read the full header block before the
+    /// handler is built, even for secrets that will never be substituted.
+    pub(crate) fn has_host_scoped_secrets(&self) -> bool {
+        self.secrets
+            .iter()
+            .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any))
+    }
 }
 
 impl SecretEntry {

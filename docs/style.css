@@ -1,3 +1,146 @@
 body {
   font-size: 12px;
 }
+
+/*
+ * microsandbox SDK reference styles
+ * Auto-loaded by Mintlify (any .css in the docs root). Class names are
+ * prefixed with `msb-` to avoid clashing with Mintlify / Tailwind utilities.
+ * Light is the default; `.dark` (toggled by Mintlify on <html>) overrides.
+ */
+
+/* kind tags: static / instance / builder / type / async */
+.msb-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0 12px; }
+.msb-tag {
+  font-size: 11px; line-height: 1; padding: 4px 9px;
+  border-radius: 6px; font-weight: 600; letter-spacing: .01em;
+}
+.msb-tag.is-static   { background: #EEEDFE; color: #26215C; }
+.msb-tag.is-instance { background: #E1F5EE; color: #04342C; }
+.msb-tag.is-builder  { background: #FAECE7; color: #4A1B0C; }
+.msb-tag.is-type     { background: #FBEAF0; color: #4B1528; }
+.msb-tag.is-async    { background: rgba(135,134,128,.18); color: #5F5E5A; }
+
+.dark .msb-tag.is-static   { background: #2b2655; color: #CECBF6; }
+.dark .msb-tag.is-instance { background: #0c3a2e; color: #9FE1CB; }
+.dark .msb-tag.is-builder  { background: #3a1c10; color: #F5C4B3; }
+.dark .msb-tag.is-type     { background: #3a1424; color: #F4C0D1; }
+.dark .msb-tag.is-async    { background: rgba(211,209,199,.14); color: #B4B2A9; }
+
+/* at a glance — grouped table, border-only (no fill, so no muddy dark blob) */
+.msb-glance {
+  border: 1px solid #e7e4ef; border-radius: 14px;
+  padding: 6px 18px 14px; margin: 20px 0 8px;
+}
+.dark .msb-glance { border-color: #322f2b; }
+
+/* group label row: dot + label + count */
+.msb-gl {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; opacity: .6; padding: 14px 0 4px;
+}
+.msb-gl:first-child { padding-top: 6px; }
+.msb-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.msb-dot.static   { background: #7F77DD; }
+.msb-dot.instance { background: #1D9E75; }
+.msb-dot.builder  { background: #D85A30; }
+.msb-dot.type     { background: #D4537E; }
+.msb-ct { margin-left: auto; font-weight: 500; opacity: .8; }
+
+/* method rows */
+.msb-row {
+  display: grid; grid-template-columns: 200px 1fr; gap: 16px;
+  padding: 5px 6px; margin: 0 -6px; border-radius: 6px;
+  border-top: 1px solid #f2f0f8; font-size: 12.5px; text-decoration: none;
+}
+.dark .msb-row { border-top-color: #211f1c; }
+.msb-row:hover { background: rgba(127,119,221,.07); }
+.msb-rn { font-family: var(--font-mono, monospace); color: #6d4bc4; }
+.dark .msb-rn { color: #c9a4ff; }
+.msb-row:hover .msb-rn { text-decoration: underline; }
+.msb-rg { opacity: .7; }
+
+/* builder + types chip rows */
+.msb-chiprow {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 7px 0 2px; border-top: 1px solid #f2f0f8;
+}
+.dark .msb-chiprow { border-top-color: #211f1c; }
+.msb-chip {
+  font-family: var(--font-mono, monospace); font-size: 11.5px; text-decoration: none;
+  padding: 2px 9px; border-radius: 6px; background: #f4f1fb; color: #4b3f7a;
+}
+.dark .msb-chip { background: #241f33; color: #c8baf2; }
+.msb-typepill {
+  font-family: var(--font-mono, monospace); font-size: 11.5px; text-decoration: none;
+  padding: 2px 9px; border-radius: 6px; background: #fbeef4; color: #7a2348;
+}
+.dark .msb-typepill { background: #321826; color: #f0b9d0; }
+.msb-more { font-size: 11.5px; opacity: .6; text-decoration: none; }
+
+/* our links shouldn't get Mintlify's prose underline-border */
+.msb-row, .msb-chip, .msb-typepill, .msb-more, .msb-backref a, .msb-type { border-bottom: 0 !important; }
+
+/* method headings: monospace name with a muted receiver / path prefix */
+.msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
+.msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
+.dark .msb-recv { color: #6f6e68; }
+
+/* inline type links (in param/return rows) */
+.msb-type { color: #6d4bc4; }
+.dark .msb-type { color: #c9a4ff; }
+
+/* small section labels (parameters / returns / example) */
+.msb-label {
+  font-size: 11px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; opacity: .55; margin: 16px 0 6px;
+}
+
+/* parameter + return rows
+ * The key column auto-sizes to its content (param name + type) and stays
+ * aligned across rows via subgrid, capped so a long type can't crowd out the
+ * description. */
+.msb-params {
+  margin: 4px 0 0;
+  display: grid;
+  grid-template-columns: minmax(170px, min(34%, 320px)) minmax(0, 1fr);
+  column-gap: 18px;
+}
+.msb-param {
+  display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; row-gap: 4px;
+  padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
+}
+.msb-param-key code { font-size: 13px; }
+.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; }
+.msb-param-desc { font-size: 14px; opacity: .85; }
+
+/* back-references on types (returned by / used by) */
+.msb-backref { font-size: 13px; opacity: .7; margin: 4px 0 12px; }
+.msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
+
+/* ----------------------------------------------------------------------------
+ * Table columns — hand the slack to the column that needs it (content-driven
+ * layout) instead of splitting width evenly, and keep name-ish first columns
+ * on one line. Width is unchanged: tables stay within the prose column.
+ * -------------------------------------------------------------------------- */
+table { table-layout: auto; }
+table th, table td { vertical-align: top; overflow-wrap: anywhere; }
+table td:first-child { white-space: nowrap; }
+
+/* ----------------------------------------------------------------------------
+ * Example collapsibles — Mintlify wraps the code block in prose margins
+ * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
+ * leaves a lot of dead space inside the accordion. Trim it to an even, tight
+ * inset. Scoped to accordions that hold a code block so prose accordions are
+ * left alone.
+ * -------------------------------------------------------------------------- */
+details.accordion:has(.code-block) > *:not(summary) { margin: 0 0.75rem 0.75rem !important; }
+details.accordion:has(.code-block) .code-block { margin: 0 !important; }
+
+@media (max-width: 640px) {
+  .msb-row { grid-template-columns: 1fr; gap: 0; }
+  .msb-rg { font-size: 11.5px; opacity: .6; }
+  .msb-params { grid-template-columns: 1fr; }
+  .msb-param { row-gap: 2px; }
+}

@@ -287,8 +287,10 @@ class InitConfig:
     as a bare string: ``init="auto"``.
 
     ``cmd`` is either an absolute path inside the guest rootfs or the
-    literal ``"auto"`` (probes /sbin/init, /lib/systemd/systemd,
-    /usr/lib/systemd/systemd).
+    literal ``"auto"``. Auto honors a known init at the start of the
+    image ENTRYPOINT, preserves attached init-entrypoint commands, then
+    probes /sbin/init, /lib/systemd/systemd, and /usr/lib/systemd/systemd
+    inside the guest.
     """
     cmd: str
     args: tuple[str, ...] = ()

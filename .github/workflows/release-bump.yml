@@ -54,7 +54,11 @@ jobs:
         run: npm install --package-lock-only --ignore-scripts
 
       - name: Refresh agent client npm lockfile
-        working-directory: agent-client/typescript
+        working-directory: packages/agent-client/typescript
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Refresh microsandbox types npm lockfile
+        working-directory: packages/microsandbox-types/typescript
         run: npm install --package-lock-only --ignore-scripts
 
       - name: Open release PR
@@ -66,13 +70,15 @@ jobs:
 
             bumped by `scripts/bump-version.sh`:
             - `Cargo.toml` workspace + path-dep versions
-            - `agent-client/typescript/package.json`
+            - `packages/agent-client/typescript/package.json`
+            - `packages/microsandbox-types/typescript/package.json`
             - `sdk/node-ts/package.json` and per-platform sub-packages
             - `sdk/go/setup.go` `sdkVersion` (if present)
 
             regenerated:
             - `Cargo.lock`
-            - `agent-client/typescript/package-lock.json`
+            - `packages/agent-client/typescript/package-lock.json`
+            - `packages/microsandbox-types/typescript/package-lock.json`
             - `sdk/node-ts/package-lock.json`
 
             after this PR merges:

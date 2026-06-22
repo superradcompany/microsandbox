@@ -3,108 +3,205 @@ title: Volumes
 description: TypeScript SDK - Volume API reference
 ---
 
-See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-## Volume
+<div className="msb-glance">
 
-Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+  <p className="msb-gl"><span className="msb-dot static"></span>Static · Volume<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#volume-builder"><span className="msb-rn">Volume.builder()</span><span className="msb-rg">configure a new volume</span></a>
+  <a className="msb-row" href="#volume-get"><span className="msb-rn">Volume.get()</span><span className="msb-rg">handle to an existing one</span></a>
+  <a className="msb-row" href="#volume-list"><span className="msb-rn">Volume.list()</span><span className="msb-rg">all volumes</span></a>
+  <a className="msb-row" href="#volume-remove"><span className="msb-rn">Volume.remove()</span><span className="msb-rg">delete a volume</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · Volume<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#volume-name"><span className="msb-rn">volume.name</span><span className="msb-rg">volume name</span></a>
+  <a className="msb-row" href="#volume-path"><span className="msb-rn">volume.path</span><span className="msb-rg">host directory path</span></a>
+  <a className="msb-row" href="#volume-fs"><span className="msb-rn">volume.fs()</span><span className="msb-rg">host-side filesystem</span></a>
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · VolumeBuilder<span className="msb-ct">7</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#directory">.directory()</a>
+    <a className="msb-chip" href="#disk">.disk()</a>
+    <a className="msb-chip" href="#size">.size()</a>
+    <a className="msb-chip" href="#quota">.quota()</a>
+    <a className="msb-chip" href="#label">.label()</a>
+    <a className="msb-chip" href="#build">.build()</a>
+    <a className="msb-chip" href="#create">.create()</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
+    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
+    <a className="msb-typepill" href="#volumefsreadstream">VolumeFsReadStream</a>
+    <a className="msb-typepill" href="#volumefswritesink">VolumeFsWriteSink</a>
+    <a className="msb-typepill" href="/sdk/typescript/filesystem#fsentry">FsEntry</a>
+    <a className="msb-typepill" href="/sdk/typescript/filesystem#fsmetadata">FsMetadata</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript
 import { Volume } from "microsandbox";
 
-const data = await Volume.builder("my-data")
+const data = await Volume.builder("my-data")    // 1. configure
   .label("env", "prod")
-  .create();
+  .create();                                    // 2. create on disk
 
-const dockerData = await Volume.builder("docker-data")
-  .disk()
-  .size(20 * 1024)
-  .create();
+const vfs = data.fs();                          // 3. host-side I/O
+await vfs.write("seed.txt", "hello");
+console.log(await vfs.list(""));
+
+await Volume.remove("my-data");                 // 4. delete
 ```
 
 ## Static methods
 
 ---
 
-#### Volume.builder()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
 static builder(name: string): VolumeBuilder
 ```
 
-Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` to create a disk-backed volume.
+Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` for a disk-backed volume. See [`VolumeBuilder`](#volumebuilder) for all options.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Volume name |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`VolumeBuilder`](#volumebuilder) | Fluent builder |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volume-builder">VolumeBuilder</a></div>
+    <div className="msb-param-desc">Fluent builder for configuring the volume.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data")
+  .label("env", "prod")
+  .create();
+```
+
+</Accordion>
 
 ---
 
-#### Volume.get()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static get(name: string): Promise<VolumeHandle>
 ```
 
-Get a handle to an existing named volume.
+Get a live handle to an existing named volume. A live handle supports `.fs()` and `.remove()`, unlike the read-only handles returned by [`list()`](#volume-list).
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Volume name |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `Promise<`[`VolumeHandle`](#volumehandle)`>` | Volume handle |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">Promise&lt;VolumeHandle&gt;</a></div>
+    <div className="msb-param-desc">Live handle with metadata, filesystem access, and removal.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const handle = await Volume.get("my-data");
+console.log(handle.usedBytes);
+```
+
+</Accordion>
 
 ---
 
-#### Volume.list()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static list(): Promise<VolumeHandle[]>
 ```
 
-List all named volumes. Handles returned from `list()` are read-only — call `Volume.get(name)` to get a live handle for `.remove()` / `.fs()`.
+List all named volumes. Handles returned here are **read-only**: calling `.fs()` or `.remove()` on them throws. Call [`Volume.get(name)`](#volume-get) to upgrade to a live handle.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `Promise<`[`VolumeHandle`](#volumehandle)`[]>` | All volumes |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">Promise&lt;VolumeHandle[]&gt;</a></div>
+    <div className="msb-param-desc">All volumes, as read-only handles.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+for (const v of await Volume.list()) {
+  console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
+}
+```
+
+</Accordion>
 
 ---
 
-#### Volume.remove()
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static remove(name: string): Promise<void>
 ```
 
-Delete a named volume and its contents. Fails if the volume is currently mounted.
+Delete a named volume and its contents. Fails if the volume is currently mounted by a sandbox.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Volume name |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await Volume.remove("my-data");
+```
+
+</Accordion>
 
 ---
 
-## Instance properties
+## Instance methods
 
-#### name
+---
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get name(): string
@@ -112,156 +209,746 @@ get name(): string
 
 The volume's name.
 
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
 ---
 
-#### path
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get path(): string
 ```
 
-Absolute host path to the volume's directory.
+Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute host directory path.</div>
+  </div>
+</div>
 
 ---
 
-#### fs()
+#### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```typescript
 fs(): VolumeFs
 ```
 
-Get a host-side filesystem handle for this volume — no sandbox required.
+Get a host-side filesystem handle for this volume's directory. Reads and writes happen directly on the host, with no sandbox running. See [`VolumeFs`](#volumefs-methods) for the full API.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumefs">VolumeFs</a></div>
+    <div className="msb-param-desc">Host-side filesystem handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```typescript
 const vfs = data.fs();
 await vfs.write("seed.txt", "hello");
-console.log(await vfs.list(""));
+console.log(await vfs.readToString("seed.txt"));
 ```
+
+</Accordion>
 
 ---
 
-## Mounts
+## VolumeBuilder
 
-Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via `SandboxBuilder.volume(guestPath, m => ...)`:
+Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#disk) plus [`size()`](#size) for a disk-backed volume. Every setter returns the builder, so calls chain.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-await using sb = await Sandbox.builder("worker")
-  .image("alpine")
-  .volume("/host",    (m) => m.bind("/var/data"))
-  .volume("/data",    (m) => m.named("my-data"))
-  .volume("/scratch", (m) => m.tmpfs().size(128))
-  .volume("/img",     (m) => m.disk("./data.qcow2").fstype("ext4").readonly())
+directory(): this
+```
+
+Create a directory-backed volume. This is the default, so calling it is only needed for clarity.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+disk(): this
+```
+
+Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
+
+<Accordion title="Example">
+
+```typescript
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
   .create();
 ```
 
-### MountBuilder
+</Accordion>
 
-Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount kind, then chain modifiers.
+---
 
-| Method | Description |
-|--------|-------------|
-| `bind(host)` | Mount a host directory into the guest. |
-| `named(name)` | Mount an existing named volume created via [`Volume.builder`](#volumebuilder). |
-| `namedWith(name, mode?, kind?, sizeMib?, quotaMib?)` | Mount a named volume with explicit behavior. `mode` is `"existing"`, `"create"`, or `"ensure-exists"`; `kind` is `"dir"` or `"disk"`. |
-| `tmpfs()` | Mount an in-memory filesystem. |
-| `disk(host)` | Mount a host disk image as a virtio-blk device. |
-| `format(fmt)` | Disk image format (`'qcow2' \| 'raw' \| 'vmdk'`). Defaults to the file extension. Disk only. |
-| `fstype(fs)` | Inner filesystem type (e.g. `"ext4"`). Disk only; omit to autodetect. |
-| `readonly()` | Mount read-only; virtiofs-backed mounts also reject writes in the host filesystem server. |
-| `noexec()` | Prevent direct execution from the mount. Interpreters can still read scripts from it. |
-| `nosuid()` | Ignore setuid and setgid privilege elevation from files on the mount. |
-| `nodev()` | Ignore device files on the mount. |
-| `size(mib)` | Cap in MiB. Tmpfs only. |
-| `build()` | Internal — produce a `VolumeMount`. |
-
-`named(name)` is existing-only. Use `namedWith` when sandbox creation should create or ensure the volume exists:
+#### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-await using sb = await Sandbox.builder("worker")
-  .image("python")
-  .volume("/cache", (m) => m.namedWith("pip-cache", "ensure-exists"))
-  .volume("/var/lib/docker", (m) =>
-    m.namedWith("docker-data", "ensure-exists", "disk", 20 * 1024)
-  )
-  .create();
+size(mib: number): this
 ```
 
-`"create"` fails when the named volume already exists. `"ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
+Set the disk capacity in MiB. Required after [`disk()`](#disk).
 
-### VolumeMount
+<p className="msb-label">Parameters</p>
 
-Discriminated union produced by `MountBuilder.build()`.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mib</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Disk capacity in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-type VolumeMount =
-  | { kind: "bind"; host: string; guest: string; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
-  | { kind: "named"; name: string; guest: string; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
-  | { kind: "tmpfs"; guest: string; sizeMib: number | null; readonly: boolean; noexec: boolean; nosuid: boolean; nodev: boolean }
-  | {
-      kind: "disk";
-      host: string;
-      guest: string;
-      format: DiskImageFormat;
-      fstype: string | null;
-      readonly: boolean;
-      noexec: boolean;
-      nosuid: boolean;
-      nodev: boolean;
-    };
+quota(mib: number): this
 ```
 
-### DiskImageFormat
+Record a quota in MiB as metadata for directory-backed volumes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mib</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Quota in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-type DiskImageFormat = "qcow2" | "raw" | "vmdk";
+label(key: string, value: string): this
 ```
+
+Add a metadata label. Can be called multiple times.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Label key.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Label value.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+build(): { name: string; kind: string; quotaMib?: number | null; capacityMib?: number | null; labels: Record<string, string> }
+```
+
+Materialize the volume configuration without creating the volume on disk. To create it, use [`create()`](#create) instead. The returned config object is the internal `NapiVolumeConfig` shape (not a public export).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">{`{ name, kind, quotaMib?, capacityMib?, labels }`}</span></div>
+    <div className="msb-param-desc">Frozen volume configuration object.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+create(): Promise<Volume>
+```
+
+Build and create the volume on disk, returning a [`Volume`](#instance-methods).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Promise&lt;Volume&gt;</a></div>
+    <div className="msb-param-desc">The created volume.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data").create();
+```
+
+</Accordion>
+
+---
+
+## VolumeFs methods
+
+Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+read(path: string): Promise<Uint8Array>
+```
+
+Read a file's full contents as bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;Uint8Array&gt;</span></div>
+    <div className="msb-param-desc">File contents.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const bytes = await vfs.read("data.bin");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+readToString(path: string): Promise<string>
+```
+
+Read a file's full contents as a UTF-8 string.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;string&gt;</span></div>
+    <div className="msb-param-desc">Decoded file contents.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const text = await vfs.readToString("config.json");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+readStream(path: string): Promise<VolumeFsReadStream>
+```
+
+Open a streaming reader for a file, for chunked reads of large files without loading them fully into memory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumefsreadstream">Promise&lt;VolumeFsReadStream&gt;</a></div>
+    <div className="msb-param-desc">Async-iterable read stream.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const stream = await vfs.readStream("large.bin");
+for await (const chunk of stream) {
+  console.log(chunk.byteLength);
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+write(path: string, data: Uint8Array | string): Promise<void>
+```
+
+Write a file, replacing any existing contents. Strings are encoded as UTF-8.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">Uint8Array | string</span></div>
+    <div className="msb-param-desc">Bytes, or a UTF-8 string.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.write("seed.txt", "hello");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+writeStream(path: string): Promise<VolumeFsWriteSink>
+```
+
+Open a streaming writer for a file, for chunked writes of large files.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumefswritesink">Promise&lt;VolumeFsWriteSink&gt;</a></div>
+    <div className="msb-param-desc">Write sink; call <code>close()</code> when done.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const sink = await vfs.writeStream("out.bin");
+await sink.write(chunk);
+await sink.close();
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+list(path: string): Promise<FsEntry[]>
+```
+
+List the entries in a directory. Pass `""` for the volume root.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/typescript/filesystem#fsentry">Promise&lt;FsEntry[]&gt;</a></div>
+    <div className="msb-param-desc">Directory entries.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+for (const e of await vfs.list("")) {
+  console.log(e.path, e.kind, e.size);
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">mkdir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+mkdir(path: string): Promise<void>
+```
+
+Create a directory, including any missing parents.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory path relative to the volume root.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.mkdir("cache/images");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">removeDir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+removeDir(path: string): Promise<void>
+```
+
+Recursively remove a directory and its contents.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory path relative to the volume root.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.removeDir("cache");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+remove(path: string): Promise<void>
+```
+
+Remove a single file.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">File path relative to the volume root.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.remove("seed.txt");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">copy()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+copy(from: string, to: string): Promise<void>
+```
+
+Copy a file or directory from one path to another.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Source path relative to the volume root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>to</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination path relative to the volume root.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.copy("seed.txt", "backup/seed.txt");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">rename()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+rename(from: string, to: string): Promise<void>
+```
+
+Move or rename a file or directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Source path relative to the volume root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>to</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination path relative to the volume root.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await vfs.rename("draft.txt", "final.txt");
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">stat()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+stat(path: string): Promise<FsMetadata>
+```
+
+Get metadata for a file or directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/typescript/filesystem#fsmetadata">Promise&lt;FsMetadata&gt;</a></div>
+    <div className="msb-param-desc">Kind, size, mode, and timestamps.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const meta = await vfs.stat("seed.txt");
+console.log(meta.size, meta.kind);
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">exists()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+exists(path: string): Promise<boolean>
+```
+
+Check whether a path exists.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;boolean&gt;</span></div>
+    <div className="msb-param-desc"><code>true</code> if the path exists.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+if (await vfs.exists("seed.txt")) {
+  await vfs.remove("seed.txt");
+}
+```
+
+</Accordion>
 
 ---
 
 ## Types
 
-### VolumeBuilder
-
-| Method | Description |
-|--------|-------------|
-| `directory()` | Create a directory-backed volume |
-| `disk()` | Create a raw ext4 disk-backed volume |
-| `size(mib)` | Disk capacity in MiB; required after `disk()` |
-| `quota(mib)` | Recorded quota metadata for directory volumes |
-| `label(key, value)` | Add a metadata label |
-| `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
-| `create()` | Build and create the volume; returns a [`Volume`](#volume) |
-
-### VolumeConfig
-
-Frozen configuration produced by `VolumeBuilder.build()`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| name | `string` | Volume name |
-| kind | `"dir" \| "disk"` | Volume kind |
-| quotaMib | `number \| null` | Maximum storage size in MiB |
-| capacityMib | `number \| null` | Disk capacity in MiB |
-| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
-
 ### VolumeHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
+
+A handle to an existing named volume, carrying its metadata. Handles from [`Volume.get()`](#volume-get) are **live**: `.fs()` and `.remove()` work. Handles in the array from [`Volume.list()`](#volume-list) are **read-only**: those two methods throw, so call `Volume.get(name)` to upgrade.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `string` | Volume name |
-| kind | `string` | Volume kind |
-| quotaMib | `number \| null` | Storage quota |
+| kind | `string` | Volume kind (`"dir"` or `"disk"`) |
+| quotaMib | `number \| null` | Recorded storage quota in MiB |
 | usedBytes | `number` | Current disk usage in bytes |
-| capacityBytes | `number \| null` | Disk capacity in bytes |
-| diskFormat | `string \| null` | Disk image format |
-| diskFstype | `string \| null` | Inner disk filesystem |
+| capacityBytes | `number \| null` | Disk capacity in bytes (disk volumes) |
+| diskFormat | `string \| null` | Disk image format (disk volumes) |
+| diskFstype | `string \| null` | Inner disk filesystem (disk volumes) |
 | labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
 | createdAt | `Date \| null` | Creation timestamp |
-| fs() | [`VolumeFs`](#volumefs) | Host-side filesystem on this volume (live handles only) |
-| remove() | `Promise<void>` | Delete this volume (live handles only) |
-
-Handles in the array returned by `Volume.list()` are read-only: calling `.fs()` or `.remove()` throws. Use `Volume.get(name)` to upgrade.
+| fs() | [`VolumeFs`](#volumefs) | Host-side filesystem (live handles only; throws on read-only handles) |
+| remove() | `Promise<void>` | Delete this volume (live handles only; throws on read-only handles) |
 
 ### VolumeFs
 
-Host-side filesystem operations on a volume's directory. Same surface area as [`SandboxFsOps`](/sdk/typescript/filesystem) (read, readToString, readStream, write, writeStream, list, mkdir, removeDir, remove, copy, rename, stat, exists) — but operates directly on the host without booting a sandbox.
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
+
+Host-side filesystem operations on a volume's directory. The methods mirror [`SandboxFsOps`](/sdk/typescript/filesystem) but run directly on the host with no sandbox booted. See the [VolumeFs methods](#volumefs-methods) section above for full per-method details.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| read(path) | `Promise<Uint8Array>` | Read a file as bytes |
+| readToString(path) | `Promise<string>` | Read a file as a UTF-8 string |
+| readStream(path) | `Promise<`[`VolumeFsReadStream`](#volumefsreadstream)`>` | Open a streaming reader |
+| write(path, data) | `Promise<void>` | Write a file (bytes or string) |
+| writeStream(path) | `Promise<`[`VolumeFsWriteSink`](#volumefswritesink)`>` | Open a streaming writer |
+| list(path) | `Promise<`[`FsEntry`](/sdk/typescript/filesystem#fsentry)`[]>` | List directory entries |
+| mkdir(path) | `Promise<void>` | Create a directory, with parents |
+| removeDir(path) | `Promise<void>` | Recursively remove a directory |
+| remove(path) | `Promise<void>` | Remove a file |
+| copy(from, to) | `Promise<void>` | Copy a file or directory |
+| rename(from, to) | `Promise<void>` | Move or rename a file or directory |
+| stat(path) | `Promise<`[`FsMetadata`](/sdk/typescript/filesystem#fsmetadata)`>` | Get file metadata |
+| exists(path) | `Promise<boolean>` | Check whether a path exists |
+
+### VolumeFsReadStream
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
+
+A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await` and `using`.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| recv() | `Promise<Uint8Array \| null>` | Read the next chunk; `null` when the stream is exhausted |
+| collect() | `Promise<Uint8Array>` | Drain the stream into a single byte array |
+| [Symbol.asyncIterator]() | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await` |
+| [Symbol.asyncDispose]() | `Promise<void>` | Mark the stream done (for `using`) |
+
+### VolumeFsWriteSink
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
+
+A streaming writer for a volume file. Implements `AsyncDisposable`, so `await using` closes it automatically.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| write(data) | `Promise<void>` | Write a chunk (`Uint8Array` or UTF-8 string) |
+| close() | `Promise<void>` | Flush and close the sink; idempotent |
+| [Symbol.asyncDispose]() | `Promise<void>` | Close the sink (for `await using`) |

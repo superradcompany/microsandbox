@@ -18,7 +18,8 @@ use crate::layout::{
     DEFAULT_CAPACITY, HEADER_SIZE, HEADER_STATE_INITIALIZING, HEADER_STATE_READY,
     HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SAMPLE_FLAG_CPU,
     SAMPLE_FLAG_MEMORY_AVAILABLE, SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_USED,
-    SLOT_ACTIVE, SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
+    SAMPLE_FLAG_UPPER_FREE, SAMPLE_FLAG_UPPER_HOST_ALLOCATED, SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE,
+    SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
 };
 use crate::snapshot::LiveMetric;
 use crate::{MetricsError, MetricsResult};
@@ -93,6 +94,12 @@ pub struct SampleWrite {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Guest-visible OCI upper filesystem used bytes when available.
+    pub upper_used_bytes: Option<u64>,
+    /// Guest-visible OCI upper filesystem free bytes when available.
+    pub upper_free_bytes: Option<u64>,
+    /// Host-allocated bytes for the writable upper image when available.
+    pub upper_host_allocated_bytes: Option<u64>,
 }
 
 /// Shared-memory registry.
@@ -621,6 +628,9 @@ impl MetricsRegistry {
             let disk_w = slot.disk_write_bytes.load(Ordering::Relaxed);
             let net_rx = slot.net_rx_bytes.load(Ordering::Relaxed);
             let net_tx = slot.net_tx_bytes.load(Ordering::Relaxed);
+            let upper_used = slot.upper_used_bytes.load(Ordering::Relaxed);
+            let upper_free = slot.upper_free_bytes.load(Ordering::Relaxed);
+            let upper_host_allocated = slot.upper_host_allocated_bytes.load(Ordering::Relaxed);
             let name = read_name(slot);
 
             let s2 = slot.seq.load(Ordering::Acquire);
@@ -675,6 +685,13 @@ impl MetricsRegistry {
                 disk_write_bytes: disk_w,
                 net_rx_bytes: net_rx,
                 net_tx_bytes: net_tx,
+                upper_used_bytes: flag_value(sample_flags, SAMPLE_FLAG_UPPER_USED, upper_used),
+                upper_free_bytes: flag_value(sample_flags, SAMPLE_FLAG_UPPER_FREE, upper_free),
+                upper_host_allocated_bytes: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_UPPER_HOST_ALLOCATED,
+                    upper_host_allocated,
+                ),
             });
         }
         None
@@ -728,6 +745,15 @@ impl MetricsSlotWriter {
         if sample.memory_host_resident_bytes.is_some() {
             sample_flags |= SAMPLE_FLAG_MEMORY_HOST_RESIDENT;
         }
+        if sample.upper_used_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_UPPER_USED;
+        }
+        if sample.upper_free_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_UPPER_FREE;
+        }
+        if sample.upper_host_allocated_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_UPPER_HOST_ALLOCATED;
+        }
         slot.sample_flags.store(sample_flags, Ordering::Relaxed);
         slot.vcpu_time_ns
             .store(sample.vcpu_time_ns.unwrap_or(0), Ordering::Relaxed);
@@ -753,6 +779,14 @@ impl MetricsSlotWriter {
             .store(sample.net_rx_bytes, Ordering::Relaxed);
         slot.net_tx_bytes
             .store(sample.net_tx_bytes, Ordering::Relaxed);
+        slot.upper_used_bytes
+            .store(sample.upper_used_bytes.unwrap_or(0), Ordering::Relaxed);
+        slot.upper_free_bytes
+            .store(sample.upper_free_bytes.unwrap_or(0), Ordering::Relaxed);
+        slot.upper_host_allocated_bytes.store(
+            sample.upper_host_allocated_bytes.unwrap_or(0),
+            Ordering::Relaxed,
+        );
         end_write(slot, begin);
         Ok(())
     }
@@ -1066,6 +1100,9 @@ fn write_reservation_fields(slot: &Slot, spec: &ReserveSlot<'_>, generation: u64
     slot.disk_write_bytes.store(0, Ordering::Relaxed);
     slot.net_rx_bytes.store(0, Ordering::Relaxed);
     slot.net_tx_bytes.store(0, Ordering::Relaxed);
+    slot.upper_used_bytes.store(0, Ordering::Relaxed);
+    slot.upper_free_bytes.store(0, Ordering::Relaxed);
+    slot.upper_host_allocated_bytes.store(0, Ordering::Relaxed);
     write_name(slot, spec.name);
     end_write(slot, begin);
 
@@ -1267,6 +1304,9 @@ mod tests {
             disk_write_bytes: 8192,
             net_rx_bytes: 100,
             net_tx_bytes: 200,
+            upper_used_bytes: Some(64 * 1024),
+            upper_free_bytes: Some(128 * 1024),
+            upper_host_allocated_bytes: Some(16 * 1024),
         };
         writer.write_sample(sample).unwrap();
 
@@ -1287,6 +1327,9 @@ mod tests {
         assert_eq!(item.disk_write_bytes, 8192);
         assert_eq!(item.net_rx_bytes, 100);
         assert_eq!(item.net_tx_bytes, 200);
+        assert_eq!(item.upper_used_bytes, Some(64 * 1024));
+        assert_eq!(item.upper_free_bytes, Some(128 * 1024));
+        assert_eq!(item.upper_host_allocated_bytes, Some(16 * 1024));
 
         // Lookup by sandbox + run id.
         assert_eq!(
@@ -1356,6 +1399,9 @@ mod tests {
                 disk_write_bytes: 8192,
                 net_rx_bytes: 100,
                 net_tx_bytes: 200,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -1407,6 +1453,9 @@ mod tests {
                     disk_write_bytes: counter,
                     net_rx_bytes: counter,
                     net_tx_bytes: counter,
+                    upper_used_bytes: None,
+                    upper_free_bytes: None,
+                    upper_host_allocated_bytes: None,
                 };
                 writer_clone.write_sample(sample).unwrap();
                 // Yield occasionally so the reader has a quiescent window;
@@ -1486,6 +1535,9 @@ mod tests {
                             disk_write_bytes: counter,
                             net_rx_bytes: counter,
                             net_tx_bytes: counter,
+                            upper_used_bytes: None,
+                            upper_free_bytes: None,
+                            upper_host_allocated_bytes: None,
                         })
                         .unwrap();
                     if n % 64 == 0 {
@@ -1607,6 +1659,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap_err();
         assert!(matches!(err, MetricsError::GenerationMismatch { .. }));
@@ -1645,6 +1700,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
         writer.release(ReleaseMode::Stale).unwrap();
@@ -1717,6 +1775,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
         assert_eq!(reg.snapshot().unwrap().len(), 1);
@@ -1785,6 +1846,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -1810,6 +1874,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap_err();
         assert!(matches!(err, MetricsError::GenerationMismatch { .. }));
@@ -1878,6 +1945,9 @@ mod tests {
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
                 net_tx_bytes: 1,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -1905,6 +1975,9 @@ mod tests {
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
                 net_tx_bytes: 1,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -1960,6 +2033,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap_err();
         assert!(matches!(err, MetricsError::GenerationMismatch { .. }));
@@ -1998,6 +2074,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -2056,6 +2135,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
@@ -2100,6 +2182,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap_err();
         assert!(matches!(err, MetricsError::GenerationMismatch { .. }));
@@ -2140,6 +2225,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
         let live = reg
@@ -2185,6 +2273,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
             })
             .unwrap();
 
