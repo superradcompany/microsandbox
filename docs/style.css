@@ -1,3 +1,87 @@
 body {
   font-size: 12px;
 }
+
+/*
+ * microsandbox SDK reference styles
+ * Auto-loaded by Mintlify (any .css in the docs root). Class names are
+ * prefixed with `msb-` to avoid clashing with Mintlify / Tailwind utilities.
+ */
+
+/* kind tags: static / instance / builder / type / async */
+.msb-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0 12px; }
+.msb-tag {
+  font-size: 11px; line-height: 1; padding: 4px 9px;
+  border-radius: 6px; font-weight: 600; letter-spacing: .01em;
+}
+.msb-tag.is-static   { background: #EEEDFE; color: #26215C; }
+.msb-tag.is-instance { background: #E1F5EE; color: #04342C; }
+.msb-tag.is-builder  { background: #FAECE7; color: #4A1B0C; }
+.msb-tag.is-type     { background: #FBEAF0; color: #4B1528; }
+.msb-tag.is-async    { background: rgba(135,134,128,.18); color: #5F5E5A; }
+
+.dark .msb-tag.is-static   { background: #2b2655; color: #CECBF6; }
+.dark .msb-tag.is-instance { background: #0c3a2e; color: #9FE1CB; }
+.dark .msb-tag.is-builder  { background: #3a1c10; color: #F5C4B3; }
+.dark .msb-tag.is-type     { background: #3a1424; color: #F4C0D1; }
+.dark .msb-tag.is-async    { background: rgba(211,209,199,.14); color: #B4B2A9; }
+
+/* at a glance panel */
+.msb-glance {
+  border: 1px solid rgba(127,119,221,.22);
+  border-radius: 14px; padding: 18px 20px; margin: 20px 0 8px;
+}
+.msb-glance-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px 24px;
+}
+.msb-eyebrow {
+  font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; opacity: .55; margin: 0 0 12px;
+}
+.msb-eyebrow-mt { margin-top: 16px; }
+.msb-col-title {
+  font-size: 13px; font-weight: 600; margin: 0 0 8px;
+  display: flex; align-items: center; gap: 7px;
+}
+.msb-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.msb-dot.static   { background: #7F77DD; }
+.msb-dot.instance { background: #1D9E75; }
+.msb-dot.builder  { background: #D85A30; }
+.msb-mrow { margin: 0 0 7px; line-height: 1.3; }
+.msb-m { font-family: var(--font-mono, monospace); font-size: 13px; text-decoration: none; }
+.msb-gloss { display: block; font-size: 12px; opacity: .6; }
+
+/* type pills + inline type links */
+.msb-m, .msb-type { color: #6d4bc4; }
+.dark .msb-m, .dark .msb-type { color: #c9a4ff; }
+.msb-typestrip { display: flex; flex-wrap: wrap; gap: 6px; }
+.msb-typepill {
+  font-family: var(--font-mono, monospace); font-size: 12px; text-decoration: none;
+  background: #FBEAF0; color: #4B1528; padding: 3px 9px; border-radius: 6px;
+}
+.dark .msb-typepill { background: #3a1424; color: #F4C0D1; }
+
+/* small section labels (parameters / returns / example) */
+.msb-label {
+  font-size: 11px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; opacity: .55; margin: 16px 0 6px;
+}
+
+/* parameter + return rows */
+.msb-params { margin: 4px 0 0; }
+.msb-param {
+  display: grid; grid-template-columns: 180px 1fr; gap: 4px 18px;
+  padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
+}
+.msb-param-key code { font-size: 13px; }
+.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; }
+.msb-param-desc { font-size: 14px; opacity: .85; }
+
+/* back-references on types (returned by / used by) */
+.msb-backref { font-size: 13px; opacity: .7; margin: 4px 0 12px; }
+.msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
+
+@media (max-width: 640px) {
+  .msb-param { grid-template-columns: 1fr; gap: 2px; }
+}
