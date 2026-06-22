@@ -39,7 +39,7 @@
 - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
 - <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
-<div align="left"><sub><sub><sup>†</sup> Boot time refers to guest boot on an M1 machine.</sub></sub></div>
+<div align="left"><sup><sup><sup>†</sup> Boot time refers to guest boot on an M1 machine.</sup></sup></div>
 
 <br />
 
