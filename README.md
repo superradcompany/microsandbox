@@ -271,20 +271,20 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > ```sh
 > # Create and start a named sandbox
-> msb create --name my-app python
+> msb create --name app python
 > ```
 >
 > ```sh
 > # Execute commands
-> msb exec my-app -- python -c "import this"
-> msb exec my-app -- curl https://example.com
+> msb exec app -- python -c "import this"
+> msb exec app -- curl https://example.com
 > ```
 >
 > ```sh
 > # Lifecycle
-> msb stop my-app
-> msb start my-app
-> msb rm my-app
+> msb stop app
+> msb start app
+> msb rm app
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
@@ -307,9 +307,9 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > ```sh
 > msb ls                         # List all sandboxes
-> msb ps my-app                  # Show sandbox status
-> msb inspect my-app             # Detailed sandbox info
-> msb metrics my-app             # Live CPU/memory/network stats
+> msb ps app                     # Show sandbox status
+> msb inspect app                # Detailed sandbox info
+> msb metrics app                # Live CPU/memory/network stats
 > ```
 
 > [!TIP]
