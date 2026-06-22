@@ -14,6 +14,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
 #[msb_test]
 async fn exec_stream_drives_guest_turn_by_turn() {
     let name = "cli-exec-stream-turns";
