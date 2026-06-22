@@ -78,7 +78,7 @@
 > ```
 >
 > ```powershell
-> irm https://install.microsandbox.dev/windows | iex       # 🪟 Windows
+> irm https://install.microsandbox.dev/windows | iex      # 🪟 Windows
 > ```
 >
 > <details>
