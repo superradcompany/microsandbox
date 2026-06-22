@@ -21,11 +21,15 @@ const HEARTBEAT_TMP_PATH: &str = "/.msb/heartbeat.tmp";
 //--------------------------------------------------------------------------------------------------
 
 /// Atomically writes the heartbeat JSON to `/.msb/heartbeat.json`.
-pub async fn write_heartbeat(heartbeat: &Heartbeat) -> AgentdResult<()> {
-    let json = serde_json::to_vec(&heartbeat)?;
+///
+/// Deliberately synchronous: the liveness pulse runs on a dedicated OS thread
+/// (see [`crate::agent`]) so a saturated async runtime can never starve it.
+/// Blocking `std::fs` keeps that thread fully independent of Tokio.
+pub fn write_heartbeat(heartbeat: &Heartbeat) -> AgentdResult<()> {
+    let json = serde_json::to_vec(heartbeat)?;
 
-    tokio::fs::write(HEARTBEAT_TMP_PATH, json).await?;
-    tokio::fs::rename(HEARTBEAT_TMP_PATH, HEARTBEAT_PATH).await?;
+    std::fs::write(HEARTBEAT_TMP_PATH, json)?;
+    std::fs::rename(HEARTBEAT_TMP_PATH, HEARTBEAT_PATH)?;
 
     Ok(())
 }
