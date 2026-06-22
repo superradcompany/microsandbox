@@ -30,6 +30,7 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
+- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
 - <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times under 100 milliseconds.
@@ -68,20 +69,16 @@
 > npx microsandbox run debian
 > ```
 >
-> [!NOTE]
->
-> Windows support is currently in preview. A Windows MSI or winget package is not published yet; use the PowerShell installer from the latest GitHub release:
->
-> ```powershell
-> irm https://github.com/superradcompany/microsandbox/releases/latest/download/install.ps1 | iex
-> ```
->
 > ##
 >
 > Or install the `msb` command globally:
 >
 > ```sh
-> curl -fsSL https://install.microsandbox.dev | sh
+> curl -fsSL https://install.microsandbox.dev | sh        # 🍎 macOS / 🐧 Linux
+> ```
+>
+> ```powershell
+> irm https://install.microsandbox.dev/windows | iex       # 🪟 Windows
 > ```
 >
 > <details>
@@ -91,6 +88,10 @@
 >
 > ```sh
 > brew install superradcompany/tap/microsandbox
+> ```
+>
+> ```sh
+> winget install SuperRad.Microsandbox
 > ```
 >
 > ```sh
@@ -117,7 +118,7 @@
 
 ##
 
-> **Requirements**: Linux with KVM enabled, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform enabled.<br />
+> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.<br />
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />

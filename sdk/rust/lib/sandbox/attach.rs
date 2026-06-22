@@ -442,10 +442,15 @@ pub(crate) mod local {
         exec::{ExecExited, ExecResize, ExecStdin, ExecStdout},
         message::MessageType,
     };
-    use tokio::{io::AsyncWriteExt, sync::mpsc};
+    use tokio::sync::mpsc;
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
-        Storage::FileSystem::ReadFile,
+        Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+            WAIT_TIMEOUT,
+        },
+        Storage::FileSystem::{
+            CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
+        },
         System::{
             Console::{
                 CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
@@ -470,8 +475,10 @@ pub(crate) mod local {
     const TERMINAL_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const TERMINAL_INPUT_BUFFER_SIZE: usize = 4096;
 
-    #[derive(Clone, Copy)]
-    struct ConsoleHandle(HANDLE);
+    struct ConsoleHandle {
+        raw: HANDLE,
+        owned: bool,
+    }
 
     unsafe impl Send for ConsoleHandle {}
 
@@ -531,10 +538,7 @@ pub(crate) mod local {
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         let terminal_guard = WindowsTerminalGuard::enter()?;
-        let mut terminal_events =
-            WindowsTerminalEventPump::spawn(terminal_guard.input, terminal_guard.output)?;
-        let mut stdout = tokio::io::stdout();
-
+        let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
         let mut exit_code: i32 = -1;
         let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
         let detach_seq = detach_keys.sequence();
@@ -568,7 +572,7 @@ pub(crate) mod local {
                     match msg.t {
                         MessageType::ExecStdout => {
                             if let Ok(out) = msg.payload::<ExecStdout>() {
-                                let _ = stdout.write_all(&out.data).await;
+                                let _ = terminal_guard.write_output(&out.data);
                             }
                         }
                         MessageType::ExecExited => {
@@ -593,7 +597,7 @@ pub(crate) mod local {
                             match next.t {
                                 MessageType::ExecStdout => {
                                     if let Ok(out) = next.payload::<ExecStdout>() {
-                                        let _ = stdout.write_all(&out.data).await;
+                                        let _ = terminal_guard.write_output(&out.data);
                                     }
                                 }
                                 MessageType::ExecExited => {
@@ -617,8 +621,6 @@ pub(crate) mod local {
                         }
                     }
 
-                    let _ = stdout.flush().await;
-
                     if should_break {
                         break;
                     }
@@ -634,10 +636,8 @@ pub(crate) mod local {
 
     impl WindowsTerminalGuard {
         pub(crate) fn enter() -> MicrosandboxResult<Self> {
-            let input = get_std_handle(STD_INPUT_HANDLE, "stdin")?;
-            let output = get_std_handle(STD_OUTPUT_HANDLE, "stdout")?;
-            let input_mode = console_mode(input, "stdin")?;
-            let output_mode = console_mode(output, "stdout")?;
+            let (input, input_mode) = get_console_handle(STD_INPUT_HANDLE, "stdin")?;
+            let (output, output_mode) = get_console_handle(STD_OUTPUT_HANDLE, "stdout")?;
 
             let mut guard = Self {
                 input,
@@ -655,8 +655,8 @@ pub(crate) mod local {
         }
 
         fn enable_virtual_terminal_modes(&mut self) -> MicrosandboxResult<()> {
-            let raw_input_mode = console_mode(self.input, "stdin")?;
-            let raw_output_mode = console_mode(self.output, "stdout")?;
+            let raw_input_mode = console_mode(&self.input, "stdin")?;
+            let raw_output_mode = console_mode(&self.output, "stdout")?;
 
             let input_mode = (raw_input_mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
                 & !(ENABLE_LINE_INPUT
@@ -664,17 +664,47 @@ pub(crate) mod local {
                     | ENABLE_PROCESSED_INPUT
                     | ENABLE_WINDOW_INPUT
                     | ENABLE_MOUSE_INPUT);
-            set_console_mode(self.input, input_mode, "configure stdin")?;
+            set_console_mode(&self.input, input_mode, "configure stdin")?;
 
             let output_mode = raw_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-            set_console_mode(self.output, output_mode, "configure stdout")?;
+            set_console_mode(&self.output, output_mode, "configure stdout")?;
 
             Ok(())
         }
 
         fn restore(&mut self) {
-            let _ = unsafe { SetConsoleMode(self.input.0, self.input_mode) };
-            let _ = unsafe { SetConsoleMode(self.output.0, self.output_mode) };
+            let _ = unsafe { SetConsoleMode(self.input.raw, self.input_mode) };
+            let _ = unsafe { SetConsoleMode(self.output.raw, self.output_mode) };
+        }
+
+        pub(crate) fn write_output(&self, data: &[u8]) -> MicrosandboxResult<()> {
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let remaining = data.len() - offset;
+                let chunk_len = remaining.min(u32::MAX as usize);
+                let mut written = 0u32;
+                let result = unsafe {
+                    WriteFile(
+                        self.output.raw,
+                        data[offset..].as_ptr().cast(),
+                        chunk_len as u32,
+                        &mut written,
+                        ptr::null_mut(),
+                    )
+                };
+                if result == 0 {
+                    return Err(MicrosandboxError::Terminal(format!(
+                        "terminal output: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                if written == 0 {
+                    break;
+                }
+                offset += written as usize;
+            }
+
+            Ok(())
         }
     }
 
@@ -686,21 +716,21 @@ pub(crate) mod local {
 
     impl WindowsTerminalEventPump {
         pub(crate) fn spawn_for_guard(guard: &WindowsTerminalGuard) -> MicrosandboxResult<Self> {
-            Self::spawn(guard.input, guard.output)
+            Self::spawn(guard.input.raw, guard.output.raw)
         }
 
-        fn spawn(input: ConsoleHandle, output: ConsoleHandle) -> MicrosandboxResult<Self> {
+        fn spawn(input: HANDLE, output: HANDLE) -> MicrosandboxResult<Self> {
             let (tx, rx) = mpsc::unbounded_channel();
             let stop = create_event("terminal stop")?;
-            let input_handle = input.0 as isize;
-            let output_handle = output.0 as isize;
+            let input_handle = input as isize;
+            let output_handle = output as isize;
             let stop_handle = stop.0 as isize;
             let handle = thread::spawn(move || {
-                let input = ConsoleHandle(input_handle as HANDLE);
-                let output = ConsoleHandle(output_handle as HANDLE);
+                let input = input_handle as HANDLE;
+                let output = output_handle as HANDLE;
                 let stop_handle = stop_handle as HANDLE;
                 let mut last_size = terminal_size_from_output(output);
-                let wait_handles = [input.0, stop_handle];
+                let wait_handles = [input, stop_handle];
                 let timeout_ms = TERMINAL_EVENT_POLL_INTERVAL.as_millis() as u32;
 
                 loop {
@@ -722,7 +752,7 @@ pub(crate) mod local {
                         let mut bytes_read = 0u32;
                         let result = unsafe {
                             ReadFile(
-                                input.0,
+                                input,
                                 input_buf.as_mut_ptr().cast(),
                                 input_buf.len() as u32,
                                 &mut bytes_read,
@@ -795,19 +825,76 @@ pub(crate) mod local {
         }
     }
 
-    fn get_std_handle(handle: u32, name: &str) -> MicrosandboxResult<ConsoleHandle> {
-        let handle = unsafe { GetStdHandle(handle) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(MicrosandboxError::Terminal(format!(
-                "{name} console handle is unavailable"
-            )));
+    impl ConsoleHandle {
+        fn borrowed(raw: HANDLE) -> Self {
+            Self { raw, owned: false }
         }
-        Ok(ConsoleHandle(handle))
+
+        fn owned(raw: HANDLE) -> Self {
+            Self { raw, owned: true }
+        }
     }
 
-    fn console_mode(handle: ConsoleHandle, name: &str) -> MicrosandboxResult<u32> {
+    impl Drop for ConsoleHandle {
+        fn drop(&mut self) {
+            if self.owned {
+                let _ = unsafe { CloseHandle(self.raw) };
+            }
+        }
+    }
+
+    fn get_console_handle(kind: u32, name: &str) -> MicrosandboxResult<(ConsoleHandle, u32)> {
+        let handle = unsafe { GetStdHandle(kind) };
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            let handle = ConsoleHandle::borrowed(handle);
+            if let Ok(mode) = console_mode(&handle, name) {
+                return Ok((handle, mode));
+            }
+        }
+
+        let handle = open_console_device(kind, name)?;
+        let mode = console_mode(&handle, name)?;
+        Ok((handle, mode))
+    }
+
+    fn open_console_device(kind: u32, name: &str) -> MicrosandboxResult<ConsoleHandle> {
+        let device = match kind {
+            STD_INPUT_HANDLE => "CONIN$",
+            STD_OUTPUT_HANDLE => "CONOUT$",
+            _ => {
+                return Err(MicrosandboxError::Terminal(format!(
+                    "{name} console handle is unavailable"
+                )));
+            }
+        };
+        let wide = device
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(MicrosandboxError::Terminal(format!(
+                "{name} console handle is unavailable: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(ConsoleHandle::owned(raw))
+    }
+
+    fn console_mode(handle: &ConsoleHandle, name: &str) -> MicrosandboxResult<u32> {
         let mut mode = 0u32;
-        let result = unsafe { GetConsoleMode(handle.0, &mut mode) };
+        let result = unsafe { GetConsoleMode(handle.raw, &mut mode) };
         if result == 0 {
             return Err(MicrosandboxError::Terminal(format!(
                 "{name} is not an interactive Windows console: {}",
@@ -817,8 +904,12 @@ pub(crate) mod local {
         Ok(mode)
     }
 
-    fn set_console_mode(handle: ConsoleHandle, mode: u32, context: &str) -> MicrosandboxResult<()> {
-        let result = unsafe { SetConsoleMode(handle.0, mode) };
+    fn set_console_mode(
+        handle: &ConsoleHandle,
+        mode: u32,
+        context: &str,
+    ) -> MicrosandboxResult<()> {
+        let result = unsafe { SetConsoleMode(handle.raw, mode) };
         if result == 0 {
             return Err(MicrosandboxError::Terminal(format!(
                 "{context}: {}",
@@ -841,15 +932,11 @@ pub(crate) mod local {
     }
 
     pub(crate) fn current_terminal_size() -> Option<(u16, u16)> {
-        let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        if output.is_null() || output == INVALID_HANDLE_VALUE {
-            return None;
-        }
-
-        terminal_size_from_output(ConsoleHandle(output))
+        let (output, _) = get_console_handle(STD_OUTPUT_HANDLE, "stdout").ok()?;
+        terminal_size_from_output(output.raw)
     }
 
-    fn terminal_size_from_output(output: ConsoleHandle) -> Option<(u16, u16)> {
+    fn terminal_size_from_output(output: HANDLE) -> Option<(u16, u16)> {
         let mut info = CONSOLE_SCREEN_BUFFER_INFO {
             dwSize: Default::default(),
             dwCursorPosition: Default::default(),
@@ -858,7 +945,7 @@ pub(crate) mod local {
             dwMaximumWindowSize: Default::default(),
         };
 
-        let result = unsafe { GetConsoleScreenBufferInfo(output.0, &mut info) };
+        let result = unsafe { GetConsoleScreenBufferInfo(output, &mut info) };
         if result == 0 {
             return None;
         }

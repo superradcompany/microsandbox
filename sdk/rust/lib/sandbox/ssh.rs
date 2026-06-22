@@ -583,7 +583,6 @@ impl SshClient {
             let terminal_guard = attach::local::WindowsTerminalGuard::enter()?;
             let mut terminal_events =
                 attach::local::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
-            let mut stdout = tokio::io::stdout();
             let detach_seq = detach_keys.sequence();
             let mut match_pos = 0usize;
             let mut exit_code = 0i32;
@@ -623,9 +622,7 @@ impl SshClient {
                         };
                         match msg {
                             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                                use tokio::io::AsyncWriteExt;
-                                stdout.write_all(&data).await?;
-                                stdout.flush().await?;
+                                terminal_guard.write_output(&data)?;
                             }
                             ChannelMsg::ExitStatus { exit_status } => {
                                 exit_code = exit_status as i32;
