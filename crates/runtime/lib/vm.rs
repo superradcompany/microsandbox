@@ -44,18 +44,12 @@ const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
 const EXIT_REASON_MAX_DURATION: u8 = 2;
 const EXIT_REASON_SIGNAL: u8 = 3;
 const EXIT_REASON_PARENT_EXIT: u8 = 4;
+/// Termination reason when agentd never signals readiness within the relay's
+/// boot window (the guest failed to come up). Reused for the boot-failure exit
+/// triggered from the relay's `wait_ready` path.
 const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
 const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
 const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
-
-/// Host-observed stale heartbeat budget before agentd is considered unresponsive.
-const STALE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Startup grace before a missing heartbeat is considered an agentd failure.
-const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(180);
-
-/// Short best-effort send budget once agentd is already considered unresponsive.
-const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
 /// NUL-terminated argument records. Keeps the network-config blob and the
@@ -701,6 +695,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Relay: spawn a blocking task for wait_ready, then run the accept loop.
     // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
     // so it runs on a background thread, not blocking the main thread.
+    let relay_exit_handle = exit_handle.clone();
+    let relay_exit_reason = Arc::clone(&exit_reason);
     tokio_rt.spawn(async move {
         let ready_result =
             tokio::task::spawn_blocking(move || relay.wait_ready().map(|()| relay)).await;
@@ -734,8 +730,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     tracing::error!("agent relay error: {e}");
                 }
             }
-            Ok(Err(e)) => tracing::error!("agent relay wait_ready failed: {e}"),
-            Err(e) => tracing::error!("agent relay wait_ready task panicked: {e}"),
+            Ok(Err(e)) => {
+                tracing::error!("agent relay wait_ready failed: {e}");
+                // agentd never signalled readiness within the relay's boot window
+                // — the guest failed to come up. Reclaim the VM. This is the boot-
+                // failure backstop that used to live in the heartbeat monitor's
+                // boot-grace path (same 180s deadline), now owned by the relay so
+                // the heartbeat monitor can be purely about idle detection.
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
+            Err(e) => {
+                tracing::error!("agent relay wait_ready task panicked: {e}");
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
         }
     });
 
@@ -825,8 +840,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         });
     }
 
-    // Heartbeat health monitor. Idle reclamation is optional, but missing or stale
-    // heartbeat data means the in-guest agent is not healthy.
+    // Idle monitor. Reclaims the sandbox only when an optional idle timeout is
+    // configured and the guest has been inactive that long. A stale or missing
+    // heartbeat is NOT treated as a failure here — a busy agent is still healthy,
+    // and a guest that never boots is reclaimed by the relay's wait_ready path.
     {
         let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
         let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
@@ -837,8 +854,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let decision =
-                    heartbeat_reader.check(idle_timeout, STALE_HEARTBEAT_TIMEOUT, HEARTBEAT_BOOT_GRACE);
+                let decision = heartbeat_reader.check(idle_timeout);
 
                 match decision {
                     HeartbeatDecision::Idle(status) => {
@@ -859,7 +875,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         );
                         match request_guest_shutdown(&heartbeat_shared) {
                             Ok(()) => {
-                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT)
+                                    .await;
                                 tracing::info!(
                                     "idle shutdown flush window elapsed, triggering host exit"
                                 );
@@ -868,39 +885,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                                 tracing::warn!(
                                     error = %err,
                                     "idle shutdown request failed, triggering host exit"
-                                );
-                            }
-                        }
-                        heartbeat_exit_handle.trigger();
-                        break;
-                    }
-                    HeartbeatDecision::AgentUnresponsive(status) => {
-                        tracing::warn!(
-                            heartbeat_seq = ?status.heartbeat_seq,
-                            activity_seq = ?status.activity_seq,
-                            heartbeat_stale_for = ?status.heartbeat_stale_for,
-                            active_exec_sessions = status.active_exec_sessions,
-                            active_fs_streams = status.active_fs_streams,
-                            active_tcp_streams = status.active_tcp_streams,
-                            "agent heartbeat stale, triggering host exit"
-                        );
-                        heartbeat_reason.store(
-                            EXIT_REASON_AGENT_UNRESPONSIVE,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        match request_guest_shutdown_with_timeout(
-                            &heartbeat_shared,
-                            AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT,
-                        ) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "agent-unresponsive shutdown request sent, triggering host exit"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "agent-unresponsive shutdown request failed, triggering host exit"
                                 );
                             }
                         }
