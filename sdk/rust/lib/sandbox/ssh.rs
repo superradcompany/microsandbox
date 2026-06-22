@@ -25,7 +25,6 @@ use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, Sig};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-#[cfg(unix)]
 use super::attach;
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient};
@@ -552,10 +551,96 @@ impl SshClient {
 
         #[cfg(windows)]
         {
-            let _ = options;
-            return Err(MicrosandboxError::Runtime(
-                "interactive SSH attach is not supported on Windows yet".into(),
-            ));
+            let detach_keys = match &options.detach_keys {
+                Some(spec) => attach::DetachKeys::parse(spec)?,
+                None => attach::DetachKeys::default_keys(),
+            };
+            let (cols, rows) = attach::local::current_terminal_size().unwrap_or((80, 24));
+            let mut channel = self
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| ssh_error("open session channel", e))?;
+            channel
+                .request_pty(
+                    true,
+                    &options.term,
+                    u32::from(cols),
+                    u32::from(rows),
+                    0,
+                    0,
+                    &[],
+                )
+                .await
+                .map_err(|e| ssh_error("request PTY", e))?;
+            wait_channel_success(&mut channel, "request PTY").await?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| ssh_error("request shell", e))?;
+            wait_channel_success(&mut channel, "request shell").await?;
+
+            let terminal_guard = attach::local::WindowsTerminalGuard::enter()?;
+            let mut terminal_events =
+                attach::local::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
+            let mut stdout = tokio::io::stdout();
+            let detach_seq = detach_keys.sequence();
+            let mut match_pos = 0usize;
+            let mut exit_code = 0i32;
+            let (mut channel_rx, channel_tx) = channel.split();
+
+            loop {
+                tokio::select! {
+                    Some(event) = terminal_events.recv() => {
+                        match event {
+                            attach::local::WindowsTerminalEvent::Input(data) => {
+                                if attach::input_contains_detach_sequence(
+                                    &data,
+                                    detach_seq,
+                                    &mut match_pos,
+                                ) {
+                                    break;
+                                }
+
+                                channel_tx
+                                    .data_bytes(Bytes::from(data))
+                                    .await
+                                    .map_err(|e| ssh_error("write channel data", e))?;
+                            }
+                            attach::local::WindowsTerminalEvent::Resize { cols, rows } => {
+                                let _ = channel_tx
+                                    .window_change(u32::from(cols), u32::from(rows), 0, 0)
+                                    .await;
+                            }
+                            attach::local::WindowsTerminalEvent::Error(error) => {
+                                return Err(MicrosandboxError::Terminal(error));
+                            }
+                        }
+                    }
+                    msg = channel_rx.wait() => {
+                        let Some(msg) = msg else {
+                            break;
+                        };
+                        match msg {
+                            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                                use tokio::io::AsyncWriteExt;
+                                stdout.write_all(&data).await?;
+                                stdout.flush().await?;
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => {
+                                exit_code = exit_status as i32;
+                            }
+                            ChannelMsg::ExitSignal { .. } => {
+                                exit_code = 128;
+                            }
+                            ChannelMsg::Close => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            Ok(exit_code)
         }
 
         #[cfg(unix)]

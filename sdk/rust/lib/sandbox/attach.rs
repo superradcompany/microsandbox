@@ -216,7 +216,11 @@ impl DetachKeys {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn input_contains_detach_sequence(data: &[u8], detach_seq: &[u8], match_pos: &mut usize) -> bool {
+pub(crate) fn input_contains_detach_sequence(
+    data: &[u8],
+    detach_seq: &[u8],
+    match_pos: &mut usize,
+) -> bool {
     if detach_seq.is_empty() {
         return false;
     }
@@ -475,20 +479,20 @@ pub(crate) mod local {
 
     unsafe impl Send for OwnedWindowsHandle {}
 
-    struct WindowsTerminalGuard {
+    pub(crate) struct WindowsTerminalGuard {
         input: ConsoleHandle,
         output: ConsoleHandle,
         input_mode: u32,
         output_mode: u32,
     }
 
-    struct WindowsTerminalEventPump {
+    pub(crate) struct WindowsTerminalEventPump {
         stop: OwnedWindowsHandle,
         handle: Option<thread::JoinHandle<()>>,
         rx: mpsc::UnboundedReceiver<WindowsTerminalEvent>,
     }
 
-    enum WindowsTerminalEvent {
+    pub(crate) enum WindowsTerminalEvent {
         Input(Vec<u8>),
         Resize { cols: u16, rows: u16 },
         Error(String),
@@ -629,7 +633,7 @@ pub(crate) mod local {
     }
 
     impl WindowsTerminalGuard {
-        fn enter() -> MicrosandboxResult<Self> {
+        pub(crate) fn enter() -> MicrosandboxResult<Self> {
             let input = get_std_handle(STD_INPUT_HANDLE, "stdin")?;
             let output = get_std_handle(STD_OUTPUT_HANDLE, "stdout")?;
             let input_mode = console_mode(input, "stdin")?;
@@ -681,6 +685,10 @@ pub(crate) mod local {
     }
 
     impl WindowsTerminalEventPump {
+        pub(crate) fn spawn_for_guard(guard: &WindowsTerminalGuard) -> MicrosandboxResult<Self> {
+            Self::spawn(guard.input, guard.output)
+        }
+
         fn spawn(input: ConsoleHandle, output: ConsoleHandle) -> MicrosandboxResult<Self> {
             let (tx, rx) = mpsc::unbounded_channel();
             let stop = create_event("terminal stop")?;
@@ -767,7 +775,7 @@ pub(crate) mod local {
             })
         }
 
-        async fn recv(&mut self) -> Option<WindowsTerminalEvent> {
+        pub(crate) async fn recv(&mut self) -> Option<WindowsTerminalEvent> {
             self.rx.recv().await
         }
     }
@@ -832,7 +840,7 @@ pub(crate) mod local {
         Ok(OwnedWindowsHandle(handle))
     }
 
-    fn current_terminal_size() -> Option<(u16, u16)> {
+    pub(crate) fn current_terminal_size() -> Option<(u16, u16)> {
         let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
         if output.is_null() || output == INVALID_HANDLE_VALUE {
             return None;
