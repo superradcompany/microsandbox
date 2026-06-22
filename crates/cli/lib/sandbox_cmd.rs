@@ -4,14 +4,17 @@
 //! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
 //! — the VMM calls `_exit()` on guest shutdown.
 
+use std::fs::File;
+use std::io::Read;
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::{os::fd::FromRawFd, os::fd::OwnedFd};
 
 use clap::Args;
 use microsandbox_runtime::{
+    launch::LaunchConfig,
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, MetricsSlotHandoff, StartupCommand, VmConfig},
+    vm::{Config, DiskMountSpec, VmConfig},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -19,6 +22,11 @@ use microsandbox_runtime::{
 //--------------------------------------------------------------------------------------------------
 
 /// Arguments for the `msb sandbox` subcommand.
+///
+/// Only the operator-readable labels and the real inherited fds live on argv.
+/// The bulk of the configuration — paths, env (incl. secrets), mounts, network
+/// config — arrives as a JSON [`LaunchConfig`] over `--config-fd` (or
+/// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct SandboxArgs {
     /// Name of the sandbox.
@@ -29,37 +37,9 @@ pub struct SandboxArgs {
     #[arg(long = "sandbox-id")]
     pub sandbox_id: i32,
 
-    /// Path to the sandbox database file.
-    #[arg(long = "db-path")]
-    pub sandbox_db_path: PathBuf,
-
-    /// Timeout when acquiring a sandbox database connection from the pool.
-    #[arg(long = "db-connect-timeout-secs", default_value_t = 30)]
-    pub sandbox_db_connect_timeout_secs: u64,
-
-    /// Directory for log files.
-    #[arg(long)]
-    pub log_dir: PathBuf,
-
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long = "log-level", value_name = "LOG_LEVEL", value_parser = parse_log_level)]
     pub log_level: Option<LogLevel>,
-
-    /// Runtime directory (scripts, heartbeat).
-    #[arg(long)]
-    pub runtime_dir: PathBuf,
-
-    /// Root directory holding every sandbox's persisted state.
-    ///
-    /// Passed explicitly so runtime-owned lifecycle maintenance can remove
-    /// ephemeral sandbox directories without inferring the path from
-    /// `--log-dir`.
-    #[arg(long = "sandboxes-dir")]
-    pub sandboxes_dir: PathBuf,
-
-    /// Path to the Unix domain socket for the agent relay.
-    #[arg(long)]
-    pub agent_sock: PathBuf,
 
     /// Read end of the attached-parent watchdog pipe.
     #[arg(long = "parent-watch-fd", hide = true)]
@@ -69,42 +49,9 @@ pub struct SandboxArgs {
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
 
-    /// Startup workload command to execute after agentd is ready.
-    #[arg(long = "startup-cmd", hide = true)]
-    pub startup_cmd: Option<String>,
-
-    /// Startup workload arguments.
-    #[arg(long = "startup-arg", hide = true)]
-    pub startup_args: Vec<String>,
-
-    /// Startup workload environment variables as `KEY=VALUE`.
-    #[arg(long = "startup-env", hide = true)]
-    pub startup_env: Vec<String>,
-
-    /// Startup workload working directory.
-    #[arg(long = "startup-cwd", hide = true)]
-    pub startup_cwd: Option<String>,
-
-    /// Startup workload guest user.
-    #[arg(long = "startup-user", hide = true)]
-    pub startup_user: Option<String>,
-
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
     pub forward_output: bool,
-
-    /// Hard cap on total sandbox lifetime in seconds.
-    #[arg(long)]
-    pub max_duration: Option<u64>,
-
-    /// Idle timeout in seconds.
-    #[arg(long)]
-    pub idle_timeout: Option<u64>,
-
-    // ── VM configuration ─────────────────────────────────────────────────
-    /// Path to the libkrunfw shared library.
-    #[arg(long)]
-    pub libkrunfw_path: PathBuf,
 
     /// Number of virtual CPUs.
     #[arg(long, default_value_t = 1)]
@@ -114,83 +61,13 @@ pub struct SandboxArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
-    /// Metrics sampling interval in milliseconds; `0` disables sampling.
-    #[arg(long = "metrics-sample-interval-ms", default_value_t = 1000)]
-    pub metrics_sample_interval_ms: u64,
+    /// Inherited fd carrying the JSON [`LaunchConfig`] (set by the SDK).
+    #[arg(long = "config-fd", hide = true)]
+    pub config_fd: Option<i32>,
 
-    /// Disable metrics sampling; overrides `--metrics-sample-interval-ms`.
-    #[arg(long = "disable-metrics-sample")]
-    pub disable_metrics_sample: bool,
-
-    /// Name of the POSIX shared-memory metrics registry, passed in by the host.
-    #[arg(long = "metrics-shm-name", hide = true)]
-    pub metrics_shm_name: Option<String>,
-
-    /// Reserved slot index inside the metrics registry.
-    #[arg(long = "metrics-slot", hide = true)]
-    pub metrics_slot: Option<u32>,
-
-    /// Generation stamp paired with the reserved slot.
-    #[arg(long = "metrics-generation", hide = true)]
-    pub metrics_generation: Option<u64>,
-
-    /// Root filesystem path for direct passthrough mounts.
-    #[arg(long)]
-    pub rootfs_path: Option<PathBuf>,
-
-    /// Disk image file path for virtio-blk rootfs.
-    #[arg(long)]
-    pub rootfs_disk: Option<PathBuf>,
-
-    /// Disk image format (qcow2, raw, vmdk).
-    #[arg(long)]
-    pub rootfs_disk_format: Option<String>,
-
-    /// Mount disk image as read-only.
-    #[arg(long)]
-    pub rootfs_disk_readonly: bool,
-
-    /// Writable upper ext4 block device for OCI rootfs overlay.
-    #[arg(long = "rootfs-blk")]
-    pub rootfs_upper: Option<PathBuf>,
-
-    /// Additional mounts as `tag:host_path` (repeatable).
-    #[arg(long)]
-    pub mount: Vec<String>,
-
-    /// Disk-image volume mounts as `id:host_path:format[:ro]` (repeatable).
-    #[arg(long)]
-    pub disk: Vec<String>,
-
-    /// Path to the init binary in the guest.
-    #[arg(long)]
-    pub init_path: Option<PathBuf>,
-
-    /// Environment variables as `KEY=VALUE` (repeatable).
-    #[arg(long)]
-    pub env: Vec<String>,
-
-    /// Working directory inside the guest.
-    #[arg(long)]
-    pub workdir: Option<PathBuf>,
-
-    /// Path to the executable to run in the guest.
-    #[arg(long)]
-    pub exec_path: Option<PathBuf>,
-
-    /// Network configuration as JSON.
-    #[cfg(feature = "net")]
-    #[arg(long)]
-    pub network_config: Option<String>,
-
-    /// Sandbox slot for deterministic network address derivation.
-    #[cfg(feature = "net")]
-    #[arg(long, default_value_t = 0)]
-    pub sandbox_slot: u64,
-
-    /// Arguments to pass to the executable.
-    #[arg(last = true)]
-    pub exec_args: Vec<String>,
+    /// Path to a JSON [`LaunchConfig`] file (manual invocation / debugging).
+    #[arg(long = "config-file", hide = true)]
+    pub config_file: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -213,6 +90,13 @@ fn parse_log_level(s: &str) -> Result<LogLevel, String> {
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: SandboxArgs) -> ! {
+    let launch = match load_launch_config(&args) {
+        Ok(launch) => launch,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
     let parent_watchdog = match args
         .parent_watch_fd
         .map(parent_watchdog_from_fd)
@@ -231,8 +115,8 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
-    let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
-    let disks = match parse_disk_args(&args.disk) {
+    let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
+    let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
         Err(err) => {
             eprintln!("{err}");
@@ -240,88 +124,98 @@ pub fn run(args: SandboxArgs) -> ! {
         }
     };
     let vm_config = VmConfig {
-        libkrunfw_path: args.libkrunfw_path,
+        libkrunfw_path: launch.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
-        rootfs_path: args.rootfs_path,
+        rootfs_path: launch.rootfs.path,
         rootfs_vmdk: if is_vmdk {
-            args.rootfs_disk.clone()
+            launch.rootfs.disk.clone()
         } else {
             None
         },
-        rootfs_upper: args.rootfs_upper,
+        rootfs_upper: launch.rootfs.upper,
         rootfs_upper_spec: None,
-        rootfs_disk: if is_vmdk { None } else { args.rootfs_disk },
+        rootfs_disk: if is_vmdk { None } else { launch.rootfs.disk },
         rootfs_disk_format: if is_vmdk {
             None
         } else {
-            args.rootfs_disk_format
+            launch.rootfs.disk_format
         },
-        rootfs_disk_readonly: args.rootfs_disk_readonly,
-        mounts: args.mount,
+        rootfs_disk_readonly: launch.rootfs.disk_readonly,
+        mounts: launch.mounts,
         disks,
         backends: vec![],
-        init_path: args.init_path,
-        env: args.env,
-        workdir: args.workdir,
-        exec_path: args.exec_path,
-        exec_args: args.exec_args,
+        init_path: launch.init_path,
+        env: launch.env,
+        workdir: launch.workdir,
+        exec_path: launch.exec_path,
+        exec_args: launch.exec_args,
         #[cfg(feature = "net")]
-        network: args
-            .network_config
-            .as_deref()
-            .map(|json| {
-                serde_json::from_str::<microsandbox_network::config::NetworkConfig>(json)
-                    .expect("invalid network config JSON")
-            })
-            .unwrap_or_default(),
+        network: launch.network.unwrap_or_default(),
         #[cfg(feature = "net")]
-        sandbox_slot: args.sandbox_slot,
+        sandbox_slot: launch.sandbox_slot,
     };
 
     let config = Config {
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
         log_level: args.log_level,
-        sandbox_db_path: args.sandbox_db_path,
-        sandbox_db_connect_timeout_secs: args.sandbox_db_connect_timeout_secs,
-        log_dir: args.log_dir,
-        runtime_dir: args.runtime_dir,
-        sandboxes_dir: args.sandboxes_dir,
-        agent_sock_path: args.agent_sock,
-        startup_command: args.startup_cmd.map(|cmd| StartupCommand {
-            cmd,
-            args: args.startup_args,
-            env: args.startup_env,
-            cwd: args.startup_cwd,
-            user: args.startup_user,
-        }),
+        sandbox_db_path: launch.db_path,
+        sandbox_db_connect_timeout_secs: launch.db_connect_timeout_secs,
+        log_dir: launch.log_dir,
+        runtime_dir: launch.runtime_dir,
+        sandboxes_dir: launch.sandboxes_dir,
+        agent_sock_path: launch.agent_sock,
+        startup_command: launch.startup,
         startup_fd,
         parent_watchdog,
         forward_output: args.forward_output,
-        idle_timeout_secs: args.idle_timeout,
-        max_duration_secs: args.max_duration,
-        metrics_sample_interval_ms: if args.disable_metrics_sample {
+        idle_timeout_secs: launch.lifecycle.idle_timeout_secs,
+        max_duration_secs: launch.lifecycle.max_duration_secs,
+        metrics_sample_interval_ms: if launch.metrics.disabled {
             None
         } else {
-            std::num::NonZero::new(args.metrics_sample_interval_ms)
+            std::num::NonZero::new(launch.metrics.sample_interval_ms)
         },
-        metrics_slot: match (
-            args.metrics_shm_name,
-            args.metrics_slot,
-            args.metrics_generation,
-        ) {
-            (Some(shm_name), Some(slot), Some(generation)) => Some(MetricsSlotHandoff {
-                shm_name,
-                slot,
-                generation,
-            }),
-            _ => None,
-        },
+        metrics_slot: launch.metrics.slot,
         vm: vm_config,
     };
 
     microsandbox_runtime::vm::enter(config)
+}
+
+/// Load the JSON [`LaunchConfig`] for this sandbox from the inherited config
+/// fd, or from `--config-file <path>` for manual invocation.
+///
+/// The launcher keeps only operator-readable labels on the real argv and
+/// serializes the rest — network config, env (including secrets), mounts, and
+/// paths — to an inherited fd, so they no longer appear in `ps` or
+/// `/proc/<pid>/cmdline`. See issue #997.
+fn load_launch_config(args: &SandboxArgs) -> Result<LaunchConfig, String> {
+    let bytes = match (args.config_fd, &args.config_file) {
+        (Some(fd), _) => read_config_fd(fd)?,
+        (None, Some(path)) => std::fs::read(path)
+            .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
+        (None, None) => {
+            return Err("missing --config-fd or --config-file for `msb sandbox`".to_string());
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid launch config: {e}"))
+}
+
+/// Read the full contents of the inherited config fd, taking ownership so it
+/// is closed once consumed.
+fn read_config_fd(fd: i32) -> Result<Vec<u8>, String> {
+    if fd < 0 {
+        return Err(format!(
+            "invalid --config-fd: must be non-negative, got {fd}"
+        ));
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read --config-fd {fd}: {e}"))?;
+    Ok(bytes)
 }
 
 fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
@@ -441,15 +335,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-    use clap::Parser;
-
     use super::*;
-
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(flatten)]
-        args: SandboxArgs,
-    }
 
     fn fmt(s: &str) -> String {
         format!(
@@ -520,35 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hidden_startup_args_accept_hyphen_values() {
-        let parsed = TestCli::parse_from([
-            "test",
-            "--name",
-            "sandbox",
-            "--sandbox-id",
-            "7",
-            "--db-path",
-            "/tmp/msb.db",
-            "--log-dir",
-            "/tmp/logs",
-            "--runtime-dir",
-            "/tmp/runtime",
-            "--sandboxes-dir",
-            "/tmp/sandboxes",
-            "--agent-sock",
-            "/tmp/agent.sock",
-            "--libkrunfw-path",
-            "/tmp/libkrunfw.dylib",
-            "--startup-cmd=/bin/sh",
-            "--startup-arg=-lc",
-            "--startup-arg=echo ok",
-        ]);
-
-        assert_eq!(parsed.args.startup_cmd.as_deref(), Some("/bin/sh"));
-        assert_eq!(parsed.args.startup_args, vec!["-lc", "echo ok"]);
-    }
-
-    #[test]
     fn test_parse_disk_args_keeps_good_entries() {
         let entries = vec![
             "good:/host/g.raw:raw".to_string(),
@@ -603,5 +460,85 @@ mod tests {
         let _write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         validate_pipe_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd(), "parent-watch-fd").unwrap();
+    }
+
+    /// Build a `SandboxArgs` carrying only a config source; the rest is unused
+    /// by `load_launch_config`.
+    fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> SandboxArgs {
+        SandboxArgs {
+            sandbox_name: "test".to_string(),
+            sandbox_id: 1,
+            log_level: None,
+            parent_watch_fd: None,
+            startup_fd: None,
+            forward_output: false,
+            vcpus: 1,
+            memory_mib: 512,
+            config_fd,
+            config_file,
+        }
+    }
+
+    #[test]
+    fn test_load_launch_config_from_file() {
+        use std::io::Write;
+
+        let launch = LaunchConfig {
+            db_path: PathBuf::from("/tmp/x.db"),
+            env: vec!["TOKEN=secret".to_string()],
+            ..Default::default()
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&launch).unwrap())
+            .unwrap();
+
+        let args = args_with(None, Some(file.path().to_path_buf()));
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
+        assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
+    }
+
+    #[test]
+    fn test_load_launch_config_from_fd() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::IntoRawFd;
+
+        let launch = LaunchConfig {
+            workdir: Some(PathBuf::from("/srv")),
+            ..Default::default()
+        };
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&serde_json::to_vec(&launch).unwrap())
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let fd = file.into_raw_fd();
+
+        let args = args_with(Some(fd), None);
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert_eq!(loaded.workdir, Some(PathBuf::from("/srv")));
+    }
+
+    #[test]
+    fn test_load_launch_config_missing_source() {
+        let err = load_launch_config(&args_with(None, None)).unwrap_err();
+        assert!(err.contains("missing"));
+    }
+
+    #[test]
+    fn test_load_launch_config_rejects_negative_fd() {
+        let err = load_launch_config(&args_with(Some(-1), None)).unwrap_err();
+        assert!(err.contains("config-fd"));
+    }
+
+    #[test]
+    fn test_load_launch_config_rejects_garbage() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not json").unwrap();
+        let err =
+            load_launch_config(&args_with(None, Some(file.path().to_path_buf()))).unwrap_err();
+        assert!(err.contains("invalid launch config"));
     }
 }

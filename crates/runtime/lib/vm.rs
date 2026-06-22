@@ -25,7 +25,7 @@ use microsandbox_protocol::{
 };
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
@@ -56,6 +56,11 @@ const HEARTBEAT_BOOT_GRACE: Duration = Duration::from_secs(180);
 
 /// Short best-effort send budget once agentd is already considered unresponsive.
 const AGENT_UNRESPONSIVE_SHUTDOWN_PUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
+/// NUL-terminated argument records. Keeps the network-config blob and the
+/// repeated `--env` flags off the process argv — see issue #997.
+pub const CONFIG_FD: i32 = 96;
 
 /// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
 pub const PARENT_WATCH_FD: i32 = 97;
@@ -142,7 +147,7 @@ pub struct Config {
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this
 /// sandbox.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricsSlotHandoff {
     /// Name of the POSIX shared-memory object holding the registry.
     pub shm_name: String,
@@ -153,7 +158,7 @@ pub struct MetricsSlotHandoff {
 }
 
 /// User workload that the sandbox process should start after boot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StartupCommand {
     /// Path or command name to execute inside the guest.
     pub cmd: String,

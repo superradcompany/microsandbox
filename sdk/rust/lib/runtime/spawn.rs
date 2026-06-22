@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt::Write,
+    io::{Seek, SeekFrom, Write as IoWrite},
     os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
@@ -38,6 +39,8 @@ use microsandbox_protocol::{
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME,
     ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
 };
+use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
+use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::SandboxLogLevel;
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -194,9 +197,10 @@ pub async fn spawn_sandbox(
         },
     };
 
-    // Build the command.
-    let mut cmd = Command::new(&msb_path);
-    cmd.args(sandbox_cli_args(
+    // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
+    // delivered over the config fd (keeps the network-config blob and
+    // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
+    let (mut visible, launch) = sandbox_cli_args(
         local,
         config,
         sandbox_id,
@@ -214,14 +218,32 @@ pub async fn spawn_sandbox(
         startup_pipe
             .as_ref()
             .map(|_| microsandbox_runtime::vm::STARTUP_FD),
+    );
+    // Serialize the LaunchConfig to an anonymous (unlinked) temp file. Kept
+    // alive until after spawn; `dup2`'d onto CONFIG_FD in pre_exec.
+    let config_file = match write_launch_config_fd(&launch) {
+        Ok(file) => file,
+        Err(err) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(err);
+        }
+    };
+    let config_raw_fd = config_file.as_raw_fd();
+    visible.push(OsString::from("--config-fd"));
+    visible.push(OsString::from(
+        microsandbox_runtime::vm::CONFIG_FD.to_string(),
     ));
+
+    // Build the command.
+    let mut cmd = Command::new(&msb_path);
+    cmd.args(visible);
 
     // Prevent the sandbox process from inheriting the parent's terminal on
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
 
-    if parent_watchdog.is_some() || startup_pipe.is_some() {
+    {
         let parent_watch_fd = parent_watchdog
             .as_ref()
             .map(|pipe| pipe.read_fd.as_raw_fd());
@@ -231,6 +253,7 @@ pub async fn spawn_sandbox(
                 if startup_write_fd.is_some() {
                     detach_from_launcher_session()?;
                 }
+                dup_inherited_fd(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD)?;
                 if let Some(fd) = parent_watch_fd {
                     dup_inherited_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
                 }
@@ -417,6 +440,20 @@ fn create_pipe() -> MicrosandboxResult<Pipe> {
     }
 
     Ok(Pipe { read_fd, write_fd })
+}
+
+/// Serialize the [`LaunchConfig`] as JSON into an anonymous temp file, rewound
+/// to offset 0. The file is unlinked on creation, so there is no path to clean
+/// up or race on; it is `dup2`'d onto
+/// [`CONFIG_FD`](microsandbox_runtime::vm::CONFIG_FD) for the child to read.
+fn write_launch_config_fd(launch: &LaunchConfig) -> MicrosandboxResult<std::fs::File> {
+    let mut file = tempfile::tempfile()?;
+    let json = serde_json::to_vec(launch)
+        .map_err(|e| crate::MicrosandboxError::Runtime(format!("serialize launch config: {e}")))?;
+    file.write_all(&json)?;
+    file.flush()?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(file)
 }
 
 fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
@@ -830,7 +867,7 @@ async fn stage_file_mounts(
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
 fn push_dir_mount_arg(
-    args: &mut Vec<OsString>,
+    mounts: &mut Vec<String>,
     guest: &str,
     host_display: &impl std::fmt::Display,
     options: MountOptions,
@@ -842,8 +879,7 @@ fn push_dir_mount_arg(
     let mut opts = mount_option_tokens(options);
     append_policy_options(&mut opts, stat_virtualization, host_permissions);
     append_option_block(&mut arg, opts);
-    args.push(OsString::from("--mount"));
-    args.push(OsString::from(arg));
+    mounts.push(arg);
 }
 
 /// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
@@ -858,9 +894,9 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, options: Mount
     append_option_block(dir_mounts_val, mount_option_tokens(options));
 }
 
-/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
+/// Collect a `fm_tag:file_mount_dir[:ro]` mount entry.
 fn push_file_mount_arg(
-    args: &mut Vec<OsString>,
+    mounts: &mut Vec<String>,
     tag: &str,
     file_mount_dir: &Path,
     options: MountOptions,
@@ -871,13 +907,12 @@ fn push_file_mount_arg(
     let mut opts = mount_option_tokens(options);
     append_policy_options(&mut opts, stat_virtualization, host_permissions);
     append_option_block(&mut arg, opts);
-    args.push(OsString::from("--mount"));
-    args.push(OsString::from(arg));
+    mounts.push(arg);
 }
 
-/// Push a `--disk id:host_path:format[:ro]` arg pair.
+/// Collect a `id:host_path:format[:ro]` disk entry.
 fn push_disk_mount_arg(
-    args: &mut Vec<OsString>,
+    disks: &mut Vec<String>,
     id: &str,
     host_display: &impl std::fmt::Display,
     format: &DiskImageFormat,
@@ -887,8 +922,7 @@ fn push_disk_mount_arg(
     if options.readonly {
         arg.push_str(":ro");
     }
-    args.push(OsString::from("--disk"));
-    args.push(OsString::from(arg));
+    disks.push(arg);
 }
 
 /// Append a `id:guest_path[:opts]` entry to the `MSB_DISK_MOUNTS` env var value.
@@ -1055,75 +1089,66 @@ fn sandbox_cli_args(
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
-) -> Vec<OsString> {
-    let mut args = vec![OsString::from("sandbox")];
+) -> (Vec<OsString>, LaunchConfig) {
+    // `visible` stays on the process argv: a small set of operator-readable
+    // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
+    // and logs. Everything bulky, structured, or secret-bearing goes into the
+    // typed `LaunchConfig`, delivered over the config fd. See issue #997.
+    let mut visible = vec![OsString::from("sandbox")];
 
     if let Some(log_level) = config.spec.runtime.log_level {
-        args.push(OsString::from(sandbox_log_level_cli_flag(log_level)));
+        visible.push(OsString::from(sandbox_log_level_cli_flag(log_level)));
     }
 
-    args.push(OsString::from("--name"));
-    args.push(OsString::from(&config.spec.name));
-    args.push(OsString::from("--sandbox-id"));
-    args.push(OsString::from(sandbox_id.to_string()));
-    args.push(OsString::from("--db-path"));
-    args.push(db_path.as_os_str().to_os_string());
-    args.push(OsString::from("--db-connect-timeout-secs"));
-    args.push(OsString::from(db_connect_timeout_secs.to_string()));
-    args.push(OsString::from("--log-dir"));
-    args.push(log_dir.as_os_str().to_os_string());
-    args.push(OsString::from("--runtime-dir"));
-    args.push(runtime_dir.as_os_str().to_os_string());
-    args.push(OsString::from("--sandboxes-dir"));
-    args.push(local.sandboxes_dir().as_os_str().to_os_string());
-    args.push(OsString::from("--agent-sock"));
-    args.push(agent_sock_path.as_os_str().to_os_string());
+    visible.push(OsString::from("--name"));
+    visible.push(OsString::from(&config.spec.name));
+    visible.push(OsString::from("--sandbox-id"));
+    visible.push(OsString::from(sandbox_id.to_string()));
     if let Some(fd) = parent_watch_fd {
-        args.push(OsString::from("--parent-watch-fd"));
-        args.push(OsString::from(fd.to_string()));
+        visible.push(OsString::from("--parent-watch-fd"));
+        visible.push(OsString::from(fd.to_string()));
     }
     if let Some(fd) = startup_fd {
-        args.push(OsString::from("--startup-fd"));
-        args.push(OsString::from(fd.to_string()));
+        visible.push(OsString::from("--startup-fd"));
+        visible.push(OsString::from(fd.to_string()));
     }
-    push_startup_command_args(&mut args, config);
+    visible.push(OsString::from("--vcpus"));
+    visible.push(OsString::from(config.spec.resources.cpus.to_string()));
+    visible.push(OsString::from("--memory-mib"));
+    visible.push(OsString::from(config.spec.resources.memory_mib.to_string()));
 
-    let sp = &config.spec.lifecycle;
-    if let Some(max_dur) = sp.max_duration_secs {
-        args.push(OsString::from("--max-duration"));
-        args.push(OsString::from(max_dur.to_string()));
-    }
-    if let Some(idle) = sp.idle_timeout_secs {
-        args.push(OsString::from("--idle-timeout"));
-        args.push(OsString::from(idle.to_string()));
-    }
+    let mut launch = LaunchConfig {
+        db_path: db_path.to_path_buf(),
+        db_connect_timeout_secs,
+        log_dir: log_dir.to_path_buf(),
+        runtime_dir: runtime_dir.to_path_buf(),
+        sandboxes_dir: local.sandboxes_dir(),
+        agent_sock: agent_sock_path.to_path_buf(),
+        libkrunfw_path: libkrunfw_path.to_path_buf(),
+        startup: startup_command(config),
+        lifecycle: Lifecycle {
+            max_duration_secs: config.spec.lifecycle.max_duration_secs,
+            idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
+        },
+        workdir: config.spec.runtime.workdir.as_ref().map(PathBuf::from),
+        ..Default::default()
+    };
 
-    args.push(OsString::from("--libkrunfw-path"));
-    args.push(libkrunfw_path.as_os_str().to_os_string());
-    args.push(OsString::from("--vcpus"));
-    args.push(OsString::from(config.spec.resources.cpus.to_string()));
-    args.push(OsString::from("--memory-mib"));
-    args.push(OsString::from(config.spec.resources.memory_mib.to_string()));
     match config.effective_metrics_interval() {
-        Some(ms) => {
-            args.push(OsString::from("--metrics-sample-interval-ms"));
-            args.push(OsString::from(ms.get().to_string()));
-        }
-        None => args.push(OsString::from("--disable-metrics-sample")),
+        Some(ms) => launch.metrics.sample_interval_ms = ms.get(),
+        None => launch.metrics.disabled = true,
     }
     if let Some(reservation) = metrics_reservation {
-        args.push(OsString::from("--metrics-shm-name"));
-        args.push(OsString::from(&reservation.shm_name));
-        args.push(OsString::from("--metrics-slot"));
-        args.push(OsString::from(reservation.slot.to_string()));
-        args.push(OsString::from("--metrics-generation"));
-        args.push(OsString::from(reservation.generation.to_string()));
+        launch.metrics.slot = Some(MetricsSlotHandoff {
+            shm_name: reservation.shm_name.clone(),
+            slot: reservation.slot,
+            generation: reservation.generation,
+        });
     }
 
     match &config.spec.image {
         RootfsSource::Bind(path) => {
-            args.push(OsString::from("--rootfs-path"));
-            args.push(path.as_os_str().to_os_string());
+            launch.rootfs.path = Some(path.clone());
         }
         RootfsSource::Oci(_) => {
             // Derive VMDK + upper paths from the stored manifest digest.
@@ -1136,20 +1161,14 @@ fn sandbox_cli_args(
                 let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
                 let upper_path = sandbox_dir.join("upper.ext4");
 
-                // VMDK (fsmeta + layers) as read-only block device.
-                args.push(OsString::from("--rootfs-disk"));
-                args.push(vmdk_path.as_os_str().to_os_string());
-                args.push(OsString::from("--rootfs-disk-format"));
-                args.push(OsString::from("vmdk"));
-
-                // upper.ext4 as writable block device.
-                args.push(OsString::from("--rootfs-blk"));
-                args.push(upper_path.as_os_str().to_os_string());
+                // VMDK (fsmeta + layers) read-only + upper.ext4 writable.
+                launch.rootfs.disk = Some(vmdk_path);
+                launch.rootfs.disk_format = Some("vmdk".to_string());
+                launch.rootfs.upper = Some(upper_path);
 
                 // MSB_BLOCK_ROOT: always 2 devices.
                 let block_root = "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4";
-                args.push(OsString::from("--env"));
-                args.push(OsString::from(format!("{}={block_root}", ENV_BLOCK_ROOT)));
+                launch.env.push(format!("{}={block_root}", ENV_BLOCK_ROOT));
             }
         }
         RootfsSource::DiskImage {
@@ -1157,21 +1176,17 @@ fn sandbox_cli_args(
             format,
             fstype,
         } => {
-            args.push(OsString::from("--rootfs-disk"));
-            args.push(path.as_os_str().to_os_string());
-            args.push(OsString::from("--rootfs-disk-format"));
-            args.push(OsString::from(format.as_str()));
+            launch.rootfs.disk = Some(path.clone());
+            launch.rootfs.disk_format = Some(format.as_str().to_string());
 
             // Build MSB_BLOCK_ROOT env var value.
             let mut block_root_val = String::from("kind=disk-image,device=/dev/vda");
             if let Some(ft) = fstype {
                 block_root_val.push_str(&format!(",fstype={ft}"));
             }
-            args.push(OsString::from("--env"));
-            args.push(OsString::from(format!(
-                "{}={block_root_val}",
-                ENV_BLOCK_ROOT
-            )));
+            launch
+                .env
+                .push(format!("{}={block_root_val}", ENV_BLOCK_ROOT));
         }
     }
 
@@ -1193,7 +1208,7 @@ fn sandbox_cli_args(
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
                     push_file_mount_arg(
-                        &mut args,
+                        &mut launch.mounts,
                         tag,
                         file_mount_dir,
                         *options,
@@ -1203,7 +1218,7 @@ fn sandbox_cli_args(
                     push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *options);
                 } else {
                     push_dir_mount_arg(
-                        &mut args,
+                        &mut launch.mounts,
                         guest,
                         &host.display(),
                         *options,
@@ -1223,7 +1238,7 @@ fn sandbox_cli_args(
             } => {
                 let vol_path = local.volume_path(name);
                 push_dir_mount_arg(
-                    &mut args,
+                    &mut launch.mounts,
                     guest,
                     &vol_path.display(),
                     *options,
@@ -1256,7 +1271,7 @@ fn sandbox_cli_args(
                 options,
             } => {
                 let id = guest_mount_tag(guest);
-                push_disk_mount_arg(&mut args, &id, &host.display(), format, *options);
+                push_disk_mount_arg(&mut launch.disks, &id, &host.display(), format, *options);
                 push_disk_mounts_spec(
                     &mut disk_mounts_val,
                     &id,
@@ -1269,75 +1284,59 @@ fn sandbox_cli_args(
     }
 
     if !tmpfs_val.is_empty() {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{}={tmpfs_val}", ENV_TMPFS)));
+        launch.env.push(format!("{}={tmpfs_val}", ENV_TMPFS));
     }
-
     if !dir_mounts_val.is_empty() {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={dir_mounts_val}",
-            ENV_DIR_MOUNTS
-        )));
+        launch
+            .env
+            .push(format!("{}={dir_mounts_val}", ENV_DIR_MOUNTS));
     }
-
     if !file_mounts_val.is_empty() {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={file_mounts_val}",
-            ENV_FILE_MOUNTS
-        )));
+        launch
+            .env
+            .push(format!("{}={file_mounts_val}", ENV_FILE_MOUNTS));
     }
-
     if !disk_mounts_val.is_empty() {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={disk_mounts_val}",
-            ENV_DISK_MOUNTS
-        )));
+        launch
+            .env
+            .push(format!("{}={disk_mounts_val}", ENV_DISK_MOUNTS));
     }
 
     if !config.spec.rlimits.is_empty() {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
+        launch.env.push(format!(
             "{}={}",
             microsandbox_protocol::ENV_RLIMITS,
             encode_rlimits(&config.spec.rlimits)
-        )));
+        ));
     }
 
-    // Network configuration.
+    // Network configuration travels as a typed value inside the JSON payload.
     #[cfg(feature = "net")]
     {
-        let network = config
-            .local_network_config()
-            .expect("sandbox network spec should decode to local network config");
-        let net_json = serde_json::to_string(&network).expect("failed to serialize network config");
-        args.push(OsString::from("--network-config"));
-        args.push(OsString::from(net_json));
-        args.push(OsString::from("--sandbox-slot"));
-        args.push(OsString::from(sandbox_id.to_string()));
+        launch.network = Some(
+            config
+                .local_network_config()
+                .expect("sandbox network spec should decode to local network config"),
+        );
+        launch.sandbox_slot = sandbox_id as u64;
     }
 
     for var in &config.spec.env {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{}={}", var.key, var.value)));
+        launch.env.push(format!("{}={}", var.key, var.value));
     }
 
     if let Some(ref user) = config.spec.runtime.user {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{}={user}", ENV_USER)));
+        launch.env.push(format!("{}={user}", ENV_USER));
     }
 
-    args.push(OsString::from("--env"));
-    args.push(OsString::from(format!(
+    launch.env.push(format!(
         "{}={}",
         ENV_SECURITY_PROFILE,
         match config.spec.security_profile {
             crate::sandbox::SecurityProfile::Default => "default",
             crate::sandbox::SecurityProfile::Restricted => "restricted",
         }
-    )));
+    ));
 
     // Hostname: explicit value or fall back to a sandbox-name-derived form
     // that fits within the Linux UTS limit.
@@ -1346,8 +1345,7 @@ fn sandbox_cli_args(
             Some(h) => h.to_string(),
             None => crate::sandbox::hostname_from_sandbox_name(&config.spec.name),
         };
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
+        launch.env.push(format!("{}={hostname}", ENV_HOSTNAME));
     }
 
     // Handoff-init: PID 1 hand-off to a user-supplied init binary.
@@ -1359,58 +1357,42 @@ fn sandbox_cli_args(
             .cmd
             .to_str()
             .expect("validate() rejects non-UTF-8 cmd paths");
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{ENV_HANDOFF_INIT}={cmd}")));
+        launch.env.push(format!("{ENV_HANDOFF_INIT}={cmd}"));
 
         if !init.args.is_empty() {
             let argv_val = encode_handoff_json(&init.args);
-            args.push(OsString::from("--env"));
-            args.push(OsString::from(format!(
-                "{ENV_HANDOFF_INIT_ARGS}={argv_val}"
-            )));
+            launch
+                .env
+                .push(format!("{ENV_HANDOFF_INIT_ARGS}={argv_val}"));
         }
 
         if let Some(ref workdir) = config.spec.runtime.workdir {
-            args.push(OsString::from("--env"));
-            args.push(OsString::from(format!("{ENV_HANDOFF_INIT_CWD}={workdir}")));
+            launch.env.push(format!("{ENV_HANDOFF_INIT_CWD}={workdir}"));
         }
 
         if !init.env.is_empty() {
             let env_val = encode_handoff_json(&init.env);
-            args.push(OsString::from("--env"));
-            args.push(OsString::from(format!("{ENV_HANDOFF_INIT_ENV}={env_val}")));
+            launch.env.push(format!("{ENV_HANDOFF_INIT_ENV}={env_val}"));
         }
     }
 
-    if let Some(ref workdir) = config.spec.runtime.workdir {
-        args.push(OsString::from("--workdir"));
-        args.push(OsString::from(workdir));
-    }
-
-    args
+    (visible, launch)
 }
 
-fn push_startup_command_args(args: &mut Vec<OsString>, config: &SandboxConfig) {
-    let Some((cmd, cmd_args)) = resolve_startup_command(config) else {
-        return;
-    };
-
-    args.push(OsString::from(format!("--startup-cmd={cmd}")));
-    for arg in cmd_args {
-        args.push(OsString::from(format!("--startup-arg={arg}")));
-    }
-    for var in &config.spec.env {
-        args.push(OsString::from(format!(
-            "--startup-env={}={}",
-            var.key, var.value
-        )));
-    }
-    if let Some(workdir) = &config.spec.runtime.workdir {
-        args.push(OsString::from(format!("--startup-cwd={workdir}")));
-    }
-    if let Some(user) = &config.spec.runtime.user {
-        args.push(OsString::from(format!("--startup-user={user}")));
-    }
+fn startup_command(config: &SandboxConfig) -> Option<StartupCommand> {
+    let (cmd, cmd_args) = resolve_startup_command(config)?;
+    Some(StartupCommand {
+        cmd,
+        args: cmd_args,
+        env: config
+            .spec
+            .env
+            .iter()
+            .map(|var| format!("{}={}", var.key, var.value))
+            .collect(),
+        cwd: config.spec.runtime.workdir.clone(),
+        user: config.spec.runtime.user.clone(),
+    })
 }
 
 fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String>)> {
@@ -1462,6 +1444,8 @@ mod tests {
     use serde::de::DeserializeOwned;
     use tempfile::tempdir;
 
+    use microsandbox_runtime::launch::LaunchConfig;
+
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
@@ -1483,9 +1467,110 @@ mod tests {
         LocalBackend::lazy()
     }
 
+    /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token
+    /// stream so the token-based assertions below keep working. Mirrors the
+    /// former producer output field-for-field.
+    fn flatten_launch(launch: &LaunchConfig) -> Vec<String> {
+        fn pair(out: &mut Vec<String>, flag: &str, val: String) {
+            out.push(flag.to_string());
+            out.push(val);
+        }
+        fn path(p: &Path) -> String {
+            p.to_string_lossy().into_owned()
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        pair(&mut out, "--db-path", path(&launch.db_path));
+        pair(
+            &mut out,
+            "--db-connect-timeout-secs",
+            launch.db_connect_timeout_secs.to_string(),
+        );
+        pair(&mut out, "--log-dir", path(&launch.log_dir));
+        pair(&mut out, "--runtime-dir", path(&launch.runtime_dir));
+        pair(&mut out, "--sandboxes-dir", path(&launch.sandboxes_dir));
+        pair(&mut out, "--agent-sock", path(&launch.agent_sock));
+        if let Some(s) = &launch.startup {
+            out.push(format!("--startup-cmd={}", s.cmd));
+            for a in &s.args {
+                out.push(format!("--startup-arg={a}"));
+            }
+            for e in &s.env {
+                out.push(format!("--startup-env={e}"));
+            }
+            if let Some(c) = &s.cwd {
+                out.push(format!("--startup-cwd={c}"));
+            }
+            if let Some(u) = &s.user {
+                out.push(format!("--startup-user={u}"));
+            }
+        }
+        if let Some(d) = launch.lifecycle.max_duration_secs {
+            pair(&mut out, "--max-duration", d.to_string());
+        }
+        if let Some(i) = launch.lifecycle.idle_timeout_secs {
+            pair(&mut out, "--idle-timeout", i.to_string());
+        }
+        pair(&mut out, "--libkrunfw-path", path(&launch.libkrunfw_path));
+        if launch.metrics.disabled {
+            out.push("--disable-metrics-sample".to_string());
+        } else {
+            pair(
+                &mut out,
+                "--metrics-sample-interval-ms",
+                launch.metrics.sample_interval_ms.to_string(),
+            );
+        }
+        if let Some(slot) = &launch.metrics.slot {
+            pair(&mut out, "--metrics-shm-name", slot.shm_name.clone());
+            pair(&mut out, "--metrics-slot", slot.slot.to_string());
+            pair(
+                &mut out,
+                "--metrics-generation",
+                slot.generation.to_string(),
+            );
+        }
+        if let Some(p) = &launch.rootfs.path {
+            pair(&mut out, "--rootfs-path", path(p));
+        }
+        if let Some(d) = &launch.rootfs.disk {
+            pair(&mut out, "--rootfs-disk", path(d));
+        }
+        if let Some(f) = &launch.rootfs.disk_format {
+            pair(&mut out, "--rootfs-disk-format", f.clone());
+        }
+        if let Some(u) = &launch.rootfs.upper {
+            pair(&mut out, "--rootfs-blk", path(u));
+        }
+        for m in &launch.mounts {
+            pair(&mut out, "--mount", m.clone());
+        }
+        for d in &launch.disks {
+            pair(&mut out, "--disk", d.clone());
+        }
+        for e in &launch.env {
+            pair(&mut out, "--env", e.clone());
+        }
+        #[cfg(feature = "net")]
+        if let Some(net) = &launch.network {
+            pair(
+                &mut out,
+                "--network-config",
+                serde_json::to_string(net).unwrap(),
+            );
+            pair(&mut out, "--sandbox-slot", launch.sandbox_slot.to_string());
+        }
+        if let Some(w) = &launch.workdir {
+            pair(&mut out, "--workdir", path(w));
+        }
+        out
+    }
+
+    /// Render the full arg set (visible argv + the flattened config payload)
+    /// as strings. Tests assert on the union since both feed `msb sandbox`.
     fn render_args(config: &SandboxConfig) -> Vec<String> {
         let local = test_local_backend();
-        sandbox_cli_args(
+        let (visible, launch) = sandbox_cli_args(
             &local,
             config,
             42,
@@ -1499,10 +1584,36 @@ mod tests {
             None,
             None,
             None,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect()
+        );
+        visible
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .chain(flatten_launch(&launch))
+            .collect()
+    }
+
+    /// Render only the `visible` argv (what shows up in `ps`).
+    fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
+        let local = test_local_backend();
+        let (visible, _piped) = sandbox_cli_args(
+            &local,
+            config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            None,
+            None,
+            None,
+        );
+        visible
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     fn decode_handoff_json<T: DeserializeOwned>(value: &str) -> T {
@@ -1515,7 +1626,7 @@ mod tests {
         staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
     ) -> Vec<String> {
         let local = test_local_backend();
-        sandbox_cli_args(
+        let (visible, launch) = sandbox_cli_args(
             &local,
             config,
             42,
@@ -1529,10 +1640,12 @@ mod tests {
             None,
             None,
             None,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect()
+        );
+        visible
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .chain(flatten_launch(&launch))
+            .collect()
     }
 
     #[tokio::test]
@@ -1593,7 +1706,7 @@ mod tests {
             .unwrap();
 
         let local = test_local_backend();
-        let args = sandbox_cli_args(
+        let (visible, _piped) = sandbox_cli_args(
             &local,
             &config,
             42,
@@ -1609,7 +1722,8 @@ mod tests {
             Some(microsandbox_runtime::vm::STARTUP_FD),
         );
 
-        assert!(args.windows(2).any(|pair| pair
+        // The startup fd is an operator-visible label, so it stays on argv.
+        assert!(visible.windows(2).any(|pair| pair
             == [
                 OsString::from("--startup-fd"),
                 OsString::from(microsandbox_runtime::vm::STARTUP_FD.to_string()),
@@ -1714,32 +1828,44 @@ mod tests {
             .await
             .unwrap();
 
-        let local = test_local_backend();
-        let args = sandbox_cli_args(
-            &local,
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            30,
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-            None,
-            None,
-            None,
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
 
         assert!(rendered.windows(2).any(|pair| {
             pair[0] == "--env"
                 && pair[1] == format!("{}=nofile=65535:65535", microsandbox_protocol::ENV_RLIMITS)
         }));
+    }
+
+    #[tokio::test]
+    async fn test_visible_args_keep_labels_and_omit_bulk() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .env("TOKEN", "secret")
+            .build()
+            .await
+            .unwrap();
+
+        let visible = render_visible_args(&config);
+        let all = render_args(&config);
+
+        // Operator-readable labels stay on argv.
+        assert_eq!(visible.first().map(String::as_str), Some("sandbox"));
+        assert!(visible.windows(2).any(|p| p == ["--name", "test"]));
+        assert!(visible.iter().any(|a| a == "--vcpus"));
+        assert!(visible.iter().any(|a| a == "--memory-mib"));
+
+        // Bulk / secret-bearing flags never appear on argv...
+        for flag in ["--env", "--db-path", "--log-dir", "--agent-sock"] {
+            assert!(
+                !visible.iter().any(|a| a == flag),
+                "visible argv unexpectedly contains {flag}"
+            );
+        }
+        assert!(!visible.iter().any(|a| a.contains("TOKEN=secret")));
+
+        // ...but are present in the full (piped) arg set.
+        assert!(all.iter().any(|a| a == "--db-path"));
+        assert!(all.iter().any(|a| a.contains("TOKEN=secret")));
     }
 
     #[tokio::test]
