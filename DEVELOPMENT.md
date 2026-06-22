@@ -9,10 +9,12 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
 - **Operating System**:
   - macOS with Apple Silicon (M1/M2/M3/M4)
   - Linux with KVM enabled
+  - Windows 11 with Windows Hypervisor Platform enabled
 - **Tools**: [`just`](https://github.com/casey/just), `git`, and `pre-commit`
   - Linux: `sudo apt install just git` and `pip install pre-commit` (or `sudo apt install pre-commit`)
   - macOS: `brew install just git pre-commit`
-- **Docker** (macOS only): Required for cross-compiling `agentd` and building the kernel
+  - Windows: install Git for Windows, `just`, Visual Studio Build Tools with MSVC, Windows SDK, and C++ Clang tools; install `pre-commit` with `pip install pre-commit` if you want `just setup` to install Git hooks
+- **Docker** (macOS and Windows libkrunfw builds): Required for cross-compiling `agentd` on macOS and building the libkrunfw kernel bundle when it has not already been generated
 - **Rust**: Installed automatically by `just setup` if missing, or install via [rustup](https://rustup.rs)
 
 ## Initial Setup
@@ -27,20 +29,22 @@ just setup
 
 `just setup` does the following:
 
-1. Installs system dependencies (build tools, musl toolchain, etc.)
+1. Installs or checks system dependencies (build tools, musl toolchain, Visual Studio toolchain, etc.)
 2. Initializes git submodules (`vendor/libkrunfw`, etc.)
 3. Builds binary dependencies (`agentd` and `libkrunfw`)
 4. Builds the `msb` CLI
-5. Installs binaries to `~/.microsandbox/bin/` and libraries to `~/.microsandbox/lib/`
-6. Installs pre-commit hooks
+5. Installs binaries to `~/.microsandbox/bin/` and libraries to `~/.microsandbox/lib/` on Unix, or `%USERPROFILE%\.microsandbox\{bin,lib}\` on Windows
+6. Installs pre-commit hooks when `pre-commit` is available
 
 > During the build, kernel config prompts may appear — press **Enter** to accept defaults.
 
-After setup, add these to your shell profile (e.g. `~/.bashrc`, `~/.zshrc`):
+On Linux and macOS, add these to your shell profile (e.g. `~/.bashrc`, `~/.zshrc`):
 
 ```bash
 export PATH="$HOME/.microsandbox/bin:$PATH"
 ```
+
+On Windows, `just install` places `%USERPROFILE%\.microsandbox\bin` first in the persistent user `PATH`; open a new PowerShell, Command Prompt, or Windows Terminal tab before running `msb` from a fresh shell. Already-open shells keep their old process-local `PATH`.
 
 Verify the installation:
 
@@ -56,7 +60,9 @@ The core development cycle is:
 just build && just install
 ```
 
-This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/`.
+This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
+
+On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64), `just build-agentd` uses the prebuilt embedded agentd path, and `just build-libkrunfw` delegates to `vendor/libkrunfw/scripts/build-windows.ps1`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 
 For a release-optimized build:
 
@@ -73,9 +79,9 @@ just build release && just install
 | `just build-msb` | Build only the `msb` CLI (debug) |
 | `just build-msb release` | Build only the `msb` CLI (release) |
 | `just build-deps` | Build only binary dependencies (agentd + libkrunfw) |
-| `just build-agentd` | Build only agentd |
+| `just build-agentd` | Build only agentd on Unix; use the prebuilt embedded agentd path on Windows |
 | `just build-libkrunfw` | Build only libkrunfw |
-| `just install` | Install msb + libkrunfw to `~/.microsandbox/` |
+| `just install` | Install msb + libkrunfw to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows |
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 

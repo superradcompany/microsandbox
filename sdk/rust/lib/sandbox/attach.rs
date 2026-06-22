@@ -431,6 +431,7 @@ pub(crate) mod local {
 
 #[cfg(windows)]
 pub(crate) mod local {
+    use std::os::windows::io::AsRawHandle;
     use std::{ptr, sync::Arc, thread, time::Duration};
 
     use microsandbox_protocol::{
@@ -449,6 +450,7 @@ pub(crate) mod local {
                 GetConsoleScreenBufferInfo, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
                 SetConsoleMode,
             },
+            IO::CancelSynchronousIo,
             Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
         },
     };
@@ -774,6 +776,12 @@ pub(crate) mod local {
         fn drop(&mut self) {
             let _ = unsafe { SetEvent(self.stop.0) };
             if let Some(handle) = self.handle.take() {
+                // The pump thread may already be blocked in a synchronous
+                // console ReadFile. The stop event only prevents the next
+                // wait from entering another read, so cancel the in-flight
+                // read before joining or finite guest commands appear to
+                // hang until the user presses another key.
+                let _ = unsafe { CancelSynchronousIo(handle.as_raw_handle() as HANDLE) };
                 let _ = handle.join();
             }
         }

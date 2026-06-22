@@ -2,8 +2,21 @@
 LIBKRUNFW_ABI := "5"
 LIBKRUNFW_VERSION := "5.2.1"
 
-# Set up the development environment, build, and install. Prerequisites: just, git (+ Docker on macOS).
-setup: _install-dev-deps
+# Run Windows recipes through cmd so contributors do not need sh/Git Bash/MSYS in PATH.
+set windows-shell := ["cmd.exe", "/c"]
+
+# Set up the development environment, build, and install. Prerequisites: just, git, and platform toolchains.
+[linux]
+setup: _setup-unix
+
+[macos]
+setup: _setup-unix
+
+[windows]
+setup:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 setup
+
+_setup-unix: _install-dev-deps
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -58,6 +71,10 @@ _install-dev-deps:
         source "$HOME/.cargo/env"
     fi
 
+[windows]
+_install-dev-deps:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 install-dev-deps
+
 # Build all binary dependencies (agentd + libkrunfw).
 build-deps: build-agentd build-libkrunfw
 
@@ -83,6 +100,11 @@ build-agentd:
     trap 'docker rm "$id" >/dev/null 2>&1' EXIT
     docker cp "$id:/agentd" build/agentd
     touch build/agentd
+
+# Use the prebuilt agentd embedded by the filesystem crate during Windows development builds.
+[windows]
+build-agentd:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-agentd
 
 # Check for libkrunfw and build it only if not found in build/ or ~/.microsandbox/lib/.
 [linux]
@@ -120,6 +142,11 @@ _ensure-libkrunfw:
     echo "libkrunfw not found — building from source..."
     just build-libkrunfw
 
+# Check for libkrunfw.dll and build it only if not found in build/ or ~/.microsandbox/lib/.
+[windows]
+_ensure-libkrunfw:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 ensure-libkrunfw
+
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]
 build-libkrunfw:
@@ -148,6 +175,11 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
+# Build libkrunfw on Windows via Docker kernel build + host MSVC/LLVM linking.
+[windows]
+build-libkrunfw:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-libkrunfw
+
 # Build the msb CLI binary.
 [linux]
 build-msb mode="debug": build-agentd
@@ -163,12 +195,21 @@ build-msb mode="debug": build-agentd
     cp target/{{ mode }}/msb build/msb
     codesign --entitlements msb-entitlements.plist --force -s - build/msb
 
+# Build the msb CLI binary for the native Windows MSVC target.
+[windows]
+build-msb mode="debug": build-agentd
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-msb {{ mode }}
+
 # Build everything: agentd, libkrunfw, and msb.
 [linux]
 build mode="debug": (build-msb mode) _ensure-libkrunfw
 
 # Build everything: agentd, libkrunfw, and msb.
 [macos]
+build mode="debug": (build-msb mode) _ensure-libkrunfw
+
+# Build everything: agentd, libkrunfw, and msb.
+[windows]
 build mode="debug": (build-msb mode) _ensure-libkrunfw
 
 # Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
@@ -219,15 +260,40 @@ install:
     echo ""
     echo "Remember to add ~/.microsandbox/bin to your PATH."
 
+# Install msb and libkrunfw.dll to %USERPROFILE%\.microsandbox\{bin,lib}\ and configure user PATH.
+[windows]
+install:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 install
+
 # Remove installed binaries from ~/.microsandbox/{bin,lib}/.
-uninstall:
+[linux]
+uninstall: _uninstall-unix
+
+[macos]
+uninstall: _uninstall-unix
+
+_uninstall-unix:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f ~/.microsandbox/bin/msb
     rm -f ~/.microsandbox/lib/libkrunfw*
     echo "Removed msb and libkrunfw from ~/.microsandbox/"
 
+[windows]
+uninstall:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 uninstall
+
 # Clean build artifacts.
-clean:
+[linux]
+clean: _clean-unix
+
+[macos]
+clean: _clean-unix
+
+_clean-unix:
     rm -rf build
     cd vendor/libkrunfw && make clean || true
+
+[windows]
+clean:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 clean

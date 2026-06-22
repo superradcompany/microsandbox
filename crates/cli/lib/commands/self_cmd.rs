@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
@@ -335,10 +335,87 @@ async fn run_uninstall(args: SelfUninstallArgs) -> anyhow::Result<()> {
 fn uninstall_all(base_dir: &Path) -> anyhow::Result<()> {
     remove_public_command_links(base_dir)?;
     clean_legacy_shell_config()?;
-    fs::remove_dir_all(base_dir)?;
-    ui::success("Removed", &base_dir.display().to_string());
-    done("Uninstall complete.");
+
+    #[cfg(windows)]
+    {
+        return uninstall_all_windows(base_dir);
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::remove_dir_all(base_dir)?;
+        ui::success("Removed", &base_dir.display().to_string());
+        done("Uninstall complete.");
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn uninstall_all_windows(base_dir: &Path) -> anyhow::Result<()> {
+    let base_dir = fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    let base_dir_script = powershell_single_quote(&base_dir.display().to_string());
+    let parent_pid = std::process::id();
+
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$base = {base_dir_script}
+$parent = {parent_pid}
+try {{
+    Wait-Process -Id $parent -Timeout 30 -ErrorAction SilentlyContinue
+}} catch {{
+    Start-Sleep -Milliseconds 500
+}}
+for ($i = 0; $i -lt 80; $i++) {{
+    if (-not (Test-Path -LiteralPath $base)) {{
+        exit 0
+    }}
+    try {{
+        Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction Stop
+        exit 0
+    }} catch {{
+        Start-Sleep -Milliseconds 250
+    }}
+}}
+exit 1
+"#
+    );
+
+    // Windows keeps the running executable locked, so self-uninstall cannot remove the install
+    // directory in-process. This helper waits for the CLI to exit, then removes the directory.
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encode_powershell_command(&script),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    ui::success("Scheduled removal", &base_dir.display().to_string());
+    done("Uninstall will complete after this msb process exits.");
     Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn encode_powershell_command(script: &str) -> String {
+    use base64::Engine as _;
+
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 //--------------------------------------------------------------------------------------------------
