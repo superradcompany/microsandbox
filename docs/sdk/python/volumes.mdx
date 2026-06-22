@@ -119,12 +119,14 @@ Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volu
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 await Volume.create("pip-cache", quota_mib=2048)
 await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
 ```
+
+</Accordion>
 
 ---
 
@@ -155,12 +157,14 @@ Get a lightweight handle to an existing named volume, with its metadata and a ho
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 handle = await Volume.get("pip-cache")
 print(handle.kind, handle.used_bytes)
 ```
+
+</Accordion>
 
 ---
 
@@ -182,12 +186,14 @@ List all named volumes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 for v in await Volume.list():
     print(v.name, v.used_bytes)
 ```
+
+</Accordion>
 
 ---
 
@@ -209,11 +215,13 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 await Volume.remove("pip-cache")
 ```
+
+</Accordion>
 
 ---
 
@@ -273,7 +281,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -282,6 +290,8 @@ sb = await Sandbox.create(
     volumes={"/src": Volume.bind("/home/me/project", readonly=True)},
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -335,7 +345,7 @@ Mount an existing named volume. The volume must already exist; create it first w
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -347,6 +357,8 @@ sb = await Sandbox.create(
     },
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -400,7 +412,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -409,6 +421,8 @@ sb = await Sandbox.create(
     volumes={"/tmp/work": Volume.tmpfs(size_mib=256)},
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -472,7 +486,7 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -481,6 +495,8 @@ sb = await Sandbox.create(
     volumes={"/var/lib/postgresql": Volume.disk("/data/pg.qcow2", fstype="ext4")},
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -545,12 +561,14 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 handle = await Volume.get("pip-cache")
 data = await handle.fs.read("index.json")
 ```
+
+</Accordion>
 
 ---
 
@@ -605,12 +623,14 @@ Write content to a file, creating it if it doesn't exist and overwriting if it d
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 handle = await Volume.get("pip-cache")
 await handle.fs.write("seed.txt", b"hello")
 ```
+
+</Accordion>
 
 ---
 

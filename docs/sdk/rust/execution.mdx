@@ -131,12 +131,14 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let out = sb.exec("python", ["-V"]).await?;
 println!("{}", out.stdout()?);
 ```
+
+</Accordion>
 
 ---
 
@@ -175,7 +177,7 @@ Run a command with per-execution overrides and wait for completion. The closure 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use std::time::Duration;
@@ -187,6 +189,8 @@ let out = sb.exec_with("python", |e| e
     .timeout(Duration::from_secs(30)))
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -217,12 +221,14 @@ Run a command through the sandbox's configured shell (default: `/bin/sh`, set vi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let out = sb.shell("cat /etc/os-release | grep PRETTY_NAME").await?;
 println!("{}", out.stdout()?);
 ```
+
+</Accordion>
 
 ---
 
@@ -261,11 +267,13 @@ Run a shell command with per-execution overrides and wait for completion. The `-
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let out = sb.shell_with("env | sort", |e| e.env("STAGE", "build")).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -304,7 +312,7 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::ExecEvent;
@@ -318,6 +326,8 @@ while let Some(event) = handle.recv().await {
     }
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -356,7 +366,7 @@ Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#stdin
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
@@ -365,6 +375,8 @@ if let Some(stdin) = handle.take_stdin() {
     stdin.close().await?;
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -395,12 +407,14 @@ Like [`shell()`](#sb-shell), but returns a streaming [`ExecHandle`](#exechandle)
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut handle = sb.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done").await?;
 let out = handle.collect().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -439,11 +453,13 @@ Run a shell command with per-execution overrides and streaming I/O. As with [`sh
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut handle = sb.shell_stream_with("npm run build", |e| e.cwd("/app")).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -486,11 +502,13 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let exit_code = sb.attach("bash", ["-l"]).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -529,7 +547,7 @@ Interactive PTY attach with options. The closure receives an [`AttachOptionsBuil
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let exit_code = sb.attach_with("zsh", |a| a
@@ -537,6 +555,8 @@ let exit_code = sb.attach_with("zsh", |a| a
     .detach_keys("ctrl-p,ctrl-q"))
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -558,11 +578,13 @@ Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let exit_code = sb.attach_shell().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -803,13 +825,15 @@ Set a POSIX resource limit with soft equal to hard. Applied via `setrlimit()` be
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::sandbox::RlimitResource;
 
 let out = sb.exec_with("./worker", |e| e.rlimit(RlimitResource::Nofile, 1024)).await?;
 ```
+
+</Accordion>
 
 ---
 

@@ -131,7 +131,7 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 out = await sandbox.exec(
@@ -144,6 +144,8 @@ out = await sandbox.exec(
 print(out.stdout_text)
 print(out.exit_code)  # 0
 ```
+
+</Accordion>
 
 ---
 
@@ -188,12 +190,14 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 out = await sandbox.shell("ls -la /app && echo done")
 print(out.stdout_text)
 ```
+
+</Accordion>
 
 ---
 
@@ -247,7 +251,7 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 import sys
@@ -259,6 +263,8 @@ async for event in handle:
     elif event.event_type == "exited":
         break
 ```
+
+</Accordion>
 
 ---
 
@@ -303,7 +309,7 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 import sys
@@ -313,6 +319,8 @@ async for event in handle:
     if event.event_type == "stdout":
         sys.stdout.buffer.write(event.data)
 ```
+
+</Accordion>
 
 ---
 
@@ -375,11 +383,13 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 code = await sandbox.attach("bash", cwd="/app", env={"EDITOR": "vim"})
 ```
+
+</Accordion>
 
 ---
 
@@ -401,11 +411,13 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 code = await sandbox.attach_shell()
 ```
+
+</Accordion>
 
 ---
 

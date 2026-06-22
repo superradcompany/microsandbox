@@ -121,13 +121,15 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const result = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
 console.log(result.stdout()); // "2\n"
 console.log(result.code);     // 0
 ```
+
+</Accordion>
 
 ---
 
@@ -165,7 +167,7 @@ Run a command with per-execution overrides. Configure working directory, environ
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const out = await sandbox.execWith("python3", (e) =>
@@ -175,6 +177,8 @@ const out = await sandbox.execWith("python3", (e) =>
     .timeout(30_000),
 );
 ```
+
+</Accordion>
 
 ---
 
@@ -205,12 +209,14 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const out = await sandbox.shell("ls -la /app && echo done");
 console.log(out.stdout());
 ```
+
+</Accordion>
 
 ---
 
@@ -232,11 +238,13 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const code = await sandbox.attachShell();
 ```
+
+</Accordion>
 
 ---
 
@@ -275,7 +283,7 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
@@ -284,6 +292,8 @@ for await (const event of handle) {
   if (event.kind === "exited") break;
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -321,7 +331,7 @@ Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const handle = await sandbox.execStreamWith("python3", (e) =>
@@ -330,6 +340,8 @@ const handle = await sandbox.execStreamWith("python3", (e) =>
 const stdin = await handle.takeStdin();
 await stdin?.write("task-1\n");
 ```
+
+</Accordion>
 
 ---
 
@@ -360,7 +372,7 @@ Run a shell command with streaming output.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const handle = await sandbox.shellStream("for i in 1 2 3; do echo $i; sleep 1; done");
@@ -368,6 +380,8 @@ for await (const event of handle) {
   if (event.kind === "stdout") process.stdout.write(event.data);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -402,11 +416,13 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const code = await sandbox.attach("python3");
 ```
+
+</Accordion>
 
 ---
 
@@ -444,7 +460,7 @@ Interactive PTY attach with options for arguments, environment variables, workin
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const code = await sandbox.attachWith("bash", (a) =>
@@ -453,6 +469,8 @@ const code = await sandbox.attachWith("bash", (a) =>
     .detachKeys("ctrl-]"),
 );
 ```
+
+</Accordion>
 
 ---
 

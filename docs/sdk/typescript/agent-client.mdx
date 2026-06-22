@@ -132,11 +132,13 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const client = await AgentClient.connectSandbox("dev", { timeoutMs: 5000 });
 ```
+
+</Accordion>
 
 ---
 
@@ -171,12 +173,14 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const path = AgentClient.socketPath("dev");
 const client = await AgentClient.connect(path);
 ```
+
+</Accordion>
 
 ---
 
@@ -207,11 +211,13 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const path = AgentClient.socketPath("dev");
 ```
+
+</Accordion>
 
 ## Instance methods
 
@@ -248,7 +254,7 @@ Send one frame and await a single response frame. Use for request/response RPCs 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { encode, decode } from "cbor-x";
@@ -258,6 +264,8 @@ const body = encode({ v: 1, t: "core.fs.request", p: encode({ op: { Stat: { path
 const frame = await client.request(FLAG_SESSION_START, body);
 console.log(decode(frame.body));
 ```
+
+</Accordion>
 
 ---
 
@@ -292,7 +300,7 @@ Open a streaming session. The returned [`AgentStream`](#agentstream) carries the
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { FLAG_SESSION_START, FLAG_TERMINAL } from "microsandbox";
@@ -302,6 +310,8 @@ for await (const frame of stream) {
   if ((frame.flags & FLAG_TERMINAL) !== 0) break;
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -331,11 +341,13 @@ Send a follow-up frame on an existing correlation id (for example stdin, a signa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await client.send(stream.id, 0, encode({ v: 1, t: "core.pty.stdin", p: encode({ data: "ls\n" }) }));
 ```
+
+</Accordion>
 
 ---
 
@@ -357,13 +369,15 @@ Return the cached handshake `core.ready` frame body as CBOR bytes. Captured duri
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 import { decode } from "cbor-x";
 
 const ready = decode(client.readyBytes());
 ```
+
+</Accordion>
 
 ---
 
@@ -376,11 +390,13 @@ close(): Promise<void>
 
 Close the connection. Idempotent: calling it more than once is safe.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await client.close();
 ```
+
+</Accordion>
 
 ## Types
 

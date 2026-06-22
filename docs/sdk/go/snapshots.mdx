@@ -134,7 +134,7 @@ Create a snapshot from a stopped or crashed sandbox. Set exactly one of [`Snapsh
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
@@ -143,6 +143,8 @@ snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
     RecordIntegrity: true,
 })
 ```
+
+</Accordion>
 
 ---
 
@@ -177,11 +179,13 @@ Open an existing artifact by bare name or filesystem path. This validates metada
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 snap, err := m.Snapshot.Open(ctx, "after-pip-install")
 ```
+
+</Accordion>
 
 ---
 
@@ -216,11 +220,13 @@ Look up a lightweight handle in the local index by name, digest, or path.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := m.Snapshot.Get(ctx, "after-pip-install")
 ```
+
+</Accordion>
 
 ---
 
@@ -242,7 +248,7 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 handles, err := m.Snapshot.List(ctx)
@@ -250,6 +256,8 @@ for _, h := range handles {
     fmt.Println(h.Digest(), h.ImageRef())
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -312,11 +320,13 @@ Remove a snapshot artifact and its index row. Refuses to delete a snapshot with 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := m.Snapshot.Remove(ctx, "after-pip-install", false)
 ```
+
+</Accordion>
 
 ---
 
@@ -351,12 +361,14 @@ Walk `dir` and rebuild the local index from the artifacts it finds.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
 fmt.Printf("indexed %d snapshots\n", n)
 ```
+
+</Accordion>
 
 ---
 
@@ -390,13 +402,15 @@ Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotExportOp
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := m.Snapshot.Export(ctx, "after-pip-install", "/tmp/snap.tar.zst",
     m.SnapshotExportOptions{WithParents: true},
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -435,11 +449,13 @@ Unpack a snapshot archive into the snapshots directory or an explicit `dest` dir
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
 ```
+
+</Accordion>
 
 ## SandboxHandle methods
 
@@ -489,11 +505,13 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 snap, err := h.Snapshot(ctx, "after-pip-install")
 ```
+
+</Accordion>
 
 ---
 
@@ -528,11 +546,13 @@ Snapshot this sandbox to an explicit artifact directory. The sandbox must be sto
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 snap, err := h.SnapshotTo(ctx, "/srv/snapshots/baseline")
 ```
+
+</Accordion>
 
 ## SnapshotArtifact methods
 
@@ -558,7 +578,7 @@ Recompute recorded content integrity for this snapshot. Requires that the artifa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 report, err := snap.Verify(ctx)
@@ -567,6 +587,8 @@ if err != nil {
 }
 fmt.Println(report.Upper.Digest)
 ```
+
+</Accordion>
 
 ---
 
@@ -713,11 +735,13 @@ Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 snap, err := h.Open(ctx)
 ```
+
+</Accordion>
 
 ---
 
@@ -743,11 +767,13 @@ Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on thi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := h.Remove(ctx, false)
 ```
+
+</Accordion>
 
 ---
 

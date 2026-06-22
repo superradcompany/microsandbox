@@ -25,9 +25,6 @@ pub struct HeartbeatReader {
     /// Path to the heartbeat.json file on the host.
     path: PathBuf,
 
-    /// Host time when this reader was created.
-    created_at: Instant,
-
     /// Last heartbeat content read successfully.
     last_heartbeat: Option<HeartbeatSnapshot>,
 
@@ -42,15 +39,12 @@ pub struct HeartbeatReader {
 
     /// Host time when the activity sequence last advanced.
     last_activity_seen_at: Option<Instant>,
-
-    /// Host time when heartbeat staleness first crossed the stale budget.
-    stale_confirmed_at: Option<Instant>,
 }
 
 /// Idle decision derived from the heartbeat stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatDecision {
-    /// No heartbeat is available yet, but startup grace has not elapsed.
+    /// No heartbeat has been observed yet — the guest is still booting.
     PendingBoot(HeartbeatStatus),
 
     /// The sandbox is not idle.
@@ -58,9 +52,6 @@ pub enum HeartbeatDecision {
 
     /// The sandbox is idle.
     Idle(HeartbeatStatus),
-
-    /// agentd stopped producing fresh heartbeat data.
-    AgentUnresponsive(HeartbeatStatus),
 }
 
 /// Snapshot of host-observed heartbeat state used to make a decision.
@@ -104,19 +95,17 @@ struct HeartbeatSnapshot {
 impl HeartbeatReader {
     /// Create a new heartbeat reader for the given runtime directory.
     pub fn new(runtime_dir: &Path) -> Self {
-        Self::new_at(runtime_dir, Instant::now())
+        Self::new_at(runtime_dir)
     }
 
-    fn new_at(runtime_dir: &Path, created_at: Instant) -> Self {
+    fn new_at(runtime_dir: &Path) -> Self {
         Self {
             path: runtime_dir.join(HEARTBEAT_FILE),
-            created_at,
             last_heartbeat: None,
             last_heartbeat_seq: None,
             last_heartbeat_seen_at: None,
             last_activity_seq: None,
             last_activity_seen_at: None,
-            stale_confirmed_at: None,
         }
     }
 
@@ -129,52 +118,31 @@ impl HeartbeatReader {
         serde_json::from_slice(&content).ok()
     }
 
-    /// Check whether the sandbox is idle based on host-observed heartbeat and
-    /// activity sequence changes.
-    pub fn check(
-        &mut self,
-        idle_timeout: Option<Duration>,
-        stale_heartbeat_timeout: Duration,
-        boot_grace: Duration,
-    ) -> HeartbeatDecision {
-        self.check_at(
-            Instant::now(),
-            idle_timeout,
-            stale_heartbeat_timeout,
-            boot_grace,
-        )
+    /// Decide whether the sandbox should be reclaimed for **idleness**.
+    ///
+    /// The heartbeat stream is used purely for idle detection (and activity
+    /// reporting). A stale or missing heartbeat is never, on its own, grounds to
+    /// kill the sandbox: a busy-but-quiet agent is still a healthy agent, and a
+    /// guest that never boots is reclaimed by the relay's `wait_ready` timeout —
+    /// not here. This monitor only ever asks "is the sandbox idle?".
+    pub fn check(&mut self, idle_timeout: Option<Duration>) -> HeartbeatDecision {
+        self.check_at(Instant::now(), idle_timeout)
     }
 
-    fn check_at(
-        &mut self,
-        now: Instant,
-        idle_timeout: Option<Duration>,
-        stale_heartbeat_timeout: Duration,
-        boot_grace: Duration,
-    ) -> HeartbeatDecision {
+    fn check_at(&mut self, now: Instant, idle_timeout: Option<Duration>) -> HeartbeatDecision {
         if let Some(heartbeat) = self.read() {
             self.observe(heartbeat, now);
         }
 
         let status = self.status(now);
 
-        let Some(heartbeat_stale_for) = status.heartbeat_stale_for else {
-            if now.duration_since(self.created_at) >= boot_grace {
-                return HeartbeatDecision::AgentUnresponsive(status);
-            }
+        // No heartbeat seen yet: the guest is still booting. A guest that never
+        // boots is reclaimed by the relay readiness timeout, not this monitor.
+        if status.heartbeat_seq.is_none() {
             return HeartbeatDecision::PendingBoot(status);
-        };
-
-        if heartbeat_stale_for >= stale_heartbeat_timeout {
-            let stale_confirmed_at = *self.stale_confirmed_at.get_or_insert(now);
-            if now.duration_since(stale_confirmed_at) >= stale_heartbeat_timeout {
-                return HeartbeatDecision::AgentUnresponsive(status);
-            }
-            return HeartbeatDecision::Active(status);
         }
 
-        self.stale_confirmed_at = None;
-
+        // Active exec sessions are never idle.
         if status.active_exec_sessions > 0 {
             return HeartbeatDecision::Active(status);
         }
@@ -191,7 +159,6 @@ impl HeartbeatReader {
         if self.last_heartbeat_seq != Some(heartbeat.heartbeat_seq) {
             self.last_heartbeat_seq = Some(heartbeat.heartbeat_seq);
             self.last_heartbeat_seen_at = Some(now);
-            self.stale_confirmed_at = None;
         }
 
         if self.last_activity_seq != Some(heartbeat.activity_seq) {
@@ -268,13 +235,11 @@ mod tests {
         assert!(!tmp_path.exists());
 
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
         assert!(matches!(
             reader.check_at(
                 start + Duration::from_secs(1),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::from_secs(2),
+                Some(Duration::from_secs(60))
             ),
             HeartbeatDecision::PendingBoot(_)
         ));
@@ -285,16 +250,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
 
         write_heartbeat_file(&path, heartbeat(1, 1, 1));
         assert!(matches!(
-            reader.check_at(
-                start,
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
-            ),
+            reader.check_at(start, Some(Duration::from_secs(60))),
             HeartbeatDecision::Active(_)
         ));
 
@@ -302,9 +262,7 @@ mod tests {
         assert!(matches!(
             reader.check_at(
                 start + Duration::from_secs(120),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
+                Some(Duration::from_secs(60))
             ),
             HeartbeatDecision::Active(_)
         ));
@@ -315,16 +273,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
 
         write_heartbeat_file(&path, heartbeat(1, 1, 0));
         assert!(matches!(
-            reader.check_at(
-                start,
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
-            ),
+            reader.check_at(start, Some(Duration::from_secs(60))),
             HeartbeatDecision::Active(_)
         ));
 
@@ -332,9 +285,7 @@ mod tests {
         assert!(matches!(
             reader.check_at(
                 start + Duration::from_secs(120),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
+                Some(Duration::from_secs(60))
             ),
             HeartbeatDecision::Idle(_)
         ));
@@ -345,89 +296,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
 
         write_heartbeat_file(&path, heartbeat(1, 1, 0));
         assert!(matches!(
-            reader.check_at(start, None, Duration::from_secs(5), Duration::ZERO,),
+            reader.check_at(start, None),
             HeartbeatDecision::Active(_)
         ));
 
         write_heartbeat_file(&path, heartbeat(2, 1, 0));
         assert!(matches!(
-            reader.check_at(
-                start + Duration::from_secs(120),
-                None,
-                Duration::from_secs(5),
-                Duration::ZERO,
-            ),
+            reader.check_at(start + Duration::from_secs(120), None),
             HeartbeatDecision::Active(_)
         ));
     }
 
     #[test]
-    fn stale_heartbeat_with_running_exec_is_unresponsive_not_active() {
+    fn stale_heartbeat_with_running_exec_is_not_killed() {
+        // The original bug: a busy sandbox whose heartbeat goes stale (the file
+        // stops advancing) while exec sessions are active was killed. It must NOT
+        // be — a busy agent is a healthy agent.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
 
         write_heartbeat_file(&path, heartbeat(1, 1, 1));
         assert!(matches!(
-            reader.check_at(
-                start,
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
-            ),
+            reader.check_at(start, Some(Duration::from_secs(60))),
             HeartbeatDecision::Active(_)
         ));
 
+        // No new heartbeat for a long time, but an exec session is still open.
         assert!(matches!(
             reader.check_at(
-                start + Duration::from_secs(6),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
+                start + Duration::from_secs(3600),
+                Some(Duration::from_secs(60))
             ),
             HeartbeatDecision::Active(_)
-        ));
-
-        assert!(matches!(
-            reader.check_at(
-                start + Duration::from_secs(12),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::ZERO,
-            ),
-            HeartbeatDecision::AgentUnresponsive(_)
         ));
     }
 
     #[test]
-    fn missing_heartbeat_becomes_unresponsive_after_boot_grace() {
+    fn stale_heartbeat_without_idle_timeout_is_never_killed() {
+        // No idle timeout configured: the sandbox runs indefinitely even if the
+        // heartbeat stops advancing entirely. This is what users expect when they
+        // set no timeouts at all.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(HEARTBEAT_FILE);
+        let start = Instant::now();
+        let mut reader = HeartbeatReader::new_at(dir.path());
+
+        write_heartbeat_file(&path, heartbeat(1, 1, 0));
+        assert!(matches!(
+            reader.check_at(start, None),
+            HeartbeatDecision::Active(_)
+        ));
+
+        assert!(matches!(
+            reader.check_at(start + Duration::from_secs(3600), None),
+            HeartbeatDecision::Active(_)
+        ));
+    }
+
+    #[test]
+    fn missing_heartbeat_stays_pending_boot() {
+        // A guest that never writes a heartbeat is NOT killed by this monitor; it
+        // stays PendingBoot. Genuine boot failures are reclaimed by the relay's
+        // wait_ready timeout instead.
         let dir = tempfile::tempdir().unwrap();
         let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path(), start);
+        let mut reader = HeartbeatReader::new_at(dir.path());
 
         assert!(matches!(
             reader.check_at(
                 start + Duration::from_secs(1),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::from_secs(2),
+                Some(Duration::from_secs(60))
             ),
             HeartbeatDecision::PendingBoot(_)
         ));
 
         assert!(matches!(
             reader.check_at(
-                start + Duration::from_secs(3),
-                Some(Duration::from_secs(60)),
-                Duration::from_secs(5),
-                Duration::from_secs(2),
+                start + Duration::from_secs(3600),
+                Some(Duration::from_secs(60))
             ),
-            HeartbeatDecision::AgentUnresponsive(_)
+            HeartbeatDecision::PendingBoot(_)
         ));
     }
 

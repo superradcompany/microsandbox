@@ -91,7 +91,7 @@ Create an OCI image rootfs source. Use `upper_size_mib` to size the writable ove
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -99,6 +99,8 @@ sb = await Sandbox.create(
     image=Image.oci("python:3.12", upper_size_mib=8192),
 )
 ```
+
+</Accordion>
 
 ---
 
@@ -130,11 +132,13 @@ Create a rootfs source that binds a host directory as the guest root filesystem.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
 ```
+
+</Accordion>
 
 ---
 
@@ -170,7 +174,7 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 sb = await Sandbox.create(
@@ -178,6 +182,8 @@ sb = await Sandbox.create(
     image=Image.disk("/data/root.qcow2", fstype="ext4"),
 )
 ```
+
+</Accordion>
 
 ## Cache management
 
@@ -213,12 +219,14 @@ Fetch one cached image by reference. Raises [`ImageNotFoundError`](#errors) when
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 handle = await Image.get("python:3.12")
 print(handle.reference, handle.layer_count)
 ```
+
+</Accordion>
 
 ---
 
@@ -241,12 +249,14 @@ Return every cached image.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 for image in await Image.list():
     print(image.reference, image.size_bytes)
 ```
+
+</Accordion>
 
 ---
 
@@ -278,7 +288,7 @@ Return handle metadata plus the parsed OCI config and per-layer detail.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 detail = await Image.inspect("python:3.12")
@@ -286,6 +296,8 @@ print(detail.handle.reference)
 for layer in detail.layers:
     print(layer.position, layer.diff_id)
 ```
+
+</Accordion>
 
 ---
 
@@ -312,11 +324,13 @@ Delete a cached image. When `force` is `False`, an image still referenced by one
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 await Image.remove("python:3.12", force=True)
 ```
+
+</Accordion>
 
 ---
 
@@ -339,12 +353,14 @@ Remove cached image data that is not used by any sandbox or indexed snapshot. Th
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```python
 report = await Image.prune()
 print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
 ```
+
+</Accordion>
 
 ## Types
 

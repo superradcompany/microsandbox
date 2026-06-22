@@ -41,14 +41,14 @@ Read and write files inside a running sandbox over the same host-guest channel a
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-fs := sb.FS()                                              // 1. get the accessor
+fs := sb.FS()                                                     // 1. get the accessor
 
 err := fs.WriteString(ctx, "/tmp/config.json", `{"debug":true}`)  // 2. write
 if err != nil {
     return err
 }
 
-content, err := fs.ReadString(ctx, "/tmp/config.json")    // 3. read back
+content, err := fs.ReadString(ctx, "/tmp/config.json")            // 3. read back
 if err != nil {
     return err
 }
@@ -92,7 +92,7 @@ Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 data, err := fs.Read(ctx, "/etc/hostname")
@@ -101,6 +101,8 @@ if err != nil {
 }
 fmt.Printf("%d bytes\n", len(data))
 ```
+
+</Accordion>
 
 ---
 
@@ -135,11 +137,13 @@ Read a file and return its contents as a string. The bytes are reinterpreted as 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 content, err := fs.ReadString(ctx, "/tmp/config.json")
 ```
+
+</Accordion>
 
 ---
 
@@ -169,11 +173,13 @@ Write bytes to a file, creating it if it does not exist and truncating it if it 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
 ```
+
+</Accordion>
 
 ---
 
@@ -203,11 +209,13 @@ Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
 ```
+
+</Accordion>
 
 ---
 
@@ -242,7 +250,7 @@ List the entries in a directory inside the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 entries, err := fs.List(ctx, "/etc")
@@ -253,6 +261,8 @@ for _, e := range entries {
     fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -287,7 +297,7 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 st, err := fs.Stat(ctx, "/etc/hosts")
@@ -296,6 +306,8 @@ if err != nil {
 }
 fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
 ```
+
+</Accordion>
 
 ---
 
@@ -321,11 +333,13 @@ Create a directory and any missing parents inside the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.Mkdir(ctx, "/app/cache/sessions")
 ```
+
+</Accordion>
 
 ---
 
@@ -351,11 +365,13 @@ Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.Remove(ctx, "/tmp/scratch.txt")
 ```
+
+</Accordion>
 
 ---
 
@@ -381,11 +397,13 @@ Remove a directory recursively.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.RemoveDir(ctx, "/app/cache")
 ```
+
+</Accordion>
 
 ---
 
@@ -415,11 +433,13 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
 ```
+
+</Accordion>
 
 ---
 
@@ -449,11 +469,13 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
 ```
+
+</Accordion>
 
 ---
 
@@ -488,7 +510,7 @@ Report whether a file or directory exists at the given path.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 ok, err := fs.Exists(ctx, "/app/.initialized")
@@ -499,6 +521,8 @@ if !ok {
     // first boot
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -528,11 +552,13 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
 ```
+
+</Accordion>
 
 ---
 
@@ -562,11 +588,13 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
 ```
+
+</Accordion>
 
 ---
 
@@ -601,7 +629,7 @@ Open a streaming reader for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 rs, err := fs.ReadStream(ctx, "/var/log/syslog")
@@ -624,6 +652,8 @@ for {
 // Or drain it as an io.WriterTo.
 _, err = rs.WriteTo(os.Stdout)
 ```
+
+</Accordion>
 
 ---
 
@@ -658,7 +688,7 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```go
 ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
@@ -673,6 +703,8 @@ if err := ws.Close(ctx); err != nil {
     return err
 }
 ```
+
+</Accordion>
 
 ---
 

@@ -102,12 +102,14 @@ Read an entire file from the guest filesystem into memory as raw bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let bytes = sb.fs().read("/app/logo.png").await?;
 println!("{} bytes", bytes.len());
 ```
+
+</Accordion>
 
 ---
 
@@ -138,12 +140,14 @@ Read an entire file and decode it as UTF-8. Errors if the contents are not valid
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let text = sb.fs().read_to_string("/etc/hostname").await?;
 println!("{}", text.trim());
 ```
+
+</Accordion>
 
 ---
 
@@ -174,7 +178,7 @@ Open a streaming reader that yields chunks of file data as they arrive. Use this
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let mut stream = sb.fs().read_stream("/var/log/big.log").await?;
@@ -184,6 +188,8 @@ while let Some(chunk) = stream.recv().await? {
 }
 println!("read {total} bytes");
 ```
+
+</Accordion>
 
 ---
 
@@ -213,11 +219,13 @@ Write data to a file in the guest, creating it if it doesn't exist and truncatin
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().write("/tmp/hello.txt", "hi there").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -248,7 +256,7 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let sink = sb.fs().write_stream("/tmp/out.bin").await?;
@@ -256,6 +264,8 @@ sink.write(&[0u8; 4096]).await?;
 sink.write(&[1u8; 4096]).await?;
 sink.close().await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -290,13 +300,15 @@ List the immediate children of a directory (non-recursive). Each entry carries i
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 for entry in sb.fs().list("/app").await? {
     println!("{:?} {}", entry.kind, entry.path);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -318,11 +330,13 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().mkdir("/app/data/cache").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -344,11 +358,13 @@ Remove a directory and everything under it, recursively. For a single file use [
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().remove_dir("/app/data/cache").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -374,11 +390,13 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().remove("/tmp/hello.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -404,11 +422,13 @@ Copy a file from one path to another within the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -434,11 +454,13 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -473,12 +495,14 @@ Get metadata for a file or directory: kind, size, mode, read-only flag, and time
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let meta = sb.fs().stat("/app/config.json").await?;
 println!("{} bytes, mode {:o}", meta.size, meta.mode);
 ```
+
+</Accordion>
 
 ---
 
@@ -513,12 +537,14 @@ Get metadata, choosing whether to follow a final symlink. With `follow_symlink =
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let link_meta = sb.fs().stat_with_follow("/app/current", false).await?;
 println!("{:?}", link_meta.kind);
 ```
+
+</Accordion>
 
 ---
 
@@ -548,7 +574,7 @@ Update metadata on a file or directory: mode, owner uid/gid, size, and access/mo
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::sandbox::FsSetAttrs;
@@ -558,6 +584,8 @@ sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
     ..Default::default()
 }).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -588,12 +616,14 @@ Read the target of a symbolic link, returning the literal target text. Local bac
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let target = sb.fs().read_link("/app/current").await?;
 println!("-> {target}");
 ```
+
+</Accordion>
 
 ---
 
@@ -619,11 +649,13 @@ Create a symbolic link at `link_path` that points to `target`. Local backend onl
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().symlink("/app/releases/v2", "/app/current").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -654,13 +686,15 @@ Check whether a file or directory exists at the given path in the guest. Impleme
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 if sb.fs().exists("/app/config.json").await? {
     println!("config present");
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -690,11 +724,13 @@ Copy a file from the host machine into the sandbox, streaming it in chunks. For 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -720,11 +756,13 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
 ```
+
+</Accordion>
 
 ---
 

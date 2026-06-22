@@ -133,13 +133,15 @@ Resolve a sandbox name to its agent relay socket path and connect, using the def
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::agent;
 
 let client = agent::connect_sandbox("dev").await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -174,7 +176,7 @@ Like [`connect_sandbox`](#agentconnect_sandbox), but with an explicit handshake 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use std::time::Duration;
@@ -182,6 +184,8 @@ use microsandbox::agent;
 
 let client = agent::connect_sandbox_with_timeout("dev", Duration::from_secs(2)).await?;
 ```
+
+</Accordion>
 
 ## AgentClient: static methods
 
@@ -214,7 +218,7 @@ Connect to an arbitrary agent relay socket by path, using the default ten-second
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::agent::AgentClient;
@@ -222,6 +226,8 @@ use microsandbox::agent::AgentClient;
 let path = AgentClient::socket_path("dev")?;
 let client = AgentClient::connect(&path).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -380,7 +386,7 @@ Resolve a sandbox's relay socket path **without connecting**. Returns the same p
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::agent::AgentClient;
@@ -388,6 +394,8 @@ use microsandbox::agent::AgentClient;
 let path = AgentClient::socket_path("dev")?;
 println!("{}", path.display());
 ```
+
+</Accordion>
 
 ---
 
@@ -413,13 +421,15 @@ Check a message type against an explicit negotiated generation. The single place
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::{agent::AgentClient, protocol::message::MessageType};
 
 AgentClient::ensure_version_compat_for(MessageType::FsRequest, 2)?;
 ```
+
+</Accordion>
 
 ## AgentClient: instance methods
 
@@ -456,7 +466,7 @@ Send one typed protocol message and wait for one response frame with the same co
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::protocol::{
@@ -477,6 +487,8 @@ let response = client
     .await?;
 let fs_response: FsResponse = response.payload()?;
 ```
+
+</Accordion>
 
 ---
 
@@ -511,7 +523,7 @@ Open a typed streaming session. The returned id is the protocol correlation id. 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::protocol::{exec::ExecRequest, message::MessageType};
@@ -534,6 +546,8 @@ while let Some(msg) = rx.recv().await {
     println!("{:?}", msg.t);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -563,13 +577,15 @@ Send a typed follow-up message on an existing correlation id (the id returned by
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::protocol::{exec::ExecStdin, message::MessageType};
 
 client.send(id, MessageType::ExecStdin, &ExecStdin { data: b"input\n".to_vec() }).await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -604,12 +620,14 @@ Allocate a correlation id, send one raw frame with `(flags, body)`, and wait for
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let frame = client.request_raw(flags, body).await?;
 println!("id={} flags={}", frame.id, frame.flags);
 ```
+
+</Accordion>
 
 ---
 
@@ -692,12 +710,14 @@ Return the decoded `core.ready` payload captured during the handshake (boot timi
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let ready = client.ready()?;
 println!("boot {} ns", ready.boot_time_ns);
 ```
+
+</Accordion>
 
 ---
 
@@ -828,7 +848,7 @@ Whether the connected sandbox is new enough to handle the given message type. Th
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::protocol::message::MessageType;
@@ -837,6 +857,8 @@ if client.supports(MessageType::FsRequest) {
     // safe to issue filesystem RPCs
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -858,13 +880,15 @@ Reject a message type the connected sandbox is too old to handle, against this c
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 use microsandbox::protocol::message::MessageType;
 
 client.ensure_version_compat(MessageType::TcpConnect)?;
 ```
+
+</Accordion>
 
 ---
 
@@ -877,11 +901,13 @@ async fn close(self)
 
 Close the client by consuming it. Drops the writer and aborts the reader task; any in-flight requests resolve with [`AgentClientError::Closed`](#agentclienterror). Dropping the client has the same effect.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 client.close().await;
 ```
+
+</Accordion>
 
 ## AgentBridge
 
@@ -1134,7 +1160,7 @@ Pull the next frame from a stream. Returns `None` when the stream has ended (the
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 let (id, handle) = bridge.stream_open(flags, body).await?;
@@ -1142,6 +1168,8 @@ while let Some(frame) = bridge.stream_next(handle).await? {
     // decode frame.body with your own CBOR tooling
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -1194,11 +1222,13 @@ async fn close(&self)
 
 Close the connection. Idempotent. After close, every operation except another close returns [`AgentClientError::Closed`](#agentclienterror).
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```rust
 bridge.close().await;
 ```
+
+</Accordion>
 
 ## Types
 

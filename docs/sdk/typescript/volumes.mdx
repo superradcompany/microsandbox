@@ -46,7 +46,7 @@ Create and manage named volumes: persistent storage that lives independently of 
 ```typescript
 import { Volume } from "microsandbox";
 
-const data = await Volume.builder("my-data")   // 1. configure
+const data = await Volume.builder("my-data")    // 1. configure
   .label("env", "prod")
   .create();                                    // 2. create on disk
 
@@ -88,13 +88,15 @@ Begin building a named volume. Directory-backed volumes are the default. Call `.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const data = await Volume.builder("my-data")
   .label("env", "prod")
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -125,12 +127,14 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const handle = await Volume.get("my-data");
 console.log(handle.usedBytes);
 ```
+
+</Accordion>
 
 ---
 
@@ -152,13 +156,15 @@ List all named volumes. Handles returned here are **read-only**: calling `.fs()`
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 for (const v of await Volume.list()) {
   console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -180,11 +186,13 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await Volume.remove("my-data");
 ```
+
+</Accordion>
 
 ---
 
@@ -250,13 +258,15 @@ Get a host-side filesystem handle for this volume's directory. Reads and writes 
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const vfs = data.fs();
 await vfs.write("seed.txt", "hello");
 console.log(await vfs.readToString("seed.txt"));
 ```
+
+</Accordion>
 
 ---
 
@@ -286,7 +296,7 @@ disk(): this
 
 Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const dockerData = await Volume.builder("docker-data")
@@ -294,6 +304,8 @@ const dockerData = await Volume.builder("docker-data")
   .size(20 * 1024)
   .create();
 ```
+
+</Accordion>
 
 ---
 
@@ -399,11 +411,13 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const data = await Volume.builder("my-data").create();
 ```
+
+</Accordion>
 
 ---
 
@@ -440,11 +454,13 @@ Read a file's full contents as bytes.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const bytes = await vfs.read("data.bin");
 ```
+
+</Accordion>
 
 ---
 
@@ -475,11 +491,13 @@ Read a file's full contents as a UTF-8 string.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const text = await vfs.readToString("config.json");
 ```
+
+</Accordion>
 
 ---
 
@@ -510,7 +528,7 @@ Open a streaming reader for a file, for chunked reads of large files without loa
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const stream = await vfs.readStream("large.bin");
@@ -518,6 +536,8 @@ for await (const chunk of stream) {
   console.log(chunk.byteLength);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -543,11 +563,13 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.write("seed.txt", "hello");
 ```
+
+</Accordion>
 
 ---
 
@@ -578,13 +600,15 @@ Open a streaming writer for a file, for chunked writes of large files.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const sink = await vfs.writeStream("out.bin");
 await sink.write(chunk);
 await sink.close();
 ```
+
+</Accordion>
 
 ---
 
@@ -615,13 +639,15 @@ List the entries in a directory. Pass `""` for the volume root.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 for (const e of await vfs.list("")) {
   console.log(e.path, e.kind, e.size);
 }
 ```
+
+</Accordion>
 
 ---
 
@@ -643,11 +669,13 @@ Create a directory, including any missing parents.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.mkdir("cache/images");
 ```
+
+</Accordion>
 
 ---
 
@@ -669,11 +697,13 @@ Recursively remove a directory and its contents.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.removeDir("cache");
 ```
+
+</Accordion>
 
 ---
 
@@ -695,11 +725,13 @@ Remove a single file.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.remove("seed.txt");
 ```
+
+</Accordion>
 
 ---
 
@@ -725,11 +757,13 @@ Copy a file or directory from one path to another.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.copy("seed.txt", "backup/seed.txt");
 ```
+
+</Accordion>
 
 ---
 
@@ -755,11 +789,13 @@ Move or rename a file or directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 await vfs.rename("draft.txt", "final.txt");
 ```
+
+</Accordion>
 
 ---
 
@@ -790,12 +826,14 @@ Get metadata for a file or directory.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 const meta = await vfs.stat("seed.txt");
 console.log(meta.size, meta.kind);
 ```
+
+</Accordion>
 
 ---
 
@@ -826,13 +864,15 @@ Check whether a path exists.
   </div>
 </div>
 
-<p className="msb-label">Example</p>
+<Accordion title="Example">
 
 ```typescript
 if (await vfs.exists("seed.txt")) {
   await vfs.remove("seed.txt");
 }
 ```
+
+</Accordion>
 
 ---
 
