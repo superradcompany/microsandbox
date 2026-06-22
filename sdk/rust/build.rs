@@ -1,22 +1,26 @@
 //! Build script — downloads prebuilt msb + libkrunfw to `$MSB_HOME` (or
 //! `~/.microsandbox/`) under `{bin,lib}/`.
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 use std::fs;
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 use std::io::{self, Cursor, Read};
+#[cfg(all(feature = "prebuilt", not(windows)))]
+use std::path::Path;
 #[cfg(feature = "prebuilt")]
-use std::path::{Path, PathBuf};
-#[cfg(feature = "prebuilt")]
+use std::path::PathBuf;
+#[cfg(all(feature = "prebuilt", not(windows)))]
 use std::process::Command;
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", unix))]
+use microsandbox_utils::LIBKRUNFW_ABI;
+#[cfg(all(feature = "prebuilt", not(windows)))]
 use microsandbox_utils::http_client;
-#[cfg(feature = "prebuilt")]
-use microsandbox_utils::{LIBKRUNFW_ABI, PREBUILT_VERSION, bundle_download_url};
 use microsandbox_utils::{
     MSB_BINARY, libkrunfw_filename as utils_libkrunfw_filename, resolve_home,
 };
+#[cfg(all(feature = "prebuilt", not(windows)))]
+use microsandbox_utils::{PREBUILT_VERSION, bundle_download_url};
 
 fn main() {
     // Re-run if MSB_HOME changes - it determines where binaries are placed.
@@ -38,7 +42,14 @@ fn main() {
     install_prebuilt(base_dir);
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", windows))]
+fn install_prebuilt(_base_dir: PathBuf) {
+    println!(
+        "cargo:warning=skipping microsandbox prebuilt runtime install on Windows; build msb/libkrunfw locally"
+    );
+}
+
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn install_prebuilt(base_dir: PathBuf) {
     let bin_dir = base_dir.join("bin");
     let lib_dir = base_dir.join("lib");
@@ -83,15 +94,10 @@ fn install_prebuilt(base_dir: PathBuf) {
 }
 
 fn libkrunfw_filename() -> String {
-    let os = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
-    utils_libkrunfw_filename(os)
+    utils_libkrunfw_filename(std::env::consts::OS)
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn bundle_url() -> String {
     let arch = std::env::consts::ARCH;
     let os = if cfg!(target_os = "macos") {
@@ -102,7 +108,7 @@ fn bundle_url() -> String {
     bundle_download_url(PREBUILT_VERSION, arch, os)
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn installed_msb_version(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -120,7 +126,7 @@ fn installed_msb_version(path: &Path) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn install_ci_local_bundle(
     bin_dir: &Path,
     lib_dir: &Path,
@@ -158,7 +164,7 @@ fn install_ci_local_bundle(
     Ok(true)
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn workspace_build_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?.parent()?;
@@ -168,7 +174,7 @@ fn workspace_build_dir() -> Option<PathBuf> {
     Some(workspace_root.join("build"))
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let resp = http_client().get(url).call()?;
     let mut buf = Vec::new();
@@ -176,7 +182,7 @@ fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(buf)
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", not(windows)))]
 fn extract_bundle(data: &[u8], bin_dir: &Path, lib_dir: &Path) -> io::Result<()> {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(data));
     let mut archive = tar::Archive::new(decoder);
@@ -206,26 +212,23 @@ fn extract_bundle(data: &[u8], bin_dir: &Path, lib_dir: &Path) -> io::Result<()>
     Ok(())
 }
 
-#[cfg(feature = "prebuilt")]
+#[cfg(all(feature = "prebuilt", unix))]
 fn create_symlinks(lib_dir: &Path, libkrunfw_name: &str) {
-    #[cfg(unix)]
-    {
-        let symlinks: Vec<(String, String)> = if cfg!(target_os = "macos") {
-            vec![("libkrunfw.dylib".to_string(), libkrunfw_name.to_string())]
-        } else {
-            let soname = format!("libkrunfw.so.{LIBKRUNFW_ABI}");
-            vec![
-                (soname.clone(), libkrunfw_name.to_string()),
-                ("libkrunfw.so".to_string(), soname),
-            ]
-        };
+    let symlinks: Vec<(String, String)> = if cfg!(target_os = "macos") {
+        vec![("libkrunfw.dylib".to_string(), libkrunfw_name.to_string())]
+    } else {
+        let soname = format!("libkrunfw.so.{LIBKRUNFW_ABI}");
+        vec![
+            (soname.clone(), libkrunfw_name.to_string()),
+            ("libkrunfw.so".to_string(), soname),
+        ]
+    };
 
-        for (link_name, target) in &symlinks {
-            let link_path = lib_dir.join(link_name);
-            if link_path.exists() || link_path.is_symlink() {
-                let _ = fs::remove_file(&link_path);
-            }
-            std::os::unix::fs::symlink(target, &link_path).ok();
+    for (link_name, target) in &symlinks {
+        let link_path = lib_dir.join(link_name);
+        if link_path.exists() || link_path.is_symlink() {
+            let _ = fs::remove_file(&link_path);
         }
+        std::os::unix::fs::symlink(target, &link_path).ok();
     }
 }

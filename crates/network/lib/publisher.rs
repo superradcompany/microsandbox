@@ -843,18 +843,6 @@ fn write_host_data(socket: &mut tcp::Socket<'_>, relay: &mut InboundRelay) {
 mod tests {
     use super::*;
 
-    fn fd_is_readable(fd: std::os::fd::RawFd) -> bool {
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        // SAFETY: poll_fd points to one valid pollfd and uses a zero timeout.
-        let n = unsafe { libc::poll(&mut poll_fd, 1, 0) };
-        n > 0 && poll_fd.revents & libc::POLLIN != 0
-    }
-
     #[tokio::test]
     async fn queue_inbound_connection_wakes_poll_loop() {
         let shared = SharedState::new(4);
@@ -864,7 +852,7 @@ mod tests {
 
         assert!(queue_inbound_connection(&tx, (), &shared).await);
         assert!(rx.try_recv().is_ok());
-        assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
+        assert!(shared.proxy_wake.wait_timeout(Duration::ZERO));
     }
 
     #[tokio::test]
@@ -906,7 +894,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
+        assert!(shared.proxy_wake.wait_timeout(Duration::ZERO));
 
         drop(client);
         drop(to_host_tx);

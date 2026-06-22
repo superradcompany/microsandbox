@@ -4,9 +4,10 @@
 //! detail views, and styled messages. All ephemeral output goes to stderr;
 //! final data output goes to stdout.
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     io::IsTerminal,
-    os::fd::AsRawFd,
     time::{Duration, Instant},
 };
 
@@ -37,10 +38,14 @@ pub struct Spinner {
 ///
 /// Prevents stray keypresses (e.g. Enter) from injecting newlines that
 /// desync indicatif's cursor tracking, which causes ghost lines.
+#[cfg(unix)]
 struct EchoGuard {
     original: libc::termios,
     fd: i32,
 }
+
+#[cfg(windows)]
+struct EchoGuard;
 
 /// Minimal table renderer with column alignment.
 pub struct Table {
@@ -133,6 +138,7 @@ impl Spinner {
 
 impl EchoGuard {
     /// Disable terminal echo on stdin. Returns `None` if stdin is not a TTY.
+    #[cfg(unix)]
     fn acquire() -> Option<Self> {
         if !std::io::stdin().is_terminal() {
             return None;
@@ -153,8 +159,15 @@ impl EchoGuard {
 
         Some(Self { original, fd })
     }
+
+    /// Disable terminal echo on stdin. Returns `None` if stdin is not a TTY.
+    #[cfg(windows)]
+    fn acquire() -> Option<Self> {
+        None
+    }
 }
 
+#[cfg(unix)]
 impl Drop for EchoGuard {
     fn drop(&mut self) {
         // Flush any keypresses that accumulated while echo was off,
@@ -248,6 +261,7 @@ pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort: restore echo on stdin if it's a TTY.
+        #[cfg(unix)]
         if std::io::stdin().is_terminal() {
             let fd = std::io::stdin().as_raw_fd();
             let mut termios: libc::termios = unsafe { std::mem::zeroed() };

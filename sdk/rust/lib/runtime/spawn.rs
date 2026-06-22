@@ -8,28 +8,37 @@
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
+use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt::Write,
     io::{Seek, SeekFrom, Write as IoWrite},
-    os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngExt;
+use rand::{Rng, RngExt};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt},
     process::Command,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
 };
 
 use microsandbox_image::{Digest, GlobalCache};
@@ -44,12 +53,15 @@ use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::SandboxLogLevel;
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
+use crate::runtime::handle::ProcessHandle;
+#[cfg(windows)]
+use crate::runtime::handle::WindowsJob;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
     config,
     db::entity::volume as volume_entity,
-    runtime::handle::{MetricsReservationCleanup, ProcessHandle},
+    runtime::handle::MetricsReservationCleanup,
     sandbox::{
         DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, Rlimit, RootfsSource,
         SandboxConfig, StatVirtualization, VolumeMount,
@@ -68,6 +80,8 @@ use crate::{
 static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
+#[cfg(windows)]
+const STARTUP_PIPE_HASH_HEX_LEN: usize = 32;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -79,16 +93,24 @@ struct StartupInfo {
     pid: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct MetricsReservation {
     shm_name: String,
     slot: u32,
     generation: u64,
+    registry: MetricsRegistry,
 }
 
+#[cfg(unix)]
 struct Pipe {
     read_fd: OwnedFd,
     write_fd: OwnedFd,
+}
+
+#[cfg(windows)]
+struct StartupPipe {
+    name: OsString,
+    server: NamedPipeServer,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -176,6 +198,7 @@ pub async fn spawn_sandbox(
     } else {
         None
     };
+    #[cfg(unix)]
     let parent_watchdog = match mode {
         SpawnMode::Attached => match create_parent_watchdog_pipe() {
             Ok(pipe) => Some(pipe),
@@ -186,6 +209,11 @@ pub async fn spawn_sandbox(
         },
         SpawnMode::Detached => None,
     };
+
+    #[cfg(windows)]
+    let parent_watchdog: Option<()> = None;
+
+    #[cfg(unix)]
     let startup_pipe = match mode {
         SpawnMode::Attached => None,
         SpawnMode::Detached => match create_startup_pipe() {
@@ -196,6 +224,35 @@ pub async fn spawn_sandbox(
             }
         },
     };
+
+    #[cfg(windows)]
+    let startup_pipe = match mode {
+        SpawnMode::Attached => None,
+        SpawnMode::Detached => match create_startup_pipe(&config.spec.name, sandbox_id) {
+            Ok(pipe) => Some(pipe),
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        },
+    };
+
+    #[cfg(windows)]
+    let child_job = match mode {
+        SpawnMode::Attached => match WindowsJob::new_kill_on_close() {
+            Ok(job) => Some(job),
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(crate::MicrosandboxError::Runtime(format!(
+                    "failed to create Windows sandbox job: {err}"
+                )));
+            }
+        },
+        SpawnMode::Detached => None,
+    };
+
+    #[cfg(windows)]
+    let startup_pipe_name = startup_pipe.as_ref().map(|pipe| pipe.name.as_os_str());
 
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
@@ -215,12 +272,19 @@ pub async fn spawn_sandbox(
         parent_watchdog
             .as_ref()
             .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
+        #[cfg(unix)]
         startup_pipe
             .as_ref()
             .map(|_| microsandbox_runtime::vm::STARTUP_FD),
+        #[cfg(unix)]
+        None,
+        #[cfg(windows)]
+        None,
+        #[cfg(windows)]
+        startup_pipe_name,
     );
-    // Serialize the LaunchConfig to an anonymous (unlinked) temp file. Kept
-    // alive until after spawn; `dup2`'d onto CONFIG_FD in pre_exec.
+
+    #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
         Ok(file) => file,
         Err(err) => {
@@ -228,14 +292,36 @@ pub async fn spawn_sandbox(
             return Err(err);
         }
     };
+    #[cfg(unix)]
     let config_raw_fd = config_file.as_raw_fd();
-    visible.push(OsString::from("--config-fd"));
-    visible.push(OsString::from(
-        microsandbox_runtime::vm::CONFIG_FD.to_string(),
-    ));
+    #[cfg(unix)]
+    {
+        visible.push(OsString::from("--config-fd"));
+        visible.push(OsString::from(
+            microsandbox_runtime::vm::CONFIG_FD.to_string(),
+        ));
+    }
+
+    #[cfg(windows)]
+    let _config_file = match write_launch_config_file(&launch, &runtime_dir) {
+        Ok(file) => {
+            visible.push(OsString::from("--config-file"));
+            visible.push(file.path().as_os_str().to_os_string());
+            file
+        }
+        Err(err) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(err);
+        }
+    };
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
+    #[cfg(windows)]
+    if matches!(mode, SpawnMode::Detached) {
+        let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        cmd.creation_flags(flags);
+    }
     cmd.args(visible);
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -243,7 +329,8 @@ pub async fn spawn_sandbox(
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
 
-    {
+    #[cfg(unix)]
+    if parent_watchdog.is_some() || startup_pipe.is_some() {
         let parent_watch_fd = parent_watchdog
             .as_ref()
             .map(|pipe| pipe.read_fd.as_raw_fd());
@@ -267,12 +354,27 @@ pub async fn spawn_sandbox(
 
     // Capture stdout for attached startup JSON. Detached mode uses a
     // dedicated startup fd so stdio can be severed from the launcher.
+    #[cfg(unix)]
     if startup_pipe.is_some() {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
     } else {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
+    }
+    #[cfg(windows)]
+    {
+        let runtime_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("runtime.log"))?;
+
+        if startup_pipe.is_some() {
+            cmd.stdout(Stdio::null());
+        } else {
+            cmd.stdout(Stdio::piped());
+        }
+        cmd.stderr(Stdio::from(runtime_log));
     }
 
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
@@ -297,36 +399,28 @@ pub async fn spawn_sandbox(
     };
     tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
 
-    // Read the startup JSON from the dedicated startup pipe in detached
-    // mode, otherwise stdout.
-    let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
-        Some(pipe) => {
-            let Pipe { read_fd, write_fd } = pipe;
-            drop(write_fd);
-            Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
-                std::fs::File::from(read_fd),
-            )))
+    #[cfg(windows)]
+    if let Some(job) = &child_job {
+        if let Err(err) = job.assign_pid(_pid) {
+            let status = terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
+            )));
         }
-        None => {
-            let stdout = child.stdout.take().ok_or_else(|| {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
-            })?;
-            Box::new(tokio::io::BufReader::new(stdout))
-        }
-    };
-    let mut line = String::new();
-    match tokio::time::timeout(
+    }
+
+    let line = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        reader.read_line(&mut line),
+        read_startup_line(&mut child, startup_pipe),
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(line)) => line,
         Ok(Err(err)) => {
             terminate_startup_process(&mut child).await;
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err.into());
+            return Err(err);
         }
         Err(_) => {
             terminate_startup_process(&mut child).await;
@@ -335,7 +429,7 @@ pub async fn spawn_sandbox(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
         }
-    }
+    };
 
     let startup: StartupInfo = match serde_json::from_str(line.trim()) {
         Ok(info) => info,
@@ -353,6 +447,15 @@ pub async fn spawn_sandbox(
             )));
         }
     };
+    if startup.pid != _pid {
+        let status = terminate_startup_process(&mut child).await;
+        release_metrics_reservation(config, metrics_reservation.as_ref());
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "sandbox startup PID mismatch: spawned pid {_pid}, startup pid {} \
+             (status: {status:?})",
+            startup.pid
+        )));
+    }
 
     tracing::debug!(
         vm_pid = startup.pid,
@@ -360,6 +463,7 @@ pub async fn spawn_sandbox(
         "spawn_sandbox: startup JSON received"
     );
 
+    #[cfg(unix)]
     let handle = ProcessHandle::new(
         startup.pid,
         config.spec.name.clone(),
@@ -372,6 +476,25 @@ pub async fn spawn_sandbox(
                 reservation.shm_name.clone(),
                 reservation.slot,
                 reservation.generation,
+                Some(reservation.registry.clone()),
+            )
+        }),
+    );
+
+    #[cfg(windows)]
+    let handle = ProcessHandle::new(
+        startup.pid,
+        config.spec.name.clone(),
+        child,
+        file_mounts_staging,
+        Vec::new(),
+        child_job,
+        metrics_reservation.as_ref().map(|reservation| {
+            MetricsReservationCleanup::new(
+                reservation.shm_name.clone(),
+                reservation.slot,
+                reservation.generation,
+                Some(reservation.registry.clone()),
             )
         }),
     );
@@ -407,6 +530,7 @@ fn reserve_metrics_slot(
             shm_name,
             slot,
             generation,
+            registry,
         }),
         Err(err) => {
             tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to reserve metrics slot");
@@ -415,14 +539,51 @@ fn reserve_metrics_slot(
     }
 }
 
+#[cfg(unix)]
 fn create_parent_watchdog_pipe() -> MicrosandboxResult<Pipe> {
     create_pipe()
 }
 
+#[cfg(unix)]
 fn create_startup_pipe() -> MicrosandboxResult<Pipe> {
     create_pipe()
 }
 
+#[cfg(windows)]
+fn create_startup_pipe(sandbox_name: &str, sandbox_id: i32) -> MicrosandboxResult<StartupPipe> {
+    let pipe_name = startup_pipe_name(sandbox_name, sandbox_id);
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .pipe_mode(PipeMode::Byte)
+        .create(&pipe_name)?;
+
+    Ok(StartupPipe {
+        name: OsString::from(pipe_name),
+        server,
+    })
+}
+
+#[cfg(windows)]
+fn startup_pipe_name(sandbox_name: &str, sandbox_id: i32) -> String {
+    let mut nonce = [0u8; 16];
+    rand::rng().fill_bytes(&mut nonce);
+
+    let mut hasher = Sha256::new();
+    hasher.update(sandbox_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(sandbox_id.to_le_bytes());
+    hasher.update(nonce);
+    let digest = hasher.finalize();
+
+    let mut hash = String::with_capacity(STARTUP_PIPE_HASH_HEX_LEN);
+    for byte in digest.iter().take(STARTUP_PIPE_HASH_HEX_LEN / 2) {
+        let _ = write!(hash, "{byte:02x}");
+    }
+
+    format!(r"\\.\pipe\msb-startup-{sandbox_id}-{hash}")
+}
+
+#[cfg(unix)]
 fn create_pipe() -> MicrosandboxResult<Pipe> {
     let mut fds = [0; 2];
     let rc = create_cloexec_pipe(&mut fds);
@@ -446,6 +607,7 @@ fn create_pipe() -> MicrosandboxResult<Pipe> {
 /// to offset 0. The file is unlinked on creation, so there is no path to clean
 /// up or race on; it is `dup2`'d onto
 /// [`CONFIG_FD`](microsandbox_runtime::vm::CONFIG_FD) for the child to read.
+#[cfg(unix)]
 fn write_launch_config_fd(launch: &LaunchConfig) -> MicrosandboxResult<std::fs::File> {
     let mut file = tempfile::tempfile()?;
     let json = serde_json::to_vec(launch)
@@ -456,6 +618,76 @@ fn write_launch_config_fd(launch: &LaunchConfig) -> MicrosandboxResult<std::fs::
     Ok(file)
 }
 
+/// Serialize the [`LaunchConfig`] as JSON to a short-lived named file for Windows.
+///
+/// Windows does not have the Unix anonymous-fd handoff used above, so the
+/// launcher keeps the file handle alive until the child reports startup and
+/// passes only the path on argv.
+#[cfg(windows)]
+fn write_launch_config_file(
+    launch: &LaunchConfig,
+    runtime_dir: &Path,
+) -> MicrosandboxResult<tempfile::NamedTempFile> {
+    let mut file = tempfile::NamedTempFile::new_in(runtime_dir)?;
+    let json = serde_json::to_vec(launch)
+        .map_err(|e| crate::MicrosandboxError::Runtime(format!("serialize launch config: {e}")))?;
+    file.write_all(&json)?;
+    file.flush()?;
+    file.as_file_mut().seek(SeekFrom::Start(0))?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+async fn read_startup_line(
+    child: &mut tokio::process::Child,
+    startup_pipe: Option<Pipe>,
+) -> MicrosandboxResult<String> {
+    let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
+        Some(pipe) => {
+            let Pipe { read_fd, write_fd } = pipe;
+            drop(write_fd);
+            Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                std::fs::File::from(read_fd),
+            )))
+        }
+        None => {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
+            })?;
+            Box::new(tokio::io::BufReader::new(stdout))
+        }
+    };
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    Ok(line)
+}
+
+#[cfg(windows)]
+async fn read_startup_line(
+    child: &mut tokio::process::Child,
+    startup_pipe: Option<StartupPipe>,
+) -> MicrosandboxResult<String> {
+    let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
+        Some(pipe) => {
+            let server = pipe.server;
+            server.connect().await?;
+            Box::new(tokio::io::BufReader::new(server))
+        }
+        None => {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
+            })?;
+            Box::new(tokio::io::BufReader::new(stdout))
+        }
+    };
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    Ok(line)
+}
+
+#[cfg(unix)]
 fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
     if unsafe { libc::dup2(src, dst) } < 0 {
         return Err(std::io::Error::last_os_error());
@@ -473,6 +705,7 @@ fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn detach_from_launcher_session() -> std::io::Result<()> {
     if unsafe { libc::setsid() } < 0 {
         return Err(std::io::Error::last_os_error());
@@ -494,12 +727,12 @@ fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
     unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn create_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
     unsafe { libc::pipe(fds.as_mut_ptr()) }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn set_cloexec(fd: &OwnedFd, enabled: bool) -> MicrosandboxResult<()> {
     let current = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
     if current < 0 {
@@ -524,14 +757,10 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     let Some(reservation) = reservation else {
         return;
     };
-    let registry = match MetricsRegistry::open(&reservation.shm_name) {
-        Ok(registry) => registry,
-        Err(err) => {
-            tracing::debug!(error = %err, sandbox = %config.spec.name, "release: failed to open metrics registry");
-            return;
-        }
-    };
-    if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
+    if let Err(err) = reservation
+        .registry
+        .release_reserved(reservation.slot, reservation.generation)
+    {
         tracing::debug!(error = %err, sandbox = %config.spec.name, "release: metrics slot release failed");
     }
 }
@@ -708,22 +937,41 @@ pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResul
     )))
 }
 
+#[cfg(unix)]
 fn sandbox_agent_socket_path(run_dir: &Path, name: &str) -> PathBuf {
+    run_dir
+        .join("agent")
+        .join(format!("{}.sock", agent_socket_hash(name)))
+}
+
+#[cfg(windows)]
+fn sandbox_agent_socket_path(_run_dir: &Path, name: &str) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\msb-agent-{}", agent_socket_hash(name)))
+}
+
+fn agent_socket_hash(name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     let digest = hasher.finalize();
 
-    let mut filename = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN + ".sock".len());
+    let mut hash = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN);
     for byte in digest.iter().take(AGENT_SOCKET_HASH_HEX_LEN / 2) {
-        let _ = Write::write_fmt(&mut filename, format_args!("{byte:02x}"));
+        let _ = Write::write_fmt(&mut hash, format_args!("{byte:02x}"));
     }
-    filename.push_str(".sock");
-
-    run_dir.join("agent").join(filename)
+    hash
 }
 
+#[cfg(unix)]
 fn legacy_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
     sandboxes_dir.join(name).join("runtime").join("agent.sock")
+}
+
+#[cfg(windows)]
+fn legacy_sandbox_agent_socket_path(_sandboxes_dir: &Path, name: &str) -> PathBuf {
+    PathBuf::from(format!(
+        r"\\.\pipe\msb-agent-legacy-{}",
+        agent_socket_hash(name)
+    ))
 }
 
 #[cfg(unix)]
@@ -1089,6 +1337,7 @@ fn sandbox_cli_args(
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
+    startup_pipe: Option<&OsStr>,
 ) -> (Vec<OsString>, LaunchConfig) {
     // `visible` stays on the process argv: a small set of operator-readable
     // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
@@ -1111,6 +1360,10 @@ fn sandbox_cli_args(
     if let Some(fd) = startup_fd {
         visible.push(OsString::from("--startup-fd"));
         visible.push(OsString::from(fd.to_string()));
+    }
+    if let Some(pipe) = startup_pipe {
+        visible.push(OsString::from("--startup-pipe"));
+        visible.push(pipe.to_os_string());
     }
     visible.push(OsString::from("--vcpus"));
     visible.push(OsString::from(config.spec.resources.cpus.to_string()));
@@ -1436,7 +1689,7 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -1584,6 +1837,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         visible
             .into_iter()
@@ -1606,6 +1860,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
             None,
             None,
             None,
@@ -1637,6 +1892,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
             None,
             None,
             None,
@@ -1720,6 +1976,7 @@ mod tests {
             None,
             None,
             Some(microsandbox_runtime::vm::STARTUP_FD),
+            None,
         );
 
         // The startup fd is an operator-visible label, so it stays on argv.
@@ -1752,6 +2009,38 @@ mod tests {
         assert!(rendered.contains(&"--startup-env=APP_ENV=test".to_string()));
         assert!(rendered.contains(&"--startup-cwd=/workspace".to_string()));
         assert!(rendered.contains(&"--startup-user=nobody".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_startup_pipe_when_supplied() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+        let local = test_local_backend();
+        let (visible, _launch) = sandbox_cli_args(
+            &local,
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            Some(OsStr::new(r"\\.\pipe\msb-startup-test")),
+        );
+
+        assert!(visible.windows(2).any(|pair| pair
+            == [
+                OsString::from("--startup-pipe"),
+                OsString::from(r"\\.\pipe\msb-startup-test"),
+            ]));
     }
 
     #[tokio::test]

@@ -18,6 +18,8 @@ default = []
 stream = []
 # Unix domain socket transport. Builds on the generic byte-stream path.
 uds = ["stream"]
+# Windows named-pipe transport. Builds on the generic byte-stream path.
+named-pipe = ["stream"]
 
 [dependencies]
 ciborium.workspace = true

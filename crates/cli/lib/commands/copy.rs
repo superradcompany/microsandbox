@@ -1,5 +1,6 @@
 //! `msb copy` command — copy files between the host and a sandbox.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -179,7 +180,7 @@ fn copy_local_entry_to_sandbox<'a>(
     Box::pin(async move {
         if metadata.is_dir() {
             fs.mkdir(&dst).await?;
-            set_guest_mode(fs, &dst, metadata.permissions().mode(), true).await?;
+            set_guest_mode(fs, &dst, local_mode(&metadata), true).await?;
 
             let mut entries = tokio::fs::read_dir(&src)
                 .await
@@ -207,7 +208,7 @@ fn copy_local_entry_to_sandbox<'a>(
 
         if metadata.is_file() {
             copy_local_file_to_sandbox(fs, &src, &dst).await?;
-            set_guest_mode(fs, &dst, metadata.permissions().mode(), true).await?;
+            set_guest_mode(fs, &dst, local_mode(&metadata), true).await?;
             return Ok(());
         }
 
@@ -240,8 +241,16 @@ fn copy_sandbox_entry_to_local<'a>(
             }
             FsEntryKind::Symlink => {
                 let target = fs.read_link(&src).await?;
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(&target, &dst)
                     .with_context(|| format!("symlink {} -> {target}", dst.display()))?;
+                #[cfg(windows)]
+                {
+                    let _ = target;
+                    anyhow::bail!(
+                        "copying sandbox symlinks to the Windows host is not supported yet"
+                    );
+                }
             }
             FsEntryKind::File => {
                 copy_sandbox_file_to_local(fs, &src, &dst).await?;
@@ -446,15 +455,44 @@ async fn set_guest_mode(
 
 /// Set local permission bits.
 async fn set_local_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(permission_bits(mode)))
-        .await
-        .with_context(|| format!("chmod {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(permission_bits(mode)))
+            .await
+            .with_context(|| format!("chmod {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        let mut permissions = tokio::fs::metadata(path)
+            .await
+            .with_context(|| format!("stat {}", path.display()))?
+            .permissions();
+        permissions.set_readonly(permission_bits(mode) & 0o222 == 0);
+        tokio::fs::set_permissions(path, permissions)
+            .await
+            .with_context(|| format!("set readonly bit on {}", path.display()))?;
+    }
     Ok(())
 }
 
 /// Keep only Unix permission bits from a mode value.
 fn permission_bits(mode: u32) -> u32 {
     mode & 0o7777
+}
+
+#[cfg(unix)]
+fn local_mode(metadata: &std::fs::Metadata) -> u32 {
+    metadata.permissions().mode()
+}
+
+#[cfg(windows)]
+fn local_mode(metadata: &std::fs::Metadata) -> u32 {
+    match (metadata.is_dir(), metadata.permissions().readonly()) {
+        (true, true) => 0o555,
+        (true, false) => 0o755,
+        (false, true) => 0o444,
+        (false, false) => 0o644,
+    }
 }
 
 /// Return the final path component of a local path.

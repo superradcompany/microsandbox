@@ -1,6 +1,7 @@
 //! `msb install` command — create an executable alias for `msb run`.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -149,6 +150,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // Write and make executable.
     fs::write(&alias_path, &script)?;
+    #[cfg(unix)]
     fs::set_permissions(&alias_path, fs::Permissions::from_mode(0o755))?;
 
     ui::success("Installed", alias_name);

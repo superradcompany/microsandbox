@@ -8,7 +8,9 @@ use futures::StreamExt;
 use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION};
+#[cfg(unix)]
+use microsandbox_utils::LIBKRUNFW_ABI;
+use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, MSB_BINARY, PREBUILT_VERSION};
 
 use super::verify::verify_installation;
 
@@ -152,6 +154,7 @@ fn default_base_dir() -> Option<PathBuf> {
     Some(microsandbox_utils::resolve_home())
 }
 
+#[cfg(unix)]
 fn libkrunfw_symlinks(filename: &str) -> Vec<(String, String)> {
     if cfg!(target_os = "macos") {
         vec![("libkrunfw.dylib".to_string(), filename.to_string())]

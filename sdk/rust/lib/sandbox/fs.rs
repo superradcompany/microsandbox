@@ -557,7 +557,7 @@ pub(crate) mod local {
         entry_info_to_fs_entry, entry_info_to_metadata, wait_for_ok_response,
     };
 
-    /// Open a fresh agent UDS connection for the named sandbox.
+    /// Open a fresh agent connection for the named sandbox.
     pub(crate) async fn connect_agent(
         local: &LocalBackend,
         name: &str,
@@ -573,7 +573,7 @@ pub(crate) mod local {
         let mut last_error = None;
 
         for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(local, name) {
-            if !sock_path.exists() {
+            if !agent_endpoint_may_exist(&sock_path) {
                 continue;
             }
 
@@ -586,9 +586,19 @@ pub(crate) mod local {
         match last_error {
             Some(error) => Err(error.into()),
             None => Err(MicrosandboxError::Runtime(format!(
-                "no agent socket found for sandbox {name:?}"
+                "no agent endpoint found for sandbox {name:?}"
             ))),
         }
+    }
+
+    #[cfg(unix)]
+    fn agent_endpoint_may_exist(path: &std::path::Path) -> bool {
+        path.exists()
+    }
+
+    #[cfg(windows)]
+    fn agent_endpoint_may_exist(_path: &std::path::Path) -> bool {
+        true
     }
 
     async fn open_file(

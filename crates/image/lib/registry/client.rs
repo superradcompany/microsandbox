@@ -5,7 +5,6 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -23,7 +22,7 @@ use tokio::{
 use crate::{
     cache::{
         self, CachedImageMetadata, CachedLayerMetadata, GlobalCache,
-        lock::{flock_unlock, open_lock_file},
+        lock::{flock_unlock, lock_exclusive, open_lock_file},
     },
     config::ImageConfig,
     digest::Digest,
@@ -317,18 +316,12 @@ impl Registry {
         let oci_ref = reference;
         let image_lock_path = self.cache.image_lock_path(reference);
         let image_lock_file = open_lock_file(&image_lock_path)?;
-        {
-            let fd = image_lock_file.as_raw_fd();
-            tokio::task::spawn_blocking(move || {
-                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if ret != 0 {
-                    return Err(ImageError::Io(io::Error::last_os_error()));
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        }
+        let image_lock_file = tokio::task::spawn_blocking(move || {
+            lock_exclusive(&image_lock_file)?;
+            Ok::<_, ImageError>(image_lock_file)
+        })
+        .await
+        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
         // Lock files are intentionally never deleted — stable inodes prevent
         // TOCTOU races where two processes flock different inodes at the same path.
         let _image_lock_guard = scopeguard::guard(image_lock_file, |file| {
@@ -810,21 +803,15 @@ impl Registry {
                     // Acquire per-layer flock to coordinate with concurrent pulls.
                     let lock_file = open_lock_file(&lock_path)
                         .map_err(|e| LayerPipelineFailure { error: e })?;
-                    {
-                        let fd = lock_file.as_raw_fd();
-                        tokio::task::spawn_blocking(move || {
-                            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                            if ret != 0 {
-                                return Err(ImageError::Io(io::Error::last_os_error()));
-                            }
-                            Ok(())
-                        })
-                        .await
-                        .map_err(|e| LayerPipelineFailure {
-                            error: ImageError::Io(io::Error::other(e)),
-                        })?
-                        .map_err(|e| LayerPipelineFailure { error: e })?;
-                    }
+                    let lock_file = tokio::task::spawn_blocking(move || {
+                        lock_exclusive(&lock_file)?;
+                        Ok::<_, ImageError>(lock_file)
+                    })
+                    .await
+                    .map_err(|e| LayerPipelineFailure {
+                        error: ImageError::Io(io::Error::other(e)),
+                    })?
+                    .map_err(|e| LayerPipelineFailure { error: e })?;
                     let _lock_guard = scopeguard::guard(lock_file, |file| {
                         let _ = flock_unlock(&file);
                     });
@@ -875,7 +862,7 @@ impl Registry {
                     let compression =
                         Compression::from_media_type(media_type.as_deref().unwrap_or(""));
                     let limits = ResourceLimits::default();
-                    let spool_path = tmp_dir.join(format!("{}.spool", diff_id));
+                    let spool_path = layer_work_path(&tmp_dir, &diff_id_digest, "spool");
                     let ingest_started_at = Instant::now();
                     let ingest_result = tar::ingest_compressed_tar(
                         MaterializeProgressReader::new(
@@ -926,7 +913,7 @@ impl Registry {
 
                     // Write to a temp file, then atomic rename to the final path.
                     // This prevents partial files from being visible to concurrent readers.
-                    let temp_path = tmp_dir.join(format!("{}.erofs.part", diff_id));
+                    let temp_path = layer_work_path(&tmp_dir, &diff_id_digest, "erofs.part");
                     let erofs_final = erofs_path.clone();
                     let diff_id_for_join = diff_id.clone();
                     let write_started_at = Instant::now();
@@ -1006,18 +993,12 @@ impl Registry {
         // Acquire flock for fsmeta/VMDK generation.
         let fsmeta_lock_path = self.cache.fsmeta_erofs_lock_path(manifest_digest);
         let fsmeta_lock_file = open_lock_file(&fsmeta_lock_path)?;
-        {
-            let fd = fsmeta_lock_file.as_raw_fd();
-            tokio::task::spawn_blocking(move || {
-                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if ret != 0 {
-                    return Err(ImageError::Io(io::Error::last_os_error()));
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        }
+        let fsmeta_lock_file = tokio::task::spawn_blocking(move || {
+            lock_exclusive(&fsmeta_lock_file)?;
+            Ok::<_, ImageError>(fsmeta_lock_file)
+        })
+        .await
+        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
         let _fsmeta_lock_guard = scopeguard::guard(fsmeta_lock_file, |file| {
             let _ = flock_unlock(&file);
         });
@@ -1196,18 +1177,12 @@ impl Registry {
 
         let fsmeta_lock_path = self.cache.fsmeta_erofs_lock_path(manifest_digest);
         let fsmeta_lock_file = open_lock_file(&fsmeta_lock_path)?;
-        {
-            let fd = fsmeta_lock_file.as_raw_fd();
-            tokio::task::spawn_blocking(move || {
-                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if ret != 0 {
-                    return Err(ImageError::Io(io::Error::last_os_error()));
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        }
+        let fsmeta_lock_file = tokio::task::spawn_blocking(move || {
+            lock_exclusive(&fsmeta_lock_file)?;
+            Ok::<_, ImageError>(fsmeta_lock_file)
+        })
+        .await
+        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
         let _fsmeta_lock_guard = scopeguard::guard(fsmeta_lock_file, |file| {
             let _ = flock_unlock(&file);
         });
@@ -1557,6 +1532,10 @@ fn layer_pipeline_concurrency(layer_count: usize) -> usize {
     host_limit.min(layer_count.max(1))
 }
 
+fn layer_work_path(tmp_dir: &Path, diff_id: &Digest, suffix: &str) -> PathBuf {
+    tmp_dir.join(format!("{}.{}", diff_id.to_path_safe(), suffix))
+}
+
 fn json_bytes_to_string(bytes: &[u8], context: &str) -> ImageResult<String> {
     std::str::from_utf8(bytes)
         .map(str::to_owned)
@@ -1573,10 +1552,11 @@ mod tests {
 
     use oci_client::manifest::{ImageIndexEntry, Platform as OciPlatform};
 
-    use super::{Platform, resolve_cached_pull_result, resolve_platform_digest};
+    use super::{Platform, layer_work_path, resolve_cached_pull_result, resolve_platform_digest};
     use crate::{
         cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
         config::ImageConfig,
+        digest::Digest,
         error::ImageError,
         pull::{PullOptions, PullPolicy},
     };
@@ -1619,6 +1599,18 @@ mod tests {
         let digest =
             resolve_platform_digest(&manifests, &Platform::with_variant("linux", "arm", "v7"));
         assert_eq!(digest.as_deref(), Some("sha256:exact"));
+    }
+
+    #[test]
+    fn test_layer_work_path_uses_path_safe_digest() {
+        let temp = tempdir().unwrap();
+        let digest = Digest::new("sha256", "abc123");
+
+        let path = layer_work_path(temp.path(), &digest, "erofs.part");
+        let file_name = path.file_name().unwrap().to_string_lossy();
+
+        assert_eq!(file_name, "sha256_abc123.erofs.part");
+        assert!(!file_name.contains(':'));
     }
 
     #[test]

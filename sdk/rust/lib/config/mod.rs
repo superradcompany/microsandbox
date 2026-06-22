@@ -856,12 +856,7 @@ pub fn resolve_libkrunfw_path(config: &LocalConfig) -> MicrosandboxResult<PathBu
         )));
     }
 
-    let os = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
-    let filename = microsandbox_utils::libkrunfw_filename(os);
+    let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
     let home_fallback = config
         .home()
         .join(microsandbox_utils::LIB_SUBDIR)
@@ -907,6 +902,16 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     }
 
     deduped
+}
+
+fn libkrunfw_target_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -1348,6 +1353,19 @@ mod tests {
             PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
         );
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_libkrunfw_target_os_uses_windows_dll_name() {
+        let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(filename, "libkrunfw.dll");
+        } else if cfg!(target_os = "macos") {
+            assert!(filename.ends_with(".dylib"));
+        } else {
+            assert!(filename.ends_with(".so.5.2.1"));
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub enum RuntimeError {
 
     /// An errno-based system error.
     #[error("system error: {0}")]
+    #[cfg(unix)]
     Nix(#[from] nix::errno::Errno),
 
     /// A custom error message.

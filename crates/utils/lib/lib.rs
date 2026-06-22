@@ -172,6 +172,8 @@ pub fn resolve_home() -> std::path::PathBuf {
 pub fn libkrunfw_filename(os: &str) -> String {
     if os == "macos" {
         format!("libkrunfw.{LIBKRUNFW_ABI}.dylib")
+    } else if os == "windows" {
+        "libkrunfw.dll".to_string()
     } else {
         format!("libkrunfw.so.{LIBKRUNFW_VERSION}")
     }
@@ -181,6 +183,8 @@ pub fn libkrunfw_filename(os: &str) -> String {
 pub fn libkrunfw_download_url(version: &str, arch: &str, os: &str) -> String {
     let (target_os, ext) = if os == "macos" {
         ("darwin", "dylib")
+    } else if os == "windows" {
+        ("windows", "dll")
     } else {
         ("linux", "so")
     };
@@ -199,7 +203,13 @@ pub fn agentd_download_url(version: &str, arch: &str) -> String {
 
 /// Returns the GitHub release download URL for the microsandbox bundle tarball.
 pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
-    let target_os = if os == "macos" { "darwin" } else { "linux" };
+    let target_os = if os == "macos" {
+        "darwin"
+    } else if os == "windows" {
+        "windows"
+    } else {
+        "linux"
+    };
     format!(
         "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{MICROSANDBOX_REPO}-{target_os}-{arch}.tar.gz"
     )

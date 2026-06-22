@@ -151,6 +151,7 @@ fn now_rfc3339() -> String {
 fn extract_errno(err: &RuntimeError) -> Option<i32> {
     match err {
         RuntimeError::Io(io_err) => io_err.raw_os_error(),
+        #[cfg(unix)]
         RuntimeError::Nix(errno) => Some(*errno as i32),
         // The Custom variant flattens io::Error into a string of the
         // form `"... (os error N)"`. Recover N when present so hints

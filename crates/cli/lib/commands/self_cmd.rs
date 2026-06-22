@@ -16,7 +16,10 @@ use crate::ui;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 const MARKER_START: &str = "# >>> microsandbox >>>";
+
+#[cfg(unix)]
 const MARKER_END: &str = "# <<< microsandbox <<<";
 
 //--------------------------------------------------------------------------------------------------
@@ -410,10 +413,12 @@ fn resolve_base_dir() -> anyhow::Result<PathBuf> {
     Ok(microsandbox_utils::resolve_home())
 }
 
+#[cfg(unix)]
 fn local_bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".local").join("bin"))
 }
 
+#[cfg(unix)]
 fn public_command_links(base_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
     let local_bin = local_bin_dir()?;
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
@@ -425,57 +430,78 @@ fn public_command_links(base_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
 }
 
 fn link_public_commands(base_dir: &Path) -> anyhow::Result<()> {
-    let Some(links) = public_command_links(base_dir) else {
-        ui::warn("Skipped command links because no home directory was found");
+    #[cfg(not(unix))]
+    {
+        info(&format!(
+            "Add {} to PATH to run msb from any terminal.",
+            base_dir.join(microsandbox_utils::BIN_SUBDIR).display()
+        ));
         return Ok(());
-    };
-
-    if let Some(parent) = links.first().and_then(|(link, _)| link.parent()) {
-        fs::create_dir_all(parent)?;
     }
 
-    for (link, target) in links {
-        if link.exists() && !link.is_symlink() {
-            ui::warn(&format!(
-                "Skipped {} because it already exists",
-                link.display()
-            ));
-            continue;
+    #[cfg(unix)]
+    {
+        let Some(links) = public_command_links(base_dir) else {
+            ui::warn("Skipped command links because no home directory was found");
+            return Ok(());
+        };
+
+        if let Some(parent) = links.first().and_then(|(link, _)| link.parent()) {
+            fs::create_dir_all(parent)?;
         }
 
-        if link.is_symlink() {
-            fs::remove_file(&link)?;
+        for (link, target) in links {
+            if link.exists() && !link.is_symlink() {
+                ui::warn(&format!(
+                    "Skipped {} because it already exists",
+                    link.display()
+                ));
+                continue;
+            }
+
+            if link.is_symlink() {
+                fs::remove_file(&link)?;
+            }
+
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &link)?;
+
+            ui::success(
+                "Linked",
+                &format!("{} -> {}", link.display(), target.display()),
+            );
         }
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link)?;
-
-        ui::success(
-            "Linked",
-            &format!("{} -> {}", link.display(), target.display()),
-        );
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
-    let Some(links) = public_command_links(base_dir) else {
+    #[cfg(not(unix))]
+    {
+        let _ = base_dir;
         return Ok(());
-    };
-
-    for (link, target) in links {
-        if !link.is_symlink() {
-            continue;
-        }
-
-        if fs::read_link(&link)? == target {
-            fs::remove_file(&link)?;
-            ui::success("Removed", &link.display().to_string());
-        }
     }
 
-    Ok(())
+    #[cfg(unix)]
+    {
+        let Some(links) = public_command_links(base_dir) else {
+            return Ok(());
+        };
+
+        for (link, target) in links {
+            if !link.is_symlink() {
+                continue;
+            }
+
+            if fs::read_link(&link)? == target {
+                fs::remove_file(&link)?;
+                ui::success("Removed", &link.display().to_string());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn info(msg: &str) {
@@ -549,6 +575,7 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Remove microsandbox marker blocks from shell config files left by older installers.
+#[cfg(unix)]
 fn clean_legacy_shell_config() -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
 
@@ -571,7 +598,14 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows installers do not write Unix shell marker blocks.
+#[cfg(not(unix))]
+fn clean_legacy_shell_config() -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// Remove the marker block from a shell config file. Returns true if modified.
+#[cfg(unix)]
 fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
     let content = std::fs::read_to_string(path)?;
     if !content.contains(MARKER_START) {

@@ -19,9 +19,9 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use microsandbox_utils::{
-    LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION, bundle_download_url, libkrunfw_filename,
-};
+#[cfg(unix)]
+use microsandbox_utils::{LIBKRUNFW_ABI, libkrunfw_filename};
+use microsandbox_utils::{MSB_BINARY, PREBUILT_VERSION, bundle_download_url};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -148,6 +148,7 @@ fn install_runtime(bin_dir: &Path, lib_dir: &Path) -> Result<(), String> {
         other => return Err(format!("unsupported architecture: {other}")),
     };
 
+    #[cfg(unix)]
     let libkrunfw_name = libkrunfw_filename(os);
     let url = bundle_download_url(PREBUILT_VERSION, arch, os);
 

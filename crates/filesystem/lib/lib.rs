@@ -16,12 +16,14 @@
 //--------------------------------------------------------------------------------------------------
 
 pub mod agentd;
+#[cfg(unix)]
 pub mod backends;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 pub use backends::{
     dualfs::{
         BackendAFallbackToBackendBRead, BackendAOnly, CachePolicy as DualCachePolicy, DualFs,
@@ -34,6 +36,7 @@ pub use backends::{
     },
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};
+#[cfg(unix)]
 pub use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
