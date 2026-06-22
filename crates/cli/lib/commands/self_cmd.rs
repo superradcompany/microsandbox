@@ -130,7 +130,8 @@ pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     }
 }
 
-fn run_doctor() -> anyhow::Result<()> {
+/// Check local runtime files and host prerequisites.
+pub fn run_doctor() -> anyhow::Result<()> {
     if microsandbox::setup::is_installed() {
         done("Runtime dependencies are installed.");
     } else {
