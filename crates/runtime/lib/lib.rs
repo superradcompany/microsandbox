@@ -15,6 +15,7 @@ pub mod boot_error;
 pub mod console;
 pub mod exec_log;
 pub mod heartbeat;
+pub mod launch;
 pub mod logging;
 pub mod maintenance;
 pub mod metrics;
