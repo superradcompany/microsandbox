@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use std::{env, ptr};
 
@@ -160,7 +162,14 @@ pub async fn run(
     // Heartbeat/activity state.
     let mut activity = ActivityTracker::new();
     let (heartbeat_tx, heartbeat_rx) = watch::channel(heartbeat_snapshot(&state, &activity));
-    let heartbeat_task = tokio::spawn(heartbeat_writer_task(heartbeat_rx));
+    // The liveness pulse runs on a dedicated OS thread, NOT a Tokio task. On the
+    // single-threaded agent runtime a flood of exec output can monopolize the
+    // executor and starve a heartbeat *task*, freezing the pulse even though the
+    // agent is alive — which makes the host wrongly declare it unresponsive and
+    // kill the sandbox. A plain OS thread is scheduled by the guest kernel
+    // independently of the async runtime, so the pulse keeps ticking under load.
+    let heartbeat_shutdown = Arc::new(AtomicBool::new(false));
+    let heartbeat_thread = spawn_heartbeat_thread(heartbeat_rx, Arc::clone(&heartbeat_shutdown));
 
     // Send core.ready with boot timing data.
     let ready_time_ns = clock::boottime_ns();
@@ -341,7 +350,8 @@ pub async fn run(
         }
     }
 
-    heartbeat_task.abort();
+    heartbeat_shutdown.store(true, Ordering::Relaxed);
+    let _ = heartbeat_thread.join();
 
     Ok(())
 }
@@ -657,37 +667,64 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(t, MessageType::ClockSync)
 }
 
-async fn heartbeat_writer_task(snapshot_rx: watch::Receiver<HeartbeatSnapshot>) {
-    let mut heartbeat_seq = 0u64;
-    let mut last_activity_seq = snapshot_rx.borrow().activity_seq;
-    let mut last_activity = Utc::now();
-    let mut heartbeat_timer = time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+/// Spawns the heartbeat pulse on a dedicated OS thread.
+///
+/// This thread is intentionally outside the Tokio runtime: it reads the latest
+/// [`HeartbeatSnapshot`] (a lock-free `watch` borrow) and writes the heartbeat
+/// file with blocking `std::fs` once per [`HEARTBEAT_INTERVAL_SECS`]. Because it
+/// is an ordinary kernel-scheduled thread, a CPU-bound or I/O-saturated async
+/// runtime cannot delay the pulse — which is exactly the starvation that made
+/// the host kill busy-but-healthy sandboxes. The sleep is chunked so the thread
+/// observes the shutdown flag promptly when the agent loop exits.
+fn spawn_heartbeat_thread(
+    snapshot_rx: watch::Receiver<HeartbeatSnapshot>,
+    shutdown: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("agentd-heartbeat".to_string())
+        .spawn(move || {
+            let mut heartbeat_seq = 0u64;
+            let mut last_activity_seq = snapshot_rx.borrow().activity_seq;
+            let mut last_activity = Utc::now();
 
-    loop {
-        heartbeat_timer.tick().await;
-        if !heartbeat::heartbeat_dir_exists() {
-            continue;
-        }
+            let interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
+            let step = Duration::from_millis(100);
 
-        heartbeat_seq = heartbeat_seq.saturating_add(1);
-        let snapshot = snapshot_rx.borrow().clone();
-        let timestamp = Utc::now();
-        if snapshot.activity_seq != last_activity_seq {
-            last_activity_seq = snapshot.activity_seq;
-            last_activity = timestamp;
-        }
-        let heartbeat = Heartbeat {
-            heartbeat_seq,
-            activity_seq: snapshot.activity_seq,
-            timestamp,
-            last_activity,
-            active_exec_sessions: snapshot.active_exec_sessions,
-            active_fs_streams: snapshot.active_fs_streams,
-            active_tcp_streams: snapshot.active_tcp_streams,
-            activity_counters: snapshot.counters,
-        };
-        let _ = heartbeat::write_heartbeat(&heartbeat).await;
-    }
+            while !shutdown.load(Ordering::Relaxed) {
+                let mut slept = Duration::ZERO;
+                while slept < interval {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(step);
+                    slept += step;
+                }
+
+                if !heartbeat::heartbeat_dir_exists() {
+                    continue;
+                }
+
+                heartbeat_seq = heartbeat_seq.saturating_add(1);
+                let snapshot = snapshot_rx.borrow().clone();
+                let timestamp = Utc::now();
+                if snapshot.activity_seq != last_activity_seq {
+                    last_activity_seq = snapshot.activity_seq;
+                    last_activity = timestamp;
+                }
+                let heartbeat = Heartbeat {
+                    heartbeat_seq,
+                    activity_seq: snapshot.activity_seq,
+                    timestamp,
+                    last_activity,
+                    active_exec_sessions: snapshot.active_exec_sessions,
+                    active_fs_streams: snapshot.active_fs_streams,
+                    active_tcp_streams: snapshot.active_tcp_streams,
+                    activity_counters: snapshot.counters,
+                };
+                let _ = heartbeat::write_heartbeat(&heartbeat);
+            }
+        })
+        .expect("failed to spawn agentd heartbeat thread")
 }
 
 fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> HeartbeatSnapshot {
