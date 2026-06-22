@@ -377,6 +377,8 @@ msb uninstall ubuntu alpine   # Remove multiple
 Manage the msb installation itself.
 
 ```bash
+msb self doctor              # Check runtime and host prerequisites
+msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
 msb self uninstall            # Remove msb (with confirmation prompt)
@@ -385,6 +387,7 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
+| `doctor` (alias: `check`) | Check runtime files and host prerequisites such as Windows Hypervisor Platform |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `uninstall` | Remove msb, libkrunfw, and command links |
 

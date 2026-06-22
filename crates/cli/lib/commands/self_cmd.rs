@@ -37,6 +37,10 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
+    /// Check local runtime and host prerequisites.
+    #[command(visible_alias = "check")]
+    Doctor,
+
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
     Update(SelfUpdateArgs),
@@ -120,9 +124,31 @@ impl UninstallCategory {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
+        SelfCommand::Doctor => run_doctor(),
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,
     }
+}
+
+fn run_doctor() -> anyhow::Result<()> {
+    if microsandbox::setup::is_installed() {
+        done("Runtime dependencies are installed.");
+    } else {
+        anyhow::bail!("microsandbox runtime is not installed; run `msb self update`");
+    }
+
+    #[cfg(windows)]
+    {
+        match microsandbox::setup::verify_windows_host_prerequisites() {
+            Ok(()) => done("Windows Hypervisor Platform is available."),
+            Err(err) => {
+                return Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into());
+            }
+        }
+    }
+
+    done("Host setup is ready.");
+    Ok(())
 }
 
 async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
