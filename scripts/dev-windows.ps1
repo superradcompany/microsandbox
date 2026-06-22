@@ -89,6 +89,32 @@ function Remove-KnownPath {
     Remove-Item -LiteralPath $Path -Recurse -Force
 }
 
+function Assert-ExecutableNotRunning {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $extension = [System.IO.Path]::GetExtension($Path)
+    if ($extension -ine ".exe") {
+        return
+    }
+
+    $target = Normalize-PathSegment -Path $Path
+    $name = [System.IO.Path]::GetFileName($Path)
+    $processes = Get-CimInstance Win32_Process -Filter "name = '$name'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+                (Normalize-PathSegment -Path $_.ExecutablePath) -ieq $target
+        }
+
+    if ($processes) {
+        $ids = ($processes | ForEach-Object { $_.ProcessId }) -join ", "
+        throw "cannot replace $Path because it is still running (pid: $ids). Stop the active sandboxes or msb processes, then rerun just install."
+    }
+}
+
 function Copy-InstalledFile {
     param(
         [Parameter(Mandatory = $true)][string] $Source,
@@ -100,7 +126,9 @@ function Copy-InstalledFile {
 
     # Replace via a temporary sibling so interrupted installs do not leave a partially-written file.
     $tempDestination = "$Destination.tmp"
+    Assert-ExecutableNotRunning -Path $Destination
     Copy-Item -LiteralPath $Source -Destination $tempDestination -Force
+    Remove-KnownPath -Path $Destination
     Move-Item -LiteralPath $tempDestination -Destination $Destination -Force
 }
 
@@ -476,6 +504,10 @@ try {
         "uninstall" { Invoke-Uninstall }
         "clean" { Invoke-Clean }
     }
+} catch {
+    Write-Host "error: " -ForegroundColor Red -NoNewline
+    Write-Host $_.Exception.Message
+    exit 1
 } finally {
     Pop-Location
 }

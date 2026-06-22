@@ -21,7 +21,7 @@ use std::process::{Command, ExitCode};
 
 #[cfg(unix)]
 use microsandbox_utils::{LIBKRUNFW_ABI, libkrunfw_filename};
-use microsandbox_utils::{MSB_BINARY, PREBUILT_VERSION, bundle_download_url};
+use microsandbox_utils::{PREBUILT_VERSION, bundle_download_url, msb_binary_filename};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -79,7 +79,7 @@ fn resolve_or_install() -> Result<PathBuf, ExitCode> {
     let base_dir = home.join(".microsandbox");
     let bin_dir = base_dir.join("bin");
     let lib_dir = base_dir.join("lib");
-    let msb_path = bin_dir.join(MSB_BINARY);
+    let msb_path = bin_dir.join(msb_binary_filename(env::consts::OS));
 
     if msb_path.is_file() {
         return Ok(msb_path);

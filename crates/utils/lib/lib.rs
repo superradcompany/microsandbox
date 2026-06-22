@@ -179,6 +179,15 @@ pub fn libkrunfw_filename(os: &str) -> String {
     }
 }
 
+/// Returns the platform-specific msb executable filename.
+pub fn msb_binary_filename(os: &str) -> String {
+    if os == "windows" {
+        format!("{MSB_BINARY}.exe")
+    } else {
+        MSB_BINARY.to_string()
+    }
+}
+
 /// Returns the GitHub release download URL for libkrunfw.
 pub fn libkrunfw_download_url(version: &str, arch: &str, os: &str) -> String {
     let (target_os, ext) = if os == "macos" {

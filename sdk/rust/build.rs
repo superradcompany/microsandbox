@@ -16,11 +16,12 @@ use std::process::Command;
 use microsandbox_utils::LIBKRUNFW_ABI;
 #[cfg(all(feature = "prebuilt", not(windows)))]
 use microsandbox_utils::http_client;
-use microsandbox_utils::{
-    MSB_BINARY, libkrunfw_filename as utils_libkrunfw_filename, resolve_home,
-};
 #[cfg(all(feature = "prebuilt", not(windows)))]
 use microsandbox_utils::{PREBUILT_VERSION, bundle_download_url};
+use microsandbox_utils::{
+    libkrunfw_filename as utils_libkrunfw_filename,
+    msb_binary_filename as utils_msb_binary_filename, resolve_home,
+};
 
 fn main() {
     // Re-run if MSB_HOME changes - it determines where binaries are placed.
@@ -31,7 +32,7 @@ fn main() {
     // Re-run if the binaries are deleted so we can re-download.
     println!(
         "cargo:rerun-if-changed={}",
-        base_dir.join("bin").join(MSB_BINARY).display()
+        base_dir.join("bin").join(msb_binary_filename()).display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -54,12 +55,13 @@ fn install_prebuilt(base_dir: PathBuf) {
     let bin_dir = base_dir.join("bin");
     let lib_dir = base_dir.join("lib");
 
+    let msb_name = msb_binary_filename();
     let libkrunfw_name = libkrunfw_filename();
 
     // Skip if both binaries already exist and the installed msb version
     // matches this package version.
     if lib_dir.join(&libkrunfw_name).exists()
-        && installed_msb_version(&bin_dir.join(MSB_BINARY)).as_deref() == Some(PREBUILT_VERSION)
+        && installed_msb_version(&bin_dir.join(&msb_name)).as_deref() == Some(PREBUILT_VERSION)
     {
         return;
     }
@@ -67,7 +69,7 @@ fn install_prebuilt(base_dir: PathBuf) {
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
     fs::create_dir_all(&lib_dir).expect("failed to create lib dir");
 
-    if install_ci_local_bundle(&bin_dir, &lib_dir, &libkrunfw_name)
+    if install_ci_local_bundle(&bin_dir, &lib_dir, &msb_name, &libkrunfw_name)
         .expect("failed to install CI local microsandbox bundle")
     {
         return;
@@ -84,7 +86,7 @@ fn install_prebuilt(base_dir: PathBuf) {
 
     // Verify.
     assert!(
-        bin_dir.join(MSB_BINARY).exists(),
+        bin_dir.join(msb_name).exists(),
         "msb binary not found after extraction"
     );
     assert!(
@@ -95,6 +97,10 @@ fn install_prebuilt(base_dir: PathBuf) {
 
 fn libkrunfw_filename() -> String {
     utils_libkrunfw_filename(std::env::consts::OS)
+}
+
+fn msb_binary_filename() -> String {
+    utils_msb_binary_filename(std::env::consts::OS)
 }
 
 #[cfg(all(feature = "prebuilt", not(windows)))]
@@ -130,6 +136,7 @@ fn installed_msb_version(path: &Path) -> Option<String> {
 fn install_ci_local_bundle(
     bin_dir: &Path,
     lib_dir: &Path,
+    msb_name: &str,
     libkrunfw_name: &str,
 ) -> io::Result<bool> {
     if std::env::var_os("CI").is_none() && std::env::var_os("GITHUB_ACTIONS").is_none() {
@@ -140,19 +147,19 @@ fn install_ci_local_bundle(
         return Ok(false);
     };
 
-    let msb_src = build_dir.join(MSB_BINARY);
+    let msb_src = build_dir.join(msb_name);
     let lib_src = build_dir.join(libkrunfw_name);
     if !msb_src.is_file() || !lib_src.is_file() {
         return Ok(false);
     }
 
-    fs::copy(&msb_src, bin_dir.join(MSB_BINARY))?;
+    fs::copy(&msb_src, bin_dir.join(msb_name))?;
     fs::copy(&lib_src, lib_dir.join(libkrunfw_name))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin_dir.join(MSB_BINARY), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(bin_dir.join(msb_name), fs::Permissions::from_mode(0o755))?;
         fs::set_permissions(
             lib_dir.join(libkrunfw_name),
             fs::Permissions::from_mode(0o755),

@@ -744,10 +744,9 @@ pub fn resolve_msb_path(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
     };
 
     let home_probe = || -> Option<PathBuf> {
-        let home_bin = config
-            .home()
-            .join(microsandbox_utils::BIN_SUBDIR)
-            .join(microsandbox_utils::MSB_BINARY);
+        let home_bin = config.home().join(microsandbox_utils::BIN_SUBDIR).join(
+            microsandbox_utils::msb_binary_filename(std::env::consts::OS),
+        );
         home_bin.is_file().then_some(home_bin)
     };
 
@@ -923,7 +922,13 @@ fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
             continue;
         }
 
-        candidates.push(ancestor.join("build").join(microsandbox_utils::MSB_BINARY));
+        candidates.push(
+            ancestor
+                .join("build")
+                .join(microsandbox_utils::msb_binary_filename(
+                    std::env::consts::OS,
+                )),
+        );
     }
 
     dedupe_paths(&mut candidates);
