@@ -319,17 +319,41 @@ function Invoke-InstallDevDeps {
         Write-Warn "pre-commit was not found; setup will skip Git hook installation. Install it with pip install pre-commit."
     }
 
-    $libkrunfwKernel = Join-Path $RepoRoot "vendor\libkrunfw\kernel.c"
-    if (-not (Test-Path -LiteralPath $libkrunfwKernel) -and -not (Get-Command "docker.exe" -ErrorAction SilentlyContinue)) {
-        throw "docker.exe was not found. Docker Desktop is required when vendor/libkrunfw/kernel.c has not already been generated."
-    }
+    Require-Command -Name "docker.exe" -Hint "Install Docker Desktop. Windows development builds use Docker to build the Linux guest agentd binary."
 
     Write-Done "Windows development prerequisites are available."
 }
 
 function Invoke-BuildAgentd {
-    Write-Info "Using prebuilt agentd for Windows development builds."
-    Write-Done "agentd is embedded by the filesystem crate during cargo build."
+    Write-Info "Building agentd via Docker..."
+    Require-Command -Name "docker.exe" -Hint "Install Docker Desktop and make sure it is running."
+
+    docker.exe build -f Dockerfile.agentd -t microsandbox-agentd-build .
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    $containerId = $null
+    try {
+        $containerId = docker.exe create microsandbox-agentd-build /dev/null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) {
+            throw "docker create failed while staging agentd"
+        }
+
+        $agentdPath = Join-Path $BuildDir "agentd"
+        Remove-KnownPath -Path $agentdPath
+        docker.exe cp "${containerId}:/agentd" $agentdPath
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } finally {
+        if (-not [string]::IsNullOrWhiteSpace($containerId)) {
+            docker.exe rm $containerId | Out-Null
+        }
+    }
+
+    Write-Done "Built $BuildDir\agentd"
 }
 
 function Invoke-BuildLibkrunfw {

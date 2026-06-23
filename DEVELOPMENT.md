@@ -14,7 +14,7 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
   - Linux: `sudo apt install just git` and `pip install pre-commit` (or `sudo apt install pre-commit`)
   - macOS: `brew install just git pre-commit`
   - Windows: install Git for Windows, `just`, Visual Studio Build Tools with MSVC, Windows SDK, and C++ Clang tools; install `pre-commit` with `pip install pre-commit` if you want `just setup` to install Git hooks
-- **Docker** (macOS and Windows libkrunfw builds): Required for cross-compiling `agentd` on macOS and building the libkrunfw kernel bundle when it has not already been generated
+- **Docker** (macOS and Windows): Required for building the Linux guest `agentd` binary from non-Linux hosts and for building the libkrunfw kernel bundle when it has not already been generated
 - **Rust**: Installed automatically by `just setup` if missing, or install via [rustup](https://rustup.rs)
 
 ## Initial Setup
@@ -62,7 +62,7 @@ just build && just install
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
 
-On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64), `just build-agentd` uses the prebuilt embedded agentd path, and `just build-libkrunfw` delegates to `vendor/libkrunfw/scripts/build-windows.ps1`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
+On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64), `just build-agentd` builds the Linux guest agent through Docker like macOS, and `just build-libkrunfw` delegates to `vendor/libkrunfw/scripts/build-windows.ps1`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 
 For a release-optimized build:
 
@@ -79,7 +79,7 @@ just build release && just install
 | `just build-msb` | Build only the `msb` CLI (debug) |
 | `just build-msb release` | Build only the `msb` CLI (release) |
 | `just build-deps` | Build only binary dependencies (agentd + libkrunfw) |
-| `just build-agentd` | Build only agentd on Unix; use the prebuilt embedded agentd path on Windows |
+| `just build-agentd` | Build only the Linux guest agentd binary; Windows and macOS use Docker |
 | `just build-libkrunfw` | Build only libkrunfw |
 | `just install` | Install msb + libkrunfw to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows |
 | `just uninstall` | Remove installed binaries |

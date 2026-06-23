@@ -9,13 +9,16 @@ set windows-shell := ["cmd.exe", "/c"]
 [linux]
 setup: _setup-unix
 
+# Set up the development environment, build, and install. Prerequisites: just, git, and platform toolchains.
 [macos]
 setup: _setup-unix
 
+# Set up the development environment, build, and install. Prerequisites: just, git, and platform toolchains.
 [windows]
 setup:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 setup
 
+# Shared Unix setup flow used by Linux and macOS.
 _setup-unix: _install-dev-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -39,6 +42,7 @@ _setup-unix: _install-dev-deps
     echo ""
     echo "Setup complete!"
 
+# Install Linux development prerequisites.
 [linux]
 _install-dev-deps:
     #!/usr/bin/env bash
@@ -55,6 +59,7 @@ _install-dev-deps:
         source "$HOME/.cargo/env"
     fi
 
+# Install macOS development prerequisites.
 [macos]
 _install-dev-deps:
     #!/usr/bin/env bash
@@ -71,6 +76,7 @@ _install-dev-deps:
         source "$HOME/.cargo/env"
     fi
 
+# Check Windows development prerequisites.
 [windows]
 _install-dev-deps:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 install-dev-deps
@@ -101,7 +107,7 @@ build-agentd:
     docker cp "$id:/agentd" build/agentd
     touch build/agentd
 
-# Use the prebuilt agentd embedded by the filesystem crate during Windows development builds.
+# Build agentd as a static Linux/musl binary via Docker cross-compilation.
 [windows]
 build-agentd:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-agentd
@@ -269,9 +275,11 @@ install:
 [linux]
 uninstall: _uninstall-unix
 
+# Remove installed binaries from ~/.microsandbox/{bin,lib}/.
 [macos]
 uninstall: _uninstall-unix
 
+# Shared Unix uninstall flow used by Linux and macOS.
 _uninstall-unix:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -279,6 +287,7 @@ _uninstall-unix:
     rm -f ~/.microsandbox/lib/libkrunfw*
     echo "Removed msb and libkrunfw from ~/.microsandbox/"
 
+# Remove installed binaries from %USERPROFILE%\.microsandbox\{bin,lib}\.
 [windows]
 uninstall:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 uninstall
@@ -287,13 +296,16 @@ uninstall:
 [linux]
 clean: _clean-unix
 
+# Clean build artifacts.
 [macos]
 clean: _clean-unix
 
+# Shared Unix clean flow used by Linux and macOS.
 _clean-unix:
     rm -rf build
     cd vendor/libkrunfw && make clean || true
 
+# Clean Windows build artifacts.
 [windows]
 clean:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 clean
