@@ -91,7 +91,7 @@
 > ```
 >
 > ```sh
-> winget install SuperRad.Microsandbox
+> winget install SuperRadCompany.Microsandbox
 > ```
 >
 > ```sh
