@@ -495,6 +495,14 @@ impl SecretsHandler {
         )
     }
 
+    /// TLS-intercepted handler for connections tunnelled via HTTP CONNECT.
+    ///
+    /// The SNI is authoritative: the proxy already verified it against the
+    /// CONNECT authority, so no DNS-cache pin is required.
+    pub(crate) fn new_tls_intercepted_via_connect(config: &SecretsConfig, sni: &str) -> Self {
+        Self::new_inner(config, sni, true, None, false)
+    }
+
     /// Create a handler for a plain-HTTP (non-TLS) connection.
     ///
     /// Only substitutes secrets that have opted in with `require_tls_identity(false)`.
