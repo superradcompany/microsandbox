@@ -1,0 +1,94 @@
+---
+title: "Security model"
+description: "The trust boundary microsandbox enforces, what it protects, and what it leaves to you"
+icon: "shield-halved"
+---
+
+microsandbox runs code you don't trust, like AI agents, user submissions, plugins, scrapers, and build jobs, without handing any of it your host. This page describes the security model end to end: the boundary it draws, the guarantees that boundary gives you by default, and the things it deliberately leaves to you.
+
+The whole model rests on one idea. **The guest is untrusted, the host is trusted, and a hardware hypervisor sits between them.** Every interaction a workload has with the outside world, whether files, network, secrets, or the control channel, is brokered by host-side code on the trusted side of that boundary.
+
+## The trust boundary
+
+A sandbox is a microVM: a real virtual machine with its own Linux kernel, scheduled by a hardware hypervisor (KVM on Linux, Apple's Hypervisor.framework on macOS). It is **not** a container sharing your host kernel.
+
+<Frame>
+  <img className="block dark:hidden" src="/images/security/trust-boundary-light.svg" alt="An untrusted guest reaches the trusted host only through hypervisor-mediated virtio channels: console, network, files, and disks." />
+  <img className="hidden dark:block" src="/images/security/trust-boundary-dark.svg" alt="An untrusted guest reaches the trusted host only through hypervisor-mediated virtio channels: console, network, files, and disks." />
+</Frame>
+
+Two actors sit on either side of one boundary:
+
+| Side | What lives there | How it's treated |
+|---|---|---|
+| **Guest** | Your workload and its processes, the guest Linux kernel, and `agentd` (the in-guest agent) | Fully untrusted. Assume it is adversarial. |
+| **Host** | Your application or the `msb` CLI, plus the per-sandbox process that embeds the VMM, network stack, filesystem broker, and secret injection | Trusted. It enforces the boundary. |
+
+The guest reaches the host only through a fixed, small set of paravirtual (virtio) devices. It cannot make host syscalls, read host memory, or open host connections on its own. Everything it asks for is mediated by the trusted side.
+
+## What you get by default
+
+Before any configuration, a sandbox already gives you:
+
+- **Hardware-isolated execution.** Each sandbox has its own kernel and memory, scheduled by the hypervisor. A guest kernel compromise stays in the guest.
+- **A private filesystem.** The guest sees only its image plus whatever you explicitly mount. Your host filesystem stays invisible.
+- **An isolated writable root.** Writes land in a per-sandbox layer that never touches the shared image cache or another sandbox.
+- **A network that can't pivot inward.** The public internet is reachable, but private ranges, loopback, link-local, cloud metadata, and your host are all denied. Inbound traffic only reaches the ports you publish.
+- **Secrets that stay on the host.** Credentials you bind never enter the VM. The guest only ever sees a meaningless placeholder.
+
+<Note>
+One default surprises people: workloads run as **root inside the guest**. That is in-guest root, contained by the VM boundary. It is not a privilege on your host, and you can drop it. See [Isolation boundary](/security/isolation#in-guest-privilege) and [Hardening](/security/hardening).
+</Note>
+
+## Scope: what the boundary covers
+
+Being candid about the edges is more useful than a long list of features. Here is where the model defends you, where it does not, and what it expects you to own.
+
+### Defended by the model
+
+- **Guest-to-host escape.** The VM and hypervisor boundary is what keeps a compromised guest off your host.
+- **Sandbox-to-sandbox isolation.** Separate VMs, separate processes, separate writable layers, separate network gateways.
+- **Egress filtering and SSRF.** Workloads cannot reach your private network, host, or cloud metadata service by default.
+- **Secret leakage to unintended hosts.** A bound credential is only revealed at the host you allow it for.
+- **Host filesystem privacy.** The guest sees nothing of your host disk unless you mount it.
+
+### Out of scope, by design
+
+- **A compromised host.** If an attacker already controls your host, or the process that launches sandboxes, they are on the trusted side. Secret values live in host memory, and host configuration defines the policy. microsandbox protects the host from the guest, not a guest from a hostile host.
+- **The hypervisor and CPU.** The model trusts KVM, Hypervisor.framework, and the silicon to enforce VM isolation. A hypervisor or hardware vulnerability sits below this boundary.
+- **What an allowed destination does with your data.** If you allow egress to `api.example.com` and inject a secret there, that endpoint receives the real credential. The model controls *where* data can go, not what the far side does with it.
+- **Image provenance.** Pulled content is verified against its declared digest, but signatures and attestations are not checked. The registry you pull from is part of your trusted base. See [Filesystem & images](/security/filesystem#image-supply-chain).
+- **Self-inflicted denial of service.** A workload can exhaust its own CPU and memory within the limits you set. That doesn't affect other sandboxes or the host.
+
+### Your responsibility
+
+- Pick a network policy that matches your threat model. The default is sensible, but high-stakes workloads often want deny-by-default.
+- Drop in-guest privileges when the workload doesn't need root.
+- Pin images you trust, and mount only what's needed, read-only where possible.
+- Keep the host that runs sandboxes secure. It is the trusted anchor for everything above.
+
+## How the model is enforced
+
+Each subsystem carries part of the boundary. The pages below go deep on each, candidly including the limits.
+
+<CardGroup cols={2}>
+  <Card title="Isolation boundary" icon="microchip" href="/security/isolation">
+    The microVM, the host-guest channel, and in-guest privilege.
+  </Card>
+  <Card title="Filesystem & images" icon="hard-drive" href="/security/filesystem">
+    Private root, mounts, snapshots, and image supply chain.
+  </Card>
+  <Card title="Network defenses" icon="network-wired" href="/security/network">
+    Egress filtering, SSRF, DNS rebinding, and metadata.
+  </Card>
+  <Card title="Secret handling" icon="key" href="/security/secrets">
+    How credentials stay on the host, and the exact guarantee.
+  </Card>
+  <Card title="Hardening" icon="user-shield" href="/security/hardening">
+    Dial the controls to match your threat level.
+  </Card>
+</CardGroup>
+
+## Reporting a vulnerability
+
+If you find a way across any of these boundaries, like a guest-to-host escape, a cross-sandbox leak, an egress-filter bypass, or a secret revealed outside its intended host, we want to hear about it. Use [GitHub's private vulnerability reporting](https://github.com/superradcompany/microsandbox/security/advisories/new) or email `security@superrad.company`. The full process and scope are in the project's [security policy](https://github.com/superradcompany/microsandbox/blob/main/SECURITY.md).

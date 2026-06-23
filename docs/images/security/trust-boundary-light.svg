@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 420" width="680" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>Trust boundary: the hypervisor mediates every guest interaction</title>
+  <text x="40" y="34" font-size="17" font-weight="600" fill="#1f2937">Trust boundary: the hypervisor mediates every guest interaction</text>
+  <text x="340" y="92" text-anchor="middle" font-size="13" fill="#6b7280">Hypervisor · KVM / HVF</text>
+
+  <rect x="40" y="70" width="200" height="300" rx="10" fill="#d85a30" fill-opacity="0.07" stroke="#d85a30" stroke-opacity="0.5" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="140" y="98" text-anchor="middle" font-size="15" font-weight="600" fill="#C2410C">Guest (untrusted)</text>
+  <rect x="440" y="70" width="200" height="300" rx="10" fill="#1d9e75" fill-opacity="0.07" stroke="#1d9e75" stroke-opacity="0.5" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="540" y="98" text-anchor="middle" font-size="15" font-weight="600" fill="#0F766E">Host (trusted)</text>
+
+  <rect x="58" y="112" width="164" height="56" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="140" y="136" text-anchor="middle" font-size="14" fill="#1f2937">Workload code</text>
+  <text x="140" y="154" text-anchor="middle" font-size="12" fill="#6b7280">untrusted program</text>
+  <rect x="58" y="182" width="164" height="56" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="140" y="206" text-anchor="middle" font-size="14" fill="#1f2937">agentd</text>
+  <text x="140" y="224" text-anchor="middle" font-size="12" fill="#6b7280">PID 1 · runs as root</text>
+  <rect x="58" y="252" width="164" height="56" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="140" y="276" text-anchor="middle" font-size="14" fill="#1f2937">Guest Linux kernel</text>
+  <text x="140" y="294" text-anchor="middle" font-size="12" fill="#6b7280">from libkrunfw</text>
+
+  <rect x="458" y="112" width="164" height="46" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="540" y="132" text-anchor="middle" font-size="14" fill="#1f2937">msb process</text>
+  <text x="540" y="148" text-anchor="middle" font-size="12" fill="#6b7280">embeds the VMM</text>
+  <rect x="458" y="170" width="164" height="46" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="540" y="190" text-anchor="middle" font-size="14" fill="#1f2937">Network stack</text>
+  <text x="540" y="206" text-anchor="middle" font-size="12" fill="#6b7280">policy + smoltcp</text>
+  <rect x="458" y="228" width="164" height="46" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="540" y="248" text-anchor="middle" font-size="14" fill="#1f2937">Secret injection</text>
+  <text x="540" y="264" text-anchor="middle" font-size="12" fill="#6b7280">real values stay here</text>
+  <rect x="458" y="286" width="164" height="46" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="540" y="306" text-anchor="middle" font-size="14" fill="#1f2937">Filesystem broker</text>
+  <text x="540" y="322" text-anchor="middle" font-size="12" fill="#6b7280">virtiofs + images</text>
+
+  <rect x="282" y="116" width="116" height="46" rx="6" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="340" y="136" text-anchor="middle" font-size="14" fill="#1f2937">Control</text>
+  <text x="340" y="152" text-anchor="middle" font-size="12" fill="#6b7280">virtio-console</text>
+  <rect x="282" y="176" width="116" height="46" rx="6" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="340" y="196" text-anchor="middle" font-size="14" fill="#1f2937">Network</text>
+  <text x="340" y="212" text-anchor="middle" font-size="12" fill="#6b7280">virtio-net</text>
+  <rect x="282" y="236" width="116" height="46" rx="6" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="340" y="256" text-anchor="middle" font-size="14" fill="#1f2937">Files</text>
+  <text x="340" y="272" text-anchor="middle" font-size="12" fill="#6b7280">virtiofs</text>
+  <rect x="282" y="296" width="116" height="46" rx="6" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="340" y="316" text-anchor="middle" font-size="14" fill="#1f2937">Disks</text>
+  <text x="340" y="332" text-anchor="middle" font-size="12" fill="#6b7280">virtio-blk</text>
+
+  <line x1="240" y1="139" x2="282" y2="139" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="240" y1="199" x2="282" y2="199" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="240" y1="259" x2="282" y2="259" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="240" y1="319" x2="282" y2="319" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="398" y1="139" x2="440" y2="139" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="398" y1="199" x2="440" y2="199" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="398" y1="259" x2="440" y2="259" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+  <line x1="398" y1="319" x2="440" y2="319" stroke="#111827" stroke-opacity="0.28" stroke-width="1"/>
+
+  <rect x="40" y="390" width="12" height="12" rx="3" fill="#d85a30" fill-opacity="0.18" stroke="#d85a30" stroke-opacity="0.6" stroke-width="1"/>
+  <text x="58" y="400" font-size="12" fill="#6b7280">untrusted</text>
+  <rect x="150" y="390" width="12" height="12" rx="3" fill="#1d9e75" fill-opacity="0.18" stroke="#1d9e75" stroke-opacity="0.6" stroke-width="1"/>
+  <text x="168" y="400" font-size="12" fill="#6b7280">trusted control</text>
+  <rect x="320" y="390" width="12" height="12" rx="3" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="338" y="400" font-size="12" fill="#6b7280">hypervisor-mediated channel</text>
+</svg>

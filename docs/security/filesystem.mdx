@@ -1,0 +1,75 @@
+---
+title: "Filesystem & images"
+description: "Private root, mounts, snapshots, and the image supply chain"
+icon: "hard-drive"
+---
+
+A sandbox's storage is private by default. The guest sees its image and nothing of your host unless you choose to share it. This page covers how that privacy is enforced, what changes when you mount or share storage, and the one place the trust chain reaches outside your host, which is image content.
+
+## Private by default
+
+When a sandbox boots from an OCI image, the guest sees exactly two things:
+
+- the image's root filesystem, and
+- whatever you explicitly mount, such as bind directories, named volumes, or disk images.
+
+Nothing else of your host disk is visible. There is no implicit passthrough of host paths, environment, or credentials into the guest.
+
+## An isolated writable root
+
+The root filesystem is a layered view:
+
+- **Read-only image layers** from a shared, content-addressed cache. Many sandboxes boot from the same cached layers without copying them.
+- A **per-sandbox writable layer** on top. Every write the guest makes lands here.
+
+Writes never modify the cached image and are never visible to another sandbox. Two sandboxes from the same image start identical and diverge privately. Delete a sandbox and its writable layer goes with it.
+
+<Frame>
+  <img className="block dark:hidden" src="/images/security/rootfs-layers-light.svg" alt="Each sandbox has its own private writable layer stacked over a shared, read-only image cache." />
+  <img className="hidden dark:block" src="/images/security/rootfs-layers-dark.svg" alt="Each sandbox has its own private writable layer stacked over a shared, read-only image cache." />
+</Frame>
+
+## Bind mounts and volumes
+
+When you *do* share a host directory, it's exposed through virtio-fs, a filesystem passthrough, not by handing the guest your host's raw disk. The broker that serves it runs on the trusted host side and enforces containment:
+
+- **Path containment.** On Linux 5.6+, lookups use `openat2` with `RESOLVE_BENEATH`, which atomically blocks `..` traversal, symlink escapes out of the shared root, and procfs magic-link tricks. On older kernels and on macOS, the broker falls back to `O_NOFOLLOW`, which still blocks symlink traversal but is a weaker guard against crafted `..` sequences. Prefer a recent Linux kernel for untrusted workloads that get *writable* bind mounts.
+- **Read-only means read-only.** A read-only mount is enforced on the host side, so even a privileged guest process that tries to remount inside the VM still cannot write through it.
+- **Identity virtualization.** By default the guest doesn't see your host's real uid/gid/mode on shared files. A stat-virtualization layer presents sandbox-local ownership and stops guest permission changes from rewriting host inode identity.
+
+Mount only what a workload needs, read-only whenever that's enough. See [Volumes](/sandboxes/volumes) for the configuration and the strict, relaxed, and off identity modes.
+
+## Sharing storage between sandboxes
+
+Sharing is opt-in, and it changes the isolation story:
+
+- **Directory-backed named volumes** are shared live. Every sandbox that mounts one sees the others' writes, and isolation *within* the volume is ordinary filesystem permissions, not a VM boundary.
+- **Disk-backed volumes and disk images** are block devices. Mounting one writable into two sandboxes at once risks filesystem corruption, so use a single writer, or mount read-only where you intend to share.
+
+Rule of thumb: a shared volume is a deliberate hole in sandbox-to-sandbox isolation. Treat anything written there as visible to every sandbox that mounts it.
+
+## Snapshots
+
+A snapshot captures a sandbox's writable layer plus a manifest that pins the base image it was built on. Restoring gives a *new, independent* sandbox its own writable copy. Snapshots don't capture memory, processes, or network state. They are purely a disk-state artifact.
+
+A few things worth knowing:
+
+- A snapshot is a plain file artifact on your host, protected by host filesystem permissions like any other file. Anyone who can read it can read the sandbox's disk state.
+- An optional integrity hash can seal a snapshot so tampering is detectable on import. It is not on by default for local snapshots.
+- Snapshots use sparse images. As with any block-level capture, treat the artifact as potentially containing anything the sandbox wrote, including data a later process deleted at the file level.
+
+See [Snapshots](/sandboxes/snapshots) for the workflow.
+
+## Image supply chain
+
+This is the one place the trust chain reaches outside your host, so it deserves a clear statement.
+
+When microsandbox pulls or loads an image, it verifies that each layer's content matches the **SHA-256 digest declared in the manifest**. That catches corruption and accidental mismatch, and lets you pin an exact image by digest for reproducibility.
+
+What it does **not** do is verify signatures or provenance. There is no cosign, Notary, or attestation check. Digest verification proves the bytes match what the manifest claims, but it does not prove the manifest came from who you think. In practice:
+
+- The registry you pull from is part of your trusted base. A compromised registry, or a man-in-the-middle on an unauthenticated pull, can serve content you didn't intend.
+- Pin images by digest, not just a moving tag, when you need reproducibility, and pull from registries you control or trust.
+- Image contents run as untrusted code inside the VM regardless. The supply-chain risk here is running the *wrong* image, not that image escaping the sandbox.
+
+See [Images](/images/overview) for pulling, caching, and digests.
