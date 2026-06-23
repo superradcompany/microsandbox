@@ -543,67 +543,63 @@ export type LogSource = "stdout" | "stderr" | "output" | "system";
 
 export type CloudCreateSandboxRequest = {
 /**
- * User-facing sandbox name.
+ * Unique sandbox name.
  */
 name: string,
 /**
- * OCI image reference to run.
+ * Root filesystem source.
  */
-image: string,
+image: RootfsSource,
 /**
- * Virtual CPU count.
+ * CPU and memory resources.
  */
-vcpus: number,
+resources: SandboxResources,
 /**
- * Guest memory in MiB.
+ * Guest runtime options.
  */
-memory_mib: number,
+runtime: SandboxRuntimeOptions,
 /**
- * Environment variables injected into the sandbox.
+ * Environment variables visible to commands in the sandbox.
  */
-env: { [key in string]: string },
+env: Array<EnvVar>,
 /**
- * Whether the sandbox should be removed when its allocation terminates.
+ * User-defined labels attached to the sandbox.
  */
-ephemeral: boolean,
+labels: { [key in string]: string },
 /**
- * Working directory inside the guest.
+ * Sandbox-wide resource limits inherited by guest processes.
  */
-workdir?: string | null,
+rlimits: Array<Rlimit>,
 /**
- * Default shell inside the guest.
+ * Volume mounts.
  */
-shell?: string | null,
+mounts: Array<VolumeMount>,
 /**
- * OCI entrypoint override.
+ * Rootfs patches applied before VM start.
  */
-entrypoint?: Array<string> | null,
+patches: Array<Patch>,
 /**
- * Guest hostname override.
+ * Network specification.
  */
-hostname?: string | null,
+network: NetworkSpec,
 /**
- * Guest user identity.
+ * Hand off PID 1 to a guest init binary after agentd setup.
  */
-user?: string | null,
+init: HandoffInit | null,
 /**
- * Runtime log verbosity.
+ * Pull policy for OCI images.
  */
-log_level?: string | null,
+pull_policy: PullPolicy,
 /**
- * Named scripts mounted into the guest.
+ * In-guest security profile.
  */
-scripts?: { [key in string]: string },
+security_profile: SecurityProfile,
 /**
- * Hard sandbox lifetime cap in seconds.
+ * Sandbox lifecycle policy.
  */
-max_duration_secs?: number | null,
-/**
- * Idle timeout in seconds.
- */
-idle_timeout_secs?: number | null, };
+lifecycle: SandboxPolicy, };
 
-export type CloudSandbox = {
+export type CloudCreateSandboxResponse = {
 /**
  * Server-side UUID.
  */
@@ -613,9 +609,13 @@ id: string,
  */
 org_id: string,
 /**
- * User-facing sandbox name.
+ * User-facing, per-org sandbox name.
  */
 name: string,
+/**
+ * Canonical, resolved SSH username token.
+ */
+slug: string,
 /**
  * Current lifecycle status.
  */

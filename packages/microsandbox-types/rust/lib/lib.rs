@@ -14,8 +14,8 @@ mod validation;
 //--------------------------------------------------------------------------------------------------
 
 pub use cloud::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
 };
 pub use domain::{
     DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB,

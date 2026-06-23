@@ -28,6 +28,7 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// Disk image format for virtio-blk root filesystems and volume mounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum DiskImageFormat {
     /// QEMU Copy-on-Write v2.
     Qcow2,
@@ -66,6 +67,7 @@ pub enum RootfsSource {
 /// OCI root filesystem source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
@@ -78,6 +80,7 @@ pub struct OciRootfsSource {
 /// Controls when an OCI registry is contacted for manifest freshness.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
     #[default]
@@ -99,6 +102,7 @@ pub enum PullPolicy {
 /// Serializes/deserializes as the lowercase variant name (`"strict"`, `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum StatVirtualization {
     /// Fail-closed: probe the host backing path; require xattr support.
@@ -114,6 +118,7 @@ pub enum StatVirtualization {
 /// Serializes/deserializes as the lowercase variant name (`"private"`, `"mirror"`) to align with the CLI and NAPI spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum HostPermissions {
     /// Guest chmod stays in the metadata overlay only.
@@ -125,6 +130,7 @@ pub enum HostPermissions {
 /// Sandbox-level in-guest security profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Preserve normal guest-root semantics.
@@ -142,6 +148,7 @@ pub enum SecurityProfile {
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
@@ -164,6 +171,7 @@ pub struct MountOptions {
 /// Storage kind for a named volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum VolumeKind {
     /// Directory-backed named volume mounted through virtiofs.
     Directory,
@@ -175,6 +183,7 @@ pub enum VolumeKind {
 /// Configuration for creating a named volume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct VolumeSpec {
     /// Volume name.
     pub name: String,
@@ -195,6 +204,7 @@ pub struct VolumeSpec {
 /// Sandbox-time behavior for a named volume mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum NamedVolumeMode {
     /// Require the named volume to already exist.
     Existing,
@@ -209,6 +219,7 @@ pub enum NamedVolumeMode {
 /// Creation metadata for sandbox-time named volume provisioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct NamedVolumeCreate {
     /// Creation behavior for this named volume mount.
     pub mode: NamedVolumeMode,
@@ -232,12 +243,14 @@ pub struct NamedVolumeCreate {
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", ts(tag = "type"))]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
     Bind {
         /// Host path to bind mount.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -281,6 +294,7 @@ pub enum VolumeMount {
     DiskImage {
         /// Host path to the disk image file.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -296,6 +310,7 @@ pub enum VolumeMount {
 /// Rootfs patch applied before VM startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum Patch {
     /// Write text content to a file.
     Text {
@@ -325,6 +340,7 @@ pub enum Patch {
     CopyFile {
         /// Host path to copy from.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -338,6 +354,7 @@ pub enum Patch {
     CopyDir {
         /// Host directory to copy from.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -387,6 +404,7 @@ pub enum Patch {
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct NetworkSpec {
     /// Whether networking is enabled for this sandbox.
@@ -425,6 +443,7 @@ pub struct NetworkSpec {
 /// A published port mapping between host and guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PublishedPortSpec {
     /// Host-side port to bind.
     pub host_port: u16,
@@ -443,6 +462,7 @@ pub struct PublishedPortSpec {
 /// Transport protocol for a published port.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum PortProtocol {
     /// TCP.
     #[default]
@@ -461,9 +481,11 @@ pub enum PortProtocol {
 /// Fully-assembled handoff-init specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct HandoffInit {
     /// Init binary: absolute path inside the guest rootfs, or the literal `auto`.
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub cmd: PathBuf,
 
     /// Supplemental argv. `argv[0]` is implicitly `cmd`.
@@ -482,6 +504,7 @@ pub struct HandoffInit {
 /// Sandbox lifecycle policy.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SandboxPolicy {
     /// Whether the sandbox is ephemeral.
     ///
@@ -549,12 +572,14 @@ pub struct SnapshotSpec {
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct SandboxSpec {
     /// Unique sandbox name.
     pub name: String,
 
     /// Root filesystem source.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
     pub image: RootfsSource,
 
     /// CPU and memory resources.
@@ -597,6 +622,7 @@ pub struct SandboxSpec {
 /// CPU and memory resources for a sandbox.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct SandboxResources {
     /// Number of virtual CPUs.
@@ -609,6 +635,7 @@ pub struct SandboxResources {
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct SandboxRuntimeOptions {
     /// Working directory inside the guest.
@@ -645,6 +672,7 @@ pub struct SandboxRuntimeOptions {
 /// Environment variable entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EnvVar {
     /// Environment variable name.
     pub key: String,
@@ -656,6 +684,7 @@ pub struct EnvVar {
 /// Runtime log verbosity for sandbox specs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxLogLevel {
     /// Emit only error logs.
@@ -681,6 +710,7 @@ pub enum SandboxLogLevel {
 /// POSIX resource limit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
     Cpu,
@@ -719,6 +749,7 @@ pub enum RlimitResource {
 /// A POSIX resource limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Rlimit {
     /// Resource type.
     pub resource: RlimitResource,
@@ -737,6 +768,7 @@ pub struct Rlimit {
 /// Source tag on a captured log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LogSource {
     /// Captured from a session's stdout (pipe mode).

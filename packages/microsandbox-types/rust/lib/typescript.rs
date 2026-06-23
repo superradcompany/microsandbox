@@ -3,8 +3,8 @@
 use ts_rs::TS;
 
 use crate::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
     HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkSpec,
     OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
     RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
@@ -73,9 +73,9 @@ pub fn declarations() -> Vec<String> {
         Rlimit::decl(&cfg),
         LogSource::decl(&cfg),
         CloudCreateSandboxRequest::decl(&cfg),
-        CloudSandbox::decl(&cfg),
+        CloudCreateSandboxResponse::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
-        CloudPaginated::<CloudSandbox>::decl(&cfg),
+        CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
         CloudErrorDetails::decl(&cfg),
