@@ -19,9 +19,9 @@ use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
 use microsandbox_filesystem::{
-    BindIdentityMapHandle, DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs,
-    StatVirtualization,
+    BindIdentityMapHandle, DynFileSystem, HostPermissions, StatVirtualization,
 };
+use microsandbox_filesystem::{PassthroughConfig, PassthroughFs};
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
     codec,
@@ -1172,8 +1172,14 @@ fn build_vm(
         }
         #[cfg(windows)]
         {
-            let runtime_dir = config.runtime_dir.clone();
-            builder = builder.fs(move |fs| fs.tag(&runtime_tag).path(&runtime_dir));
+            let cfg = PassthroughConfig {
+                root_dir: config.runtime_dir.clone(),
+                inject_init: false,
+                ..Default::default()
+            };
+            let backend = PassthroughFs::new(cfg)
+                .map_err(|e| RuntimeError::Custom(format!("runtime mount: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
         }
     }
 

@@ -1,6 +1,6 @@
 //! Extended attribute operations: setxattr, getxattr, listxattr, removexattr.
 //!
-//! The `user.containers.override_stat` xattr is hidden from the guest: get/set/remove
+//! The `user.msb.override_stat` xattr is hidden from the guest: get/set/remove
 //! return `EACCES`, and it is filtered from listxattr results. This is secure because the
 //! FUSE protocol guarantees ALL guest xattr operations go through these handlers — there is
 //! no direct path from the guest to the host filesystem.
@@ -182,7 +182,7 @@ pub(crate) fn do_getxattr(
 
 /// List extended attribute names.
 ///
-/// Filters out the `user.containers.override_stat` key from the returned list.
+/// Filters out the `user.msb.override_stat` key from the returned list.
 pub(crate) fn do_listxattr(
     fs: &PassthroughFs,
     _ctx: Context,
