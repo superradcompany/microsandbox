@@ -1,0 +1,16 @@
+# nextest configuration.
+#
+# The VM integration suites (`--run-ignored`) boot real microVMs on a shared
+# self-hosted KVM runner. A single test that loses relay/session readiness or
+# stalls on a guest-network operation (e.g. the DoT forwarder) otherwise hangs
+# with no internal timeout until the 45-minute job timeout cancels the whole
+# job — wasting CI and never naming the culprit test.
+#
+# Bound every test: warn once it runs past `period`, then SIGTERM/SIGKILL it
+# after `terminate-after` periods. A hang now fails fast as an attributable
+# test failure (at ~180s, around the agent-relay readiness ceiling) and the
+# rest of the suite still runs. The ceiling is far above any healthy test
+# (microVM boot is sub-second; full create/teardown ~9s), so it does not
+# terminate legitimately-slow tests.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3 }
