@@ -13,8 +13,6 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
