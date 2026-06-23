@@ -54,6 +54,16 @@ pub const AGENT_PORT_NAME: &str = "agent";
 /// Virtiofs tag for the runtime filesystem (scripts, heartbeat).
 pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 
+/// Guest-write byte budget for the runtime (`/.msb`) virtiofs mount.
+///
+/// `/.msb` is a host↔guest control channel, not bulk storage: the only
+/// guest-written payload is a ~1 KiB heartbeat (host-written scripts and TLS
+/// certs form the mount's baseline and are not charged). This 16 MiB ceiling is
+/// therefore almost entirely abuse headroom — it exists so the channel cannot be
+/// used to fill the host disk. It is intentionally a fixed constant rather than
+/// a user-facing knob.
+pub const RUNTIME_FS_QUOTA_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 

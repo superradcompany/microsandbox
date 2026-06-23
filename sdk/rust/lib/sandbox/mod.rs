@@ -7,7 +7,7 @@
 
 pub(crate) mod attach;
 mod builder;
-mod config;
+pub(crate) mod config;
 pub mod exec;
 pub mod fs;
 mod handle;

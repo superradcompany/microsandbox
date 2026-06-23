@@ -64,6 +64,10 @@ pub(crate) fn do_create(
         return Err(platform::eacces());
     }
 
+    // Snapshot the quota baseline before creating the file, so the new file's
+    // bytes are charged as guest growth rather than absorbed into the baseline.
+    fs.quota_ensure_baseline();
+
     let parent_fd = inode::get_inode_fd(fs, parent)?;
 
     // Apply umask.
