@@ -11,7 +11,7 @@ DNS queries from the sandbox are intercepted on the host. Rather than letting th
 - tune the query timeout,
 - power domain-based policy rules (by mapping responses back to IPs).
 
-The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see the [security model](/networking/security-model).
+The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see [network defenses](/security/network).
 
 ## DNS as egress
 
@@ -199,5 +199,5 @@ Because of that, domain rules only take effect on connections that are preceded 
 
 ## See also
 
-- [Security model](/networking/security-model): rebinding protection and DNS-to-IP binding (TOCTOU defense)
+- [Network defenses](/security/network): rebinding protection and DNS-to-IP binding (TOCTOU defense)
 - [TLS interception](/networking/tls): domains that get intercepted also go through TLS inspection

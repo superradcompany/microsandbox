@@ -253,13 +253,36 @@ pub async fn spawn_sandbox(
                 if startup_write_fd.is_some() {
                     detach_from_launcher_session()?;
                 }
-                dup_inherited_fd(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD)?;
-                if let Some(fd) = parent_watch_fd {
-                    dup_inherited_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
+
+                let mut config_mapping =
+                    InheritedFdMapping::new(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD);
+                let mut parent_watch_mapping = parent_watch_fd.map(|fd| {
+                    InheritedFdMapping::new(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)
+                });
+                let mut startup_mapping = startup_write_fd
+                    .map(|fd| InheritedFdMapping::new(fd, microsandbox_runtime::vm::STARTUP_FD));
+
+                // Parent runtimes such as Vitest or Go tests can have enough
+                // open files that pipe/tempfile allocation lands on one of the
+                // fixed inherited fd numbers. Move those sources away before
+                // any dup2 call can overwrite a later source fd.
+                let mut next_spare_fd = microsandbox_runtime::vm::STARTUP_FD + 1;
+                move_reserved_source_fd(&mut config_mapping, &mut next_spare_fd)?;
+                if let Some(mapping) = parent_watch_mapping.as_mut() {
+                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
-                if let Some(fd) = startup_write_fd {
-                    dup_inherited_fd(fd, microsandbox_runtime::vm::STARTUP_FD)?;
+                if let Some(mapping) = startup_mapping.as_mut() {
+                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
+
+                dup_inherited_fd(config_mapping.src, config_mapping.dst)?;
+                if let Some(mapping) = parent_watch_mapping {
+                    dup_inherited_fd(mapping.src, mapping.dst)?;
+                }
+                if let Some(mapping) = startup_mapping {
+                    dup_inherited_fd(mapping.src, mapping.dst)?;
+                }
+
                 Ok(())
             });
         }
@@ -454,6 +477,46 @@ fn write_launch_config_fd(launch: &LaunchConfig) -> MicrosandboxResult<std::fs::
     file.flush()?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InheritedFdMapping {
+    src: i32,
+    dst: i32,
+}
+
+impl InheritedFdMapping {
+    fn new(src: i32, dst: i32) -> Self {
+        Self { src, dst }
+    }
+}
+
+fn move_reserved_source_fd(
+    mapping: &mut InheritedFdMapping,
+    next_spare_fd: &mut i32,
+) -> std::io::Result<()> {
+    if !inherited_fd_source_needs_spare(mapping.src, mapping.dst) {
+        return Ok(());
+    }
+
+    let spare = unsafe { libc::fcntl(mapping.src, libc::F_DUPFD, *next_spare_fd) };
+    if spare < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    mapping.src = spare;
+    *next_spare_fd = spare.saturating_add(1);
+    Ok(())
+}
+
+fn inherited_fd_source_needs_spare(src: i32, dst: i32) -> bool {
+    src != dst
+        && matches!(
+            src,
+            microsandbox_runtime::vm::CONFIG_FD
+                | microsandbox_runtime::vm::PARENT_WATCH_FD
+                | microsandbox_runtime::vm::STARTUP_FD
+        )
 }
 
 fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
@@ -1455,6 +1518,38 @@ mod tests {
             SandboxConfig,
         },
     };
+
+    #[test]
+    fn test_inherited_fd_source_needs_spare_for_cross_reserved_fd() {
+        assert!(super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::CONFIG_FD,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+        ));
+        assert!(super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            microsandbox_runtime::vm::STARTUP_FD,
+        ));
+    }
+
+    #[test]
+    fn test_inherited_fd_source_keeps_own_reserved_fd_in_place() {
+        assert!(!super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::CONFIG_FD,
+            microsandbox_runtime::vm::CONFIG_FD,
+        ));
+        assert!(!super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+        ));
+    }
+
+    #[test]
+    fn test_inherited_fd_source_leaves_ordinary_fd_in_place() {
+        assert!(!super::inherited_fd_source_needs_spare(
+            42,
+            microsandbox_runtime::vm::CONFIG_FD,
+        ));
+    }
 
     //----------------------------------------------------------------------------------------------
     // Functions: Helpers

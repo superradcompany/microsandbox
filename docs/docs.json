@@ -56,8 +56,19 @@
             "pages": [
               "networking/overview",
               "networking/dns",
-              "networking/tls",
-              "networking/security-model"
+              "networking/tls"
+            ]
+          },
+          {
+            "group": "Security",
+            "icon": "shield-halved",
+            "pages": [
+              "security/overview",
+              "security/isolation",
+              "security/filesystem",
+              "security/network",
+              "security/secrets",
+              "security/hardening"
             ]
           },
           {

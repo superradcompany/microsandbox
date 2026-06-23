@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 250" width="680" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#111827" stroke-opacity="0.5" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+  <title>Each sandbox writes to its own layer over a shared base</title>
+  <text x="40" y="34" font-size="17" font-weight="600" fill="#1f2937">Each sandbox writes to its own layer over a shared base</text>
+
+  <rect x="80" y="80" width="220" height="56" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="190" y="106" text-anchor="middle" font-size="14" fill="#1f2937">Sandbox A</text>
+  <text x="190" y="124" text-anchor="middle" font-size="12" fill="#6b7280">writable layer (private)</text>
+
+  <rect x="380" y="80" width="220" height="56" rx="6" fill="#111827" fill-opacity="0.06" stroke="#111827" stroke-opacity="0.18" stroke-width="1"/>
+  <text x="490" y="106" text-anchor="middle" font-size="14" fill="#1f2937">Sandbox B</text>
+  <text x="490" y="124" text-anchor="middle" font-size="12" fill="#6b7280">writable layer (private)</text>
+
+  <line x1="190" y1="138" x2="190" y2="174" stroke="#111827" stroke-opacity="0.45" stroke-width="1.3" marker-end="url(#ah)"/>
+  <line x1="490" y1="138" x2="490" y2="174" stroke="#111827" stroke-opacity="0.45" stroke-width="1.3" marker-end="url(#ah)"/>
+
+  <rect x="80" y="176" width="520" height="56" rx="6" fill="#111827" fill-opacity="0.09" stroke="#111827" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="340" y="202" text-anchor="middle" font-size="14" fill="#1f2937">Read-only image layers</text>
+  <text x="340" y="220" text-anchor="middle" font-size="12" fill="#6b7280">shared, content-addressed cache</text>
+</svg>
