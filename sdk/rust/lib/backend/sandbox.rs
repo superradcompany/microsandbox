@@ -1237,7 +1237,7 @@ fn unsupported_metrics(feature: &'static str) -> MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::SandboxBuilder;
+    use crate::sandbox::{EnvVar, OciRootfsSource, SandboxBuilder, SandboxSpec};
 
     #[tokio::test]
     async fn cloud_create_request_maps_common_fields() {
@@ -1255,15 +1255,16 @@ mod tests {
 
         let req = cloud_create_request_from_config(config).unwrap();
 
-        assert_eq!(req.name, "agent-1");
-        assert_eq!(req.image, "python:3.12");
-        assert_eq!(req.vcpus, 2);
-        assert_eq!(req.memory_mib, 1024);
-        assert_eq!(req.env["A"], "B");
-        assert_eq!(req.workdir.as_deref(), Some("/app"));
-        assert_eq!(req.shell.as_deref(), Some("/bin/bash"));
+        // The request now embeds the shared spec verbatim, so assert on `spec`.
+        assert_eq!(req.spec.name, "agent-1");
+        assert!(matches!(req.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12"));
+        assert_eq!(req.spec.resources.cpus, 2);
+        assert_eq!(req.spec.resources.memory_mib, 1024);
+        assert_eq!(req.spec.env, vec![EnvVar::new("A", "B")]);
+        assert_eq!(req.spec.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(req.spec.runtime.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(
-            req.entrypoint,
+            req.spec.runtime.entrypoint,
             Some(vec!["python".to_string(), "-u".to_string()])
         );
     }
@@ -1381,30 +1382,39 @@ mod tests {
 
     #[test]
     fn sandbox_config_from_cloud_round_trips_d13_fields() {
+        // The cloud response now embeds the shared spec directly, so the
+        // conversion is a verbatim clone-through. Populate a full spec and
+        // assert every field survives.
+        let mut spec = SandboxSpec {
+            name: "agent-1".into(),
+            image: RootfsSource::Oci(OciRootfsSource {
+                reference: "python:3.12".into(),
+                upper_size_mib: None,
+            }),
+            env: vec![EnvVar::new("A", "B")],
+            ..Default::default()
+        };
+        spec.resources.cpus = 4;
+        spec.resources.memory_mib = 2048;
+        spec.runtime.workdir = Some("/app".into());
+        spec.runtime.shell = Some("/bin/bash".into());
+        spec.runtime.entrypoint = Some(vec!["python".into(), "-u".into()]);
+        spec.runtime.hostname = Some("worker".into());
+        spec.runtime.user = Some("appuser".into());
+        spec.runtime.log_level = Some(microsandbox_types::SandboxLogLevel::Debug);
+        spec.runtime
+            .scripts
+            .insert("setup".into(), "echo hi".into());
+        spec.lifecycle.max_duration_secs = Some(3600);
+        spec.lifecycle.idle_timeout_secs = Some(600);
+
         let cloud = CloudCreateSandboxResponse {
             id: "00000000-0000-0000-0000-000000000002".into(),
             org_id: "00000000-0000-0000-0000-000000000001".into(),
             name: "agent-1".into(),
+            slug: "brave-otter".into(),
             status: CloudSandboxStatus::Running,
-            config: CloudCreateSandboxRequest {
-                name: "agent-1".into(),
-                image: "python:3.12".into(),
-                vcpus: 4,
-                memory_mib: 2048,
-                env: [("A".to_string(), "B".to_string())].into_iter().collect(),
-                ephemeral: true,
-                workdir: Some("/app".into()),
-                shell: Some("/bin/bash".into()),
-                entrypoint: Some(vec!["python".into(), "-u".into()]),
-                hostname: Some("worker".into()),
-                user: Some("appuser".into()),
-                log_level: Some("debug".into()),
-                scripts: [("setup".to_string(), "echo hi".to_string())]
-                    .into_iter()
-                    .collect(),
-                max_duration_secs: Some(3600),
-                idle_timeout_secs: Some(600),
-            },
+            config: CloudCreateSandboxRequest { spec },
             ephemeral: true,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1436,7 +1446,6 @@ mod tests {
         assert_eq!(
             config.spec.runtime.log_level,
             Some(microsandbox_types::SandboxLogLevel::Debug),
-            "log_level should round-trip via string mapping",
         );
         assert_eq!(
             config.spec.runtime.scripts.get("setup"),
@@ -1444,33 +1453,6 @@ mod tests {
         );
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
         assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(600));
-    }
-
-    #[test]
-    fn sandbox_config_from_cloud_drops_unknown_log_level() {
-        let cloud = CloudCreateSandboxResponse {
-            id: "00000000-0000-0000-0000-000000000002".into(),
-            org_id: "00000000-0000-0000-0000-000000000001".into(),
-            name: "agent-1".into(),
-            status: CloudSandboxStatus::Running,
-            config: CloudCreateSandboxRequest {
-                name: "agent-1".into(),
-                image: "python:3.12".into(),
-                log_level: Some("verbose".into()),
-                ..Default::default()
-            },
-            ephemeral: true,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            stopped_at: None,
-            last_error: None,
-        };
-
-        let config = sandbox_config_from_cloud(&cloud);
-        assert!(
-            config.spec.runtime.log_level.is_none(),
-            "unknown log_level should map to None"
-        );
     }
 
     #[test]
