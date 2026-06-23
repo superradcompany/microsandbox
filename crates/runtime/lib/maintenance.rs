@@ -29,6 +29,14 @@ use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::RuntimeResult;
 
@@ -477,9 +485,13 @@ fn is_terminal(status: sandbox_entity::SandboxStatus) -> bool {
     )
 }
 
-/// Best-effort liveness probe for a PID. Treats `EPERM` as alive (the PID
-/// exists but is owned by another user).
+/// Best-effort liveness probe for a Unix PID. Treats `EPERM` as alive because
+/// the PID exists but is owned by another user.
+#[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
     if unsafe { libc::kill(pid, 0) } == 0 {
         return true;
     }
@@ -487,6 +499,27 @@ fn pid_is_alive(pid: i32) -> bool {
         std::io::Error::last_os_error().raw_os_error(),
         Some(code) if code == libc::EPERM
     )
+}
+
+/// Best-effort liveness probe for a Windows PID. `OpenProcess` can fail with
+/// access denied for protected processes, which still proves that the PID is
+/// alive enough for cleanup to leave the sandbox row alone.
+#[cfg(target_os = "windows")]
+fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+    if handle.is_null() {
+        let error = unsafe { GetLastError() };
+        return error == ERROR_ACCESS_DENIED;
+    }
+
+    let mut exit_code = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe { CloseHandle(handle) };
+    ok != 0 && exit_code == STILL_ACTIVE as u32
 }
 
 /// Remove a directory tree, treating a missing directory as success.

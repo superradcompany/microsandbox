@@ -8,10 +8,17 @@
 use std::num::NonZero;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{GetLastError, NO_ERROR},
+    Storage::FileSystem::GetCompressedFileSizeW,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -188,9 +195,27 @@ fn upper_host_allocated_bytes(path: Option<&Path>) -> Option<u64> {
     }
     #[cfg(windows)]
     {
-        let _ = path;
-        None
+        windows_allocated_file_bytes(path).ok()
     }
+}
+
+#[cfg(windows)]
+fn windows_allocated_file_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut high = 0_u32;
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let low = unsafe { GetCompressedFileSizeW(path_wide.as_ptr(), &mut high) };
+    if low == u32::MAX {
+        let error = unsafe { GetLastError() };
+        if error != NO_ERROR {
+            return Err(std::io::Error::from_raw_os_error(error as i32));
+        }
+    }
+
+    Ok((u64::from(high) << 32) | u64::from(low))
 }
 
 fn upper_filesystem_metrics(
@@ -198,8 +223,32 @@ fn upper_filesystem_metrics(
     stale_after: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> (Option<u64>, Option<u64>) {
-    let _ = (krun, stale_after, now);
-    (None, None)
+    let (Some(used), Some(free), Some(sampled_at_ms)) = (
+        krun.filesystem.upper_used_bytes,
+        krun.filesystem.upper_free_bytes,
+        krun.filesystem.upper_sampled_at_unix_ms,
+    ) else {
+        return (None, None);
+    };
+
+    if upper_filesystem_sample_is_fresh(sampled_at_ms, stale_after, now) {
+        (Some(used), Some(free))
+    } else {
+        (None, None)
+    }
+}
+
+fn upper_filesystem_sample_is_fresh(
+    sampled_at_ms: u64,
+    stale_after: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let now_ms = now.timestamp_millis();
+    if now_ms < 0 {
+        return false;
+    }
+    let now_ms = now_ms as u64;
+    sampled_at_ms >= now_ms || now_ms.saturating_sub(sampled_at_ms) <= duration_millis(stale_after)
 }
 
 fn upper_filesystem_stale_after(interval: Duration) -> Duration {
@@ -209,6 +258,10 @@ fn upper_filesystem_stale_after(interval: Duration) -> Duration {
         .max(MIN_UPPER_FILESYSTEM_STALE_AFTER.as_millis())
         .min(u128::from(u64::MAX)) as u64;
     Duration::from_millis(millis)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn cpu_percent_from_vcpu_time(
@@ -291,6 +344,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn upper_host_allocated_bytes_uses_windows_allocation_size() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![1_u8; 8192]).unwrap();
+
+        assert!(upper_host_allocated_bytes(Some(file.path())).is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
     fn upper_host_allocated_bytes_returns_none_without_path() {
         assert_eq!(upper_host_allocated_bytes(None), None);
     }
@@ -327,9 +389,56 @@ mod tests {
     }
 
     #[test]
-    fn upper_filesystem_metrics_returns_none_when_krun_has_no_sample() {
+    fn write_sample_publishes_upper_filesystem_metrics_from_krun() {
+        let name = unique_shm_name("upper");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 8,
+                name: "upper",
+                memory_limit_bytes: 512 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 10,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
         let now = chrono::Utc::now();
-        let krun = msb_krun::VmMetrics::default();
+        let krun = msb_krun::VmMetrics {
+            filesystem: msb_krun::FilesystemMetrics {
+                upper_used_bytes: Some(53_248),
+                upper_free_bytes: Some(450_527_232),
+                upper_sampled_at_unix_ms: Some(now.timestamp_millis() as u64),
+            },
+            ..Default::default()
+        };
+
+        assert!(write_sample(&writer, None, &krun, None, None, Duration::from_secs(3)).is_ok());
+
+        let snapshot = registry.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].upper_used_bytes, Some(53_248));
+        assert_eq!(snapshot[0].upper_free_bytes, Some(450_527_232));
+        cleanup_shm(&name);
+    }
+
+    #[test]
+    fn upper_filesystem_metrics_returns_none_for_stale_samples() {
+        let now = chrono::Utc::now();
+        let stale_sample = (now - chrono::Duration::seconds(10)).timestamp_millis() as u64;
+        let krun = msb_krun::VmMetrics {
+            filesystem: msb_krun::FilesystemMetrics {
+                upper_used_bytes: Some(53_248),
+                upper_free_bytes: Some(450_527_232),
+                upper_sampled_at_unix_ms: Some(stale_sample),
+            },
+            ..Default::default()
+        };
 
         assert_eq!(
             upper_filesystem_metrics(&krun, Duration::from_secs(3), now),
