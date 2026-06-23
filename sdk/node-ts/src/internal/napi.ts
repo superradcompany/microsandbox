@@ -1028,5 +1028,6 @@ export interface NapiImageBuilder {
   oci(reference: string): this;
   upperSize(sizeMiB: number): this;
   disk(path: string): this;
+  bind(host: string): this;
   fstype(fstype: string): this;
 }
