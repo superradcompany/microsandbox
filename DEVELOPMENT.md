@@ -70,7 +70,7 @@ For Windows Server development, use Ubuntu WSL as the Linux build backend:
 $env:MSB_WINDOWS_LINUX_BUILD_BACKEND = "wsl"
 wsl --install -d Ubuntu
 wsl -d Ubuntu -- bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils"
+wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils patch"
 ```
 
 For a release-optimized build:

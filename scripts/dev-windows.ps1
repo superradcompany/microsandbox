@@ -423,13 +423,22 @@ function ConvertTo-WslPath {
     return ($converted | Select-Object -First 1).Trim()
 }
 
+function ConvertTo-WslBashCommand {
+    param([Parameter(Mandatory = $true)][string] $Command)
+
+    # PowerShell here-strings use CRLF on Windows, but Bash treats the CR as
+    # part of tokens such as pipefail. Normalize before passing through wsl.exe.
+    return $Command.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
 function Test-WslBash {
     param(
         [Parameter(Mandatory = $true)][string] $Distro,
         [Parameter(Mandatory = $true)][string] $Command
     )
 
-    & wsl.exe -d $Distro -- bash -lc $Command
+    $commandText = ConvertTo-WslBashCommand -Command $Command
+    & wsl.exe -d $Distro -- bash -lc $commandText
     return $LASTEXITCODE -eq 0
 }
 
@@ -439,19 +448,38 @@ function Invoke-WslBash {
         [Parameter(Mandatory = $true)][string] $Command
     )
 
-    & wsl.exe -d $Distro -- bash -lc $Command
+    $commandText = ConvertTo-WslBashCommand -Command $Command
+    & wsl.exe -d $Distro -- bash -lc $commandText
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 }
 
-function Test-WslBuildTools {
+function Get-WslBuildPackages {
+    return "build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils patch"
+}
+
+function Test-WslAgentdBuildTools {
     $distro = Resolve-WslDistro
-    $command = "source `"`$HOME/.cargo/env`" 2>/dev/null || true; command -v cargo >/dev/null && command -v rustup >/dev/null && command -v musl-gcc >/dev/null && command -v make >/dev/null && command -v python3 >/dev/null && command -v gcc >/dev/null && command -v flex >/dev/null && command -v bison >/dev/null && command -v bc >/dev/null && python3 -c 'import elftools' >/dev/null"
+    $command = "source `"`$HOME/.cargo/env`" 2>/dev/null || true; command -v cargo >/dev/null && command -v rustup >/dev/null && command -v musl-gcc >/dev/null && command -v gcc >/dev/null"
 
     if (-not (Test-WslBash -Distro $distro -Command $command)) {
-        throw "WSL distro '$distro' is missing Linux build tools. Install Rust and Ubuntu packages: sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils"
+        throw "WSL distro '$distro' is missing Rust or musl build tools. Install Rust and Ubuntu packages: sudo apt update && sudo apt install -y $(Get-WslBuildPackages)"
     }
+}
+
+function Test-WslLibkrunfwBuildTools {
+    $distro = Resolve-WslDistro
+    $command = "command -v make >/dev/null && command -v python3 >/dev/null && command -v gcc >/dev/null && command -v flex >/dev/null && command -v bison >/dev/null && command -v bc >/dev/null && command -v curl >/dev/null && command -v tar >/dev/null && command -v xz >/dev/null && command -v patch >/dev/null && test -e /usr/include/libelf.h && test -e /usr/include/openssl/ssl.h && python3 -c 'import elftools' >/dev/null"
+
+    if (-not (Test-WslBash -Distro $distro -Command $command)) {
+        throw "WSL distro '$distro' is missing kernel build tools. Install Ubuntu packages: sudo apt update && sudo apt install -y $(Get-WslBuildPackages)"
+    }
+}
+
+function Test-WslBuildTools {
+    Test-WslAgentdBuildTools
+    Test-WslLibkrunfwBuildTools
 }
 
 #--------------------------------------------------------------------------------------------------
@@ -513,6 +541,8 @@ function Invoke-BuildAgentdWithDocker {
 }
 
 function Invoke-BuildAgentdWithWsl {
+    Test-WslAgentdBuildTools
+
     $distro = Resolve-WslDistro
     $repo = ConvertTo-WslPath -Distro $distro -Path $RepoRoot
     $repoQuoted = Quote-Bash $repo
@@ -557,6 +587,8 @@ function Invoke-BuildLibkrunfwKernelBundleWithDocker {
 
 function Invoke-BuildLibkrunfwKernelBundleWithWsl {
     param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    Test-WslLibkrunfwBuildTools
 
     $distro = Resolve-WslDistro
     $submoduleWsl = ConvertTo-WslPath -Distro $distro -Path $Submodule
