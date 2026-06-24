@@ -73,8 +73,8 @@ microsandbox-network = { version = "0.5.8", path = "crates/network" }
 microsandbox-protocol = { version = "0.5.8", path = "crates/protocol" }
 microsandbox-runtime = { version = "0.5.8", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "0.5.8", path = "crates/utils" }
-msb_krun = { git = "https://github.com/superradcompany/libkrun", branch = "krun-windows" }
-msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", branch = "krun-windows" }
+msb_krun = { git = "https://github.com/superradcompany/libkrun", branch = "appcypher/initial-windows-support" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", branch = "appcypher/initial-windows-support" }
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }
 
