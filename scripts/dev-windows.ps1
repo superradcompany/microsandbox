@@ -597,8 +597,39 @@ function Invoke-BuildLibkrunfwKernelBundleWithWsl {
     Write-Info "Building libkrunfw kernel bundle via WSL ($distro)..."
     $command = @"
 set -euo pipefail
-cd $submoduleQuoted
-make -j`$(nproc) kernel.c
+source_dir=$submoduleQuoted
+cache_dir="`${XDG_CACHE_HOME:-`$HOME/.cache}/microsandbox/libkrunfw"
+build_dir="`$(mktemp -d "`${TMPDIR:-/tmp}/msb-libkrunfw.XXXXXX")"
+
+cleanup() {
+    rm -rf "`$build_dir"
+}
+trap cleanup EXIT
+
+mkdir -p "`$cache_dir/tarballs"
+if [ -d "`$source_dir/tarballs" ]; then
+    cp -a "`$source_dir/tarballs/." "`$cache_dir/tarballs/" 2>/dev/null || true
+fi
+
+cd "`$source_dir"
+tar --exclude='.git' \
+    --exclude='kernel.c' \
+    --exclude='linux-*' \
+    --exclude='tarballs' \
+    --exclude='*.dll' \
+    --exclude='*.lib' \
+    --exclude='*.exp' \
+    --exclude='*.pdb' \
+    --exclude='kernel.obj' \
+    -cf - . | tar -xf - -C "`$build_dir"
+
+mkdir -p "`$build_dir/tarballs"
+cp -a "`$cache_dir/tarballs/." "`$build_dir/tarballs/" 2>/dev/null || true
+
+cd "`$build_dir"
+make -j"`$(nproc)" kernel.c
+cp -a "`$build_dir/tarballs/." "`$cache_dir/tarballs/" 2>/dev/null || true
+cp kernel.c "`$source_dir/kernel.c"
 "@
     Invoke-WslBash -Distro $distro -Command $command
 }
