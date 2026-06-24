@@ -273,7 +273,7 @@ function Invoke-MsvcCommand {
 function Test-MsvcTools {
     $target = Resolve-WindowsTarget
     $devCmd = Resolve-VsDevCmd
-    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul 2>nul && where link.exe >nul 2>nul"
+    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul 2>nul && where link.exe >nul 2>nul && where rc.exe >nul 2>nul"
     cmd.exe /c $cmdLine
     if ($LASTEXITCODE -ne 0) {
         throw "Visual Studio toolchain is incomplete. Install MSVC and Windows SDK, then retry from a new shell."
@@ -708,7 +708,39 @@ function New-LibkrunfwDefFile {
     return $defPath
 }
 
-function New-WindowsLibkrunfwKernelBundle {
+function Get-LibkrunfwKernelMetadata {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $kernelBundle = Join-Path $Submodule "kernel.c"
+    if (-not (Test-Path -LiteralPath $kernelBundle)) {
+        throw "libkrunfw kernel bundle is missing at $kernelBundle"
+    }
+
+    $loadAddr = $null
+    $entryAddr = $null
+    foreach ($line in [System.IO.File]::ReadLines($kernelBundle, [System.Text.Encoding]::ASCII)) {
+        if ($null -eq $loadAddr -and $line -match "\*load_addr\s*=\s*([^;]+);") {
+            $loadAddr = $Matches[1].Trim()
+        } elseif ($null -eq $entryAddr -and $line -match "\*entry_addr\s*=\s*([^;]+);") {
+            $entryAddr = $Matches[1].Trim()
+        }
+
+        if ($null -ne $loadAddr -and $null -ne $entryAddr) {
+            break
+        }
+    }
+
+    if ($null -eq $loadAddr -or $null -eq $entryAddr) {
+        throw "failed to read libkrunfw kernel load metadata from $kernelBundle"
+    }
+
+    return @{
+        LoadAddr = $loadAddr
+        EntryAddr = $entryAddr
+    }
+}
+
+function New-LibkrunfwKernelBinary {
     param([Parameter(Mandatory = $true)][string] $Submodule)
 
     $kernelBundle = Join-Path $Submodule "kernel.c"
@@ -717,23 +749,156 @@ function New-WindowsLibkrunfwKernelBundle {
     }
 
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
-    $windowsKernelBundle = Join-Path $BuildDir "libkrunfw-kernel-windows.c"
-    $source = [System.IO.File]::ReadAllText($kernelBundle, [System.Text.Encoding]::ASCII)
-
-    # libkrunfw's generated C bundle uses a GNU alignment attribute. Convert
-    # it to MSVC syntax so Windows builds do not require the optional Clang
-    # toolset just to link the generated DLL.
-    $converted = [regex]::Replace(
-        $source,
-        "__attribute__\s*\(\(\s*aligned\s*\(\s*(\d+)\s*\)\s*\)\)\s+char\s+",
-        "__declspec(align(`$1)) char "
-    )
-    if ($converted -eq $source) {
-        throw "failed to convert libkrunfw kernel bundle alignment attribute for MSVC"
+    $kernelBinary = Join-Path $BuildDir "libkrunfw-kernel.bin"
+    if ((Test-Path -LiteralPath $kernelBinary) -and
+        ((Get-Item -LiteralPath $kernelBinary).LastWriteTimeUtc -ge (Get-Item -LiteralPath $kernelBundle).LastWriteTimeUtc)) {
+        return $kernelBinary
     }
 
-    [System.IO.File]::WriteAllText($windowsKernelBundle, $converted, [System.Text.Encoding]::ASCII)
-    return $windowsKernelBundle
+    Write-Info "Extracting libkrunfw kernel bytes from generated bundle..."
+    $reader = [System.IO.StreamReader]::new($kernelBundle, [System.Text.Encoding]::ASCII)
+    $writer = [System.IO.File]::Open($kernelBinary, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $buffer = [byte[]]::new(65536)
+    $count = 0
+    $total = 0
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            $matches = [regex]::Matches($line, "\\x([0-9a-fA-F]{1,2})")
+            foreach ($match in $matches) {
+                $buffer[$count] = [Convert]::ToByte($match.Groups[1].Value, 16)
+                $count += 1
+                $total += 1
+                if ($count -eq $buffer.Length) {
+                    $writer.Write($buffer, 0, $count)
+                    $count = 0
+                }
+            }
+        }
+
+        if ($count -gt 0) {
+            $writer.Write($buffer, 0, $count)
+        }
+    } finally {
+        $writer.Dispose()
+        $reader.Dispose()
+    }
+
+    if ($total -eq 0) {
+        throw "failed to extract libkrunfw kernel bytes from $kernelBundle"
+    }
+
+    return $kernelBinary
+}
+
+function ConvertTo-RcString {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    return '"' + $Value.Replace('\', '\\').Replace('"', '\"') + '"'
+}
+
+function New-WindowsLibkrunfwLinkSources {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $metadata = Get-LibkrunfwKernelMetadata -Submodule $Submodule
+    $kernelBinary = New-LibkrunfwKernelBinary -Submodule $Submodule
+    $resourceId = 101
+    $resourceRc = Join-Path $BuildDir "libkrunfw-kernel.rc"
+    $resourceRes = Join-Path $BuildDir "libkrunfw-kernel.res"
+    $wrapper = Join-Path $BuildDir "libkrunfw-windows.c"
+    $kernelBinaryRc = ConvertTo-RcString -Value $kernelBinary
+
+    $resourceLines = @(
+        "#define IDR_LIBKRUNFW_KERNEL $resourceId",
+        "IDR_LIBKRUNFW_KERNEL RCDATA $kernelBinaryRc"
+    )
+    Set-Content -LiteralPath $resourceRc -Encoding ASCII -Value $resourceLines
+
+    $wrapperSource = @"
+#define WIN32_LEAN_AND_MEAN
+#include <stddef.h>
+#include <windows.h>
+
+#define IDR_LIBKRUNFW_KERNEL $resourceId
+
+static char *KERNEL_BUNDLE = NULL;
+static size_t KERNEL_BUNDLE_SIZE = 0;
+
+static int krunfw_load_kernel_bundle(void)
+{
+    HMODULE module = NULL;
+    HRSRC resource = NULL;
+    HGLOBAL loaded = NULL;
+    DWORD resource_size = 0;
+    void *resource_data = NULL;
+
+    if (KERNEL_BUNDLE != NULL) {
+        return 1;
+    }
+
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)&krunfw_load_kernel_bundle,
+            &module)) {
+        return 0;
+    }
+
+    resource = FindResourceA(module, MAKEINTRESOURCEA(IDR_LIBKRUNFW_KERNEL), RT_RCDATA);
+    if (resource == NULL) {
+        return 0;
+    }
+
+    resource_size = SizeofResource(module, resource);
+    loaded = LoadResource(module, resource);
+    resource_data = LockResource(loaded);
+    if (resource_size == 0 || loaded == NULL || resource_data == NULL) {
+        return 0;
+    }
+
+    KERNEL_BUNDLE = (char *)VirtualAlloc(NULL, resource_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (KERNEL_BUNDLE == NULL) {
+        return 0;
+    }
+
+    CopyMemory(KERNEL_BUNDLE, resource_data, resource_size);
+    KERNEL_BUNDLE_SIZE = (size_t)resource_size;
+    return 1;
+}
+
+char * krunfw_get_kernel(size_t *load_addr, size_t *entry_addr, size_t *size)
+{
+    if (load_addr != NULL) {
+        *load_addr = $($metadata.LoadAddr);
+    }
+    if (entry_addr != NULL) {
+        *entry_addr = $($metadata.EntryAddr);
+    }
+    if (size != NULL) {
+        *size = 0;
+    }
+
+    if (!krunfw_load_kernel_bundle()) {
+        return NULL;
+    }
+
+    if (size != NULL) {
+        *size = KERNEL_BUNDLE_SIZE;
+    }
+    return KERNEL_BUNDLE;
+}
+
+int krunfw_get_version()
+{
+    return ABI_VERSION;
+}
+"@
+    Set-Content -LiteralPath $wrapper -Encoding ASCII -Value $wrapperSource
+
+    return @{
+        ResourceRc = $resourceRc
+        ResourceRes = $resourceRes
+        Wrapper = $wrapper
+    }
 }
 
 function Invoke-LinkLibkrunfwDll {
@@ -745,9 +910,9 @@ function Invoke-LinkLibkrunfwDll {
     }
 
     $defPath = New-LibkrunfwDefFile -Submodule $Submodule
-    $windowsKernelBundle = New-WindowsLibkrunfwKernelBundle -Submodule $Submodule
+    $sources = New-WindowsLibkrunfwLinkSources -Submodule $Submodule
     Write-Info "Linking libkrunfw.dll with cl.exe..."
-    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fo:kernel.obj /Fe:libkrunfw.dll `"$windowsKernelBundle`" /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
+    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && rc.exe /nologo /fo`"$($sources.ResourceRes)`" `"$($sources.ResourceRc)`" && cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fo:libkrunfw.obj /Fe:libkrunfw.dll `"$($sources.Wrapper)`" `"$($sources.ResourceRes)`" /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536"
 }
 
 function Invoke-BuildLibkrunfw {
