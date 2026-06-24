@@ -143,7 +143,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 37);
+        assert_eq!(declarations.len(), 45);
         assert!(
             declarations
                 .iter()
