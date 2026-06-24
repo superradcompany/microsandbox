@@ -3,14 +3,14 @@
 use ts_rs::TS;
 
 use crate::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
-    HostPattern, HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    NetworkSpec, OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit,
-    RlimitResource, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
-    SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
-    SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization, ViolationAction,
-    VolumeKind, VolumeMount, VolumeSpec,
+    CertCacheConfig, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat,
+    EnvVar, HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, LogSource, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol,
+    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, SandboxLogLevel,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry,
+    SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination, SnapshotSpec,
+    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -63,6 +63,9 @@ pub fn declarations() -> Vec<String> {
         ViolationAction::decl(&cfg),
         SecretEntry::decl(&cfg),
         SecretsConfig::decl(&cfg),
+        InterceptCaConfig::decl(&cfg),
+        CertCacheConfig::decl(&cfg),
+        TlsConfig::decl(&cfg),
         NetworkSpec::decl(&cfg),
         PublishedPortSpec::decl(&cfg),
         PortProtocol::decl(&cfg),

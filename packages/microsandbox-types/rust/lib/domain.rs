@@ -718,12 +718,129 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: TLS interception
+//--------------------------------------------------------------------------------------------------
+
+/// TLS interception configuration. Carried in [`NetworkSpec::tls`](NetworkSpec).
+///
+/// The local network engine terminates TCP at its in-process stack, so TLS MITM
+/// is handled by proxy tasks — these fields configure which ports/domains are
+/// intercepted and how the interception CA is sourced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct TlsConfig {
+    /// Whether TLS interception is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// TCP ports subject to TLS interception (default: `[443]`).
+    #[serde(default = "default_intercepted_ports")]
+    pub intercepted_ports: Vec<u16>,
+
+    /// Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards.
+    #[serde(default)]
+    pub bypass: Vec<String>,
+
+    /// Whether to verify the upstream server's TLS certificate.
+    #[serde(default = "default_true")]
+    pub verify_upstream: bool,
+
+    /// Drop UDP to intercepted ports when TLS interception is active, forcing
+    /// QUIC traffic to fall back to TCP/TLS.
+    #[serde(default = "default_true")]
+    pub block_quic_on_intercept: bool,
+
+    /// CA certificate PEM files to trust for upstream server verification.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+    pub upstream_ca_cert: Vec<PathBuf>,
+
+    /// Interception CA configuration. The TLS proxy uses this CA to sign
+    /// per-domain certs it presents to the guest during interception.
+    #[serde(default, alias = "ca")]
+    pub intercept_ca: InterceptCaConfig,
+
+    /// Per-domain certificate cache configuration.
+    #[serde(default)]
+    pub cache: CertCacheConfig,
+}
+
+/// Certificate authority configuration for TLS interception.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct InterceptCaConfig {
+    /// Path to an existing CA certificate PEM file. If `None`, a CA is
+    /// auto-generated and persisted.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub cert_path: Option<PathBuf>,
+
+    /// Path to an existing CA private key PEM file. If `None`, a key is
+    /// auto-generated and persisted.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub key_path: Option<PathBuf>,
+}
+
+/// Per-domain certificate cache configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CertCacheConfig {
+    /// Maximum number of cached certificates. Default: 1000.
+    #[serde(default = "default_cache_capacity")]
+    pub capacity: usize,
+
+    /// Certificate validity duration in hours. Default: 24.
+    #[serde(default = "default_cert_validity_hours")]
+    pub validity_hours: u64,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intercepted_ports: default_intercepted_ports(),
+            bypass: Vec::new(),
+            verify_upstream: true,
+            block_quic_on_intercept: true,
+            upstream_ca_cert: Vec::new(),
+            intercept_ca: InterceptCaConfig::default(),
+            cache: CertCacheConfig::default(),
+        }
+    }
+}
+
+impl Default for CertCacheConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_cache_capacity(),
+            validity_hours: default_cert_validity_hours(),
+        }
+    }
+}
+
+fn default_intercepted_ports() -> Vec<u16> {
+    vec![443]
+}
+
+fn default_cache_capacity() -> usize {
+    1000
+}
+
+fn default_cert_validity_hours() -> u64 {
+    24
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
 /// Complete network specification for a sandbox.
 ///
-/// Common, backend-visible fields are typed directly, as is the secret-injection subdocument (`secrets`). The remaining rich local-engine subdocuments such as policy, DNS, TLS, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
+/// Common, backend-visible fields are typed directly, as are the secret-injection (`secrets`) and TLS-interception (`tls`) subdocuments. The remaining rich local-engine subdocuments such as policy, DNS, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -747,9 +864,9 @@ pub struct NetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns: Option<Value>,
 
-    /// TLS interception subdocument.
+    /// TLS-interception subdocument (see [`TlsConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls: Option<Value>,
+    pub tls: Option<TlsConfig>,
 
     /// Placeholder-based secret-injection subdocument (see [`SecretsConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2034,5 +2151,38 @@ mod secret_tests {
         let dbg = format!("{entry:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("uniq-sensitive-12345"));
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_defaults() {
+        let t = TlsConfig::default();
+        assert!(!t.enabled);
+        assert_eq!(t.intercepted_ports, vec![443]);
+        assert!(t.verify_upstream);
+        assert!(t.block_quic_on_intercept);
+        assert_eq!(t.cache.capacity, 1000);
+        assert_eq!(t.cache.validity_hours, 24);
+    }
+
+    #[test]
+    fn tls_config_round_trips_and_accepts_ca_alias() {
+        // `ca` is an accepted alias for `intercept_ca`.
+        let cfg: TlsConfig = serde_json::from_str(
+            r#"{"enabled":true,"bypass":["*.internal"],"ca":{"cert_path":"/etc/ca.pem"}}"#,
+        )
+        .unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bypass, vec!["*.internal".to_string()]);
+        assert_eq!(
+            cfg.intercept_ca.cert_path.as_deref(),
+            Some(std::path::Path::new("/etc/ca.pem"))
+        );
+        let back: TlsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.bypass, cfg.bypass);
     }
 }

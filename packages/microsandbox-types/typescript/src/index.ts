@@ -362,6 +362,64 @@ secrets: Array<SecretEntry>,
  */
 on_violation: ViolationAction, };
 
+export type InterceptCaConfig = {
+/**
+ * Path to an existing CA certificate PEM file. If `None`, a CA is
+ * auto-generated and persisted.
+ */
+cert_path: string | null,
+/**
+ * Path to an existing CA private key PEM file. If `None`, a key is
+ * auto-generated and persisted.
+ */
+key_path: string | null, };
+
+export type CertCacheConfig = {
+/**
+ * Maximum number of cached certificates. Default: 1000.
+ */
+capacity: number,
+/**
+ * Certificate validity duration in hours. Default: 24.
+ */
+validity_hours: number, };
+
+export type TlsConfig = {
+/**
+ * Whether TLS interception is enabled.
+ */
+enabled: boolean,
+/**
+ * TCP ports subject to TLS interception (default: `[443]`).
+ */
+intercepted_ports: Array<number>,
+/**
+ * Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards.
+ */
+bypass: Array<string>,
+/**
+ * Whether to verify the upstream server's TLS certificate.
+ */
+verify_upstream: boolean,
+/**
+ * Drop UDP to intercepted ports when TLS interception is active, forcing
+ * QUIC traffic to fall back to TCP/TLS.
+ */
+block_quic_on_intercept: boolean,
+/**
+ * CA certificate PEM files to trust for upstream server verification.
+ */
+upstream_ca_cert: Array<string>,
+/**
+ * Interception CA configuration. The TLS proxy uses this CA to sign
+ * per-domain certs it presents to the guest during interception.
+ */
+intercept_ca: InterceptCaConfig,
+/**
+ * Per-domain certificate cache configuration.
+ */
+cache: CertCacheConfig, };
+
 export type NetworkSpec = {
 /**
  * Whether networking is enabled for this sandbox.
@@ -384,9 +442,9 @@ policy: JsonValue | null,
  */
 dns: JsonValue | null,
 /**
- * TLS interception subdocument.
+ * TLS-interception subdocument (see [`TlsConfig`]).
  */
-tls: JsonValue | null,
+tls: TlsConfig | null,
 /**
  * Placeholder-based secret-injection subdocument (see [`SecretsConfig`]).
  */
