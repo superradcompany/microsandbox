@@ -400,13 +400,35 @@ impl MountBuilder {
         }
         if self.stat_virtualization.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".stat_virtualization() is only valid for bind and named volume mounts".into(),
+                ".stat_virtualization() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
         }
         if self.host_permissions.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".host_permissions() is only valid for bind and named volume mounts".into(),
+                ".host_permissions() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
+        }
+        if let MountKind::Named {
+            name,
+            create: Some(create),
+        } = &self.mount
+            && create.kind() == VolumeKind::Disk
+        {
+            // Disk-backed named volumes are passed to the VMM as block
+            // devices, so virtiofs-only policies are invalid even when the
+            // caller explicitly sets the same values as the defaults.
+            if self.stat_virtualization.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "stat_virtualization is only valid for directory named volumes: {name}"
+                )));
+            }
+            if self.host_permissions.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "host_permissions is only valid for directory named volumes: {name}"
+                )));
+            }
         }
 
         // `Off + Mirror` is a contradiction. With xattr disabled there is no
@@ -831,11 +853,19 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             guest,
             stat_virtualization,
             host_permissions,
+            create,
             ..
         } => {
             validate_guest_mount_path(guest)?;
             crate::volume::validate_volume_name(name)?;
-            validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            if create
+                .as_ref()
+                .is_some_and(|create| create.kind() == VolumeKind::Disk)
+            {
+                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+            } else {
+                validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            }
         }
         VolumeMount::Tmpfs { guest, .. } => {
             validate_guest_mount_path(guest)?;
@@ -917,6 +947,24 @@ fn validate_virtiofs_policies(
              Drop one or the other."
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_named_disk_mount_options(
+    name: &str,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) -> crate::MicrosandboxResult<()> {
+    if stat_virtualization != StatVirtualization::Strict {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "stat_virtualization is only valid for directory named volumes: {name}"
+        )));
+    }
+    if host_permissions != HostPermissions::Private {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "host_permissions is only valid for directory named volumes: {name}"
+        )));
     }
     Ok(())
 }
@@ -1092,6 +1140,51 @@ mod tests {
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_virtiofs_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_stat_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Strict)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_host_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .host_permissions(HostPermissions::Private)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -565,7 +565,7 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
         opts: &'a LogOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>> {
-        Box::pin(async move { crate::logs::read_logs(name, opts).await })
+        Box::pin(async move { crate::logs::read_logs_local(self, name, opts).await })
     }
 
     fn log_stream<'a>(
@@ -575,7 +575,7 @@ impl SandboxBackend for LocalBackend {
         opts: &'a LogStreamOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
         Box::pin(async move {
-            let stream = crate::logs::log_stream(name, opts).await?;
+            let stream = crate::logs::log_stream_local(self, name, opts).await?;
             Ok(Box::pin(stream) as LogStream)
         })
     }

@@ -357,6 +357,15 @@ export type PullProgressStream = NapiPullProgressStream;
 export { Setup, install, isInstalled, setup } from "./setup.js";
 export { allSandboxMetrics } from "./all-metrics.js";
 
+/** Override the `libkrunfw` shared library path used by subsequently created local sandboxes. */
+export function setRuntimeLibkrunfwPath(path: string): void {
+  const setter = napi.setRuntimeLibkrunfwPath;
+  if (!setter) {
+    throw new Error("native binding does not expose setRuntimeLibkrunfwPath");
+  }
+  setter(path);
+}
+
 // Errors
 export {
   CustomError,

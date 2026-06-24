@@ -404,14 +404,14 @@ export declare class MountBuilder {
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * named volume mounts.
+   * directory-backed named volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
-   * Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
-   * mounts.
+   * Accepts `"private"` or `"mirror"`. Valid only for bind and
+   * directory-backed named volume mounts.
    */
   hostPermissions(policy: string): this
   /**
@@ -975,6 +975,15 @@ export declare class SandboxBuilder {
   initWith(cmd: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
   /** Override the guest hostname. */
   hostname(name: string): this
+  /**
+   * Deprecated compatibility setter for older Node SDK callers.
+   *
+   * The libkrunfw path is a process-level concern (one dylib per process
+   * address space), not a per-sandbox builder setting. Keep this chainable
+   * alias so pre-backend-split code still compiles, but route it through the
+   * same process-wide override as `microsandbox.setRuntimeLibkrunfwPath(...)`.
+   */
+  libkrunfwPath(path: string): this
   /** Default running user. */
   user(user: string): this
   /** Image pull policy: `"always" | "if-missing" | "never"`. */
@@ -2125,6 +2134,8 @@ export interface VolumeMount {
   nodev: boolean
   host?: string
   name?: string
+  namedMode?: string
+  namedKind?: string
   sizeMib?: number
   quotaMib?: number
   format?: string
