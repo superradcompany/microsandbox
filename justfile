@@ -181,7 +181,7 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
-# Build libkrunfw on Windows via Docker/WSL kernel bundle build + host MSVC/LLVM linking.
+# Build libkrunfw on Windows via Docker/WSL kernel bundle build + host MSVC linking.
 [windows]
 build-libkrunfw:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-libkrunfw

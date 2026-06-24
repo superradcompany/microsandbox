@@ -255,7 +255,7 @@ function Resolve-VsDevCmd {
         }
     }
 
-    throw "Visual Studio developer command prompt was not found. Install Visual Studio Build Tools with MSVC, Windows SDK, and C++ Clang tools."
+    throw "Visual Studio developer command prompt was not found. Install Visual Studio Build Tools with MSVC and Windows SDK."
 }
 
 function Invoke-MsvcCommand {
@@ -270,28 +270,14 @@ function Invoke-MsvcCommand {
     }
 }
 
-function Resolve-ClangClCommand {
-    $target = Resolve-WindowsTarget
-    $devCmd = Resolve-VsDevCmd
-    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && (where clang-cl.exe >nul 2>nul && echo clang-cl.exe || (where clang.exe >nul 2>nul && echo clang.exe --driver-mode=cl))"
-    $resolved = cmd.exe /c $cmdLine
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
-        throw "Visual Studio clang toolchain is incomplete. Install Visual Studio Build Tools with C++ Clang tools, then retry from a new shell."
-    }
-
-    return ($resolved | Select-Object -First 1).Trim()
-}
-
 function Test-MsvcTools {
     $target = Resolve-WindowsTarget
     $devCmd = Resolve-VsDevCmd
     $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul 2>nul && where link.exe >nul 2>nul"
     cmd.exe /c $cmdLine
     if ($LASTEXITCODE -ne 0) {
-        throw "Visual Studio toolchain is incomplete. Install MSVC, Windows SDK, and C++ Clang tools, then retry from a new shell."
+        throw "Visual Studio toolchain is incomplete. Install MSVC and Windows SDK, then retry from a new shell."
     }
-
-    $null = Resolve-ClangClCommand
 }
 
 function Require-Command {
@@ -722,6 +708,34 @@ function New-LibkrunfwDefFile {
     return $defPath
 }
 
+function New-WindowsLibkrunfwKernelBundle {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $kernelBundle = Join-Path $Submodule "kernel.c"
+    if (-not (Test-Path -LiteralPath $kernelBundle)) {
+        throw "libkrunfw kernel bundle is missing at $kernelBundle"
+    }
+
+    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    $windowsKernelBundle = Join-Path $BuildDir "libkrunfw-kernel-windows.c"
+    $source = [System.IO.File]::ReadAllText($kernelBundle, [System.Text.Encoding]::ASCII)
+
+    # libkrunfw's generated C bundle uses a GNU alignment attribute. Convert
+    # it to MSVC syntax so Windows builds do not require the optional Clang
+    # toolset just to link the generated DLL.
+    $converted = [regex]::Replace(
+        $source,
+        "__attribute__\s*\(\(\s*aligned\s*\(\s*(\d+)\s*\)\s*\)\)\s+char\s+",
+        "__declspec(align(`$1)) char "
+    )
+    if ($converted -eq $source) {
+        throw "failed to convert libkrunfw kernel bundle alignment attribute for MSVC"
+    }
+
+    [System.IO.File]::WriteAllText($windowsKernelBundle, $converted, [System.Text.Encoding]::ASCII)
+    return $windowsKernelBundle
+}
+
 function Invoke-LinkLibkrunfwDll {
     param([Parameter(Mandatory = $true)][string] $Submodule)
 
@@ -731,9 +745,9 @@ function Invoke-LinkLibkrunfwDll {
     }
 
     $defPath = New-LibkrunfwDefFile -Submodule $Submodule
-    $clangCl = Resolve-ClangClCommand
-    Write-Info "Linking libkrunfw.dll with $clangCl..."
-    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && $clangCl /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fe:libkrunfw.dll kernel.c /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
+    $windowsKernelBundle = New-WindowsLibkrunfwKernelBundle -Submodule $Submodule
+    Write-Info "Linking libkrunfw.dll with cl.exe..."
+    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fo:kernel.obj /Fe:libkrunfw.dll `"$windowsKernelBundle`" /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
 }
 
 function Invoke-BuildLibkrunfw {
