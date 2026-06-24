@@ -1032,13 +1032,6 @@ fn build_vm(
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .balloon_stats_interval(balloon_stats_interval);
-            #[cfg(windows)]
-            let m = {
-                // The private upper-filesystem metrics device currently
-                // blocks PID 1 registration under WHP/x64. Keep Windows
-                // guests bootable while the device path is hardened.
-                m.msb_metrics(false)
-            };
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
