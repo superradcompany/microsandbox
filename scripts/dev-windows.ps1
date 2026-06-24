@@ -598,29 +598,52 @@ function Invoke-BuildLibkrunfwKernelBundleWithWsl {
     $command = @"
 set -euo pipefail
 source_dir=$submoduleQuoted
-cache_dir="`${XDG_CACHE_HOME:-`$HOME/.cache}/microsandbox/libkrunfw"
-build_dir="`$(mktemp -d "`${TMPDIR:-/tmp}/msb-libkrunfw.XXXXXX")"
+home_dir="`$(getent passwd "`$(id -u)" | cut -d: -f6)"
+if [ -z "`$home_dir" ] || [ ! -d "`$home_dir" ]; then
+    home_dir="`$HOME"
+fi
+if [ -z "`$home_dir" ] || [ ! -d "`$home_dir" ] || [ ! -w "`$home_dir" ]; then
+    echo "error: WSL home directory is not writable: `$home_dir" >&2
+    exit 1
+fi
+
+work_root="`$home_dir/.cache/microsandbox/libkrunfw"
+cache_dir="`$work_root/cache"
+build_parent="`$work_root/tmp"
+mkdir -p "`$cache_dir/tarballs" "`$build_parent"
+build_dir="`$(mktemp -d "`$build_parent/build.XXXXXX")"
 
 cleanup() {
     rm -rf "`$build_dir"
 }
 trap cleanup EXIT
 
-mkdir -p "`$cache_dir/tarballs"
+echo "Using WSL libkrunfw cache: `$cache_dir"
+echo "Using WSL libkrunfw build directory: `$build_dir"
+
 if [ -d "`$source_dir/tarballs" ]; then
     cp -a "`$source_dir/tarballs/." "`$cache_dir/tarballs/" 2>/dev/null || true
 fi
 
 cd "`$source_dir"
 tar --exclude='.git' \
+    --exclude='./.git' \
     --exclude='kernel.c' \
+    --exclude='./kernel.c' \
     --exclude='linux-*' \
+    --exclude='./linux-*' \
     --exclude='tarballs' \
+    --exclude='./tarballs' \
     --exclude='*.dll' \
+    --exclude='./*.dll' \
     --exclude='*.lib' \
+    --exclude='./*.lib' \
     --exclude='*.exp' \
+    --exclude='./*.exp' \
     --exclude='*.pdb' \
+    --exclude='./*.pdb' \
     --exclude='kernel.obj' \
+    --exclude='./kernel.obj' \
     -cf - . | tar -xf - -C "`$build_dir"
 
 mkdir -p "`$build_dir/tarballs"
