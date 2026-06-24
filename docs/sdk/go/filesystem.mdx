@@ -3,102 +3,271 @@ title: Filesystem
 description: Go SDK - Filesystem API reference
 ---
 
-See [Filesystem](/sandboxes/filesystem) for usage examples.
+Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file transfer, prefer a [volume](/sdk/go/volumes).
 
-## SandboxFsOps
+<div className="msb-glance">
 
-Filesystem accessor for a running sandbox. Obtained via [`Sandbox.FS()`](/sdk/go/sandbox#fs). All operations go through the same host-guest channel as command execution — no SSH, no network involved. For bulk file operations, consider using a [volume](/sdk/go/volumes) instead.
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · SandboxFSOps<span className="msb-ct">16</span></p>
+  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.Read()</span><span className="msb-rg">read a file as bytes</span></a>
+  <a className="msb-row" href="#fs-readstring"><span className="msb-rn">fs.ReadString()</span><span className="msb-rg">read a file as a string</span></a>
+  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.Write()</span><span className="msb-rg">write bytes</span></a>
+  <a className="msb-row" href="#fs-writestring"><span className="msb-rn">fs.WriteString()</span><span className="msb-rg">write a string</span></a>
+  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.List()</span><span className="msb-rg">list a directory</span></a>
+  <a className="msb-row" href="#fs-stat"><span className="msb-rn">fs.Stat()</span><span className="msb-rg">file metadata</span></a>
+  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.Mkdir()</span><span className="msb-rg">create a directory</span></a>
+  <a className="msb-row" href="#fs-remove"><span className="msb-rn">fs.Remove()</span><span className="msb-rg">delete a file</span></a>
+  <a className="msb-row" href="#fs-removedir"><span className="msb-rn">fs.RemoveDir()</span><span className="msb-rg">delete a directory</span></a>
+  <a className="msb-row" href="#fs-copy"><span className="msb-rn">fs.Copy()</span><span className="msb-rg">copy within the guest</span></a>
+  <a className="msb-row" href="#fs-rename"><span className="msb-rn">fs.Rename()</span><span className="msb-rg">rename / move</span></a>
+  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.Exists()</span><span className="msb-rg">test a path</span></a>
+  <a className="msb-row" href="#fs-copyfromhost"><span className="msb-rn">fs.CopyFromHost()</span><span className="msb-rg">host file into guest</span></a>
+  <a className="msb-row" href="#fs-copytohost"><span className="msb-rn">fs.CopyToHost()</span><span className="msb-rg">guest file to host</span></a>
+  <a className="msb-row" href="#fs-readstream"><span className="msb-rn">fs.ReadStream()</span><span className="msb-rg">stream a large read</span></a>
+  <a className="msb-row" href="#fs-writestream"><span className="msb-rn">fs.WriteStream()</span><span className="msb-rg">stream a large write</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#fsentry">FsEntry</a>
+    <a className="msb-typepill" href="#fsentrykind">FsEntryKind</a>
+    <a className="msb-typepill" href="#fsstat">FsStat</a>
+    <a className="msb-typepill" href="#fsreadstream">FsReadStream</a>
+    <a className="msb-typepill" href="#fswritestream">FsWriteStream</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
-fs := sb.FS()
+import m "github.com/superradcompany/microsandbox/sdk/go"
 
-if err := fs.WriteString(ctx, "/tmp/config.json", `{"debug": true}`); err != nil {
+fs := sb.FS()                                                     // 1. get the accessor
+
+err := fs.WriteString(ctx, "/tmp/config.json", `{"debug":true}`)  // 2. write
+if err != nil {
     return err
 }
-content, err := fs.ReadString(ctx, "/tmp/config.json")
+
+content, err := fs.ReadString(ctx, "/tmp/config.json")            // 3. read back
+if err != nil {
+    return err
+}
+fmt.Println(content)
 ```
+
+## Methods
+
+The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#fs). Every method takes a `context.Context` first and returns an `error` (wrapped, inspectable with `m.IsKind`).
 
 ---
 
-#### Read()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Read()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error)
 ```
 
-Read the entire contents of a file as raw bytes.
+Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB; for files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream) so callers get a uniform bytes-returning interface up to runtime memory limits.
 
-The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path; this method transparently falls back to `ReadStream` so callers get a uniform "Read returns bytes" interface up to runtime memory limits.
+<p className="msb-label">Parameters</p>
 
-**Parameters**
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the read.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest, e.g. <code>"/app/config.json"</code>.</div>
+  </div>
+</div>
 
-| Name | Type | Description |
-|------|------|-------------|
-| ctx | `context.Context` | Cancels the read |
-| path | `string` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
+<p className="msb-label">Returns</p>
 
-**Returns**
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">File contents.</div>
+  </div>
+</div>
 
-| Type | Description |
-|------|-------------|
-| `[]byte` | File contents |
+<Accordion title="Example">
+
+```go
+data, err := fs.Read(ctx, "/etc/hostname")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes\n", len(data))
+```
+
+</Accordion>
 
 ---
 
-#### ReadString()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">ReadString()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error)
 ```
 
-Read the entire contents of a file and return as a string (UTF-8 reinterpretation of the bytes; no validation).
+Read a file and return its contents as a string. The bytes are reinterpreted as UTF-8 without validation.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the read.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">File contents.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+content, err := fs.ReadString(ctx, "/tmp/config.json")
+```
+
+</Accordion>
 
 ---
 
-#### Write()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Write()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error
 ```
 
-Write bytes to a file, creating it if it doesn't exist and truncating if it does.
+Write bytes to a file, creating it if it does not exist and truncating it if it does.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the write.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">Bytes to write.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
+```
+
+</Accordion>
 
 ---
 
-#### WriteString()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">WriteString()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error
 ```
 
-Write a UTF-8 string to a file.
+Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the write.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>content</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Text to write.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
+```
+
+</Accordion>
 
 ---
 
-#### List()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">List()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error)
 ```
 
-List the entries in a directory.
+List the entries in a directory inside the sandbox.
 
-**Returns**
+<p className="msb-label">Parameters</p>
 
-| Type | Description |
-|------|-------------|
-| `[]`[`FsEntry`](#fsentry) | Directory entries |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the listing.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute directory path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fsentry">[]FsEntry</a></div>
+    <div className="msb-param-desc">Directory entries.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```go
 entries, err := fs.List(ctx, "/etc")
+if err != nil {
+    return err
+}
 for _, e := range entries {
     fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
 }
 ```
 
+</Accordion>
+
 ---
 
-#### Stat()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Stat()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
@@ -106,35 +275,108 @@ func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
 
 Get detailed metadata for a file or directory.
 
-**Returns**
+<p className="msb-label">Parameters</p>
 
-| Type | Description |
-|------|-------------|
-| [`*FsStat`](#fsstat) | File metadata |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the stat.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fsstat">*FsStat</a></div>
+    <div className="msb-param-desc">File metadata.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+st, err := fs.Stat(ctx, "/etc/hosts")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
+```
+
+</Accordion>
 
 ---
 
-#### Mkdir()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Mkdir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error
 ```
 
-Create a directory and all missing parents.
+Create a directory and any missing parents inside the sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute directory path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.Mkdir(ctx, "/app/cache/sessions")
+```
+
+</Accordion>
 
 ---
 
-#### Remove()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error
 ```
 
-Remove a single file. Use [`RemoveDir`](#removedir) for directories.
+Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute file path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.Remove(ctx, "/tmp/scratch.txt")
+```
+
+</Accordion>
 
 ---
 
-#### RemoveDir()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">RemoveDir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
@@ -142,9 +384,31 @@ func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
 
 Remove a directory recursively.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute directory path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.RemoveDir(ctx, "/app/cache")
+```
+
+</Accordion>
+
 ---
 
-#### Copy()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Copy()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
@@ -152,9 +416,35 @@ func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
 
 Copy a file within the sandbox.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>src</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Source path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dst</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
+```
+
+</Accordion>
+
 ---
 
-#### Rename()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Rename()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
@@ -162,19 +452,82 @@ func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
 
 Rename or move a file or directory within the sandbox.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>src</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Current path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dst</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">New path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
+```
+
+</Accordion>
+
 ---
 
-#### Exists()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">Exists()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error)
 ```
 
-Report whether a path exists inside the sandbox.
+Report whether a file or directory exists at the given path.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the check.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> if the path exists.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+ok, err := fs.Exists(ctx, "/app/.initialized")
+if err != nil {
+    return err
+}
+if !ok {
+    // first boot
+}
+```
+
+</Accordion>
 
 ---
 
-#### CopyFromHost()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">CopyFromHost()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
@@ -182,9 +535,35 @@ func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath st
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the copy.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hostPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Source path on the host.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guestPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination path inside the guest.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
+```
+
+</Accordion>
+
 ---
 
-#### CopyToHost()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">CopyToHost()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error
@@ -192,15 +571,65 @@ func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath stri
 
 Copy a file from the sandbox to the host machine.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the copy.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guestPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Source path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hostPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination path on the host.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
+```
+
+</Accordion>
+
 ---
 
-#### ReadStream()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">ReadStream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
 ```
 
-Open a streaming reader for a file. Data is transferred in chunks (~3 MiB each). Use this for files too large to fit in memory. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream).
+Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels opening the stream.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fsreadstream">*FsReadStream</a></div>
+    <div className="msb-param-desc">Open read stream; close it when done.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```go
 rs, err := fs.ReadStream(ctx, "/var/log/syslog")
@@ -209,7 +638,6 @@ if err != nil {
 }
 defer rs.Close()
 
-// Streaming pattern.
 for {
     chunk, err := rs.Recv(ctx)
     if err != nil {
@@ -221,19 +649,46 @@ for {
     os.Stdout.Write(chunk)
 }
 
-// Or as an io.WriterTo.
+// Or drain it as an io.WriterTo.
 _, err = rs.WriteTo(os.Stdout)
 ```
 
+</Accordion>
+
 ---
 
-#### WriteStream()
+#### <span className="msb-recv">fs.</span><span className="msb-hn">WriteStream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
 ```
 
-Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the operation.
+Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels opening the stream.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fswritestream">*FsWriteStream</a></div>
+    <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalise.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```go
 ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
@@ -249,13 +704,19 @@ if err := ws.Close(ctx); err != nil {
 }
 ```
 
+</Accordion>
+
 ---
 
 ## Types
 
 ### FsEntry
 
-A single directory listing entry returned by [`List`](#list).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#fs-list">List()</a></p>
+
+A single directory listing entry.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -266,9 +727,11 @@ A single directory listing entry returned by [`List`](#list).
 
 ### FsEntryKind
 
-```go
-type FsEntryKind string
-```
+<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
+
+<p className="msb-backref">Used by <a href="#fsentry">FsEntry.Kind</a></p>
+
+Classifies a directory listing entry. Defined as `type FsEntryKind string`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -279,43 +742,47 @@ type FsEntryKind string
 
 ### FsStat
 
-Detailed file metadata returned by [`Stat`](#stat).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#fs-stat">Stat()</a></p>
+
+Detailed file metadata.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | Path | `string` | File path |
 | Size | `int64` | File size in bytes |
 | Mode | `uint32` | Unix permission bits |
-| ModTime | `time.Time` | Last modified timestamp (zero value if the guest did not report one) |
+| ModTime | `time.Time` | Last modified timestamp; zero value if the guest did not report one |
 | IsDir | `bool` | Whether the path is a directory |
 
 ### FsReadStream
 
-Streaming file read returned by [`ReadStream`](#readstream). Must be closed when done.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-```go
-type FsReadStream struct { /* ... */ }
-```
+<p className="msb-backref">Returned by <a href="#fs-readstream">ReadStream()</a></p>
+
+An open streaming read from a guest file. Must be closed with `Close` when done.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `Recv(ctx)` | `([]byte, error)` | Receive the next chunk. Returns `(nil, nil)` at EOF |
-| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()` — implements `io.WriterTo` |
-| `CopyTo(ctx, w io.Writer)` | `(int64, error)` | Drain into `w` with caller-supplied context |
+| `Recv(ctx context.Context)` | `([]byte, error)` | Receive the next chunk; returns `(nil, nil)` at EOF |
+| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()`; implements `io.WriterTo` |
+| `CopyTo(ctx context.Context, w io.Writer)` | `(int64, error)` | Drain into `w` honouring `ctx` for per-chunk cancellation |
 | `Close()` | `error` | Release the read stream handle |
 
-`WriteTo` and `CopyTo` leave the stream open on error and partial writes so the caller can decide how to recover; close it explicitly in either case.
+On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
 
 ### FsWriteStream
 
-Streaming file write returned by [`WriteStream`](#writestream). Must be closed via `Close(ctx)` to finalise.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-```go
-type FsWriteStream struct { /* ... */ }
-```
+<p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
+
+An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `Write(p []byte)` | `(int, error)` | Implements `io.Writer`. Uses `context.Background()` internally |
-| `WriteCtx(ctx, data []byte)` | `error` | Write with explicit context |
-| `Close(ctx)` | `error` | Send EOF and finalise the file |
+| `Write(p []byte)` | `(int, error)` | Send a chunk; implements `io.Writer`, uses `context.Background()` internally |
+| `WriteCtx(ctx context.Context, data []byte)` | `error` | Send a chunk with explicit context control |
+| `Close(ctx context.Context)` | `error` | Send the EOF marker and wait for the guest to confirm; must be called to complete the write |

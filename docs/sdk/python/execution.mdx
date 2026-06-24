@@ -3,144 +3,565 @@ title: Execution
 description: Python SDK - Command execution API reference
 ---
 
-See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox: collect output in one shot, stream events as they arrive, or bridge your terminal to an interactive PTY. These methods live on a running [`Sandbox`](/sdk/python/sandbox). See [Commands](/sandboxes/commands) for usage examples.
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Run &amp; collect<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#sandbox-exec"><span className="msb-rn">sandbox.exec()</span><span className="msb-rg">run, buffer output</span></a>
+  <a className="msb-row" href="#sandbox-shell"><span className="msb-rn">sandbox.shell()</span><span className="msb-rg">run through the shell</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Stream<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#sandbox-exec_stream"><span className="msb-rn">sandbox.exec_stream()</span><span className="msb-rg">stream events live</span></a>
+  <a className="msb-row" href="#sandbox-shell_stream"><span className="msb-rn">sandbox.shell_stream()</span><span className="msb-rg">stream through the shell</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Attach<span className="msb-ct">2</span></p>
+  <a className="msb-row" href="#sandbox-attach"><span className="msb-rn">sandbox.attach()</span><span className="msb-rg">interactive PTY bridge</span></a>
+  <a className="msb-row" href="#sandbox-attach_shell"><span className="msb-rn">sandbox.attach_shell()</span><span className="msb-rg">attach the default shell</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#execoutput">ExecOutput</a>
+    <a className="msb-typepill" href="#exechandle">ExecHandle</a>
+    <a className="msb-typepill" href="#execsink">ExecSink</a>
+    <a className="msb-typepill" href="#execevent">ExecEvent</a>
+    <a className="msb-typepill" href="#exitstatus">ExitStatus</a>
+    <a className="msb-typepill" href="#stdin">Stdin</a>
+    <a className="msb-typepill" href="#rlimit">Rlimit</a>
+    <a className="msb-typepill" href="#rlimitresource">RlimitResource</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```python
+import sys
+
+from microsandbox import Sandbox
+
+sandbox = await Sandbox.create("api", image="python")
+
+# 1. one-shot
+out = await sandbox.exec("python3", ["-c", "print(1 + 1)"])
+print(out.stdout_text)  # "2\n"
+
+# 2. stream
+handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
+async for event in handle:
+    if event.event_type == "stdout":
+        sys.stdout.buffer.write(event.data)
+    elif event.event_type == "exited":
+        break
+
+await sandbox.stop()
+```
+
+## Run and collect
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def exec(
+    cmd: str,
+    args: list[str] | Mapping[str, Any] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecOutput
+```
+
+Run a command inside the sandbox and wait for it to complete, buffering all stdout and stderr into memory. The keyword-only options apply to this call alone and don't change the sandbox's defaults. For long-running processes or large output, use [`exec_stream()`](#sandbox-exec_stream) instead. Raises [`ExecTimeoutError`](/sdk/python/sandbox) if `timeout` elapses and [`ExecFailedError`](/sdk/python/sandbox) if the process can't be spawned.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Command to execute (e.g. <code>"python3"</code>, <code>"/usr/bin/node"</code>).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | Mapping[str, Any] | None</span></div>
+    <div className="msb-param-desc">Command arguments. A mapping is accepted as a shorthand for the keyword-only options below.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Working directory for this command.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Guest user to run as.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Environment variables, merged on top of the sandbox defaults.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Seconds before the process is killed.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stdin</code><a className="msb-type" href="#stdin">Stdin | bytes | str | None</a></div>
+    <div className="msb-param-desc">Stdin mode. Raw <code>bytes</code> / <code>str</code> are sent inline; default is <code>/dev/null</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tty</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Allocate a pseudo-terminal, merging stdout and stderr.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rlimits</code><a className="msb-type" href="#rlimit">list[Rlimit] | None</a></div>
+    <div className="msb-param-desc">POSIX resource limits applied to the process.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+out = await sandbox.exec(
+    "python3",
+    ["script.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
+print(out.stdout_text)
+print(out.exit_code)  # 0
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def shell(
+    script: str,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecOutput
+```
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works. Accepts the same keyword-only options as [`exec()`](#sandbox-exec).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Shell command string (e.g. <code>"ls -la /app &amp;&amp; echo done"</code>).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+out = await sandbox.shell("ls -la /app && echo done")
+print(out.stdout_text)
+```
+
+</Accordion>
+
+---
+
+## Stream
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def exec_stream(
+    cmd: str,
+    args: list[str] | Mapping[str, Any] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecHandle
+```
+
+Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, and exit events as they happen rather than buffering everything. Takes the same per-call options as [`exec()`](#sandbox-exec). Pass `stdin=Stdin.pipe()` to write to the process while it runs via [`take_stdin()`](#exechandle).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Command to execute.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | Mapping[str, Any] | None</span></div>
+    <div className="msb-param-desc">Command arguments.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle for receiving events and controlling the process.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+import sys
+
+handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
+async for event in handle:
+    if event.event_type == "stdout":
+        sys.stdout.buffer.write(event.data)
+    elif event.event_type == "exited":
+        break
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def shell_stream(
+    script: str,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> ExecHandle
+```
+
+Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the configured shell but returns an [`ExecHandle`](#exechandle) instead of buffering output.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Shell command string.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+import sys
+
+handle = await sandbox.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done")
+async for event in handle:
+    if event.event_type == "stdout":
+        sys.stdout.buffer.write(event.data)
+```
+
+</Accordion>
+
+---
+
+## Attach
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def attach(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    detach_keys: str | None = None,
+) -> int
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press the configured detach key sequence (default `Ctrl+]`) to disconnect without stopping the process. Returns the process exit code.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Command arguments.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Working directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Guest user to run as.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Environment variables for the session.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detach_keys</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Detach key sequence (e.g. <code>"ctrl-]"</code> or <code>"ctrl-p,ctrl-q"</code>).</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the process.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+code = await sandbox.attach("bash", cwd="/app", env={"EDITOR": "vim"})
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach_shell()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def attach_shell() -> int
+```
+
+Bridge your terminal to the sandbox's default shell in a fully interactive PTY session. Returns the shell's exit code.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the shell process.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+code = await sandbox.attach_shell()
+```
+
+</Accordion>
+
+---
 
 ## Types
 
 ### ExecOutput
 
-The result of a completed command execution.
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
+
+The result of a completed command execution: collected output plus exit status. All members are properties.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| exit_code | `int` | Exit code |
-| success | `bool` | `True` if exit_code is `0` |
-| stdout_text | `str` | Collected stdout decoded as UTF-8. Raises on invalid encoding. |
-| stderr_text | `str` | Collected stderr decoded as UTF-8 |
+| exit_code | `int` | Process exit code |
+| success | `bool` | `True` when `exit_code == 0` |
+| stdout_text | `str` | Collected stdout decoded as UTF-8. Raises on invalid encoding |
+| stderr_text | `str` | Collected stderr decoded as UTF-8. Raises on invalid encoding |
 | stdout_bytes | `bytes` | Raw stdout bytes |
 | stderr_bytes | `bytes` | Raw stderr bytes |
 
----
-
 ### ExecHandle
 
-A handle to a running streaming execution. Supports `async for event in handle:` to iterate over events until the stream ends.
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | id | `str` | Correlation ID for this execution |
-| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after first call. |
-| recv() | `ExecEvent \| None` | *(async)* Receive the next event. Returns `None` when done. |
-| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)`. |
-| collect() | [`ExecOutput`](#execoutput) | *(async)* Wait and collect all remaining output |
-| signal(sig) | `None` | *(async)* Send a POSIX signal to the process |
-| kill() | `None` | *(async)* Send SIGKILL |
-
----
+| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after the first call, or when stdin wasn't piped |
+| recv() | [`ExecEvent`](#execevent) ` \| None` | *(async)* Receive the next event. Returns `None` when the stream ends |
+| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)` |
+| collect() | [`ExecOutput`](#execoutput) | *(async)* Drain remaining output and wait for exit |
+| signal(sig) | `None` | *(async)* Send a POSIX signal (numeric) to the process |
+| kill() | `None` | *(async)* Send SIGKILL to the process |
 
 ### ExecSink
 
-Writer for sending data to a running process's stdin.
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
+
+Writer for sending data to a running process's stdin. Obtained from [`ExecHandle.take_stdin()`](#exechandle) when the execution was configured with `stdin=Stdin.pipe()`.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| write() | `data: bytes` | *(async)* Write bytes to the process's stdin |
-| close() | - | *(async)* Close stdin. The process sees EOF. |
-
----
+| write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
+| close() | - | *(async)* Close stdin. The process sees EOF |
 
 ### ExecEvent
 
-Native event object emitted by streaming execution methods.
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Emitted by <a href="#exechandle">ExecHandle</a></p>
+
+Native event object emitted by [`recv()`](#exechandle) and by iterating an [`ExecHandle`](#exechandle). Fields that don't apply to a given event are `None`.
 
 | Property | Type | Description |
 |----------|------|-------------|
 | event_type | `str` | `"started"`, `"stdout"`, `"stderr"`, `"exited"`, `"failed"`, or `"stdin_error"` |
-| pid | `int \| None` | Guest PID (on `"started"`) |
-| data | `bytes \| None` | Output data on `"stdout"` / `"stderr"`, or a UTF-8 failure message on `"failed"` / `"stdin_error"` |
+| pid | `int \| None` | Guest PID, set on `"started"` |
+| data | `bytes \| None` | Output bytes on `"stdout"` / `"stderr"`, or a UTF-8 failure message on `"failed"` / `"stdin_error"` |
 | code | `int \| None` | Exit code on `"exited"`, or errno when available on `"failed"` / `"stdin_error"` |
 
-Fields that do not apply to a particular event are `None`.
+### ExitStatus
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#exechandle">ExecHandle.wait()</a></p>
+
+Frozen dataclass describing a process exit result. [`ExecHandle.wait()`](#exechandle) returns the same information as a `(code, success)` tuple.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| code | `int` | Process exit code |
+| success | `bool` | `True` when `code == 0` |
 
 ### Stdin
 
-Frozen dataclass with factory methods for configuring process stdin.
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` and `str` are also accepted directly and are sent inline.
 
 | Factory | Parameters | Description |
 |---------|-----------|-------------|
-| Stdin.null() | - | `/dev/null` (default) |
-| Stdin.pipe() | - | Piped stdin. Use [`take_stdin()`](#exechandle) on the handle to write. |
-| Stdin.bytes() | `data: bytes` | Inline data sent before the process starts |
-
----
+| Stdin.null() | - | Connect stdin to `/dev/null` (default) |
+| Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
+| Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
 
 ### Rlimit
 
-Frozen dataclass with factory methods for POSIX resource limits.
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+Frozen dataclass describing a POSIX resource limit. Construct one directly or via a factory, then pass a list as the `rlimits` argument.
 
 | Factory | Parameters | Description |
 |---------|-----------|-------------|
 | Rlimit.nofile(limit) | `limit: int` | Max open file descriptors |
 | Rlimit.cpu(secs) | `secs: int` | CPU time limit in seconds |
-| Rlimit.as_(*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
+| Rlimit.as_(\*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
 | Rlimit.nproc(limit) | `limit: int` | Max number of processes |
 | Rlimit.fsize(limit) | `limit: int` | Max file size |
 | Rlimit.memlock(limit) | `limit: int` | Max locked memory |
 | Rlimit.stack(limit) | `limit: int` | Max stack size |
 
-**Properties**
+**Fields**
 
-| Property | Type | Description |
-|----------|------|-------------|
-| resource | [`RlimitResource`](#rlimitresource) | Resource type |
+| Field | Type | Description |
+|-------|------|-------------|
+| resource | [`RlimitResource`](#rlimitresource) | Which resource is limited |
 | soft | `int` | Soft limit |
 | hard | `int` | Hard limit |
 
----
-
 ### RlimitResource
 
-Enum of POSIX resource types.
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#rlimit">Rlimit.resource</a></p>
+
+String enum (`enum.StrEnum`) naming a limitable POSIX resource.
 
 | Value | Description |
 |-------|-------------|
-| `cpu` | CPU time |
-| `fsize` | File size |
-| `data` | Data segment size |
-| `stack` | Stack size |
-| `core` | Core file size |
-| `rss` | Resident set size |
-| `nproc` | Number of processes |
-| `nofile` | Open file descriptors |
-| `memlock` | Locked memory |
-| `as` | Virtual memory |
-| `locks` | File locks |
-| `sigpending` | Pending signals |
-| `msgqueue` | Message queue size |
-| `nice` | Nice priority ceiling |
-| `rtprio` | Real-time priority ceiling |
-| `rttime` | Real-time CPU time |
-
----
-
-### SandboxMetrics
-
-Metrics snapshot for a running sandbox.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| cpu_percent | `float` | CPU utilization percentage |
-| memory_bytes | `int` | Current memory usage in bytes |
-| memory_limit_bytes | `int` | Memory limit in bytes |
-| disk_read_bytes | `int` | Total bytes read from disk |
-| disk_write_bytes | `int` | Total bytes written to disk |
-| net_rx_bytes | `int` | Total bytes received over the network |
-| net_tx_bytes | `int` | Total bytes sent over the network |
-| uptime_ms | `int` | Sandbox uptime in milliseconds |
-| timestamp_ms | `float` | Timestamp of the snapshot in milliseconds |
-
----
-
-### MetricsStream
-
-Async iterator yielding [`SandboxMetrics`](#sandboxmetrics). Use `async for metrics in stream:` to consume.
+| `CPU` | CPU time |
+| `FSIZE` | File size |
+| `DATA` | Data segment size |
+| `STACK` | Stack size |
+| `CORE` | Core file size |
+| `RSS` | Resident set size |
+| `NPROC` | Number of processes |
+| `NOFILE` | Open file descriptors |
+| `MEMLOCK` | Locked memory |
+| `AS` | Virtual memory |
+| `LOCKS` | File locks |
+| `SIGPENDING` | Pending signals |
+| `MSGQUEUE` | Message queue size |
+| `NICE` | Nice priority ceiling |
+| `RTPRIO` | Real-time priority ceiling |
+| `RTTIME` | Real-time CPU time |

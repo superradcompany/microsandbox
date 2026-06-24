@@ -35,6 +35,7 @@ type SandboxConfig struct {
 	Env                map[string]string
 	Labels             map[string]string
 	Detached           bool
+	Ephemeral          bool
 	Entrypoint         []string
 	Init               *InitConfig
 	LogLevel           LogLevel
@@ -57,25 +58,39 @@ type SandboxConfig struct {
 type SandboxOption func(*SandboxConfig)
 
 type persistedSandboxConfig struct {
-	Name            string            `json:"name"`
-	Image           json.RawMessage   `json:"image"`
-	ImageFstype     string            `json:"image_fstype"`
-	OCIUpperSizeMiB uint32            `json:"oci_upper_size_mib"`
-	MemoryMiB       uint32            `json:"memory_mib"`
-	CPUs            uint8             `json:"cpus"`
-	Workdir         string            `json:"workdir"`
-	Shell           string            `json:"shell"`
-	SecurityProfile SecurityProfile   `json:"security_profile"`
-	Hostname        string            `json:"hostname"`
-	User            string            `json:"user"`
-	Replace         bool              `json:"replace"`
-	Labels          map[string]string `json:"labels"`
-	Detached        bool              `json:"detached"`
-	Entrypoint      []string          `json:"entrypoint"`
-	LogLevel        LogLevel          `json:"log_level"`
-	QuietLogs       bool              `json:"quiet_logs"`
-	Scripts         map[string]string `json:"scripts"`
-	PullPolicy      PullPolicy        `json:"pull_policy"`
+	Name            string               `json:"name"`
+	Image           json.RawMessage      `json:"image"`
+	ImageFstype     string               `json:"image_fstype"`
+	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
+	MemoryMiB       uint32               `json:"memory_mib"`
+	CPUs            uint8                `json:"cpus"`
+	Workdir         string               `json:"workdir"`
+	Shell           string               `json:"shell"`
+	SecurityProfile SecurityProfile      `json:"security_profile"`
+	Hostname        string               `json:"hostname"`
+	User            string               `json:"user"`
+	Replace         bool                 `json:"replace"`
+	Labels          map[string]string    `json:"labels"`
+	Detached        bool                 `json:"detached"`
+	Lifecycle       *persistedLifecycle  `json:"lifecycle"`
+	Entrypoint      []string             `json:"entrypoint"`
+	Init            *persistedInitConfig `json:"init"`
+	LogLevel        LogLevel             `json:"log_level"`
+	QuietLogs       bool                 `json:"quiet_logs"`
+	Scripts         map[string]string    `json:"scripts"`
+	PullPolicy      PullPolicy           `json:"pull_policy"`
+}
+
+type persistedInitConfig struct {
+	Cmd  string      `json:"cmd"`
+	Args []string    `json:"args"`
+	Env  [][2]string `json:"env"`
+}
+
+type persistedLifecycle struct {
+	Ephemeral       bool   `json:"ephemeral"`
+	MaxDurationSecs uint64 `json:"max_duration_secs"`
+	IdleTimeoutSecs uint64 `json:"idle_timeout_secs"`
 }
 
 // UnmarshalJSON decodes the persisted Rust sandbox config into the Go SDK's
@@ -114,13 +129,52 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Replace:         raw.Replace,
 		Labels:          raw.Labels,
 		Detached:        raw.Detached,
+		Ephemeral:       raw.lifecycleEphemeral(),
 		Entrypoint:      raw.Entrypoint,
+		Init:            decodePersistedInit(raw.Init),
 		LogLevel:        raw.LogLevel,
 		QuietLogs:       raw.QuietLogs,
 		Scripts:         raw.Scripts,
 		PullPolicy:      raw.PullPolicy,
+		MaxDuration:     time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
+		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
+}
+
+func (c persistedSandboxConfig) lifecycleEphemeral() bool {
+	return c.Lifecycle != nil && c.Lifecycle.Ephemeral
+}
+
+func (c persistedSandboxConfig) lifecycleMaxDurationSecs() uint64 {
+	if c.Lifecycle == nil {
+		return 0
+	}
+	return c.Lifecycle.MaxDurationSecs
+}
+
+func (c persistedSandboxConfig) lifecycleIdleTimeoutSecs() uint64 {
+	if c.Lifecycle == nil {
+		return 0
+	}
+	return c.Lifecycle.IdleTimeoutSecs
+}
+
+func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
+	if raw == nil {
+		return nil
+	}
+	cfg := &InitConfig{
+		Cmd:  raw.Cmd,
+		Args: append([]string(nil), raw.Args...),
+	}
+	if len(raw.Env) > 0 {
+		cfg.Env = make(map[string]string, len(raw.Env))
+		for _, entry := range raw.Env {
+			cfg.Env[entry[0]] = entry[1]
+		}
+	}
+	return cfg
 }
 
 func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, bool, error) {
@@ -316,6 +370,12 @@ func WithDetached() SandboxOption {
 	return func(o *SandboxConfig) { o.Detached = true }
 }
 
+// WithEphemeral marks whether the runtime should remove the sandbox's DB row,
+// on-disk state, logs, and captured output after it reaches a terminal status.
+func WithEphemeral(ephemeral bool) SandboxOption {
+	return func(o *SandboxConfig) { o.Ephemeral = ephemeral }
+}
+
 // WithEntrypoint overrides the user-workload entrypoint baked into the image.
 // Note this is the user workload (what the agent execs per request), not the
 // guest PID 1 — for that, use WithInit.
@@ -479,7 +539,8 @@ type initFactory struct{}
 //	microsandbox.WithInit(microsandbox.Init.Cmd("/sbin/init", microsandbox.InitOptions{}))
 var Init initFactory
 
-// Auto delegates to agentd to probe common init paths.
+// Auto uses a known image ENTRYPOINT init when present, preserving attached
+// init-entrypoint commands, otherwise it delegates to agentd to probe common init paths.
 func (initFactory) Auto() InitConfig { return InitConfig{Cmd: "auto"} }
 
 // Cmd sets the init binary path with optional args/env.

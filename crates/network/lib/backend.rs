@@ -5,7 +5,8 @@
 //! guest sends a frame and [`read_frame()`](NetBackend::read_frame) to deliver
 //! frames back to the guest. Frames flow through [`SharedState`]'s
 //! `tx_ring`/`rx_ring` queues with [`WakePipe`](crate::shared::WakePipe)
-//! notifications.
+//! notifications. libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
+//! in edge-triggered mode, so reads must drain the wake pipe before returning.
 
 use std::{os::fd::RawFd, sync::Arc};
 
@@ -73,6 +74,8 @@ impl NetBackend for SmoltcpBackend {
     /// Deliver a frame from smoltcp to the guest. Prepends a zeroed
     /// virtio-net header.
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
+        self.shared.rx_wake.drain();
+
         let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
 
         let total_len = VIRTIO_NET_HDR_LEN + frame.len();
@@ -108,5 +111,48 @@ impl NetBackend for SmoltcpBackend {
     /// `SmoltcpDevice::transmit()` pushes a frame and wakes `rx_wake`).
     fn raw_socket_fd(&self) -> RawFd {
         self.shared.rx_wake.as_raw_fd()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn read_frame_drains_rx_wake_pipe() {
+        let shared = Arc::new(SharedState::new(4));
+        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut buf = [0u8; 64];
+
+        assert!(shared.push_rx_frame_and_wake(vec![0xaa, 0xbb]));
+        assert!(fd_is_readable(backend.raw_socket_fd()));
+
+        let n = backend.read_frame(&mut buf).expect("frame should be read");
+        assert_eq!(n, VIRTIO_NET_HDR_LEN + 2);
+        assert_eq!(&buf[VIRTIO_NET_HDR_LEN..n], &[0xaa, 0xbb]);
+        assert!(!fd_is_readable(backend.raw_socket_fd()));
+
+        assert!(shared.push_rx_frame_and_wake(vec![0xcc]));
+        assert!(fd_is_readable(backend.raw_socket_fd()));
+    }
+
+    fn fd_is_readable(fd: RawFd) -> bool {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        // SAFETY: `pfd` points to a valid pollfd for a live file descriptor.
+        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        assert!(ret >= 0, "poll failed: {}", std::io::Error::last_os_error());
+
+        ret == 1 && pfd.revents & libc::POLLIN != 0
     }
 }

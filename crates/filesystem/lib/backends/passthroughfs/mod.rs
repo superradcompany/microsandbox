@@ -11,6 +11,7 @@ mod file_ops;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
+pub(crate) mod quota;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -149,6 +150,14 @@ pub struct PassthroughConfig {
 
     /// Optional user-volume identity map for host metadata fallback.
     pub bind_identity_map: Option<stat_override::BindIdentityMapHandle>,
+
+    /// Optional guest-write byte budget for this mount's subtree.
+    ///
+    /// `None` means unbounded (the default). When set, guest-attributable
+    /// growth past this many bytes is rejected with `ENOSPC`, and guest
+    /// `statfs` reports the budget instead of the host filesystem. Enforced by
+    /// the `quota` module.
+    pub quota_bytes: Option<u64>,
 }
 
 /// Passthrough filesystem backend.
@@ -193,6 +202,9 @@ pub struct PassthroughFs {
     /// after first rejecting real host symlinks on the pinned inode.
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
+
+    /// Optional guest-write byte budget for this mount's subtree.
+    pub(crate) quota: Option<quota::DirQuota>,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -288,6 +300,10 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        let quota = cfg
+            .quota_bytes
+            .map(|limit| quota::DirQuota::new(cfg.root_dir.clone(), limit));
+
         Ok(Self {
             cfg,
             root_fd,
@@ -302,6 +318,7 @@ impl PassthroughFs {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            quota,
         })
     }
 }
@@ -401,6 +418,32 @@ impl PassthroughFs {
     pub(crate) fn is_virtual_init_inode(&self, inode: u64) -> bool {
         self.injects_init() && inode == init_binary::INIT_INODE
     }
+
+    /// Charge the quota for growing an open file to `new_end` bytes.
+    ///
+    /// No-op when this mount has no quota. Otherwise charges the delta between
+    /// the file's current logical size and `new_end` (zero when the operation
+    /// stays within the existing size), returning `ENOSPC` if it would exceed
+    /// the budget.
+    pub(crate) fn quota_charge_to(&self, fd: std::os::fd::RawFd, new_end: u64) -> io::Result<()> {
+        if let Some(q) = &self.quota {
+            let old = quota::fd_size(fd);
+            q.charge(new_end.saturating_sub(old))?;
+        }
+        Ok(())
+    }
+
+    /// Capture the quota baseline now if it has not been captured yet.
+    ///
+    /// No-op when this mount has no quota. Called from the write-gating
+    /// handlers so the baseline reflects the pre-guest-write state without
+    /// walking the directory at mount time. May block for one directory walk on
+    /// its first call for a heavy mount; cheap thereafter.
+    pub(crate) fn quota_ensure_baseline(&self) {
+        if let Some(q) = &self.quota {
+            q.ensure_baseline();
+        }
+    }
 }
 
 impl PassthroughConfig {
@@ -444,6 +487,7 @@ impl Default for PassthroughConfig {
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
+            quota_bytes: None,
         }
     }
 }

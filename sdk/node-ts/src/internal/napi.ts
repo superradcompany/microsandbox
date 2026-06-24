@@ -24,6 +24,20 @@ export const napi = native;
 
 export interface NativeBindings {
   readonly setRuntimeMsbPath?: (path: string) => void;
+  readonly setDefaultBackend?: (
+    kind: string,
+    url?: string,
+    apiKey?: string,
+    profile?: string,
+  ) => void;
+  readonly pushDefaultBackend?: (
+    kind: string,
+    url?: string,
+    apiKey?: string,
+    profile?: string,
+  ) => number;
+  readonly popDefaultBackend?: (token: number) => void;
+  readonly defaultBackendKind?: () => "local" | "cloud";
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;
@@ -63,6 +77,7 @@ export interface NativeBindings {
 export interface NapiAgentClientStatic {
   connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
   connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  socketPath(name: string): string;
 }
 
 export interface AgentConnectOptions {
@@ -129,6 +144,7 @@ export interface NapiSandboxBuilderSetters {
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
+  ephemeral(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;
@@ -665,6 +681,9 @@ export interface NapiSandboxMetrics {
   readonly diskWriteBytes: number;
   readonly netRxBytes: number;
   readonly netTxBytes: number;
+  readonly upperUsedBytes?: number;
+  readonly upperFreeBytes?: number;
+  readonly upperHostAllocatedBytes?: number;
   readonly uptimeMs: number;
   readonly timestampMs: number;
 }

@@ -3,33 +3,149 @@ title: Images
 description: Go SDK - Image cache API reference
 ---
 
-The Go SDK exposes local OCI image-cache operations through the package-level `Image` value. These APIs inspect and prune images that have already been pulled by sandbox creation.
+Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
 
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
-## Image
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#image-get"><span className="msb-rn">Image.Get()</span><span className="msb-rg">one cached image by reference</span></a>
+  <a className="msb-row" href="#image-list"><span className="msb-rn">Image.List()</span><span className="msb-rg">every cached image</span></a>
+  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.Inspect()</span><span className="msb-rg">handle + config + layers</span></a>
+  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.Remove()</span><span className="msb-rg">delete a cached image</span></a>
+  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.Prune()</span><span className="msb-rg">reclaim unused image data</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · ImageHandle<span className="msb-ct">10</span></p>
+  <a className="msb-row" href="#h-reference"><span className="msb-rn">h.Reference()</span><span className="msb-rg">image reference</span></a>
+  <a className="msb-row" href="#h-manifestdigest"><span className="msb-rn">h.ManifestDigest()</span><span className="msb-rg">manifest digest</span></a>
+  <a className="msb-row" href="#h-architecture"><span className="msb-rn">h.Architecture()</span><span className="msb-rg">resolved architecture</span></a>
+  <a className="msb-row" href="#h-os"><span className="msb-rn">h.OS()</span><span className="msb-rg">resolved operating system</span></a>
+  <a className="msb-row" href="#h-layercount"><span className="msb-rn">h.LayerCount()</span><span className="msb-rg">number of layers</span></a>
+  <a className="msb-row" href="#h-sizebytes"><span className="msb-rn">h.SizeBytes()</span><span className="msb-rg">total size in bytes</span></a>
+  <a className="msb-row" href="#h-createdat"><span className="msb-rn">h.CreatedAt()</span><span className="msb-rg">first-pulled time</span></a>
+  <a className="msb-row" href="#h-lastusedat"><span className="msb-rn">h.LastUsedAt()</span><span className="msb-rg">last-referenced time</span></a>
+  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.Remove()</span><span className="msb-rg">delete this image</span></a>
+  <a className="msb-row" href="#h-inspect"><span className="msb-rn">h.Inspect()</span><span className="msb-rg">full detail for this image</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
+    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
+    <a className="msb-typepill" href="#imageconfig">ImageConfig</a>
+    <a className="msb-typepill" href="#imagelayer">ImageLayer</a>
+    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+images, err := m.Image.List(ctx)        // 1. enumerate the cache
+if err != nil {
+    return err
+}
+for _, img := range images {
+    fmt.Println(img.Reference(), img.LayerCount())
+}
+
+report, err := m.Image.Prune(ctx)       // 2. reclaim unused data
+if err != nil {
+    return err
+}
+fmt.Println(report.LayersRemoved, "layers removed")
+```
+
+## Functions
 
 ---
 
-#### Image.Get()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Get(ctx context.Context, reference string) (*ImageHandle, error)
 ```
 
-Fetch one cached image by reference. Returns `ErrImageNotFound` when the image is not present in the local cache.
+Fetch one cached image by reference. Returns `ErrImageNotFound` when no image with that reference is present in the local cache.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the lookup.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Image reference, e.g. <code>"python:3.12"</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">*ImageHandle</a></div>
+    <div className="msb-param-desc">Metadata handle for the cached image.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc"><code>ErrImageNotFound</code> when the reference is not cached.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+fmt.Println(img.ManifestDigest())
+```
+
+</Accordion>
 
 ---
 
-#### Image.List()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">List()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) List(ctx context.Context) ([]*ImageHandle, error)
 ```
 
-Return every cached image, ordered newest first.
+Return every cached image, ordered by creation time (newest first).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the listing.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">[]*ImageHandle</a></div>
+    <div className="msb-param-desc">All cached image handles, newest first.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil on failure.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```go
 images, err := m.Image.List(ctx)
@@ -41,54 +157,443 @@ for _, img := range images {
 }
 ```
 
+</Accordion>
+
 ---
 
-#### Image.Inspect()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Inspect()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Inspect(ctx context.Context, reference string) (*ImageDetail, error)
 ```
 
-Return handle metadata plus parsed OCI config and layer details.
+Return the full detail for a cached image: the [`ImageHandle`](#imagehandle) plus the parsed OCI config and the layer list.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the inspection.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Image reference, e.g. <code>"python:3.12"</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagedetail">*ImageDetail</a></div>
+    <div className="msb-param-desc">Handle, OCI config, and layers.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc"><code>ErrImageNotFound</code> when the reference is not cached.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+detail, err := m.Image.Inspect(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+fmt.Println(detail.Config.Entrypoint, len(detail.Layers), "layers")
+```
+
+</Accordion>
 
 ---
 
-#### Image.Remove()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Remove(ctx context.Context, reference string, force bool) error
 ```
 
-Delete a cached image. When `force` is false, sandboxes still referencing the image cause `ErrImageInUse`.
+Delete a cached image. When `force` is false, sandboxes that still reference the image cause the call to fail with `ErrImageInUse`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the removal.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Image reference to delete.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>true</code>, remove even if sandboxes still reference it.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc"><code>ErrImageInUse</code> when in use and <code>force</code> is false.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 ---
 
-#### Image.Prune()
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Prune()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error)
 ```
 
-Remove cached image data that is not used by sandboxes and return a report with the number of image refs, manifests, layers, fsmeta files, VMDK files, and bytes reclaimed.
+Remove cached image data that is not used by any sandbox. Returns a report tallying the image refs, manifests, layers, fsmeta files, and VMDK files removed, plus bytes reclaimed.
 
-## ImageHandle
+<p className="msb-label">Parameters</p>
 
-Returned by `Image.Get` and `Image.List`.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the prune.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imageprunereport">*ImagePruneReport</a></div>
+    <div className="msb-param-desc">Summary of what was reclaimed.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil on failure.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+report, err := m.Image.Prune(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(report.LayersRemoved, "layers removed")
+```
+
+</Accordion>
+
+---
+
+## Methods
+
+Instance methods on [`*ImageHandle`](#imagehandle), the metadata reference returned by [`Image.Get`](#image-get) and [`Image.List`](#image-list). The accessors are pure reads of cached metadata; only `Remove` and `Inspect` take a context and reach the runtime.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Reference()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) Reference() string
+```
+
+The image reference, e.g. `"docker.io/library/python:3.12"`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Image reference.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ManifestDigest()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) ManifestDigest() string
+```
+
+The content-addressable manifest digest, or empty when unknown.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Manifest digest, or empty.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Architecture()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) Architecture() string
+```
+
+The architecture resolved during the pull, or empty.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Architecture, or empty.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">OS()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) OS() string
+```
+
+The operating system resolved during the pull, or empty.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Operating system, or empty.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">LayerCount()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) LayerCount() uint
+```
+
+The number of layers in the image.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">uint</span></div>
+    <div className="msb-param-desc">Layer count.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">SizeBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) SizeBytes() *int64
+```
+
+The total image size in bytes, or `nil` when unknown.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">*int64</span></div>
+    <div className="msb-param-desc">Total size in bytes, or <code>nil</code>.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) CreatedAt() time.Time
+```
+
+When this image was first pulled. Returns the zero `time.Time` when unknown.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">time.Time</span></div>
+    <div className="msb-param-desc">First-pulled time, or the zero value.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">LastUsedAt()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) LastUsedAt() time.Time
+```
+
+When this image was last referenced. Returns the zero `time.Time` when unknown.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">time.Time</span></div>
+    <div className="msb-param-desc">Last-referenced time, or the zero value.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) Remove(ctx context.Context, force bool) error
+```
+
+Delete this image. Equivalent to [`Image.Remove(ctx, h.Reference(), force)`](#image-remove). When `force` is false, sandboxes that still reference the image cause the call to fail with `ErrImageInUse`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the removal.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>true</code>, remove even if sandboxes still reference it.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc"><code>ErrImageInUse</code> when in use and <code>force</code> is false.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "old:tag")
+if err != nil {
+    return err
+}
+if err := img.Remove(ctx, false); err != nil {
+    return err
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Inspect()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ImageHandle) Inspect(ctx context.Context) (*ImageDetail, error)
+```
+
+Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Reference())`](#image-inspect).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the inspection.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagedetail">*ImageDetail</a></div>
+    <div className="msb-param-desc">Handle, OCI config, and layers.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil on failure.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+detail, err := img.Inspect(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(detail.Config.WorkingDir)
+```
+
+</Accordion>
+
+---
+
+## Types
+
+### ImageHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">Image.Get()</a> · <a href="#image-list">Image.List()</a></p>
+
+A lightweight metadata reference to a cached OCI image. Fields are unexported; read them through the accessor methods below. Embedded in [`ImageDetail`](#imagedetail).
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `Reference()` | `string` | Image reference |
-| `ManifestDigest()` | `string` | Content-addressable manifest digest, or empty |
-| `Architecture()` | `string` | Resolved architecture, or empty |
-| `OS()` | `string` | Resolved operating system, or empty |
-| `LayerCount()` | `uint` | Number of layers |
-| `SizeBytes()` | `*int64` | Total size, or nil when unknown |
-| `CreatedAt()` | `time.Time` | First-pulled time, or zero |
-| `LastUsedAt()` | `time.Time` | Last referenced time, or zero |
-| `Remove(ctx, force)` | `error` | Delete this image |
-| `Inspect(ctx)` | `(*ImageDetail, error)` | Fetch full detail for this image |
+| [Reference()](#h-reference) | `string` | Image reference |
+| [ManifestDigest()](#h-manifestdigest) | `string` | Content-addressable manifest digest, or empty |
+| [Architecture()](#h-architecture) | `string` | Resolved architecture, or empty |
+| [OS()](#h-os) | `string` | Resolved operating system, or empty |
+| [LayerCount()](#h-layercount) | `uint` | Number of layers |
+| [SizeBytes()](#h-sizebytes) | `*int64` | Total size in bytes, or `nil` when unknown |
+| [CreatedAt()](#h-createdat) | `time.Time` | First-pulled time, or the zero value |
+| [LastUsedAt()](#h-lastusedat) | `time.Time` | Last-referenced time, or the zero value |
+| [Remove(ctx, force)](#h-remove) | `error` | Delete this image |
+| [Inspect(ctx)](#h-inspect) | `(*ImageDetail, error)` | Fetch full detail for this image |
 
-## ImageDetail
+### ImageDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-inspect">Image.Inspect()</a> · <a href="#h-inspect">Inspect()</a></p>
+
+Bundles an [`ImageHandle`](#imagehandle) (embedded, so all its accessors are promoted) with the parsed OCI config and layer list.
 
 ```go
 type ImageDetail struct {
@@ -98,30 +603,61 @@ type ImageDetail struct {
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `*ImageHandle` | [`*ImageHandle`](#imagehandle) | Embedded metadata handle (accessors promoted) |
+| Config | [`*ImageConfig`](#imageconfig) | Parsed OCI config block |
+| Layers | `[]`[`ImageLayer`](#imagelayer) | Layers in manifest order |
+
 ### ImageConfig
 
-Parsed OCI config block.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-| Field | Type |
-|-------|------|
-| Digest | `string` |
-| Env | `[]string` |
-| Cmd | `[]string` |
-| Entrypoint | `[]string` |
-| WorkingDir | `string` |
-| User | `string` |
-| Labels | `map[string]string` |
-| StopSignal | `string` |
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.Config</a></p>
+
+The parsed OCI config block.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Digest | `string` | Config blob digest |
+| Env | `[]string` | Environment variables (`KEY=VALUE`) |
+| Cmd | `[]string` | Default command |
+| Entrypoint | `[]string` | Entrypoint |
+| WorkingDir | `string` | Working directory |
+| User | `string` | Default user |
+| Labels | `map[string]string` | OCI labels |
+| StopSignal | `string` | Stop signal |
 
 ### ImageLayer
 
-One layer in the image manifest.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-| Field | Type |
-|-------|------|
-| DiffID | `string` |
-| BlobDigest | `string` |
-| MediaType | `string` |
-| CompressedSizeBytes | `*int64` |
-| ErofsSizeBytes | `*int64` |
-| Position | `int32` |
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.Layers</a></p>
+
+One layer of an image manifest.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| DiffID | `string` | Uncompressed layer diff ID |
+| BlobDigest | `string` | Compressed blob digest |
+| MediaType | `string` | Layer media type |
+| CompressedSizeBytes | `*int64` | Compressed size in bytes, or `nil` |
+| ErofsSizeBytes | `*int64` | EROFS size in bytes, or `nil` |
+| Position | `int32` | Index in the layer stack |
+
+### ImagePruneReport
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-prune">Image.Prune()</a></p>
+
+Summarizes the artifacts removed by [`Image.Prune`](#image-prune).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ImageRefsRemoved | `uint32` | Image references removed |
+| ManifestsRemoved | `uint32` | Manifests removed |
+| LayersRemoved | `uint32` | Layers removed |
+| FsmetaRemoved | `uint32` | Fsmeta files removed |
+| VMDKRemoved | `uint32` | VMDK files removed |
+| BytesReclaimed | `*uint64` | Bytes reclaimed, or `nil` when unknown |

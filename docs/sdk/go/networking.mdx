@@ -3,69 +3,54 @@ title: Networking
 description: Go SDK - Network API reference
 ---
 
-See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
+Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
 
-The Go SDK's network surface is a single [`NetworkConfig`](#networkconfig) struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork). Common shapes come from [`NetworkPolicy`](#networkpolicy); custom rule sets are built by populating `NetworkConfig.Rules` directly.
+The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) struct passed to [`WithNetwork`](#m-withnetwork). Common shapes come from the [`NetworkPolicy`](#networkpolicy) factory; custom firewalls are built by populating `NetworkConfig.Rules` directly.
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#m-withnetwork"><span className="msb-rn">m.WithNetwork()</span><span className="msb-rg">attach a network config</span></a>
+  <a className="msb-row" href="#m-withports"><span className="msb-rn">m.WithPorts()</span><span className="msb-rg">publish TCP ports</span></a>
+  <a className="msb-row" href="#m-withportsudp"><span className="msb-rn">m.WithPortsUDP()</span><span className="msb-rg">publish UDP ports</span></a>
+  <a className="msb-row" href="#m-withportbindings"><span className="msb-rn">m.WithPortBindings()</span><span className="msb-rg">publish on explicit binds</span></a>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Factory · NetworkPolicy<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#networkpolicy-publiconly"><span className="msb-rn">NetworkPolicy.PublicOnly()</span><span className="msb-rg">public internet only (default)</span></a>
+  <a className="msb-row" href="#networkpolicy-none"><span className="msb-rn">NetworkPolicy.None()</span><span className="msb-rg">deny everything</span></a>
+  <a className="msb-row" href="#networkpolicy-allowall"><span className="msb-rn">NetworkPolicy.AllowAll()</span><span className="msb-rg">allow everything</span></a>
+  <a className="msb-row" href="#networkpolicy-nonlocal"><span className="msb-rn">NetworkPolicy.NonLocal()</span><span className="msb-rg">public + private, no local</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#networkconfig">NetworkConfig</a>
+    <a className="msb-typepill" href="#policyrule">PolicyRule</a>
+    <a className="msb-typepill" href="#dnsconfig">DNSConfig</a>
+    <a className="msb-typepill" href="#tlsconfig">TLSConfig</a>
+    <a className="msb-typepill" href="#portbinding">PortBinding</a>
+    <a className="msb-typepill" href="#portprotocol">PortProtocol</a>
+    <a className="msb-typepill" href="#policyaction">PolicyAction</a>
+    <a className="msb-typepill" href="#policydirection">PolicyDirection</a>
+    <a className="msb-typepill" href="#policyprotocol">PolicyProtocol</a>
+    <a className="msb-typepill" href="#networkpolicypreset">NetworkPolicyPreset</a>
+    <a className="msb-typepill" href="#destination-groups">Destination groups</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+// Preset — public internet only
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("alpine"),
     m.WithNetwork(m.NetworkPolicy.PublicOnly()),
 )
-```
 
-## NetworkPolicy
-
-Helpers that return common preset [`*NetworkConfig`](#networkconfig) values. Access via the package-level `NetworkPolicy` value.
-
----
-
-#### NetworkPolicy.PublicOnly()
-
-```go
-func (networkPolicyFactory) PublicOnly() *NetworkConfig
-```
-
-Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** when no network configuration is supplied.
-
----
-
-#### NetworkPolicy.None()
-
-```go
-func (networkPolicyFactory) None() *NetworkConfig
-```
-
-Deny all traffic. No network interface is created; the guest is fully offline. `Exec` and `FS` still work — they use the host-guest channel, not the network.
-
----
-
-#### NetworkPolicy.AllowAll()
-
-```go
-func (networkPolicyFactory) AllowAll() *NetworkConfig
-```
-
-Unrestricted network access, including private addresses and the host machine.
-
----
-
-#### NetworkPolicy.NonLocal()
-
-```go
-func (networkPolicyFactory) NonLocal() *NetworkConfig
-```
-
-Allow public + private (LAN) destinations; ingress allowed by default. Blocks loopback, link-local, and metadata.
-
----
-
-## Custom rules
-
-Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction. `DefaultEgress` and `DefaultIngress` set the fall-through action.
-
-```go
-sb, err := m.CreateSandbox(ctx, "ci-runner",
+// Or a custom first-match-wins firewall
+sb, err = m.CreateSandbox(ctx, "ci-runner",
     m.WithImage("python:3.12"),
     m.WithNetwork(&m.NetworkConfig{
         DefaultEgress:  m.PolicyActionDeny,
@@ -78,6 +63,309 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
                 Protocol:    m.PolicyProtocolTCP,
                 Port:        "443",
             },
+        },
+    }),
+)
+```
+
+## Functions
+
+---
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">WithNetwork()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func WithNetwork(net *NetworkConfig) SandboxOption
+```
+
+Set the network configuration for the sandbox. Pass a preset from the [`NetworkPolicy`](#networkpolicy) factory, or a custom [`NetworkConfig`](#networkconfig) value with your own rules, DNS, TLS, and port settings.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>net</code><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Network stack configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">WithPorts()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func WithPorts(ports map[uint16]uint16) SandboxOption
+```
+
+Make TCP services running in the sandbox reachable on localhost ports on the host. Each map entry exposes the guest port (value) on the host port (key), bound to `127.0.0.1`. Called multiple times, the maps merge.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ports</code><span className="msb-type">map[uint16]uint16</span></div>
+    <div className="msb-param-desc">Host port to guest port (TCP).</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithPorts(map[uint16]uint16{8080: 8080}),
+)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">WithPortsUDP()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func WithPortsUDP(ports map[uint16]uint16) SandboxOption
+```
+
+Make UDP services running in the sandbox reachable on localhost ports on the host. Each map entry exposes the guest port (value) on the host port (key), bound to `127.0.0.1`. Called multiple times, the maps merge.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ports</code><span className="msb-type">map[uint16]uint16</span></div>
+    <div className="msb-param-desc">Host port to guest port (UDP).</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "dns",
+    m.WithImage("alpine"),
+    m.WithPortsUDP(map[uint16]uint16{5353: 53}),
+)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">WithPortBindings()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func WithPortBindings(bindings ...PortBinding) SandboxOption
+```
+
+Make services running in the sandbox reachable on explicit host addresses and ports. Use this when the default `127.0.0.1` bind is too restrictive, for example to expose a port on `0.0.0.0`. Accepts one or more [`PortBinding`](#portbinding) values.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>bindings</code><a className="msb-type" href="#portbinding">...PortBinding</a></div>
+    <div className="msb-param-desc">Explicit bind address, host port, guest port, and protocol.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithPortBindings(
+        m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001},
+        m.PortBinding{Bind: "127.0.0.1", HostPort: 5353, GuestPort: 53, Protocol: m.PortProtocolUDP},
+    ),
+)
+```
+
+</Accordion>
+
+---
+
+## NetworkPolicy
+
+Factory namespace returning common preset [`*NetworkConfig`](#networkconfig) values. Access through the package-level `NetworkPolicy` value, for example `m.NetworkPolicy.PublicOnly()`.
+
+---
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">PublicOnly()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (networkPolicyFactory) PublicOnly() *NetworkConfig
+```
+
+Allow only public internet traffic; RFC-1918 private ranges are blocked. This is the **default** when no network configuration is supplied.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Preset config with <code>Policy: "public-only"</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.PublicOnly())
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">None()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (networkPolicyFactory) None() *NetworkConfig
+```
+
+Block all network access. No network interface is created; the guest is fully offline. `Exec` and `FS` still work, since they use the host-guest channel rather than the network.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Preset config with <code>Policy: "none"</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.None())
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">AllowAll()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (networkPolicyFactory) AllowAll() *NetworkConfig
+```
+
+Permit all network traffic, including private addresses and the host machine.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Preset config with <code>Policy: "allow-all"</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.AllowAll())
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">NonLocal()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (networkPolicyFactory) NonLocal() *NetworkConfig
+```
+
+Allow public internet plus private/LAN egress; block loopback, link-local, and metadata.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Preset config with <code>Policy: "non-local"</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.NonLocal())
+```
+
+</Accordion>
+
+---
+
+## Custom rules
+
+Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction; `DefaultEgress` and `DefaultIngress` set the fall-through action. A broad rule placed before a narrow one swallows it, so put specific rules first.
+
+```go
+sb, err := m.CreateSandbox(ctx, "ci-runner",
+    m.WithImage("python:3.12"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress:  m.PolicyActionDeny,
+        DefaultIngress: m.PolicyActionAllow,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionDeny, Destination: "10.0.0.5"},      // specific first
+            {Action: m.PolicyActionAllow, Destination: "10.0.0.0/8"},   // broad fallthrough
             {
                 Action:      m.PolicyActionAllow,
                 Direction:   m.PolicyDirectionEgress,
@@ -90,143 +378,81 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
 )
 ```
 
-### Rule order matters
-
-The first matching rule wins, so a broad rule placed before a narrow one swallows it:
-
-```go
-Rules: []m.PolicyRule{
-    {Action: m.PolicyActionAllow, Destination: "10.0.0.0/8"},  // matches everything in 10.x
-    {Action: m.PolicyActionDeny,  Destination: "10.0.0.5"},    // never reached
-},
-```
-
-Put specific rules before general ones.
-
----
-
 ## Types
 
 ### NetworkConfig
 
-The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#m-withnetwork">WithNetwork()</a> · returned by <a href="#networkpolicy">NetworkPolicy</a></p>
+
+The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with `Rules` for canned configurations; set via [`NetworkPolicy`](#networkpolicy) |
+| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with custom rules for canned configs; set via [`NetworkPolicy`](#networkpolicy). When set alongside `Rules`, preset rules come first and custom rules follow |
 | Rules | `[]`[`PolicyRule`](#policyrule) | Ordered custom rules (first match wins) |
 | DefaultEgress | [`PolicyAction`](#policyaction) | Fall-through action for outbound when no rule matches. Defaults to `"deny"` |
 | DefaultIngress | [`PolicyAction`](#policyaction) | Fall-through action for inbound when no rule matches. Defaults to `"allow"` |
-| DenyDomains | `[]string` | Exact-match domains to refuse DNS resolution for. Adds high-priority `deny Domain("...")` policy rules that fire at DNS (NXDOMAIN), TLS first-flight (SNI), and TCP egress (cache fallback) |
-| DenyDomainSuffixes | `[]string` | Domain suffixes (e.g. `.ads`) — denies the apex and any subdomain |
-| DNS | [`*DNSConfig`](#dnsconfig) | DNS interception settings |
+| DenyDomains | `[]string` | Exact domain names to refuse DNS resolution for |
+| DenyDomainSuffixes | `[]string` | Domain suffixes (e.g. `.ads`) to block, including the apex and any subdomain |
+| DNS | [`*DNSConfig`](#dnsconfig) | In-VM DNS proxy settings |
 | DNSRebindProtection | `*bool` | Legacy convenience for `DNS.RebindProtection`. When `DNS` is also set, the nested value wins |
-| TLS | [`*TLSConfig`](#tlsconfig) | TLS interception settings |
-| Ports | `map[uint16]uint16` | Host→guest TCP port mappings bound to `127.0.0.1` |
-| PortBindings | `[]`[`PortBinding`](#portbinding) | Host→guest port mappings with explicit bind addresses |
-| IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
-| IPv6Pool | `string` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
-| MaxConnections | `*uint` | Cap concurrent network connections from the sandbox |
-| OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host |
-| TrustHostCAs | `*bool` | Ship the host's trusted root CAs into the guest at boot. Opt-in for corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, ...) whose gateway CA is unknown to the guest's stock Mozilla bundle |
-
-### PortBinding
-
-```go
-type PortBinding struct {
-    Bind      string
-    HostPort  uint16
-    GuestPort uint16
-    Protocol  PortProtocol
-}
-```
-
-A host-to-guest port mapping with an explicit host bind address. Use it with [`WithPortBindings`](/sdk/go/sandbox#withportbindings) or `NetworkConfig.PortBindings` when the default `127.0.0.1` bind is too restrictive.
-
-```go
-sb, err := m.CreateSandbox(ctx, "api",
-    m.WithImage("python:3.12"),
-    m.WithPortBindings(
-        m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001},
-        m.PortBinding{Bind: "127.0.0.1", HostPort: 5353, GuestPort: 53, Protocol: m.PortProtocolUDP},
-    ),
-)
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| Bind | `string` | Host IP address to bind, such as `127.0.0.1`, `0.0.0.0`, or `::` |
-| HostPort | `uint16` | Port on the host |
-| GuestPort | `uint16` | Port inside the sandbox |
-| Protocol | [`PortProtocol`](#portprotocol) | `PortProtocolTCP` or `PortProtocolUDP`. Empty defaults to TCP |
-
-### PortProtocol
-
-```go
-type PortProtocol string
-```
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `PortProtocolTCP` | `"tcp"` | TCP port mapping |
-| `PortProtocolUDP` | `"udp"` | UDP port mapping |
+| TLS | [`*TLSConfig`](#tlsconfig) | Transparent TLS interception proxy settings |
+| Ports | `map[uint16]uint16` | Host to guest TCP port mappings bound to `127.0.0.1` |
+| PortBindings | `[]`[`PortBinding`](#portbinding) | Host to guest mappings with explicit bind addresses |
+| IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
+| IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
+| MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
+| OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
+| TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
 
 ### PolicyRule
 
-A single firewall rule.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Rules</a></p>
+
+A single firewall rule. Ingress rules carrying ICMP protocols are rejected at sandbox creation, since the host has no inbound ICMP path; use `PolicyDirectionEgress` for ICMP.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | Action | [`PolicyAction`](#policyaction) | `allow` or `deny` |
 | Direction | [`PolicyDirection`](#policydirection) | Direction this rule considers. `PolicyDirectionAny` matches in either |
-| Destination | `string` | Target filter: a [destination group](#destgroups), domain, domain suffix (prefixed with `.`), CIDR (`10.0.0.0/8`), exact IP, or `"*"`. Domain and suffix strings are validated at sandbox creation |
-| Protocol | [`PolicyProtocol`](#policyprotocol) | Legacy single-protocol field. Prefer `Protocols` when matching multiple |
+| Destination | `string` | Target filter: a [destination group](#destination-groups), domain, domain suffix (prefixed with `.`), CIDR (`10.0.0.0/8`), exact IP, or `"*"` |
+| Protocol | [`PolicyProtocol`](#policyprotocol) | Legacy single-protocol field. The empty string means any. Prefer `Protocols` when matching multiple |
 | Protocols | `[]`[`PolicyProtocol`](#policyprotocol) | Protocol set. Empty means any |
 | Port | `string` | Single port (`"443"`) or range (`"8000-9000"`) |
-| Ports | `[]string` | Multiple port values at once |
-
-Ingress rules carrying ICMP protocols are rejected at sandbox creation — the host has no inbound ICMP path. Use `PolicyDirectionEgress` for ICMP allow/deny.
+| Ports | `[]string` | Several port values at once |
 
 ### DNSConfig
 
-```go
-type DNSConfig struct {
-    RebindProtection *bool
-    Nameservers      []string
-    QueryTimeoutMs   *uint64
-}
-```
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.DNS</a></p>
 
 In-VM DNS proxy configuration.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| RebindProtection | `*bool` | Block DNS responses resolving to private IPs. Default `true` when unset |
-| Nameservers | `[]string` | Upstream resolvers. Each entry is `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`. Replaces `/etc/resolv.conf` when non-empty |
+| RebindProtection | `*bool` | Block DNS responses resolving to private IPs. Defaults to `true` when unset |
+| Nameservers | `[]string` | Upstream resolvers (e.g. `"1.1.1.1:53"`). Replaces `/etc/resolv.conf` when non-empty |
 | QueryTimeoutMs | `*uint64` | Per-DNS-query timeout in milliseconds |
 
 ### TLSConfig
 
-```go
-type TLSConfig struct {
-    Bypass           []string
-    VerifyUpstream   *bool
-    InterceptedPorts []uint16
-    BlockQUIC        *bool
-    CACert           string
-    CAKey            string
-    UpstreamCACerts  []string
-}
-```
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.TLS</a></p>
 
 Transparent HTTPS inspection proxy configuration.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Bypass | `[]string` | Domains to skip interception (supports `*.suffix` globs). Use for domains with certificate pinning |
-| VerifyUpstream | `*bool` | Verify upstream server certificates. Default `true`. Set `false` only for self-signed servers |
-| InterceptedPorts | `[]uint16` | TCP ports where TLS interception is active. Default `[443]` |
-| BlockQUIC | `*bool` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| Bypass | `[]string` | Domain patterns (supports `*.suffix`) to skip MITM. Use for domains with certificate pinning |
+| VerifyUpstream | `*bool` | Verify upstream server certificates. Defaults to `true`. Set `false` only for self-signed servers |
+| InterceptedPorts | `[]uint16` | TCP ports where TLS is intercepted. Defaults to `[443]` |
+| BlockQUIC | `*bool` | Block QUIC on intercepted ports to force TLS fallback |
 | CACert | `string` | Path to a custom interception CA certificate PEM file |
 | CAKey | `string` | Path to a custom interception CA private key PEM file |
 | UpstreamCACerts | `[]string` | Paths to additional CA bundles trusted for upstream verification |
@@ -243,11 +469,41 @@ sb, err := m.CreateSandbox(ctx, "inspect",
 )
 ```
 
+### PortBinding
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#m-withportbindings">WithPortBindings()</a> · <a href="#networkconfig">NetworkConfig.PortBindings</a></p>
+
+A host-to-guest port mapping with an explicit host bind address. `Protocol` defaults to TCP when empty. Use `Bind: "0.0.0.0"` to expose the published port on all IPv4 interfaces.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bind | `string` | Host IP address to bind, such as `127.0.0.1`, `0.0.0.0`, or `::` |
+| HostPort | `uint16` | Port on the host |
+| GuestPort | `uint16` | Port inside the sandbox |
+| Protocol | [`PortProtocol`](#portprotocol) | `PortProtocolTCP` or `PortProtocolUDP`. Empty defaults to TCP |
+
+### PortProtocol
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#portbinding">PortBinding.Protocol</a></p>
+
+Identifies the protocol for an exposed sandbox service.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PortProtocolTCP` | `"tcp"` | TCP port mapping |
+| `PortProtocolUDP` | `"udp"` | UDP port mapping |
+
 ### PolicyAction
 
-```go
-type PolicyAction string
-```
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Action</a> · <a href="#networkconfig">NetworkConfig.DefaultEgress</a></p>
+
+The action half of a [`PolicyRule`](#policyrule).
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -256,9 +512,11 @@ type PolicyAction string
 
 ### PolicyDirection
 
-```go
-type PolicyDirection string
-```
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Direction</a></p>
+
+The direction half of a [`PolicyRule`](#policyrule). The Go SDK follows the Python naming (`egress`/`ingress`); the wire format carries these values.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -268,9 +526,11 @@ type PolicyDirection string
 
 ### PolicyProtocol
 
-```go
-type PolicyProtocol string
-```
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Protocol</a> · <a href="#policyrule">PolicyRule.Protocols</a></p>
+
+The protocol half of a [`PolicyRule`](#policyrule).
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -281,11 +541,11 @@ type PolicyProtocol string
 
 ### NetworkPolicyPreset
 
-```go
-type NetworkPolicyPreset string
-```
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
-Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer [`NetworkPolicy`](#networkpolicy), which returns a preconfigured `*NetworkConfig`.
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Policy</a></p>
+
+Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer the [`NetworkPolicy`](#networkpolicy) factory, which returns a preconfigured `*NetworkConfig`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -296,16 +556,18 @@ Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer [`Netw
 
 ### Destination groups
 
-The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains:
+<div className="msb-tags"><span className="msb-tag is-type">reference</span></div>
+
+<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
+
+The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains. A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.
 
 | Value | Description |
 |-------|-------------|
-| `"public"` | Complement of the named categories: every address not in any other group |
+| `"public"` | Every address not in any other group |
 | `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
-| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap) |
+| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See [Reaching the host](/networking/overview#reaching-the-host) |
 | `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
 | `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
 | `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
 | `"host"` | The host machine, reached via `host.microsandbox.internal`. The right group for "let the sandbox reach my host's localhost", not `"loopback"` |
-
-A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.

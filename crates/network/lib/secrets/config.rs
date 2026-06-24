@@ -201,6 +201,32 @@ impl SecretsConfig {
         }
         Ok(())
     }
+
+    /// Whether any secret can be substituted over plain HTTP.
+    ///
+    /// True only when at least one secret has opted out of TLS identity
+    /// (`require_tls_identity == false`) and has an enabled injection scope.
+    /// Used to decide whether the plain-HTTP header peek is worth its latency.
+    pub(crate) fn has_plain_http_candidates(&self) -> bool {
+        self.secrets.iter().any(|secret| {
+            !secret.require_tls_identity
+                && (secret.injection.headers
+                    || secret.injection.basic_auth
+                    || secret.injection.query_params
+                    || secret.injection.body)
+        })
+    }
+
+    /// Whether any secret restricts itself to specific hosts (a non-`Any` host
+    /// pattern). Such a secret's plain-HTTP eligibility — substitute, forward
+    /// the placeholder unchanged, or block as a violation — depends on the
+    /// request `Host`, so the peek must read the full header block before the
+    /// handler is built, even for secrets that will never be substituted.
+    pub(crate) fn has_host_scoped_secrets(&self) -> bool {
+        self.secrets
+            .iter()
+            .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any))
+    }
 }
 
 impl SecretEntry {

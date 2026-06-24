@@ -127,6 +127,13 @@ func TestWithInitAuto(t *testing.T) {
 	if !strings.Contains(h.ConfigJSON(), `"auto"`) {
 		t.Errorf("Init.Auto not visible in ConfigJSON: %s", h.ConfigJSON())
 	}
+	parsed, err := h.Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if parsed.Init == nil || parsed.Init.Cmd != "auto" {
+		t.Errorf("Init.Auto not visible in parsed Config: %+v", parsed.Init)
+	}
 }
 
 // TestWithLogLevelRoundTrip verifies that WithLogLevel surfaces in the
@@ -273,7 +280,7 @@ func TestWithPullPolicyRoundTrip(t *testing.T) {
 	} {
 		t.Run(string(p), func(t *testing.T) {
 			ctx := integrationCtx(t)
-			name := "go-sdk-pull-" + t.Name()
+			name := "go-sdk-pull-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 			sb, err := microsandbox.CreateSandbox(ctx, name,
 				microsandbox.WithImage(goIntegrationImage),
 				microsandbox.WithPullPolicy(p),

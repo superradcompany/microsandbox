@@ -56,8 +56,7 @@
             "pages": [
               "networking/overview",
               "networking/dns",
-              "networking/tls",
-              "networking/security-model"
+              "networking/tls"
             ]
           },
           {
@@ -211,6 +210,17 @@
               "recipes/metrics-backends/datadog"
             ]
           }
+        ]
+      },
+      {
+        "tab": "Security",
+        "pages": [
+          "security/overview",
+          "security/isolation",
+          "security/filesystem",
+          "security/network",
+          "security/secrets",
+          "security/hardening"
         ]
       },
       {

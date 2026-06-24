@@ -9,6 +9,6 @@ name = "net-secrets"
 path = "bin/main.rs"
 
 [dependencies]
-microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox = { path = "../../../sdk/rust" }
 microsandbox-network = { path = "../../../crates/network" }
 tokio = { version = "1.52", features = ["full"] }

@@ -12,7 +12,7 @@ Do not apply them to other repositories or to general agent behavior outside thi
 
 ## Project Map
 
-- `crates/microsandbox` is the public Rust SDK crate.
+- `sdk/rust` is the public Rust SDK crate.
 - `crates/cli` contains the `msb` CLI.
 - `crates/runtime` contains VM runtime integration.
 - `crates/filesystem`, `crates/image`, `crates/network`, `crates/db`, `crates/migration`, `crates/metrics`, `crates/protocol`, and `crates/utils` are shared internal crates.
@@ -43,7 +43,6 @@ Repository layout:
 |   |-- filesystem/
 |   |-- image/
 |   |-- metrics/
-|   |-- microsandbox/
 |   |-- migration/
 |   |-- network/
 |   |-- protocol/
@@ -75,6 +74,7 @@ Repository layout:
 |-- sdk/
 |   |-- go/
 |   |-- node-ts/
+|   |-- rust/
 |   `-- python/
 |-- skills/
 |   `-- microsandbox/

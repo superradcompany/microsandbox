@@ -3,81 +3,198 @@ title: Volumes
 description: Go SDK - Volume API reference
 ---
 
-See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+Create and manage named persistent volumes, read and write their data directly on the host, and attach them (or bind mounts, tmpfs, and disk images) to sandboxes. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-## Volume
+<div className="msb-glance">
 
-Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#createvolume"><span className="msb-rn">CreateVolume()</span><span className="msb-rg">create a named volume</span></a>
+  <a className="msb-row" href="#getvolume"><span className="msb-rn">GetVolume()</span><span className="msb-rg">look up one by name</span></a>
+  <a className="msb-row" href="#listvolumes"><span className="msb-rn">ListVolumes()</span><span className="msb-rg">all volumes on the host</span></a>
+  <a className="msb-row" href="#removevolume"><span className="msb-rn">RemoveVolume()</span><span className="msb-rg">delete one by name</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · Volume<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#v-name"><span className="msb-rn">v.Name()</span><span className="msb-rg">volume name</span></a>
+  <a className="msb-row" href="#v-path"><span className="msb-rn">v.Path()</span><span className="msb-rg">host data directory path</span></a>
+  <a className="msb-row" href="#v-fs"><span className="msb-rn">v.FS()</span><span className="msb-rg">host-side file access</span></a>
+  <a className="msb-row" href="#v-remove"><span className="msb-rn">v.Remove()</span><span className="msb-rg">delete this volume</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · VolumeHandle<span className="msb-ct">12</span></p>
+  <a className="msb-row" href="#h-name"><span className="msb-rn">h.Name()</span><span className="msb-rg">volume name</span></a>
+  <a className="msb-row" href="#h-path"><span className="msb-rn">h.Path()</span><span className="msb-rg">host data directory path</span></a>
+  <a className="msb-row" href="#h-kind"><span className="msb-rn">h.Kind()</span><span className="msb-rg">dir or disk backing</span></a>
+  <a className="msb-row" href="#h-quotamib"><span className="msb-rn">h.QuotaMiB()</span><span className="msb-rg">quota in MiB, or nil</span></a>
+  <a className="msb-row" href="#h-usedbytes"><span className="msb-rn">h.UsedBytes()</span><span className="msb-rg">space used in bytes</span></a>
+  <a className="msb-row" href="#h-capacitybytes"><span className="msb-rn">h.CapacityBytes()</span><span className="msb-rg">disk capacity in bytes</span></a>
+  <a className="msb-row" href="#h-diskformat"><span className="msb-rn">h.DiskFormat()</span><span className="msb-rg">disk image format</span></a>
+  <a className="msb-row" href="#h-diskfstype"><span className="msb-rn">h.DiskFstype()</span><span className="msb-rg">inner filesystem type</span></a>
+  <a className="msb-row" href="#h-labels"><span className="msb-rn">h.Labels()</span><span className="msb-rg">metadata labels</span></a>
+  <a className="msb-row" href="#h-createdat"><span className="msb-rn">h.CreatedAt()</span><span className="msb-rg">creation timestamp</span></a>
+  <a className="msb-row" href="#h-fs"><span className="msb-rn">h.FS()</span><span className="msb-rg">host-side file access</span></a>
+  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.Remove()</span><span className="msb-rg">delete this volume</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · VolumeFs<span className="msb-ct">9</span></p>
+  <a className="msb-row" href="#vfs-root"><span className="msb-rn">vfs.Root()</span><span className="msb-rg">absolute root path</span></a>
+  <a className="msb-row" href="#vfs-read"><span className="msb-rn">vfs.Read()</span><span className="msb-rg">read file bytes</span></a>
+  <a className="msb-row" href="#vfs-readstring"><span className="msb-rn">vfs.ReadString()</span><span className="msb-rg">read file as string</span></a>
+  <a className="msb-row" href="#vfs-write"><span className="msb-rn">vfs.Write()</span><span className="msb-rg">write bytes to a file</span></a>
+  <a className="msb-row" href="#vfs-writestring"><span className="msb-rn">vfs.WriteString()</span><span className="msb-rg">write a string</span></a>
+  <a className="msb-row" href="#vfs-mkdir"><span className="msb-rn">vfs.Mkdir()</span><span className="msb-rg">create directory tree</span></a>
+  <a className="msb-row" href="#vfs-remove"><span className="msb-rn">vfs.Remove()</span><span className="msb-rg">delete file or empty dir</span></a>
+  <a className="msb-row" href="#vfs-removeall"><span className="msb-rn">vfs.RemoveAll()</span><span className="msb-rg">recursive delete</span></a>
+  <a className="msb-row" href="#vfs-exists"><span className="msb-rn">vfs.Exists()</span><span className="msb-rg">check for existence</span></a>
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">9</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#withvolumekind">WithVolumeKind()</a>
+    <a className="msb-chip" href="#withvolumesize">WithVolumeSize()</a>
+    <a className="msb-chip" href="#withvolumequota">WithVolumeQuota()</a>
+    <a className="msb-chip" href="#withvolumelabels">WithVolumeLabels()</a>
+    <a className="msb-chip" href="#mount-bind">Mount.Bind()</a>
+    <a className="msb-chip" href="#mount-named">Mount.Named()</a>
+    <a className="msb-chip" href="#mount-namedwith">Mount.NamedWith()</a>
+    <a className="msb-chip" href="#mount-tmpfs">Mount.Tmpfs()</a>
+    <a className="msb-chip" href="#mount-disk">Mount.Disk()</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#volume">Volume</a>
+    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
+    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
+    <a className="msb-typepill" href="#errpathescape">ErrPathEscape</a>
+    <a className="msb-typepill" href="#volumeconfig">VolumeConfig</a>
+    <a className="msb-typepill" href="#volumeoption">VolumeOption</a>
+    <a className="msb-typepill" href="#volumekind">VolumeKind</a>
+    <a className="msb-typepill" href="#mountconfig">MountConfig</a>
+    <a className="msb-typepill" href="#mountkind">MountKind</a>
+    <a className="msb-typepill" href="#mountoptions">MountOptions</a>
+    <a className="msb-typepill" href="#namedvolumeoptions">NamedVolumeOptions</a>
+    <a className="msb-typepill" href="#tmpfsoptions">TmpfsOptions</a>
+    <a className="msb-typepill" href="#diskoptions">DiskOptions</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
-vol, err := m.CreateVolume(ctx, "my-data",
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+vol, err := m.CreateVolume(ctx, "my-data",         // 1. create a named volume
+    m.WithVolumeQuota(64),
     m.WithVolumeLabels(map[string]string{"env": "prod"}),
 )
 
-dockerData, err := m.CreateVolume(ctx, "docker-data",
-    m.WithVolumeKind(m.VolumeKindDisk),
-    m.WithVolumeSize(20 * 1024),
+vfs := vol.FS()                                    // 2. seed it from the host
+err = vfs.WriteString("seed.txt", "hello")
+
+sb, err := m.CreateSandbox(ctx, "worker",          // 3. attach it to a sandbox
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Named("my-data", m.MountOptions{}),
+    }),
 )
 ```
 
-There is no Rust-side resource to release — `Remove` deletes the on-disk state and the DB record.
+Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox. There is no Rust-side resource to release: `Remove` deletes the on-disk state and the DB record.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Name()` | `string` | Volume name |
-| `Path()` | `string` | Host filesystem path of the volume's data directory |
-| `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
-| `Remove(ctx)` | `error` | Delete this volume (all sandboxes using it must be stopped) |
+## Functions
 
 ---
 
-## Top-level functions
-
----
-
-#### CreateVolume()
+#### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
-func CreateVolume(
-    ctx context.Context,
-    name string,
-    opts ...VolumeOption,
-) (*Volume, error)
+func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error)
 ```
 
-Create a named volume.
+Create a named volume and return a populated [`*Volume`](#volume) with its name and host path. Configure the kind, quota, disk size, and labels with [option functions](#options). Returns `ErrVolumeAlreadyExists` if a volume with the given name already exists.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| ctx | `context.Context` | Cancels the create |
-| name | `string` | Volume name |
-| opts | `...VolumeOption` | Functional options — see [Options](#options) |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the create.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#volumeoption">...VolumeOption</a></div>
+    <div className="msb-param-desc">Functional options, see <a href="#options">Options</a>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`*Volume`](#volume) | Newly created volume with `Name` and `Path` |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volume">*Volume</a></div>
+    <div className="msb-param-desc">Newly created volume with <code>Name</code> and <code>Path</code>.</div>
+  </div>
+</div>
 
-Returns `ErrVolumeAlreadyExists` if a volume with the given name already exists.
+<Accordion title="Example">
+
+```go
+vol, err := m.CreateVolume(ctx, "docker-data",
+    m.WithVolumeKind(m.VolumeKindDisk),
+    m.WithVolumeSize(20*1024),
+)
+```
+
+</Accordion>
 
 ---
 
-#### GetVolume()
+#### <span className="msb-recv"></span><span className="msb-hn">GetVolume()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func GetVolume(ctx context.Context, name string) (*VolumeHandle, error)
 ```
 
-Look up a volume by name and return its metadata.
+Look up a volume by name and return its metadata. Returns `ErrVolumeNotFound` if no such volume exists.
 
-Returns `ErrVolumeNotFound` if no such volume exists.
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the lookup.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">*VolumeHandle</a></div>
+    <div className="msb-param-desc">Metadata reference for the volume.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+h, err := m.GetVolume(ctx, "my-data")
+fmt.Println(h.Path(), h.UsedBytes())
+```
+
+</Accordion>
 
 ---
 
-#### ListVolumes()
+#### <span className="msb-recv"></span><span className="msb-hn">ListVolumes()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func ListVolumes(ctx context.Context) ([]*VolumeHandle, error)
@@ -85,88 +202,300 @@ func ListVolumes(ctx context.Context) ([]*VolumeHandle, error)
 
 Return metadata for every named volume on the host.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the listing.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">[]*VolumeHandle</a></div>
+    <div className="msb-param-desc">All volume metadata handles.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+vols, err := m.ListVolumes(ctx)
+for _, h := range vols {
+    fmt.Printf("%s — %s\n", h.Name(), h.Kind())
+}
+```
+
+</Accordion>
+
 ---
 
-#### RemoveVolume()
+#### <span className="msb-recv"></span><span className="msb-hn">RemoveVolume()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func RemoveVolume(ctx context.Context, name string) error
 ```
 
-Delete a volume by name. All sandboxes referencing the volume must be stopped.
+Delete a volume by name. All sandboxes referencing the volume must be stopped first.
 
----
+<p className="msb-label">Parameters</p>
 
-## Options
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the removal.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
 
----
-
-#### WithVolumeQuota()
-
-```go
-func WithVolumeQuota(mebibytes uint32) VolumeOption
-```
-
-Set recorded quota metadata for directory volumes. Zero means unlimited.
-
----
-
-#### WithVolumeKind()
+<Accordion title="Example">
 
 ```go
-func WithVolumeKind(kind VolumeKind) VolumeOption
+err := m.RemoveVolume(ctx, "my-data")
 ```
 
-Select the volume kind. Valid values are `VolumeKindDir` and `VolumeKindDisk`.
+</Accordion>
+
+## Volume methods
+
+A `Volume` is returned by [`CreateVolume`](#createvolume) and carries the volume's name and host path.
 
 ---
 
-#### WithVolumeSize()
+#### <span className="msb-recv">v.</span><span className="msb-hn">Name()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
-func WithVolumeSize(mebibytes uint32) VolumeOption
+func (v *Volume) Name() string
 ```
 
-Set disk volume capacity in MiB. Required with `VolumeKindDisk`.
+Return the volume's name.
 
 ---
 
-#### WithVolumeLabels()
+#### <span className="msb-recv">v.</span><span className="msb-hn">Path()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
-func WithVolumeLabels(labels map[string]string) VolumeOption
+func (v *Volume) Path() string
 ```
 
-Attach key-value labels to the volume. Called repeatedly, maps merge; later keys overwrite earlier ones.
+Return the host filesystem path of the volume's data directory.
 
 ---
 
-## VolumeHandle
+#### <span className="msb-recv">v.</span><span className="msb-hn">FS()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
-Metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#listvolumes).
+```go
+func (v *Volume) FS() *VolumeFs
+```
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Name()` | `string` | Volume name |
-| `Path()` | `string` | Host filesystem path of the volume's data directory |
-| `Kind()` | `VolumeKind` | Volume kind: `VolumeKindDir` or `VolumeKindDisk` |
-| `QuotaMiB()` | `*uint32` | Quota in MiB, or `nil` if unlimited |
-| `UsedBytes()` | `uint64` | Current disk usage in bytes |
-| `CapacityBytes()` | `*uint64` | Disk capacity in bytes |
-| `DiskFormat()` | `*string` | Disk image format |
-| `DiskFstype()` | `*string` | Disk filesystem type |
-| `Labels()` | `map[string]string` | Metadata labels |
-| `CreatedAt()` | `time.Time` | Creation timestamp, zero value if unknown |
-| `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
-| `Remove(ctx)` | `error` | Delete this volume |
+Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this volume.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumefs">*VolumeFs</a></div>
+    <div className="msb-param-desc">Host-side filesystem accessor rooted at the volume directory.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+vfs := vol.FS()
+err := vfs.WriteString("seed.txt", "hello")
+```
+
+</Accordion>
 
 ---
 
-## VolumeFs
+#### <span className="msb-recv">v.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
-Host-side filesystem operations on a named volume's data directory. Obtained via [`Volume.FS()`](#volume) or [`VolumeHandle.FS()`](#volumehandle). These operations run directly on the host filesystem — no running sandbox is required and no agent protocol is involved.
+```go
+func (v *Volume) Remove(ctx context.Context) error
+```
 
-All path arguments are **relative to the volume root**. Paths that would escape the root via `..`, absolute components, or stray symlink chains are rejected with [`ErrPathEscape`](#errpathescape).
+Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, v.Name())`](#removevolume).
+
+<Accordion title="Example">
+
+```go
+err := vol.Remove(ctx)
+```
+
+</Accordion>
+
+## VolumeHandle methods
+
+A `VolumeHandle` is the metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#listvolumes).
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) Name() string
+```
+
+Return the volume name.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Path()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) Path() string
+```
+
+Return the host filesystem path of the volume's data directory.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Kind()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) Kind() VolumeKind
+```
+
+Return the volume storage kind: [`VolumeKindDir`](#volumekind) or [`VolumeKindDisk`](#volumekind).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumekind">VolumeKind</a></div>
+    <div className="msb-param-desc">Storage backing for the volume.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">QuotaMiB()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) QuotaMiB() *uint32
+```
+
+Return the quota in MiB, or `nil` if unlimited.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">UsedBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) UsedBytes() uint64
+```
+
+Return the amount of space used by the volume, in bytes.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CapacityBytes()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) CapacityBytes() *uint64
+```
+
+Return the disk capacity in bytes for disk volumes, or `nil` for directory volumes.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">DiskFormat()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) DiskFormat() *string
+```
+
+Return the disk image format for disk volumes, or `nil` for directory volumes.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">DiskFstype()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) DiskFstype() *string
+```
+
+Return the inner filesystem type for disk volumes, or `nil` for directory volumes.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Labels()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) Labels() map[string]string
+```
+
+Return the labels attached to this volume.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) CreatedAt() time.Time
+```
+
+Return the creation timestamp, or the zero `time.Time` value if unknown.
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">FS()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) FS() *VolumeFs
+```
+
+Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this volume.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volumefs">*VolumeFs</a></div>
+    <div className="msb-param-desc">Host-side filesystem accessor rooted at the volume directory.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *VolumeHandle) Remove(ctx context.Context) error
+```
+
+Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, h.Name())`](#removevolume).
+
+## VolumeFs methods
+
+Host-side filesystem operations on a named volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). These operations run directly on the host filesystem: no running sandbox is required and no agent protocol is involved.
+
+All path arguments are relative to the volume root. Paths that would escape the root via `..`, absolute components, or stray symlink chains are rejected with [`ErrPathEscape`](#errpathescape).
 
 ```go
 vfs := vol.FS()
@@ -179,7 +508,8 @@ content, err := vfs.ReadString("seed.txt")
 
 ---
 
-#### Root()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Root()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Root() string
@@ -189,7 +519,8 @@ Return the absolute host path of the volume's data directory.
 
 ---
 
-#### Read()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Read()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Read(relPath string) ([]byte, error)
@@ -197,9 +528,28 @@ func (fs *VolumeFs) Read(relPath string) ([]byte, error)
 
 Read the contents of a file relative to the volume root.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>relPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">File contents.</div>
+  </div>
+</div>
+
 ---
 
-#### ReadString()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">ReadString()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) ReadString(relPath string) (string, error)
@@ -209,7 +559,8 @@ Read a file and return its contents as a UTF-8 string.
 
 ---
 
-#### Write()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Write()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Write(relPath string, data []byte) error
@@ -217,19 +568,34 @@ func (fs *VolumeFs) Write(relPath string, data []byte) error
 
 Write data to a file, creating or truncating it. Created files use mode `0o644`.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>relPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path relative to the volume root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">Bytes to write.</div>
+  </div>
+</div>
+
 ---
 
-#### WriteString()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">WriteString()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) WriteString(relPath, content string) error
 ```
 
-Write a string to a file.
+Write a string to a file. Created files use mode `0o644`.
 
 ---
 
-#### Mkdir()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Mkdir()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Mkdir(relPath string) error
@@ -239,7 +605,8 @@ Create a directory and all missing parents (mode `0o755`).
 
 ---
 
-#### Remove()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Remove()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Remove(relPath string) error
@@ -249,7 +616,8 @@ Delete a single file or empty directory.
 
 ---
 
-#### RemoveAll()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">RemoveAll()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) RemoveAll(relPath string) error
@@ -259,7 +627,8 @@ Delete a path and any children it contains (recursive).
 
 ---
 
-#### Exists()
+#### <span className="msb-recv">vfs.</span><span className="msb-hn">Exists()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *VolumeFs) Exists(relPath string) (bool, error)
@@ -267,75 +636,192 @@ func (fs *VolumeFs) Exists(relPath string) (bool, error)
 
 Report whether a file or directory exists at the given path.
 
----
+<p className="msb-label">Returns</p>
 
-#### ErrPathEscape
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> if a file or directory exists at the path.</div>
+  </div>
+</div>
 
-```go
-var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
-```
+## Options
 
-Returned by every `VolumeFs` method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or otherwise escapes the volume's directory after `filepath.Clean`.
-
-```go
-if _, err := vfs.Read("../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
-    log.Println("nice try")
-}
-```
+Functional options passed to [`CreateVolume`](#createvolume), plus the [`Mount`](#mountconfig) factory helpers that attach a volume, bind mount, tmpfs, or disk image to a sandbox via [`WithMounts`](/sdk/go/sandbox#withmounts).
 
 ---
 
-## Mounts
-
-Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via [`WithMounts`](/sdk/go/sandbox#withmounts) on the sandbox:
+#### <span className="msb-recv"></span><span className="msb-hn">WithVolumeKind()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("alpine"),
-    m.WithMounts(map[string]m.MountConfig{
-        "/host":    m.Mount.Bind("/var/data", m.MountOptions{}),
-        "/data":    m.Mount.Named("my-data", m.MountOptions{}),
-        "/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128}),
-        "/img":     m.Mount.Disk("./data.qcow2", m.DiskOptions{
-            Format:   "qcow2",
-            Fstype:   "ext4",
-            Readonly: true,
-        }),
-    }),
-)
+func WithVolumeKind(kind VolumeKind) VolumeOption
 ```
 
-Each `Mount.X(...)` helper returns a [`MountConfig`](#mountconfig). The `kind` discriminator is set internally; callers should always use these helpers rather than constructing the struct manually.
+Select the volume kind. Valid values are [`VolumeKindDir`](#volumekind) (default) and [`VolumeKindDisk`](#volumekind).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>kind</code><a className="msb-type" href="#volumekind">VolumeKind</a></div>
+    <div className="msb-param-desc">Storage backing for the volume.</div>
+  </div>
+</div>
 
 ---
 
-#### Mount.Bind()
+#### <span className="msb-recv"></span><span className="msb-hn">WithVolumeSize()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithVolumeSize(mebibytes uint32) VolumeOption
+```
+
+Set disk volume capacity in MiB. Required when the kind is [`VolumeKindDisk`](#volumekind).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mebibytes</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Disk capacity in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithVolumeQuota()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithVolumeQuota(mebibytes uint32) VolumeOption
+```
+
+Set the recorded quota in MiB for directory volumes. Zero means unlimited.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mebibytes</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Quota in MiB; zero means unlimited.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithVolumeLabels()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithVolumeLabels(labels map[string]string) VolumeOption
+```
+
+Attach key-value labels to the volume. When called repeatedly, the maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Metadata labels to attach.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">Bind()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
 ```
 
-Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
+Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hostPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host directory to bind.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#mountoptions">MountOptions</a></div>
+    <div className="msb-param-desc">Mount tuning (read-only, noexec, and so on).</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+"/host": m.Mount.Bind("/var/data", m.MountOptions{Readonly: true})
+```
+
+</Accordion>
 
 ---
 
-#### Mount.Named()
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">Named()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func (mountFactory) Named(name string, opts MountOptions) MountConfig
 ```
 
-Mount an existing named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+Mount an existing named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)). Returns a [`MountConfig`](#mountconfig).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Name of an existing volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#mountoptions">MountOptions</a></div>
+    <div className="msb-param-desc">Mount tuning.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+"/data": m.Mount.Named("my-data", m.MountOptions{})
+```
+
+</Accordion>
 
 ---
 
-#### Mount.NamedWith()
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">NamedWith()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
 ```
 
-Mount a named persistent volume with explicit sandbox-time existence behavior. `NamedVolumeOptions.Mode` accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `NamedVolumeOptions.Kind` accepts `"dir"` (default) or `"disk"`.
+Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#mountoptions">MountOptions</a></div>
+    <div className="msb-param-desc">Mount tuning.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>namedOpts</code><a className="msb-type" href="#namedvolumeoptions">NamedVolumeOptions</a></div>
+    <div className="msb-param-desc">Provisioning mode, kind, size, and quota.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
@@ -353,100 +839,254 @@ sb, err := m.CreateSandbox(ctx, "worker",
 )
 ```
 
-`Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. The ensure-exists mode errors when the existing volume has a different kind, quota, or capacity than the requested configuration; it does not mutate existing volume metadata.
-
-**NamedVolumeOptions**
-
-| Field | Description |
-|-------|-------------|
-| `Mode` | `"existing"`, `"create"`, or `"ensure-exists"`; empty means `"existing"` |
-| `Kind` | `"dir"` or `"disk"`; empty means `"dir"` |
-| `SizeMiB` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
-| `QuotaMiB` | Directory volume quota in MiB |
+</Accordion>
 
 ---
 
-#### Mount.Tmpfs()
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">Tmpfs()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func (mountFactory) Tmpfs(opts TmpfsOptions) MountConfig
 ```
 
-Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox stops.
+Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox stops. Returns a [`MountConfig`](#mountconfig).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#tmpfsoptions">TmpfsOptions</a></div>
+    <div className="msb-param-desc">Size limit and mount flags.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+"/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128})
+```
+
+</Accordion>
 
 ---
 
-#### Mount.Disk()
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig
 ```
 
-Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk formats.
+Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk formats. Returns a [`MountConfig`](#mountconfig).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hostPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host path to the disk image.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#diskoptions">DiskOptions</a></div>
+    <div className="msb-param-desc">Format, inner filesystem, and mount flags.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+"/img": m.Mount.Disk("./data.qcow2", m.DiskOptions{
+    Format:   "qcow2",
+    Fstype:   "ext4",
+    Readonly: true,
+})
+```
+
+</Accordion>
+
+## Types
 
 ---
 
-## Mount option types
+### Volume
 
-### MountOptions
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-Tuning struct for `Mount.Bind` and `Mount.Named`.
+A named persistent volume carrying its host-side path. Returned by [`CreateVolume`](#createvolume). Lookups via [`GetVolume`](#getvolume) and [`ListVolumes`](#listvolumes) yield richer [`VolumeHandle`](#volumehandle) values instead.
+
+<p className="msb-backref">Returned by <a href="#createvolume">CreateVolume()</a></p>
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Name()`](#v-name) | `string` | Volume name |
+| [`Path()`](#v-path) | `string` | Host filesystem path of the data directory |
+| [`FS()`](#v-fs) | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| [`Remove(ctx)`](#v-remove) | `error` | Delete this volume (all sandboxes using it must be stopped) |
+
+---
+
+### VolumeHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Metadata reference for a named volume. Obtain via [`GetVolume`](#getvolume) or [`ListVolumes`](#listvolumes).
+
+<p className="msb-backref">Returned by <a href="#getvolume">GetVolume()</a> · <a href="#listvolumes">ListVolumes()</a></p>
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Name()`](#h-name) | `string` | Volume name |
+| [`Path()`](#h-path) | `string` | Host filesystem path of the data directory |
+| [`Kind()`](#h-kind) | [`VolumeKind`](#volumekind) | Volume kind: `VolumeKindDir` or `VolumeKindDisk` |
+| [`QuotaMiB()`](#h-quotamib) | `*uint32` | Quota in MiB, or `nil` if unlimited |
+| [`UsedBytes()`](#h-usedbytes) | `uint64` | Current disk usage in bytes |
+| [`CapacityBytes()`](#h-capacitybytes) | `*uint64` | Disk capacity in bytes, or `nil` |
+| [`DiskFormat()`](#h-diskformat) | `*string` | Disk image format, or `nil` |
+| [`DiskFstype()`](#h-diskfstype) | `*string` | Disk filesystem type, or `nil` |
+| [`Labels()`](#h-labels) | `map[string]string` | Metadata labels |
+| [`CreatedAt()`](#h-createdat) | `time.Time` | Creation timestamp, zero value if unknown |
+| [`FS()`](#h-fs) | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| [`Remove(ctx)`](#h-remove) | `error` | Delete this volume |
+
+---
+
+### VolumeFs
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Host-side filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). All path arguments are relative to the volume root; escaping paths are rejected with [`ErrPathEscape`](#errpathescape).
+
+<p className="msb-backref">Returned by <a href="#v-fs">Volume.FS()</a> · <a href="#h-fs">VolumeHandle.FS()</a></p>
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Root()`](#vfs-root) | `string` | Absolute host path of the data directory |
+| [`Read(relPath)`](#vfs-read) | `([]byte, error)` | Read file bytes |
+| [`ReadString(relPath)`](#vfs-readstring) | `(string, error)` | Read file as a UTF-8 string |
+| [`Write(relPath, data)`](#vfs-write) | `error` | Write bytes, creating or truncating |
+| [`WriteString(relPath, content)`](#vfs-writestring) | `error` | Write a string |
+| [`Mkdir(relPath)`](#vfs-mkdir) | `error` | Create a directory tree |
+| [`Remove(relPath)`](#vfs-remove) | `error` | Delete a file or empty directory |
+| [`RemoveAll(relPath)`](#vfs-removeall) | `error` | Recursive delete |
+| [`Exists(relPath)`](#vfs-exists) | `(bool, error)` | Check for existence |
+
+---
+
+### ErrPathEscape
+
+<div className="msb-tags"><span className="msb-tag is-type">error</span></div>
+
+```go
+var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
+```
+
+Returned by every [`VolumeFs`](#volumefs) method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or otherwise escapes the volume's directory after `filepath.Clean`.
+
+<p className="msb-backref">Returned by <a href="#volumefs">VolumeFs</a> methods</p>
+
+```go
+if _, err := vfs.Read("../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
+    log.Println("nice try")
+}
+```
+
+---
+
+### VolumeConfig
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+The config struct populated by [`VolumeOption`](#volumeoption) functions. Most callers go through `CreateVolume(ctx, name, opts...)`; `VolumeConfig` is exported for callers that prefer to construct one directly.
+
+<p className="msb-backref">Mutated by <a href="#volumeoption">VolumeOption</a></p>
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Readonly | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
-| Noexec | `bool` | Prevent direct execution from the mount |
-| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| Nodev | `bool` | Ignore device files on the mount |
+| `QuotaMiB` | `uint32` | Maximum storage size in MiB (zero = unlimited) |
+| `Kind` | [`VolumeKind`](#volumekind) | Volume kind (`VolumeKindDir` by default) |
+| `SizeMiB` | `uint32` | Disk capacity in MiB for `VolumeKindDisk` |
+| `Labels` | `map[string]string` | Metadata labels |
 
-### TmpfsOptions
+---
 
-Tuning struct for `Mount.Tmpfs`.
+### VolumeOption
 
-| Field | Type | Description |
-|-------|------|-------------|
-| SizeMiB | `uint32` | Maximum size in MiB |
-| Readonly | `bool` | Mount as read-only |
-| Noexec | `bool` | Prevent direct execution from the mount |
-| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| Nodev | `bool` | Ignore device files on the mount |
+<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
-### DiskOptions
+```go
+type VolumeOption func(*VolumeConfig)
+```
 
-Tuning struct for `Mount.Disk`.
+A functional option for [`CreateVolume`](#createvolume). Constructed by the [`WithVolume*`](#options) helpers.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Format | `string` | Format hint (`"raw"`, `"qcow2"`, `"vmdk"`). Optional; defaults from the file extension |
-| Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional; omitted means auto-detect |
-| Readonly | `bool` | Mount as read-only |
-| Noexec | `bool` | Prevent direct execution from the mount |
-| Nosuid | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
-| Nodev | `bool` | Ignore device files on the mount |
+<p className="msb-backref">Used by <a href="#createvolume">CreateVolume()</a></p>
+
+---
+
+### VolumeKind
+
+<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
+
+```go
+type VolumeKind string
+```
+
+Describes the storage backing for a named volume.
+
+<p className="msb-backref">Used by <a href="#volumeconfig">VolumeConfig</a> · <a href="#withvolumekind">WithVolumeKind()</a> · <a href="#h-kind">VolumeHandle.Kind()</a></p>
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `VolumeKindDir` | `"dir"` | Directory-backed named volume |
+| `VolumeKindDisk` | `"disk"` | Raw ext4 disk-backed named volume |
+
+---
 
 ### MountConfig
 
-Discriminated mount configuration produced by `Mount` helpers. Inspect the kind via `Kind()`.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Discriminated mount configuration produced by the [`Mount`](#options) factory helpers and passed to [`WithMounts`](/sdk/go/sandbox#withmounts). Construct it with the factory rather than by hand: the factory sets the internal `kind` discriminator and enforces the mutually-exclusive flavours. Inspect the flavour via `Kind()`.
+
+<p className="msb-backref">Returned by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a> · <a href="#mount-tmpfs">Mount.Tmpfs()</a> · <a href="#mount-disk">Mount.Disk()</a></p>
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Bind | `string` | Host path for bind mounts |
-| Named | `string` | Volume name for named mounts |
-| Tmpfs | `bool` | Set for tmpfs mounts |
-| Disk | `string` | Host path for disk images |
-| Format | `string` | Disk format |
-| Fstype | `string` | Inner filesystem type |
-| Readonly | `bool` | Whether the mount is read-only |
-| Noexec | `bool` | Whether direct execution from the mount is disabled |
-| Nosuid | `bool` | Whether setuid/setgid privilege elevation from files on the mount is ignored |
-| Nodev | `bool` | Whether device files on the mount are ignored |
-| SizeMiB | `uint32` | Size limit for tmpfs mounts |
+| `Bind` | `string` | Host path for bind mounts |
+| `Named` | `string` | Volume name for named mounts |
+| `NamedMode` | `string` | Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`) |
+| `NamedKind` | `string` | Kind for provisioned named mounts (`"dir"` or `"disk"`) |
+| `QuotaMiB` | `uint32` | Quota in MiB for provisioned directory volumes |
+| `Tmpfs` | `bool` | Set for tmpfs mounts |
+| `Disk` | `string` | Host path for disk images |
+| `Format` | `string` | Disk format |
+| `Fstype` | `string` | Inner filesystem type |
+| `Readonly` | `bool` | Whether the mount is read-only |
+| `Noexec` | `bool` | Whether direct execution from the mount is disabled |
+| `Nosuid` | `bool` | Whether setuid/setgid elevation from files on the mount is ignored |
+| `Nodev` | `bool` | Whether device files on the mount are ignored |
+| `SizeMiB` | `uint32` | Size limit for tmpfs / capacity for provisioned disk volumes |
+| `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (bind / named only) |
+| `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (bind / named only) |
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Kind()` | [`MountKind`](#mountkind) | Which mount flavour this is |
+
+---
 
 ### MountKind
+
+<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 ```go
 type MountKind uint8
 ```
+
+Discriminates between the four mount flavours. Inspect via `mount.Kind()`.
+
+<p className="msb-backref">Returned by <a href="#mountconfig">MountConfig.Kind()</a></p>
 
 | Constant | Description |
 |----------|-------------|
@@ -455,27 +1095,75 @@ type MountKind uint8
 | `MountKindTmpfs` | In-memory tmpfs |
 | `MountKindDisk` | Host disk image |
 
-Inspect via `mount.Kind()`.
-
 ---
 
-## Types
+### MountOptions
 
-### VolumeConfig
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-The config struct populated by [`VolumeOption`](#volumeoption) functions. Most callers go through `CreateVolume(ctx, name, ...opts)`; `VolumeConfig` is exported for callers that prefer to construct one directly.
+Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization` and `HostPermissions` are virtiofs-only and rejected at build time if combined with a tmpfs or disk-image mount; their zero values preserve the conservative defaults (strict, private).
+
+<p className="msb-backref">Used by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a></p>
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Kind | `VolumeKind` | Volume kind (`VolumeKindDir` by default) |
-| QuotaMiB | `uint32` | Maximum storage size in MiB (zero = unlimited) |
-| SizeMiB | `uint32` | Disk capacity in MiB for `VolumeKindDisk` |
-| Labels | `map[string]string` | Metadata labels |
+| `Readonly` | `bool` | Mount as read-only; virtiofs-backed mounts also reject writes in the host filesystem server |
+| `Noexec` | `bool` | Prevent direct execution from the mount |
+| `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| `Nodev` | `bool` | Ignore device files on the mount |
+| `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
+| `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
 
-### VolumeOption
+---
 
-```go
-type VolumeOption func(*VolumeConfig)
-```
+### NamedVolumeOptions
 
-A functional option for [`CreateVolume`](#createvolume).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Tunes sandbox-time named volume provisioning for [`Mount.NamedWith`](#mount-namedwith).
+
+<p className="msb-backref">Used by <a href="#mount-namedwith">Mount.NamedWith()</a></p>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Mode` | `string` | `"existing"`, `"create"`, or `"ensure-exists"`; empty means `"existing"` |
+| `Kind` | `string` | `"dir"` or `"disk"`; empty means `"dir"` |
+| `SizeMiB` | `uint32` | Disk capacity in MiB; required when creating or ensuring a missing disk volume |
+| `QuotaMiB` | `uint32` | Directory volume quota in MiB |
+
+---
+
+### TmpfsOptions
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Tuning struct for [`Mount.Tmpfs`](#mount-tmpfs).
+
+<p className="msb-backref">Used by <a href="#mount-tmpfs">Mount.Tmpfs()</a></p>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Maximum size in MiB |
+| `Readonly` | `bool` | Mount as read-only |
+| `Noexec` | `bool` | Prevent direct execution from the mount |
+| `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| `Nodev` | `bool` | Ignore device files on the mount |
+
+---
+
+### DiskOptions
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+Tuning struct for [`Mount.Disk`](#mount-disk).
+
+<p className="msb-backref">Used by <a href="#mount-disk">Mount.Disk()</a></p>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Format` | `string` | Format hint (`"raw"`, `"qcow2"`, `"vmdk"`). Optional; the runtime can usually probe |
+| `Fstype` | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional; omitted means auto-detect |
+| `Readonly` | `bool` | Mount as read-only |
+| `Noexec` | `bool` | Prevent direct execution from the mount |
+| `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
+| `Nodev` | `bool` | Ignore device files on the mount |

@@ -9,6 +9,6 @@ name = "logs-read"
 path = "bin/main.rs"
 
 [dependencies]
-microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox = { path = "../../../sdk/rust" }
 anyhow = "1"
 tokio = { version = "1.52", features = ["full"] }

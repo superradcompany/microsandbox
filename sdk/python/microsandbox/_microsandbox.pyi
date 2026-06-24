@@ -26,6 +26,8 @@ class PyAgentClient:
         *,
         timeout: float | None = None,
     ) -> PyAgentClient: ...
+    @staticmethod
+    def socket_path(name: str) -> str: ...
     async def request(self, flags: int, body: bytes) -> dict[str, int | bytes]: ...
     async def stream_open(self, flags: int, body: bytes) -> dict[str, int]: ...
     async def stream_next(self, handle: int) -> dict[str, int | bytes] | None: ...
@@ -364,6 +366,9 @@ class SandboxMetrics:
     disk_write_bytes: int
     net_rx_bytes: int
     net_tx_bytes: int
+    upper_used_bytes: int | None
+    upper_free_bytes: int | None
+    upper_host_allocated_bytes: int | None
     uptime_ms: int
     timestamp_ms: float
 

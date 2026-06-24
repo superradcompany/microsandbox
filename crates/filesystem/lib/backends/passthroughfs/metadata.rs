@@ -185,6 +185,15 @@ pub(crate) fn do_setattr(
 
     // Handle size changes via ftruncate.
     if valid.contains(SetattrValid::SIZE) {
+        // Snapshot the quota baseline before truncating — a path-based truncate
+        // reaches here without a prior `open`, so this is the write-gating point
+        // that guarantees the baseline predates the mutation.
+        fs.quota_ensure_baseline();
+
+        // Quota: an extending truncate grows the file. Charge the growth past
+        // EOF before ftruncate (a shrinking truncate charges nothing).
+        fs.quota_charge_to(*close_fd, attr.st_size.max(0) as u64)?;
+
         let ret = unsafe { libc::ftruncate(*close_fd, attr.st_size) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));

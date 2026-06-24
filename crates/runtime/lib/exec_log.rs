@@ -34,35 +34,6 @@ pub const EXEC_LOG_FILENAME: &str = "exec.log";
 /// Per-file rotation threshold (10 MiB).
 const EXEC_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Source tag for a log entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogSource {
-    /// Captured from the primary session's stdout (pipe mode only).
-    Stdout,
-
-    /// Captured from the primary session's stderr (pipe mode only).
-    Stderr,
-
-    /// Captured from the primary session in pty mode.
-    ///
-    /// pty allocation merges stdout and stderr at the kernel level
-    /// before the bytes leave the guest. Tagging these as `output`
-    /// (rather than lying with `stdout`) keeps `s: "stderr"` filters
-    /// honest: a programmatic consumer doing
-    /// `jq 'select(.s == "stderr")'` will not accidentally pick up
-    /// merged pty output that originated as stderr.
-    Output,
-
-    /// Synthetic lifecycle marker injected by the host writer
-    /// (e.g. `--- sandbox started ---`).
-    System,
-}
-
 /// A single JSON Lines entry.
 ///
 /// Field names are short to keep the file compact when many small
@@ -280,3 +251,9 @@ mod tests {
         assert_eq!(entries[1].d, "line2\n");
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::LogSource;

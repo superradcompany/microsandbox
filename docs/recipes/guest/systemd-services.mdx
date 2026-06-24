@@ -17,7 +17,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
   -- bash
 ```
 
-`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
+`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/customize#custom-init-system) for the exact behavior and for pinning to an explicit path.
 
 ## Step 2: Confirm systemd is PID 1
 
@@ -60,6 +60,6 @@ The guest detects microsandbox as a container, so packages with `policy-rc.d` de
 
 ## Notes
 
-- **Image choice matters.** Distroless / minimal images (`python:3.13-slim`, `alpine`) don't ship a systemd init binary; `--init auto` will fail and `kernel.log` will list every path it tried. Use a systemd-equipped base or layer one in.
+- **Image choice matters.** Distroless / minimal images (`python:3.13-slim`, `alpine`) don't ship a systemd init binary; `--init auto` will fail if it cannot resolve a known image ENTRYPOINT init or find a guest-side probe match. Use a systemd-equipped base or layer one in.
 - **Memory budget.** systemd's idle footprint is ~50 MiB; daemons add more. Bump `--memory` if your service is hungry.
-- **Other inits work.** `--init` accepts any absolute path. s6, OpenRC, runit, or a hand-rolled `/sbin/init` shell script are all fine; `auto` just covers the systemd-on-Debian/Ubuntu case.
+- **Other inits work.** `--init` accepts any absolute path. s6, OpenRC, runit, or a hand-rolled `/sbin/init` shell script are all fine; `auto` covers known image ENTRYPOINT inits plus common distro init paths.

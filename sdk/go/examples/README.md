@@ -11,6 +11,7 @@ go run ./examples/basic
 | Example | Description |
 |---------|-------------|
 | `basic` | Create a sandbox, run commands, use filesystem and metrics |
+| `cloud-backend` | Cloud backend lifecycle and live logs |
 | `detached` | Detached lifecycle, reattach, stop, and remove |
 | `disk` | Build and mount a raw ext4 disk image |
 | `errors` | Typed error handling with `IsKind` and `errors.As` |

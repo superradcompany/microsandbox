@@ -11,6 +11,12 @@ export {
   type AgentConnectOptions,
   type RawFrame,
 } from "./agent.js";
+export {
+  defaultBackendKind,
+  setDefaultBackend,
+  withDefaultBackend,
+} from "./runtime.js";
+export type { DefaultBackend } from "./runtime.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox } from "./sandbox.js";
@@ -354,6 +360,7 @@ export { allSandboxMetrics } from "./all-metrics.js";
 // Errors
 export {
   CustomError,
+  CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
   HttpError,
@@ -372,10 +379,12 @@ export {
   ProtocolError,
   RuntimeError,
   SandboxFsOpsError,
+  SandboxAlreadyExistsError,
   SandboxNotFoundError,
   SandboxStillRunningError,
   TerminalError,
   UnsupportedOperationError,
+  UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";

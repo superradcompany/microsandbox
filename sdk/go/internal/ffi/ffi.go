@@ -155,6 +155,7 @@ typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint
 typedef char *(*msb_volume_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_get_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_version_fn)(uint8_t *buf, size_t buf_len);
+typedef char *(*msb_agent_socket_path_fn)(const char *name, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_image_get_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
@@ -298,6 +299,7 @@ static msb_agent_ready_bytes_fn     ptr_msb_agent_ready_bytes     = NULL;
 static msb_agent_close_fn           ptr_msb_agent_close           = NULL;
 static msb_agent_free_bytes_fn      ptr_msb_agent_free_bytes      = NULL;
 static msb_version_fn              ptr_msb_version              = NULL;
+static msb_agent_socket_path_fn    ptr_msb_agent_socket_path    = NULL;
 static msb_image_get_fn            ptr_msb_image_get            = NULL;
 static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
@@ -450,6 +452,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_agent_close);
 	RESOLVE(msb_agent_free_bytes);
 	RESOLVE(msb_version);
+	RESOLVE(msb_agent_socket_path);
 	RESOLVE(msb_image_get);
 	RESOLVE(msb_image_list);
 	RESOLVE(msb_image_inspect);
@@ -786,6 +789,9 @@ void call_msb_agent_free_bytes(uint8_t *ptr, size_t len) {
 char *call_msb_version(uint8_t *buf, size_t buf_len) {
 	return ptr_msb_version ? ptr_msb_version(buf, buf_len) : NULL;
 }
+char *call_msb_agent_socket_path(const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_agent_socket_path ? ptr_msb_agent_socket_path(name, buf, buf_len) : NULL;
+}
 char *call_msb_image_get(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_get ? ptr_msb_image_get(cancel_id, reference, buf, buf_len) : NULL;
 }
@@ -885,7 +891,7 @@ func IsLoaded() bool {
 }
 
 // SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
-// resolver's tier 2 (see crates/microsandbox/lib/config/mod.rs:
+// resolver's tier 2 (see sdk/rust/lib/config/mod.rs:
 // resolve_msb_path). Set-once on the Rust side: subsequent calls are
 // ignored. The user's MSB_PATH env var still wins as tier 1.
 func SetSdkMsbPath(path string) {
@@ -1389,6 +1395,7 @@ type CreateOptions struct {
 	Env                  map[string]string    `json:"env,omitempty"`
 	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
+	Ephemeral            bool                 `json:"ephemeral,omitempty"`
 	Entrypoint           []string             `json:"entrypoint,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`
 	LogLevel             string               `json:"log_level,omitempty"`
@@ -2759,6 +2766,9 @@ type Metrics struct {
 	DiskWriteBytes          uint64        `json:"disk_write_bytes"`
 	NetRxBytes              uint64        `json:"net_rx_bytes"`
 	NetTxBytes              uint64        `json:"net_tx_bytes"`
+	UpperUsedBytes          *uint64       `json:"upper_used_bytes"`
+	UpperFreeBytes          *uint64       `json:"upper_free_bytes"`
+	UpperHostAllocatedBytes *uint64       `json:"upper_host_allocated_bytes"`
 	UptimeSecs              uint64        `json:"uptime_secs"`
 	Uptime                  time.Duration `json:"-"`
 }
@@ -2838,6 +2848,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -2857,6 +2870,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}
@@ -3431,6 +3447,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -3447,6 +3466,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}, nil
@@ -3711,6 +3733,38 @@ func Version() (string, error) {
 		return "", fmt.Errorf("parse version: %w", err)
 	}
 	return resp.Version, nil
+}
+
+// AgentSocketPath resolves the host-side path of a sandbox's agentd relay
+// socket by name, without connecting.
+func AgentSocketPath(name string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_agent_socket_path(cName, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return "", &e
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	var resp struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(buf[:end], &resp); err != nil {
+		return "", fmt.Errorf("parse agent socket path: %w", err)
+	}
+	return resp.Path, nil
 }
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.
