@@ -22,6 +22,13 @@ ts = ["dep:ts-rs", "ts-rs/chrono-impl", "ts-rs/serde-json-impl"]
 # Derive `utoipa::ToSchema` on the wire types an HTTP API (the cloud control
 # plane) exposes. Off by default so runtime/SDK builds never pull utoipa.
 utoipa = ["dep:utoipa"]
+# Annotate the spec sub-types with `#[typeshare]` so a downstream consumer can
+# generate Go (and other) bindings for them via the typeshare CLI. The attribute
+# expands to nothing at compile time; off by default so normal builds never pull
+# the proc-macro. Note: the CLI reads the SOURCE, so it picks up the annotations
+# regardless of whether this feature is enabled — the feature only governs
+# whether the attribute resolves when the crate is compiled.
+typeshare = ["dep:typeshare"]
 
 [dependencies]
 chrono.workspace = true
@@ -30,6 +37,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
+typeshare = { version = "1", optional = true }
 utoipa = { version = "5", optional = true, features = ["chrono"] }
 
 [dev-dependencies]

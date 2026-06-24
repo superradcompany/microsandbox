@@ -29,6 +29,7 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum DiskImageFormat {
     /// QEMU Copy-on-Write v2.
     Qcow2,
@@ -81,6 +82,7 @@ pub struct OciRootfsSource {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
     #[default]
@@ -103,6 +105,7 @@ pub enum PullPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum StatVirtualization {
     /// Fail-closed: probe the host backing path; require xattr support.
@@ -119,6 +122,7 @@ pub enum StatVirtualization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum HostPermissions {
     /// Guest chmod stays in the metadata overlay only.
@@ -131,6 +135,7 @@ pub enum HostPermissions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Preserve normal guest-root semantics.
@@ -149,6 +154,7 @@ pub enum SecurityProfile {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
@@ -444,6 +450,7 @@ pub struct NetworkSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct PublishedPortSpec {
     /// Host-side port to bind.
     pub host_port: u16,
@@ -463,6 +470,7 @@ pub struct PublishedPortSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum PortProtocol {
     /// TCP.
     #[default]
@@ -505,6 +513,7 @@ pub struct HandoffInit {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SandboxPolicy {
     /// Whether the sandbox is ephemeral.
     ///
@@ -518,9 +527,14 @@ pub struct SandboxPolicy {
     pub ephemeral: bool,
 
     /// Hard cap on total sandbox lifetime in seconds. `None` = run forever.
+    // typeshare rejects bare 64-bit ints (JS-unsafe); `U53` is its big-int
+    // escape and the Go backend maps it to `uint64` — exact, since this crate's
+    // typeshare output targets Go only.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub max_duration_secs: Option<u64>,
 
     /// Idle timeout in seconds. `None` = no idle detection.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub idle_timeout_secs: Option<u64>,
 }
 
@@ -623,6 +637,7 @@ pub struct SandboxSpec {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct SandboxResources {
     /// Number of virtual CPUs.
@@ -636,6 +651,7 @@ pub struct SandboxResources {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct SandboxRuntimeOptions {
     /// Working directory inside the guest.
@@ -645,6 +661,12 @@ pub struct SandboxRuntimeOptions {
     pub shell: Option<String>,
 
     /// Named scripts available inside the guest.
+    // typeshare doesn't recognize `BTreeMap`; serialize as a map for codegen
+    // (identical JSON object shape) → Go `map[string]string`.
+    #[cfg_attr(
+        feature = "typeshare",
+        typeshare(serialized_as = "HashMap<String, String>")
+    )]
     pub scripts: BTreeMap<String, String>,
 
     /// Image entrypoint override.
@@ -663,6 +685,7 @@ pub struct SandboxRuntimeOptions {
     pub log_level: Option<SandboxLogLevel>,
 
     /// Metrics sampling interval in milliseconds. `None` disables sampling.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub metrics_sample_interval_ms: Option<u64>,
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
@@ -673,6 +696,7 @@ pub struct SandboxRuntimeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct EnvVar {
     /// Environment variable name.
     pub key: String,
@@ -685,6 +709,7 @@ pub struct EnvVar {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxLogLevel {
     /// Emit only error logs.
@@ -711,6 +736,7 @@ pub enum SandboxLogLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
     Cpu,
@@ -750,14 +776,17 @@ pub enum RlimitResource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct Rlimit {
     /// Resource type.
     pub resource: RlimitResource,
 
     /// Soft limit (can be raised up to hard limit by the process).
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub soft: u64,
 
     /// Hard limit (ceiling, requires privileges to raise).
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub hard: u64,
 }
 
