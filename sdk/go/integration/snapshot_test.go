@@ -25,7 +25,7 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 		removeSnapshotBestEffort(snapshotName)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
+	base, err := createSandbox(t, ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 		t.Fatalf("Snapshot.List did not include digest %q", artifact.Digest())
 	}
 
-	fork, err := microsandbox.CreateSandbox(ctx, forkName, microsandbox.WithSnapshot(snapshotName))
+	fork, err := createSandbox(t, ctx, forkName, microsandbox.WithSnapshot(snapshotName))
 	if err != nil {
 		t.Fatalf("CreateSandbox with WithSnapshot: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
 		removeSnapshotBestEffort(snapshotDir)
 	})
 
-	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage(goIntegrationImage))
+	base, err := createSandbox(t, ctx, baseName, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
