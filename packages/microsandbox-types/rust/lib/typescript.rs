@@ -5,10 +5,11 @@ use ts_rs::TS;
 use crate::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
-    HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkSpec,
-    OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
-    RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,
+    HostPattern, HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode,
+    NetworkSpec, OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit,
+    RlimitResource, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
+    SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization, ViolationAction,
     VolumeKind, VolumeMount, VolumeSpec,
 };
 
@@ -57,6 +58,11 @@ pub fn declarations() -> Vec<String> {
         NamedVolumeCreate::decl(&cfg),
         VolumeMount::decl(&cfg),
         Patch::decl(&cfg),
+        HostPattern::decl(&cfg),
+        SecretInjection::decl(&cfg),
+        ViolationAction::decl(&cfg),
+        SecretEntry::decl(&cfg),
+        SecretsConfig::decl(&cfg),
         NetworkSpec::decl(&cfg),
         PublishedPortSpec::decl(&cfg),
         PortProtocol::decl(&cfg),

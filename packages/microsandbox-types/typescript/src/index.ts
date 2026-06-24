@@ -284,6 +284,84 @@ path: string,
  */
 content: string, } };
 
+export type HostPattern = { "exact": string } | { "wildcard": string } | "any";
+
+export type SecretInjection = {
+/**
+ * Substitute in HTTP headers (default: true).
+ */
+headers: boolean,
+/**
+ * Substitute in HTTP Basic Auth (default: true).
+ */
+basic_auth: boolean,
+/**
+ * Substitute in URL query parameters (default: false).
+ */
+query_params: boolean,
+/**
+ * Substitute in request body (default: false).
+ *
+ * Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
+ * larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
+ * decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
+ * through unchanged. HTTP/2 DATA-frame body substitution is not
+ * supported; matching body placeholders are blocked.
+ */
+body: boolean, };
+
+export type ViolationAction = "block" | "block-and-log" | "block-and-terminate" | { "passthrough": Array<HostPattern> };
+
+export type SecretEntry = {
+/**
+ * Environment variable name exposed to the sandbox (holds the placeholder).
+ *
+ * Must be non-empty and must not contain `=` or NUL. microsandbox does
+ * not require shell-identifier syntax because Linux environment entries
+ * only require a `NAME=value` shape.
+ */
+env_var: string,
+/**
+ * The actual secret value (never enters the sandbox).
+ */
+value: string,
+/**
+ * Placeholder string the sandbox sees instead of the real value.
+ *
+ * Must be non-empty, no longer than [`MAX_SECRET_PLACEHOLDER_BYTES`], and
+ * must not contain NUL, CR, or LF.
+ */
+placeholder: string,
+/**
+ * Hosts allowed to receive this secret.
+ */
+allowed_hosts: Array<HostPattern>,
+/**
+ * Where the secret can be injected.
+ */
+injection: SecretInjection,
+/**
+ * Action on a violation for this secret (overrides the config default).
+ */
+on_violation?: ViolationAction | null,
+/**
+ * Require verified TLS identity before substituting (default: true).
+ *
+ * When true, the secret is only substituted if the connection uses TLS
+ * interception (not bypass) and the SNI matches an allowed host.
+ */
+require_tls_identity: boolean, };
+
+export type SecretsConfig = {
+/**
+ * List of secrets to inject.
+ */
+secrets: Array<SecretEntry>,
+/**
+ * Default action when a placeholder leaks to a disallowed host.
+ */
+on_violation: ViolationAction, };
+
 export type NetworkSpec = {
 /**
  * Whether networking is enabled for this sandbox.
@@ -310,9 +388,9 @@ dns: JsonValue | null,
  */
 tls: JsonValue | null,
 /**
- * Secret injection subdocument.
+ * Placeholder-based secret-injection subdocument (see [`SecretsConfig`]).
  */
-secrets: JsonValue | null,
+secrets: SecretsConfig | null,
 /**
  * Max concurrent guest connections.
  */

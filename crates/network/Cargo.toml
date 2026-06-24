@@ -27,6 +27,7 @@ ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-protocol.workspace = true
+microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["net"] }
 parking_lot = { workspace = true }

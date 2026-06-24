@@ -3381,6 +3381,7 @@ dependencies = [
  "libc",
  "lru",
  "microsandbox-protocol",
+ "microsandbox-types",
  "microsandbox-utils",
  "msb_krun",
  "parking_lot",
