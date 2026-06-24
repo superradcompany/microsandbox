@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -517,11 +518,8 @@ impl Sandbox {
     pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let name = sb.name().to_string();
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries = microsandbox::logs::read_logs(&name, &rust_opts)
-            .await
-            .map_err(to_napi_error)?;
+        let entries = sb.logs(&rust_opts).await.map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
     }
 
@@ -535,9 +533,9 @@ impl Sandbox {
     pub async fn log_stream(&self, opts: Option<LogStreamOptions>) -> Result<JsLogStream> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let name = sb.name().to_string();
         let rust_opts = log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        spawn_log_stream(&name, rust_opts).await
+        let stream = sb.log_stream(&rust_opts).await.map_err(to_napi_error)?;
+        spawn_log_stream_from_stream(stream).await
     }
 }
 
@@ -618,15 +616,16 @@ impl AsyncGenerator for JsLogStream {
 /// Open a log stream against the given sandbox name and bridge it
 /// onto a JS-side mpsc channel. Shared between `Sandbox::log_stream`
 /// and `SandboxHandle::log_stream`.
-pub async fn spawn_log_stream(
-    name: &str,
-    opts: microsandbox::logs::LogStreamOptions,
+pub async fn spawn_log_stream_from_stream(
+    mut stream: Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = microsandbox::MicrosandboxResult<microsandbox::logs::LogEntry>,
+                > + Send
+                + 'static,
+        >,
+    >,
 ) -> Result<JsLogStream> {
-    let mut stream = Box::pin(
-        microsandbox::logs::log_stream(name, &opts)
-            .await
-            .map_err(to_napi_error)?,
-    );
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         while let Some(result) = stream.next().await {

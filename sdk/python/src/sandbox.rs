@@ -10,7 +10,6 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::sandbox_builder_from_args;
-use crate::logs::read_logs_blocking;
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
@@ -569,15 +568,14 @@ impl PySandbox {
         sources: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let opts = crate::logs::parse_log_options(tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let name = sandbox.name().to_string();
-            let entries = tokio::task::spawn_blocking(move || {
-                read_logs_blocking(&name, tail, since_ms, until_ms, sources)
-            })
-            .await
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))??;
-            Ok(entries)
+            let entries = sandbox.logs(&opts).await.map_err(to_py_err)?;
+            Ok(entries
+                .into_iter()
+                .map(crate::logs::convert_entry)
+                .collect::<Vec<_>>())
         })
     }
 
@@ -625,8 +623,8 @@ impl PySandbox {
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let name = sandbox.name().to_string();
-            crate::logs::open_log_stream(&name, opts).await
+            let stream = sandbox.log_stream(&opts).await.map_err(to_py_err)?;
+            Ok(crate::logs::PyLogStream::new(stream))
         })
     }
 

@@ -174,6 +174,11 @@ impl SandboxConfig {
         let mut config = self.clone();
         config.startup_command_requested = false;
         config.initial_command = None;
+        for mount in &mut config.spec.mounts {
+            if let VolumeMount::Named { create, .. } = mount {
+                *create = None;
+            }
+        }
         config
     }
 
@@ -524,11 +529,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{SandboxConfig, merge_env};
-    use crate::sandbox::{HandoffInit, MountOptions, RootfsSource, VolumeMount};
+    use crate::sandbox::{
+        HandoffInit, MountOptions, NamedVolumeMode, RootfsSource, StatVirtualization, VolumeMount,
+    };
     use microsandbox_image::ImageConfig;
     use microsandbox_types::{
-        EnvVar, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-        SandboxSpec, SecurityProfile,
+        EnvVar, NamedVolumeCreate, SandboxLogLevel, SandboxPolicy, SandboxResources,
+        SandboxRuntimeOptions, SandboxSpec, SecurityProfile, VolumeKind,
     };
 
     #[test]
@@ -875,6 +882,41 @@ mod tests {
             persisted_init.args,
             vec!["--unit=multi-user.target".to_string()]
         );
+    }
+
+    #[test]
+    fn test_clone_for_persistence_strips_named_volume_create_intent() {
+        let config = SandboxConfig {
+            spec: SandboxSpec {
+                mounts: vec![VolumeMount::Named {
+                    name: "cache".to_string(),
+                    guest: "/cache".to_string(),
+                    create: Some(NamedVolumeCreate {
+                        mode: NamedVolumeMode::Create,
+                        name: "cache".to_string(),
+                        kind: VolumeKind::Directory,
+                        quota_mib: Some(512),
+                        capacity_mib: None,
+                        labels: Vec::new(),
+                    }),
+                    options: MountOptions::default(),
+                    stat_virtualization: StatVirtualization::Strict,
+                    host_permissions: crate::sandbox::HostPermissions::Private,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let persisted = config.clone_for_persistence();
+
+        match &persisted.spec.mounts[0] {
+            VolumeMount::Named { name, create, .. } => {
+                assert_eq!(name, "cache");
+                assert!(create.is_none());
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
     }
 
     #[test]

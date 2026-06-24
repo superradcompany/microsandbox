@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use microsandbox::Backend;
-
 use microsandbox::sandbox::FsEntry as RustFsEntry;
 use microsandbox::sandbox::FsEntryKind as RustFsEntryKind;
 use microsandbox::sandbox::FsMetadata as RustFsMetadata;
@@ -31,8 +29,12 @@ pub struct JsVolumeHandle {
 
 #[napi(js_name = "VolumeFs")]
 pub struct JsVolumeFs {
-    backend: Arc<dyn Backend>,
-    name: String,
+    inner: JsVolumeFsInner,
+}
+
+enum JsVolumeFsInner {
+    Volume(Arc<Volume>),
+    Handle(VolumeHandle),
 }
 
 #[napi(async_iterator, js_name = "VolumeFsReadStream")]
@@ -87,8 +89,7 @@ impl JsVolume {
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            backend: microsandbox::default_backend(),
-            name: self.inner.name().to_string(),
+            inner: JsVolumeFsInner::Volume(self.inner.clone()),
         }
     }
 }
@@ -160,8 +161,7 @@ impl JsVolumeHandle {
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            backend: microsandbox::default_backend(),
-            name: self.inner.name().to_string(),
+            inner: JsVolumeFsInner::Handle(self.inner.clone()),
         }
     }
 }
@@ -169,11 +169,12 @@ impl JsVolumeHandle {
 #[napi]
 impl JsVolumeFs {
     fn make(&self) -> microsandbox::volume::VolumeFs<'_> {
-        // VolumeFs borrows the parent's backend + name; we keep an owned copy
-        // of each on `JsVolumeFs` and re-construct per call.
-        // Safety / lifetime note: the temporary VolumeFs only lives for the
-        // duration of each FFI call.
-        microsandbox::volume::VolumeFs::with_backend(self.backend.clone(), &self.name)
+        // VolumeFs only borrows the wrapped Volume/VolumeHandle for the
+        // duration of the FFI call, while the wrapper owns that parent object.
+        match &self.inner {
+            JsVolumeFsInner::Volume(volume) => volume.fs(),
+            JsVolumeFsInner::Handle(handle) => handle.fs(),
+        }
     }
 
     #[napi]

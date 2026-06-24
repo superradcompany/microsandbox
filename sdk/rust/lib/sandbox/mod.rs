@@ -46,10 +46,14 @@ use microsandbox_image::{
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
+    backend::LocalBackend,
     db::entity::{
         run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
     },
-    runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
+    runtime::{
+        ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes,
+        spawn_sandbox,
+    },
 };
 
 use self::exec::{ExecHandle, ExecOptions};
@@ -73,10 +77,13 @@ pub fn validate_sandbox_name(name: &str) -> MicrosandboxResult<()> {
     microsandbox_types::validate_sandbox_name(name).map_err(Into::into)
 }
 
-/// Validate sandbox-name-derived runtime paths before the sandbox process starts.
-pub(super) fn validate_sandbox_name_for_runtime(name: &str) -> MicrosandboxResult<()> {
+/// Validate sandbox-name-derived runtime paths using an explicit local backend.
+pub(super) fn validate_sandbox_name_for_runtime_with_backend(
+    local: &LocalBackend,
+    name: &str,
+) -> MicrosandboxResult<()> {
     validate_sandbox_name(name)?;
-    crate::runtime::resolve_sandbox_agent_socket_path(name).map(|_| ())
+    crate::runtime::resolve_sandbox_agent_socket_path_for(local, name).map(|_| ())
 }
 
 /// Validate an explicit guest hostname before it is forwarded to agentd.
@@ -95,6 +102,8 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
         .copied()
         .find(|prefix| key.starts_with(prefix))
 }
+
+pub(crate) use types::validate_named_disk_mount_options;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -460,11 +469,12 @@ pub(crate) async fn create_local(
     let mut pinned_reference: Option<String> = None;
 
     config.apply_runtime_defaults();
-    validate_sandbox_name_for_runtime(&config.spec.name)?;
+    validate_sandbox_name_for_runtime_with_backend(local_backend, &config.spec.name)?;
     validate_hostname(config.spec.runtime.hostname.as_deref())?;
     validate_rootfs_source(&config.spec.image)?;
     validate_env(&config.spec.env)?;
     validate_labels(&config.spec.labels)?;
+    types::validate_volume_mounts(&config.spec.mounts)?;
     if let Some(init) = &config.spec.init {
         init::validate(init)?;
     }
@@ -594,10 +604,21 @@ pub(crate) async fn create_local(
         patch::apply_patches(&config.spec.image, &config.spec.patches).await?;
     }
 
+    // Sandbox-time named-volume creation is one-shot create intent. Provision
+    // before inserting the sandbox row so volume conflicts or incompatibilities
+    // cannot leave a stopped sandbox that never booted.
+    let created_named_volumes = ensure_named_volumes(local_backend, &config).await?;
+
     // Insert the sandbox record and keep its stable database ID.
     let write_db = db.write();
     let persisted_config = config.clone_for_persistence();
-    let sandbox_id = insert_sandbox_record(write_db, &persisted_config).await?;
+    let sandbox_id = match insert_sandbox_record(write_db, &persisted_config).await {
+        Ok(sandbox_id) => sandbox_id,
+        Err(err) => {
+            rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+            return Err(err);
+        }
+    };
     tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
     // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
@@ -606,7 +627,13 @@ pub(crate) async fn create_local(
         match create_inner_local(local_backend, config, sandbox_id, mode).await {
             Ok(pair) => pair,
             Err(e) => {
-                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                if created_named_volumes.is_empty() {
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                } else {
+                    rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+                    let _ = delete_sandbox_record(write_db, sandbox_id).await;
+                }
                 return Err(e);
             }
         };
@@ -618,19 +645,48 @@ pub(crate) async fn create_local(
     ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
     {
         let _ = sandbox.stop().await;
-        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+        if created_named_volumes.is_empty() {
+            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+        } else {
+            rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+            let _ = delete_sandbox_record(write_db, sandbox_id).await;
+        }
         return Err(err);
     }
 
-    // Validate that the configured workdir exists inside the guest.
-    if let Some(ref workdir) = sandbox.config.spec.runtime.workdir
-        && !sandbox.fs().exists(workdir).await.unwrap_or(false)
-    {
-        let _ = sandbox.stop().await;
-        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "workdir does not exist in guest: {workdir}"
-        )));
+    // Validate that the configured workdir exists inside the guest and is a
+    // directory before returning a ready sandbox. Shell/exec calls inherit this
+    // cwd, so accepting a regular file here leads to later, murkier failures.
+    if let Some(ref workdir) = sandbox.config.spec.runtime.workdir {
+        match sandbox.fs().stat(workdir).await {
+            Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
+            Ok(_) => {
+                let _ = sandbox.stop().await;
+                if created_named_volumes.is_empty() {
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                } else {
+                    rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+                    let _ = delete_sandbox_record(write_db, sandbox_id).await;
+                }
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "workdir is not a directory in guest: {workdir}"
+                )));
+            }
+            Err(_) => {
+                let _ = sandbox.stop().await;
+                if created_named_volumes.is_empty() {
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                } else {
+                    rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+                    let _ = delete_sandbox_record(write_db, sandbox_id).await;
+                }
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "workdir does not exist in guest: {workdir}"
+                )));
+            }
+        }
     }
 
     Ok(sandbox)
@@ -671,11 +727,12 @@ pub(crate) async fn start_local(
 
     let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
     config.apply_runtime_defaults();
-    validate_sandbox_name_for_runtime(&config.spec.name)?;
+    validate_sandbox_name_for_runtime_with_backend(local_backend, &config.spec.name)?;
     validate_hostname(config.spec.runtime.hostname.as_deref())?;
     validate_rootfs_source(&config.spec.image)?;
     validate_env(&config.spec.env)?;
     validate_labels(&config.spec.labels)?;
+    types::validate_volume_mounts(&config.spec.mounts)?;
     validate_start_state(
         local_backend,
         &config,
@@ -2437,6 +2494,13 @@ async fn insert_sandbox_record(
     .await
 }
 
+async fn delete_sandbox_record(db: &DbWriteConnection, sandbox_id: i32) -> MicrosandboxResult<()> {
+    sandbox_entity::Entity::delete_by_id(sandbox_id)
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 async fn persist_oci_manifest_pin(
     db: &DbWriteConnection,
     sandbox_id: i32,
@@ -2551,16 +2615,19 @@ mod tests {
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
 
-    use crate::sandbox::OciRootfsSource;
+    use crate::{
+        backend::{Backend, LocalBackend},
+        sandbox::OciRootfsSource,
+    };
     use microsandbox_migration::{Migrator, MigratorTrait};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::{
-        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RootfsSource, SandboxConfig, SandboxStatus,
-        hostname_from_sandbox_name, insert_sandbox_record, persist_oci_manifest_pin,
-        prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
-        validate_hostname, validate_rootfs_source,
+        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, RootfsSource, SandboxConfig,
+        SandboxStatus, VolumeMount, hostname_from_sandbox_name, insert_sandbox_record,
+        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
+        remove_dir_if_exists, validate_hostname, validate_rootfs_source,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2615,6 +2682,66 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[tokio::test]
+    async fn test_runtime_name_validation_uses_explicit_backend_paths() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("msb-home");
+        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+
+        super::validate_sandbox_name_for_runtime_with_backend(&backend, "sdk-socket-test").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_local_validates_direct_config_mounts() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let rootfs = temp.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let backend_trait: Arc<dyn Backend> = backend;
+        let mut config = test_config_with_rootfs("bad-mounts", RootfsSource::Bind(rootfs));
+        config.spec.mounts = vec![
+            VolumeMount::Tmpfs {
+                guest: "/dup".to_string(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Tmpfs {
+                guest: "/dup".to_string(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        let err = match super::create_local(
+            backend_trait,
+            config,
+            crate::runtime::SpawnMode::Attached,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected invalid direct-config mounts to be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("multiple volumes cannot mount"),
+            "got: {err}"
+        );
     }
 
     #[test]

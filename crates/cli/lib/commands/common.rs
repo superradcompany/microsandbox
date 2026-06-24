@@ -947,6 +947,12 @@ pub fn apply_explicit_named_mount(
     {
         anyhow::bail!("mount-named kind=disk does not support quota=...");
     }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && (parsed.options.stat_virtualization.is_some()
+            || parsed.options.host_permissions.is_some())
+    {
+        anyhow::bail!("mount-named kind=disk does not support stat-virt=... or host-perms=...");
+    }
 
     let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
@@ -968,7 +974,9 @@ pub fn apply_explicit_named_mount(
             }
             v
         });
-        apply_common_mount_options(mount, options)
+        let mut common_options = options;
+        common_options.quota_mib = None;
+        apply_common_mount_options(mount, common_options)
     }))
 }
 
@@ -2444,6 +2452,44 @@ mod tests {
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_named_mount_directory_quota() {
+        let mount = build_explicit("cache:/data:quota=1G", apply_explicit_named_mount).await;
+        match mount {
+            VolumeMount::Named { create, .. } => {
+                let create = create.expect("mount-named should ensure the named volume");
+                assert_eq!(
+                    create.mode(),
+                    microsandbox::sandbox::NamedVolumeMode::EnsureExists
+                );
+                assert_eq!(create.kind(), VolumeKind::Directory);
+                assert_eq!(create.quota_mib(), Some(1024));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_explicit_named_mount_disk_rejects_policy_options() {
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,stat-virt=relaxed",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject stat-virt"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not support stat-virt"));
+
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,host-perms=mirror",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject host-perms"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not support stat-virt"));
     }
 
     #[test]

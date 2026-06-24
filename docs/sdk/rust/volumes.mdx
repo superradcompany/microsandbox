@@ -1718,7 +1718,7 @@ Ignore device files on this mount.
 fn stat_virtualization(self, policy: StatVirtualization) -> Self
 ```
 
-Set the guest stat virtualization policy for a virtiofs-backed mount. Default: [`Strict`](#statvirtualization). Valid only for bind and named-volume mounts; calling it on a tmpfs or disk-image mount errors at finalize time.
+Set the guest stat virtualization policy for a virtiofs-backed mount. Default: [`Strict`](#statvirtualization). Valid only for bind and directory-backed named-volume mounts. Tmpfs and disk-image mounts are rejected when the mount is built; disk-backed named volumes are rejected once the backing volume kind is known during sandbox create or start.
 
 <p className="msb-label">Parameters</p>
 
@@ -1738,7 +1738,7 @@ Set the guest stat virtualization policy for a virtiofs-backed mount. Default: [
 fn host_permissions(self, policy: HostPermissions) -> Self
 ```
 
-Set the host permission propagation policy for a virtiofs-backed mount. Default: [`Private`](#hostpermissions). Valid only for bind and named-volume mounts. Combining [`StatVirtualization::Off`](#statvirtualization) with [`HostPermissions::Mirror`](#hostpermissions) is rejected, since with no overlay the guest chmod already hits the host inode and `Mirror` would be a no-op.
+Set the host permission propagation policy for a virtiofs-backed mount. Default: [`Private`](#hostpermissions). Valid only for bind and directory-backed named-volume mounts. Combining [`StatVirtualization::Off`](#statvirtualization) with [`HostPermissions::Mirror`](#hostpermissions) is rejected, since with no overlay the guest chmod already hits the host inode and `Mirror` would be a no-op.
 
 <p className="msb-label">Parameters</p>
 
