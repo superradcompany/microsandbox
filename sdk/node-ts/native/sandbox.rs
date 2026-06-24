@@ -117,16 +117,19 @@ impl Sandbox {
 
     /// List all sandboxes.
     #[napi]
-    pub async fn list() -> Result<Vec<SandboxInfo>> {
+    pub async fn list() -> Result<Vec<JsSandboxHandle>> {
         let handles = microsandbox::sandbox::Sandbox::list()
             .await
             .map_err(to_napi_error)?;
-        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+        Ok(handles
+            .into_iter()
+            .map(JsSandboxHandle::from_rust)
+            .collect())
     }
 
     /// List sandboxes matching a filter.
     #[napi(js_name = "listWith")]
-    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<SandboxInfo>> {
+    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<JsSandboxHandle>> {
         let handles = match filter.labels {
             Some(labels) if !labels.is_empty() => {
                 let filter = labels.into_iter().fold(
@@ -141,7 +144,10 @@ impl Sandbox {
                 .await
                 .map_err(to_napi_error)?,
         };
-        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+        Ok(handles
+            .into_iter()
+            .map(JsSandboxHandle::from_rust)
+            .collect())
     }
 
     /// Remove a stopped sandbox from the database.
@@ -391,7 +397,7 @@ impl Sandbox {
     // Lifecycle
     //----------------------------------------------------------------------------------------------
 
-    /// Stop the sandbox gracefully (SIGTERM).
+    /// Stop the sandbox gracefully and wait for it to exit.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         let guard = self.inner.lock().await;
@@ -408,12 +414,46 @@ impl Sandbox {
         Ok(exit_status_to_js(status))
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
+    /// Request graceful shutdown without waiting for observed exit.
+    #[napi]
+    pub async fn request_stop(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_stop().await.map_err(to_napi_error)
+    }
+
+    /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
+    #[napi]
+    pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let timeout = Duration::from_millis(timeout_ms.into());
+        sb.stop_with_timeout(timeout).await.map_err(to_napi_error)
+    }
+
+    /// Kill the sandbox immediately and wait for observed exit.
     #[napi]
     pub async fn kill(&self) -> Result<()> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.kill().await.map_err(to_napi_error)
+    }
+
+    /// Request force termination without waiting for observed exit.
+    #[napi]
+    pub async fn request_kill(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_kill().await.map_err(to_napi_error)
+    }
+
+    /// Force-kill the sandbox with an explicit observation timeout.
+    #[napi]
+    pub async fn kill_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let timeout = Duration::from_millis(timeout_ms.into());
+        sb.kill_with_timeout(timeout).await.map_err(to_napi_error)
     }
 
     /// Graceful drain (SIGUSR1 — for load balancing).
@@ -422,6 +462,23 @@ impl Sandbox {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.drain().await.map_err(to_napi_error)
+    }
+
+    /// Request graceful drain without waiting for observed exit.
+    #[napi]
+    pub async fn request_drain(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_drain().await.map_err(to_napi_error)
+    }
+
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    #[napi]
+    pub async fn wait_until_stopped(&self) -> Result<SandboxStopResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.wait_until_stopped().await.map_err(to_napi_error)?;
+        Ok(sandbox_stop_result_to_js(result))
     }
 
     /// Wait for the sandbox process to exit.
@@ -721,16 +778,6 @@ pub fn sandbox_stop_result_to_js(
         signal: result.signal,
         observed_at: datetime_to_ms(&result.observed_at),
         source: result.source,
-    }
-}
-
-fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> SandboxInfo {
-    SandboxInfo {
-        name: handle.name().to_string(),
-        status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
-        config_json: handle.config_json().to_string(),
-        created_at: opt_datetime_to_ms(&handle.created_at()),
-        updated_at: opt_datetime_to_ms(&handle.updated_at()),
     }
 }
 
