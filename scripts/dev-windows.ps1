@@ -598,10 +598,7 @@ function Invoke-BuildLibkrunfwKernelBundleWithWsl {
     $command = @"
 set -euo pipefail
 source_dir=$submoduleQuoted
-home_dir="`$(getent passwd "`$(id -u)" | cut -d: -f6)"
-if [ -z "`$home_dir" ] || [ ! -d "`$home_dir" ]; then
-    home_dir="`$HOME"
-fi
+home_dir="`$HOME"
 if [ -z "`$home_dir" ] || [ ! -d "`$home_dir" ] || [ ! -w "`$home_dir" ]; then
     echo "error: WSL home directory is not writable: `$home_dir" >&2
     exit 1
