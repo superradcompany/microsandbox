@@ -455,6 +455,27 @@ function Invoke-WslBash {
     }
 }
 
+function Invoke-WslBashScript {
+    param(
+        [Parameter(Mandatory = $true)][string] $Distro,
+        [Parameter(Mandatory = $true)][string] $Script,
+        [string[]] $Arguments = @()
+    )
+
+    $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "msb-wsl-$([System.Guid]::NewGuid().ToString("N")).sh"
+    try {
+        $scriptText = ConvertTo-WslBashCommand -Command $Script
+        [System.IO.File]::WriteAllText($scriptPath, $scriptText, [System.Text.Encoding]::ASCII)
+        $scriptWsl = ConvertTo-WslPath -Distro $Distro -Path $scriptPath
+        & wsl.exe -d $Distro -- bash $scriptWsl @Arguments
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } finally {
+        Remove-KnownPath -Path $scriptPath
+    }
+}
+
 function Get-WslBuildPackages {
     return "build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils patch"
 }
@@ -592,37 +613,36 @@ function Invoke-BuildLibkrunfwKernelBundleWithWsl {
 
     $distro = Resolve-WslDistro
     $submoduleWsl = ConvertTo-WslPath -Distro $distro -Path $Submodule
-    $submoduleQuoted = Quote-Bash $submoduleWsl
 
     Write-Info "Building libkrunfw kernel bundle via WSL ($distro)..."
-    $command = @"
+    $script = @'
 set -euo pipefail
-source_dir=$submoduleQuoted
-home_dir="`$HOME"
-if [ -z "`$home_dir" ] || [ ! -d "`$home_dir" ] || [ ! -w "`$home_dir" ]; then
-    echo "error: WSL home directory is not writable: `$home_dir" >&2
+source_dir="$1"
+home_dir="${HOME:-}"
+if [ -z "$home_dir" ] || [ ! -d "$home_dir" ] || [ ! -w "$home_dir" ]; then
+    echo "error: WSL home directory is not writable: $home_dir" >&2
     exit 1
 fi
 
-work_root="`$home_dir/.cache/microsandbox/libkrunfw"
-cache_dir="`$work_root/cache"
-build_parent="`$work_root/tmp"
-mkdir -p "`$cache_dir/tarballs" "`$build_parent"
-build_dir="`$(mktemp -d "`$build_parent/build.XXXXXX")"
+work_root="$home_dir/.cache/microsandbox/libkrunfw"
+cache_dir="$work_root/cache"
+build_parent="$work_root/tmp"
+mkdir -p "$cache_dir/tarballs" "$build_parent"
+build_dir="$(mktemp -d "$build_parent/build.XXXXXX")"
 
 cleanup() {
-    rm -rf "`$build_dir"
+    rm -rf "$build_dir"
 }
 trap cleanup EXIT
 
-echo "Using WSL libkrunfw cache: `$cache_dir"
-echo "Using WSL libkrunfw build directory: `$build_dir"
+echo "Using WSL libkrunfw cache: $cache_dir"
+echo "Using WSL libkrunfw build directory: $build_dir"
 
-if [ -d "`$source_dir/tarballs" ]; then
-    cp -a "`$source_dir/tarballs/." "`$cache_dir/tarballs/" 2>/dev/null || true
+if [ -d "$source_dir/tarballs" ]; then
+    cp -a "$source_dir/tarballs/." "$cache_dir/tarballs/" 2>/dev/null || true
 fi
 
-cd "`$source_dir"
+cd "$source_dir"
 tar --exclude='.git' \
     --exclude='./.git' \
     --exclude='kernel.c' \
@@ -641,17 +661,17 @@ tar --exclude='.git' \
     --exclude='./*.pdb' \
     --exclude='kernel.obj' \
     --exclude='./kernel.obj' \
-    -cf - . | tar -xf - -C "`$build_dir"
+    -cf - . | tar -xf - -C "$build_dir"
 
-mkdir -p "`$build_dir/tarballs"
-cp -a "`$cache_dir/tarballs/." "`$build_dir/tarballs/" 2>/dev/null || true
+mkdir -p "$build_dir/tarballs"
+cp -a "$cache_dir/tarballs/." "$build_dir/tarballs/" 2>/dev/null || true
 
-cd "`$build_dir"
-make -j"`$(nproc)" kernel.c
-cp -a "`$build_dir/tarballs/." "`$cache_dir/tarballs/" 2>/dev/null || true
-cp kernel.c "`$source_dir/kernel.c"
-"@
-    Invoke-WslBash -Distro $distro -Command $command
+cd "$build_dir"
+make -j"$(nproc)" kernel.c
+cp -a "$build_dir/tarballs/." "$cache_dir/tarballs/" 2>/dev/null || true
+cp kernel.c "$source_dir/kernel.c"
+'@
+    Invoke-WslBashScript -Distro $distro -Script $script -Arguments @($submoduleWsl)
 }
 
 function Invoke-BuildLibkrunfwKernelBundle {
