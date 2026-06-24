@@ -1,7 +1,7 @@
 //! Snapshot content verification.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};

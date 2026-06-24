@@ -135,7 +135,7 @@ impl ProcessHandle {
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
             signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL)?;
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(windows)]
@@ -160,7 +160,7 @@ impl ProcessHandle {
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
             signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGUSR1)?;
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(windows)]

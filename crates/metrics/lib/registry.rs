@@ -847,9 +847,7 @@ fn try_open_existing(
             )));
         }
     }
-    if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
-        return Err(e);
-    }
+    validate_header(header_ref, Some(expected_capacity))?;
     drop(header_mapping);
 
     let Some(mapping) = open_existing_region(name, map_len)? else {
@@ -857,9 +855,7 @@ fn try_open_existing(
     };
 
     let header_ref = unsafe { &*(mapping.ptr.as_ptr() as *const Header) };
-    if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
-        return Err(e);
-    }
+    validate_header(header_ref, Some(expected_capacity))?;
 
     let inner = RegistryInner {
         name: name.to_owned(),

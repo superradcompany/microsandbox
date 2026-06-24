@@ -1032,6 +1032,13 @@ fn build_vm(
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .balloon_stats_interval(balloon_stats_interval);
+            #[cfg(windows)]
+            let m = {
+                // The private upper-filesystem metrics device currently
+                // blocks PID 1 registration under WHP/x64. Keep Windows
+                // guests bootable while the device path is hardened.
+                m.msb_metrics(false)
+            };
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
@@ -1308,9 +1315,7 @@ fn build_vm(
     });
 
     // Console — ring-buffer-based custom backend for agent protocol, plus
-    // implicit console output routed to kernel.log for kernel/init logs.
-    // NOTE: The implicit console must remain enabled (do not call
-    // `disable_implicit()`) because disk image rootfs boots depend on it.
+    // console output routed to kernel.log for kernel/init logs.
     let kernel_log_path = config.log_dir.join("kernel.log");
     #[cfg(unix)]
     {
@@ -1326,7 +1331,11 @@ fn build_vm(
         let _ = console_backend;
         let agent_pipe = agent_console_pipe_name(config.sandbox_id);
         builder = builder.console(|c| {
-            c.output(&kernel_log_path)
+            // Windows WHP/x64 currently uses virtio-console for reliable
+            // guest logs; the implicit serial console is present but silent
+            // on the dev hosts used for WHP testing.
+            c.disable_implicit()
+                .virtio_output(&kernel_log_path)
                 .named_pipe(microsandbox_protocol::AGENT_PORT_NAME, agent_pipe)
         });
     }

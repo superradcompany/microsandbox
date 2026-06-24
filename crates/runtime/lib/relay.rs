@@ -161,7 +161,7 @@ impl AgentListener {
             }
 
             let inner = UnixListener::bind(endpoint)?;
-            return Ok(Self { inner });
+            Ok(Self { inner })
         }
 
         #[cfg(windows)]
@@ -177,7 +177,7 @@ impl AgentListener {
         #[cfg(unix)]
         {
             let (stream, _addr) = self.inner.accept().await?;
-            return Ok(stream);
+            Ok(stream)
         }
 
         #[cfg(windows)]

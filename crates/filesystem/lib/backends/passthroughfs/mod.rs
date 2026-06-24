@@ -13,8 +13,6 @@ mod windows;
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
-pub(crate) use unix::inode;
-#[cfg(unix)]
 pub use unix::*;
 #[cfg(windows)]
 pub use windows::{HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization};
