@@ -199,7 +199,7 @@ Put specific rules before general ones.
 
 ### Shadow detection
 
-[`NetworkPolicyBuilder.build()`](#build) walks the rules and warns when a rule is fully covered by an earlier one in the same direction. Only `cidr` and `group` destinations are checked; domain coverage depends on runtime DNS and is skipped. Builds still succeed; the warning surfaces as a host-side `tracing::warn!` from the rust core:
+[`NetworkPolicyBuilder.build()`](#build) walks the rules and warns when a rule is fully covered by an earlier one in the same direction. Only `ip`, `cidr`, and `group` destinations are checked; domain coverage depends on runtime DNS and is skipped. Builds still succeed; the warning surfaces as a host-side `tracing::warn!` from the Rust core:
 
 ```text
 WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr(10.0.0.0/8) Allow); to narrow, place the more specific rule first

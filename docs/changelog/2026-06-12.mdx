@@ -1,0 +1,69 @@
+---
+title: "Week of June 12, 2026"
+description: "Guest runtime metrics, idempotent named volumes, unified sandbox lifecycle APIs, explicit mount kind flags, cleaner installer, raw agent socket paths, and richer secret violation logs."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.5.6](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.6)
+</Tip>
+
+## New features
+
+**Guest runtime metrics**
+
+`msb-metrics` and the per-sandbox metrics surface now report CPU, memory, disk, and network samples from the VMM instead of host process totals, so readings reflect what the guest actually used. Stopped sandboxes are excluded from exports, and the new fields flow through the CLI, the Rust, TypeScript, Python, and Go SDKs, and the MCP tool.
+
+```bash
+msb-metrics otel --endpoint https://otlp.example.com/v1/metrics
+msb ls --format json
+```
+
+See the [`msb-metrics` overview](/observability/msb-metrics).
+
+**Idempotent named volume mounts**
+
+Named volumes can now be mounted in one step: the CLI creates the backing volume if it does not exist, so a fresh sandbox can persist state without a separate `msb volume create`. The Rust, TypeScript, Python, and Go SDKs gain explicit `existing-only`, `create-only`, and `ensure-exists` modes on named mounts.
+
+```bash
+msb run --name worker --mount-named cache:/var/cache python
+```
+
+See the [volumes guide](/sandboxes/volumes).
+
+**Unified sandbox lifecycle APIs**
+
+`stop` and `kill` now wait for the sandbox to reach the requested state across the Rust, TypeScript, Python, and Go SDKs. Timeout-aware variants and a new `wait_until_stopped` / `waitUntilStopped` / `WaitUntilStopped` helper let you observe sandbox-domain stopped state. Request-only behavior is still available through explicit methods for fire-and-return callers. Scoped filesystem and SSH helpers are renamed to operation groups (`SandboxFsOps`, `SandboxSshOps`, and language-idiomatic variants), and SSH helper methods are now `open_client`, `prepare_server`, and `serve_connection`. This is a breaking SDK source change; the CLI is unaffected.
+
+```python
+result = await sandbox.stop(timeout=30)
+await sandbox.wait_until_stopped()
+```
+
+See the [Python SDK reference](/sdk/python/sandbox).
+
+**Explicit mount kind flags**
+
+New `--mount-dir`, `--mount-file`, `--mount-disk`, and `--mount-named` flags on `msb run` and `msb create` let you choose the mount kind directly instead of relying on `-v` source inference. Each flag uses the existing `SOURCE:DEST[:OPTIONS]` syntax with kind-specific option validation, and explicit directory and file sources are checked against the host path kind so typos fail early.
+
+```bash
+msb run alpine \
+  --mount-dir ./src:/app/src:ro \
+  --mount-file ./config.toml:/etc/app/config.toml \
+  --mount-named cache:/var/cache
+```
+
+See the [sandbox commands reference](/cli/sandbox-commands).
+
+**Other features**
+
+- **Raw agentd socket path.** `AgentClient::socket_path(name)` in Rust, `AgentClient.socketPath(name)` in TypeScript, `AgentClient.socket_path(name)` in Python, and `microsandbox.AgentSocketPath(name)` in Go return a sandbox's `agentd` relay socket path without connecting, so callers that splice raw bytes to the socket no longer have to open the framed client first. The C FFI gains `msb_agent_socket_path`. See the [Python agent client reference](/sdk/python/agent-client).
+- **Richer secret violation logs.** `block-and-log` and `block-and-terminate` actions now emit structured warnings and errors with the secret env var, placeholder, request context, match location, protocol, SNI, host, method, redacted path, and original guest destination. Body-continuation chunks on long-lived TLS connections carry the same context. `block` continues to be silent. See the [TLS networking guide](/networking/tls).
+- **Cleaner installer.** The CLI installer no longer edits shell startup files. It places runtime files under `$HOME/.microsandbox` (or `$MSB_HOME`), exposes `msb` and `microsandbox` through `~/.local/bin` symlinks, prints a PATH hint only when `~/.local/bin` is missing, and refreshes those links from `msb self update`. Existing non-symlink command paths are left alone instead of being overwritten. See the [quickstart](/getting-started/quickstart).
+- **Global log level for sandbox runs.** Global log flags now flow into the sandbox runtime when `msb run` or `msb create` does not pass `--log-level`, so `msb -v run ...` actually raises sandbox verbosity instead of being ignored.
+
+## Bug fixes
+
+- Published-port responses no longer stall behind a slow host-side client; the relay now wakes the poll loop as soon as host-channel capacity frees up.
+- Long-running execs that take no host input, like builds, `sleep`, or batch commands, are no longer reclaimed by the idle-timeout monitor while still running. Heartbeat-based idle detection now tracks exec sessions, filesystem and TCP byte movement, and agentd heartbeats independently of serial or stream backpressure.
+- Stopped sandboxes no longer appear in metrics exports with a frozen value after a SIGKILL; the collector now skips slots whose updates have stopped instead of replaying the last sample indefinitely.
