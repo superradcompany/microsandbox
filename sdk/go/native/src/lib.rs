@@ -2172,8 +2172,7 @@ pub unsafe extern "C" fn msb_sandbox_stop(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            h.stop_with_timeout(Duration::from_millis(timeout_ms))
+            sb.stop_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
@@ -2191,8 +2190,7 @@ pub unsafe extern "C" fn msb_sandbox_request_stop(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            h.request_stop().await.map_err(FfiError::from)?;
+            sb.request_stop().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2231,8 +2229,7 @@ pub unsafe extern "C" fn msb_sandbox_kill(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            h.kill_with_timeout(Duration::from_millis(timeout_ms))
+            sb.kill_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
@@ -2250,8 +2247,7 @@ pub unsafe extern "C" fn msb_sandbox_request_kill(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            h.request_kill().await.map_err(FfiError::from)?;
+            sb.request_kill().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2288,8 +2284,7 @@ pub unsafe extern "C" fn msb_sandbox_request_drain(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            h.request_drain().await.map_err(FfiError::from)?;
+            sb.request_drain().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2326,8 +2321,7 @@ pub unsafe extern "C" fn msb_sandbox_wait_until_stopped(
     run_c(cancel_id, buf, buf_len, || {
         let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(sb.name()).await.map_err(FfiError::from)?;
-            let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
+            let result = sb.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
         }))
     })

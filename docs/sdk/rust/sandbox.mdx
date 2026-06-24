@@ -361,6 +361,17 @@ sb.drain().await?;
 
 ---
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn request_drain(&self) -> MicrosandboxResult<()>
+```
+
+Request graceful drain and return once the request is sent. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs stopped-state observation.
+
+---
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">fs()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
@@ -396,7 +407,7 @@ sb.fs().write("/tmp/hello.txt", "hi").await?;
 async fn kill(&self) -> MicrosandboxResult<()>
 ```
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown — use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
+Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
 <Accordion title="Example">
 
@@ -405,6 +416,28 @@ sb.kill().await?; // SIGKILL, no graceful shutdown
 ```
 
 </Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">kill_with_timeout()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
+```
+
+Force-terminate the sandbox and wait up to `timeout` for stopped-state observation.
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn request_kill(&self) -> MicrosandboxResult<()>
+```
+
+Request force termination and return once the request is sent, without waiting for stopped-state observation.
 
 ---
 
@@ -611,6 +644,17 @@ sb.remove_persisted().await?;
 
 ---
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn request_stop(&self) -> MicrosandboxResult<()>
+```
+
+Request graceful shutdown and return once the request is sent, without waiting for stopped-state observation. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs the terminal state.
+
+---
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
@@ -630,6 +674,17 @@ sb.stop().await?;
 
 ---
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
+```
+
+Gracefully shut down the sandbox with an explicit timeout before escalation. `Duration::ZERO` skips graceful shutdown and force-kills immediately.
+
+---
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
@@ -637,7 +692,7 @@ sb.stop().await?;
 async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
 ```
 
-Stop the sandbox and wait for the exit status.
+Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#stop) or [`stop_with_timeout()`](#stop_with_timeout) when the caller only needs stopped-state observation.
 
 <p className="msb-label">Returns</p>
 
@@ -684,6 +739,23 @@ let status = sb.wait().await?;
 ```
 
 </Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_stopped()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult>
+```
+
+Block until the sandbox is observed in a terminal non-running state. Owned local sandboxes can include process exit details; detached, name-addressed, and cloud-backed sandboxes report the observed backend state.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxStopResult`](#sandboxstopresult) | Observed terminal sandbox state |
 
 ---
 
@@ -1791,17 +1863,35 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
 | connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
 | created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate immediately. Pending writes may be lost |
+| kill() | `Result<()>` | Force terminate and wait until stopped state is observed |
+| kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
 | remove() | `Result<()>` | Delete sandbox and state |
+| request_drain() | `Result<()>` | Request graceful drain without waiting |
+| request_kill() | `Result<()>` | Request force termination without waiting |
+| request_stop() | `Result<()>` | Request graceful shutdown without waiting |
 | start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
 | status() | [`SandboxStatus`](#sandboxstatus) | Current status |
 | stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
 | stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
+| wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
+
+### SandboxStopResult
+
+Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until_stopped).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `String` | Sandbox name |
+| status | [`SandboxStatus`](#sandboxstatus) | Terminal status that was observed |
+| exit_code | `Option<i32>` | Process exit code when available from an owned child process |
+| signal | `Option<i32>` | Terminating signal when available from an owned child process |
+| observed_at | `DateTime<Utc>` | When the terminal state was observed |
+| source | `Option<String>` | Description of the observation source |
 
 ### SandboxMetrics
 
