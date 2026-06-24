@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fmt::Write,
     io::{Seek, SeekFrom, Write as IoWrite},
@@ -171,6 +171,24 @@ pub async fn spawn_sandbox(
     // exposing adjacent files on the host.
     let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
     ensure_named_volumes(local, config).await?;
+
+    // Recover the volume kind for Named mounts whose `create` field was not
+    // persisted. When a sandbox is restarted, `create` is always `None` (it is
+    // intentionally skipped on serialization), so we cannot rely on it to
+    // determine whether a named volume is disk-backed. Query the database for
+    // any Named volume names that are not already conclusively identified as
+    // Disk via the `create` field.
+    let ambiguous_named_names = config.spec.mounts.iter().filter_map(|m| {
+        if let VolumeMount::Named { name, create, .. } = m {
+            let already_known_disk = matches!(create, Some(c) if c.kind == VolumeKind::Disk);
+            if !already_known_disk {
+                return Some(name.as_str());
+            }
+        }
+        None
+    });
+    let db_disk_volumes = resolve_named_disk_volumes(local, ambiguous_named_names).await?;
+
     let metrics_reservation = if config.effective_metrics_interval().is_some() {
         reserve_metrics_slot(local, config, sandbox_id)
     } else {
@@ -211,6 +229,7 @@ pub async fn spawn_sandbox(
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
+        &db_disk_volumes,
         metrics_reservation.as_ref(),
         parent_watchdog
             .as_ref()
@@ -712,6 +731,32 @@ async fn ensure_named_volumes(
     Ok(())
 }
 
+/// Query the database for the subset of `names` that correspond to disk-backed
+/// named volumes (i.e. rows where `disk_format IS NOT NULL`).
+///
+/// This is used by [`spawn_sandbox`] to recover the volume kind for Named
+/// volume mounts whose `create` field was intentionally omitted when the
+/// sandbox config was persisted (see [`VolumeMount::Named`]). Without this
+/// look-up, restarted sandboxes that use a disk-backed named volume would
+/// silently fall back to virtiofs and corrupt the ext4 filesystem inside the
+/// block device.
+async fn resolve_named_disk_volumes(
+    local: &LocalBackend,
+    names: impl Iterator<Item = &str>,
+) -> MicrosandboxResult<HashSet<String>> {
+    let names: Vec<&str> = names.collect();
+    if names.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let pools = local.db().await?;
+    let rows = volume_entity::Entity::find()
+        .filter(volume_entity::Column::Name.is_in(names))
+        .filter(volume_entity::Column::DiskFormat.is_not_null())
+        .all(pools.read())
+        .await?;
+    Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
 /// Return agent relay socket paths in preferred connection order.
 pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
     let (run_dir, sandboxes_dir) = crate::backend::default_backend()
@@ -1154,6 +1199,10 @@ fn sandbox_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    // Named volumes confirmed to be disk-backed by a DB look-up (disk_format IS
+    // NOT NULL). Used to recover the correct mount type for the restart path where
+    // VolumeMount::Named.create is None (intentionally not persisted).
+    db_disk_volumes: &HashSet<String>,
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
@@ -1309,22 +1358,42 @@ fn sandbox_cli_args(
                 host_permissions,
                 create,
             } => {
-                let vol_path = local.volume_path(name);
-                // Directory named volumes honor their configured quota. The
-                // value is available here when the volume is created or ensured
-                // this spawn (`create`); a quota set on a prior run and reloaded
-                // from a persisted config is not yet re-resolved from the store.
-                let quota_mib = create.as_ref().and_then(|c| c.quota_mib);
-                push_dir_mount_arg(
-                    &mut launch.mounts,
-                    guest,
-                    &vol_path.display(),
-                    *options,
-                    *stat_virtualization,
-                    *host_permissions,
-                    quota_mib,
-                );
-                push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                // A named volume is disk-backed when either:
+                // (a) `create` is present and its kind is Disk (first-run path), or
+                // (b) the volume name appears in `db_disk_volumes` — which is
+                //     populated from the `volume` table's `disk_format` column and
+                //     catches the restart path where `create` was not persisted.
+                let is_disk = matches!(create, Some(c) if c.kind == VolumeKind::Disk)
+                    || db_disk_volumes.contains(name.as_str());
+                if is_disk {
+                    let raw = local.volume_path(name).join("disk.raw");
+                    let id = guest_mount_tag(guest);
+                    push_disk_mount_arg(
+                        &mut launch.disks,
+                        &id,
+                        &raw.display(),
+                        &DiskImageFormat::Raw,
+                        *options,
+                    );
+                    push_disk_mounts_spec(&mut disk_mounts_val, &id, guest, Some("ext4"), *options);
+                } else {
+                    let vol_path = local.volume_path(name);
+                    // Directory named volumes honor their configured quota. The
+                    // value is available here when the volume is created or ensured
+                    // this spawn (`create`); a quota set on a prior run and reloaded
+                    // from a persisted config is not yet re-resolved from the store.
+                    let quota_mib = create.as_ref().and_then(|c| c.quota_mib);
+                    push_dir_mount_arg(
+                        &mut launch.mounts,
+                        guest,
+                        &vol_path.display(),
+                        *options,
+                        *stat_virtualization,
+                        *host_permissions,
+                        quota_mib,
+                    );
+                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                }
             }
             VolumeMount::Tmpfs {
                 guest,
@@ -1514,7 +1583,7 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -1692,6 +1761,38 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            &HashSet::new(),
+            None,
+            None,
+            None,
+        );
+        visible
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .chain(flatten_launch(&launch))
+            .collect()
+    }
+
+    /// Like `render_args` but with a pre-populated `db_disk_volumes` set.
+    /// Use this to test the restart path where `create` is `None` but the
+    /// volume is known to be disk-backed via the database.
+    fn render_args_with_db_disk(
+        config: &SandboxConfig,
+        db_disk_volumes: &HashSet<String>,
+    ) -> Vec<String> {
+        let local = test_local_backend();
+        let (visible, launch) = sandbox_cli_args(
+            &local,
+            config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            db_disk_volumes,
             None,
             None,
             None,
@@ -1717,6 +1818,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            &HashSet::new(),
             None,
             None,
             None,
@@ -1748,6 +1850,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            &HashSet::new(),
             None,
             None,
             None,
@@ -1828,6 +1931,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            &HashSet::new(),
             None,
             None,
             Some(microsandbox_runtime::vm::STARTUP_FD),
@@ -2409,6 +2513,148 @@ mod tests {
         // MSB_DISK_MOUNTS env entry carries the guest path and fstype.
         let expected_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
         assert!(rendered.contains(&expected_env));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_disk_volume() {
+        // A named volume created with kind=Disk must be mounted as a virtio-blk
+        // block device (--disk pointing to disk.raw) rather than virtiofs.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.named_with("mydata", |v| v.disk().ensure_exists())
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let local = test_local_backend();
+        let raw_path = local.volume_path("mydata").join("disk.raw");
+        let data_tag = super::guest_mount_tag("/data");
+
+        // --disk arg must be present with the disk.raw path and raw format.
+        let expected_disk_arg = format!("{data_tag}:{}:raw", raw_path.display());
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
+            "missing --disk arg for named disk volume in {rendered:?}"
+        );
+
+        // MSB_DISK_MOUNTS must carry guest path and ext4 fstype.
+        let expected_disk_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
+        assert!(
+            rendered.contains(&expected_disk_env),
+            "missing MSB_DISK_MOUNTS for named disk volume in {rendered:?}"
+        );
+
+        // /data must NOT appear in MSB_DIR_MOUNTS (virtiofs path).
+        assert!(
+            !rendered
+                .iter()
+                .any(|a| a.starts_with("MSB_DIR_MOUNTS=") && a.contains("/data")),
+            "named disk volume must not appear in MSB_DIR_MOUNTS: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_directory_volume() {
+        // A plain named volume (kind=Directory / no create) must continue to
+        // use virtiofs (--mount / MSB_DIR_MOUNTS) and must not emit --disk or
+        // MSB_DISK_MOUNTS. This is the regression-protection test.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.named("mydir"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+
+        // --mount arg must be present (virtiofs path).
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1].starts_with(&data_tag.to_string())),
+            "missing --mount arg for named directory volume in {rendered:?}"
+        );
+
+        // MSB_DIR_MOUNTS must carry the guest path.
+        let expected_dir_env = format!("MSB_DIR_MOUNTS={data_tag}:/data");
+        assert!(
+            rendered.contains(&expected_dir_env),
+            "missing MSB_DIR_MOUNTS for named directory volume in {rendered:?}"
+        );
+
+        // Must NOT emit --disk.
+        assert!(
+            !rendered.windows(2).any(|pair| pair[0] == "--disk"),
+            "named directory volume must not emit --disk: {rendered:?}"
+        );
+
+        // Must NOT emit MSB_DISK_MOUNTS.
+        assert!(
+            !rendered.iter().any(|a| a.starts_with("MSB_DISK_MOUNTS=")),
+            "named directory volume must not emit MSB_DISK_MOUNTS: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_disk_volume_restart_path() {
+        // Regression test for the restart bug: when a sandbox with a disk-backed
+        // named volume is stopped and restarted, the persisted config has
+        // `create: None` (intentionally not serialized).  Without the DB
+        // look-up, `is_disk` would be `false` and the volume would fall back to
+        // virtiofs, corrupting the ext4 filesystem inside the block device.
+        //
+        // We simulate the restart path by:
+        //   (1) building a config with `named("mydata")` (no `create` field, i.e.
+        //       `create == None`), and
+        //   (2) passing `db_disk_volumes` containing "mydata" — as if
+        //       `resolve_named_disk_volumes` had queried the DB and found the row.
+        //
+        // The expected outcome is identical to the first-run path: virtio-blk
+        // args (--disk / MSB_DISK_MOUNTS), no virtiofs args.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.named("mydata"))
+            .build()
+            .await
+            .unwrap();
+
+        let mut db_disk = HashSet::new();
+        db_disk.insert("mydata".to_string());
+
+        let rendered = render_args_with_db_disk(&config, &db_disk);
+        let local = test_local_backend();
+        let raw_path = local.volume_path("mydata").join("disk.raw");
+        let data_tag = super::guest_mount_tag("/data");
+
+        // Must emit --disk with the disk.raw path and raw format.
+        let expected_disk_arg = format!("{data_tag}:{}:raw", raw_path.display());
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
+            "restart path: missing --disk arg for named disk volume in {rendered:?}"
+        );
+
+        // MSB_DISK_MOUNTS must carry guest path and ext4 fstype.
+        let expected_disk_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
+        assert!(
+            rendered.contains(&expected_disk_env),
+            "restart path: missing MSB_DISK_MOUNTS for named disk volume in {rendered:?}"
+        );
+
+        // Must NOT fall through to the virtiofs path.
+        assert!(
+            !rendered
+                .iter()
+                .any(|a| a.starts_with("MSB_DIR_MOUNTS=") && a.contains("/data")),
+            "restart path: named disk volume must not appear in MSB_DIR_MOUNTS: {rendered:?}"
+        );
     }
 
     #[tokio::test]
