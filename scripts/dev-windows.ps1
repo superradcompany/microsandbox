@@ -412,7 +412,10 @@ function ConvertTo-WslPath {
         [Parameter(Mandatory = $true)][string] $Path
     )
 
-    $converted = & wsl.exe -d $Distro -- wslpath -a $Path
+    # wsl.exe treats backslashes as Linux-side escapes when forwarding argv.
+    # Double them so wslpath receives a real Windows path like C:\Users\...
+    $wslPathInput = $Path.Replace('\', '\\')
+    $converted = & wsl.exe -d $Distro -- wslpath -a $wslPathInput
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($converted)) {
         throw "failed to convert Windows path for WSL: $Path"
     }
