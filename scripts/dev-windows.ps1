@@ -270,14 +270,28 @@ function Invoke-MsvcCommand {
     }
 }
 
+function Resolve-ClangClCommand {
+    $target = Resolve-WindowsTarget
+    $devCmd = Resolve-VsDevCmd
+    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && (where clang-cl.exe >nul 2>nul && echo clang-cl.exe || (where clang.exe >nul 2>nul && echo clang.exe --driver-mode=cl))"
+    $resolved = cmd.exe /c $cmdLine
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
+        throw "Visual Studio clang toolchain is incomplete. Install Visual Studio Build Tools with C++ Clang tools, then retry from a new shell."
+    }
+
+    return ($resolved | Select-Object -First 1).Trim()
+}
+
 function Test-MsvcTools {
     $target = Resolve-WindowsTarget
     $devCmd = Resolve-VsDevCmd
-    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul && where link.exe >nul && where clang-cl.exe >nul"
+    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul 2>nul && where link.exe >nul 2>nul"
     cmd.exe /c $cmdLine
     if ($LASTEXITCODE -ne 0) {
         throw "Visual Studio toolchain is incomplete. Install MSVC, Windows SDK, and C++ Clang tools, then retry from a new shell."
     }
+
+    $null = Resolve-ClangClCommand
 }
 
 function Require-Command {
@@ -717,8 +731,9 @@ function Invoke-LinkLibkrunfwDll {
     }
 
     $defPath = New-LibkrunfwDefFile -Submodule $Submodule
-    Write-Info "Linking libkrunfw.dll with clang-cl..."
-    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && clang-cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fe:libkrunfw.dll kernel.c /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
+    $clangCl = Resolve-ClangClCommand
+    Write-Info "Linking libkrunfw.dll with $clangCl..."
+    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && $clangCl /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fe:libkrunfw.dll kernel.c /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
 }
 
 function Invoke-BuildLibkrunfw {
