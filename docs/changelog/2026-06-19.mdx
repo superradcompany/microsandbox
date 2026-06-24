@@ -55,7 +55,7 @@ See the [TLS networking guide](/networking/tls).
 
 `SecretsHandler` is now wired into the plain-HTTP relay in addition to the TLS path. Plain-HTTP substitution is opt-in per secret via `require_tls_identity(false)`, so existing secrets that require TLS keep their stricter behavior, and violation detection runs across both transports regardless. Server-first protocols such as SSH, SMTP, and databases are no longer delayed by the substitution layer, and full HTTP header blocks are read across TCP segments so host-scoped secrets match reliably.
 
-See the [secrets guide](/networking/security-model).
+See the [secrets guide](/security/secrets).
 
 **Other features**
 
