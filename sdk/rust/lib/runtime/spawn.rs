@@ -1309,22 +1309,36 @@ fn sandbox_cli_args(
                 host_permissions,
                 create,
             } => {
-                let vol_path = local.volume_path(name);
-                // Directory named volumes honor their configured quota. The
-                // value is available here when the volume is created or ensured
-                // this spawn (`create`); a quota set on a prior run and reloaded
-                // from a persisted config is not yet re-resolved from the store.
-                let quota_mib = create.as_ref().and_then(|c| c.quota_mib);
-                push_dir_mount_arg(
-                    &mut launch.mounts,
-                    guest,
-                    &vol_path.display(),
-                    *options,
-                    *stat_virtualization,
-                    *host_permissions,
-                    quota_mib,
-                );
-                push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                let is_disk = matches!(create, Some(c) if c.kind == VolumeKind::Disk);
+                if is_disk {
+                    let raw = local.volume_path(name).join("disk.raw");
+                    let id = guest_mount_tag(guest);
+                    push_disk_mount_arg(
+                        &mut launch.disks,
+                        &id,
+                        &raw.display(),
+                        &DiskImageFormat::Raw,
+                        *options,
+                    );
+                    push_disk_mounts_spec(&mut disk_mounts_val, &id, guest, Some("ext4"), *options);
+                } else {
+                    let vol_path = local.volume_path(name);
+                    // Directory named volumes honor their configured quota. The
+                    // value is available here when the volume is created or ensured
+                    // this spawn (`create`); a quota set on a prior run and reloaded
+                    // from a persisted config is not yet re-resolved from the store.
+                    let quota_mib = create.as_ref().and_then(|c| c.quota_mib);
+                    push_dir_mount_arg(
+                        &mut launch.mounts,
+                        guest,
+                        &vol_path.display(),
+                        *options,
+                        *stat_virtualization,
+                        *host_permissions,
+                        quota_mib,
+                    );
+                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                }
             }
             VolumeMount::Tmpfs {
                 guest,
@@ -2409,6 +2423,92 @@ mod tests {
         // MSB_DISK_MOUNTS env entry carries the guest path and fstype.
         let expected_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
         assert!(rendered.contains(&expected_env));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_disk_volume() {
+        // A named volume created with kind=Disk must be mounted as a virtio-blk
+        // block device (--disk pointing to disk.raw) rather than virtiofs.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.named_with("mydata", |v| v.disk().ensure_exists())
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let local = test_local_backend();
+        let raw_path = local.volume_path("mydata").join("disk.raw");
+        let data_tag = super::guest_mount_tag("/data");
+
+        // --disk arg must be present with the disk.raw path and raw format.
+        let expected_disk_arg = format!("{data_tag}:{}:raw", raw_path.display());
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
+            "missing --disk arg for named disk volume in {rendered:?}"
+        );
+
+        // MSB_DISK_MOUNTS must carry guest path and ext4 fstype.
+        let expected_disk_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:fstype=ext4");
+        assert!(
+            rendered.contains(&expected_disk_env),
+            "missing MSB_DISK_MOUNTS for named disk volume in {rendered:?}"
+        );
+
+        // /data must NOT appear in MSB_DIR_MOUNTS (virtiofs path).
+        assert!(
+            !rendered
+                .iter()
+                .any(|a| a.starts_with("MSB_DIR_MOUNTS=") && a.contains("/data")),
+            "named disk volume must not appear in MSB_DIR_MOUNTS: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_named_directory_volume() {
+        // A plain named volume (kind=Directory / no create) must continue to
+        // use virtiofs (--mount / MSB_DIR_MOUNTS) and must not emit --disk or
+        // MSB_DISK_MOUNTS. This is the regression-protection test.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.named("mydir"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+
+        // --mount arg must be present (virtiofs path).
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1].starts_with(&data_tag.to_string())),
+            "missing --mount arg for named directory volume in {rendered:?}"
+        );
+
+        // MSB_DIR_MOUNTS must carry the guest path.
+        let expected_dir_env = format!("MSB_DIR_MOUNTS={data_tag}:/data");
+        assert!(
+            rendered.contains(&expected_dir_env),
+            "missing MSB_DIR_MOUNTS for named directory volume in {rendered:?}"
+        );
+
+        // Must NOT emit --disk.
+        assert!(
+            !rendered.windows(2).any(|pair| pair[0] == "--disk"),
+            "named directory volume must not emit --disk: {rendered:?}"
+        );
+
+        // Must NOT emit MSB_DISK_MOUNTS.
+        assert!(
+            !rendered.iter().any(|a| a.starts_with("MSB_DISK_MOUNTS=")),
+            "named directory volume must not emit MSB_DISK_MOUNTS: {rendered:?}"
+        );
     }
 
     #[tokio::test]
