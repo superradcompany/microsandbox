@@ -2978,6 +2978,12 @@ mod tests {
             !rendered.windows(2).any(|pair| pair[0] == "--disk"),
             "named directory volume must not emit --disk: {rendered:?}"
         );
+        assert!(
+            !rendered
+                .iter()
+                .any(|arg| arg.starts_with("MSB_DISK_MOUNTS=")),
+            "named directory volume must not emit disk mount metadata: {rendered:?}"
+        );
     }
 
     #[test]
