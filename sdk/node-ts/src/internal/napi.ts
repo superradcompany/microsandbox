@@ -343,14 +343,6 @@ export interface NapiSshServer {
   close(): Promise<void>;
 }
 
-export interface NapiSandboxInfo {
-  readonly name: string;
-  readonly status: string;
-  readonly configJson: string;
-  readonly createdAt: number | null | undefined;
-  readonly updatedAt: number | null | undefined;
-}
-
 export interface NapiVolumeStatic {
   get(name: string): Promise<NapiVolumeHandle>;
   list(): Promise<NapiVolumeInfo[]>;

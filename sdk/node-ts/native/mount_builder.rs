@@ -31,6 +31,7 @@ pub struct JsBuiltVolumeMount {
     pub host: Option<String>,
     pub name: Option<String>,
     pub size_mib: Option<u32>,
+    pub quota_mib: Option<u32>,
     pub format: Option<String>,
     pub fstype: Option<String>,
     /// `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk.
@@ -210,6 +211,17 @@ impl JsMountBuilder {
         self
     }
 
+    /// Guest-write quota in MiB (only valid with `.bind()`).
+    ///
+    /// Bounds how much the guest may add beyond the bind-mounted directory's
+    /// existing contents. Without it, a protective default is applied.
+    #[napi]
+    pub fn quota(&mut self, mib: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.quota(Mebibytes::from(mib)));
+        self
+    }
+
     /// Set the guest stat virtualization policy.
     ///
     /// Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
@@ -289,6 +301,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             options,
             stat_virtualization,
             host_permissions,
+            quota_mib,
         } => JsBuiltVolumeMount {
             kind: "bind".into(),
             guest,
@@ -299,6 +312,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             size_mib: None,
+            quota_mib,
             format: None,
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
@@ -321,6 +335,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             host: None,
             name: Some(name),
             size_mib: None,
+            quota_mib: None,
             format: None,
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
@@ -340,6 +355,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             host: None,
             name: None,
             size_mib,
+            quota_mib: None,
             format: None,
             fstype: None,
             stat_virtualization: None,
@@ -361,6 +377,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             size_mib: None,
+            quota_mib: None,
             format: Some(
                 match format {
                     RustDiskImageFormat::Qcow2 => "qcow2",

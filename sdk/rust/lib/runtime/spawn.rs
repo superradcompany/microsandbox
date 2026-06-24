@@ -929,6 +929,7 @@ async fn stage_file_mounts(
 }
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
+#[allow(clippy::too_many_arguments)]
 fn push_dir_mount_arg(
     mounts: &mut Vec<String>,
     guest: &str,
@@ -936,11 +937,15 @@ fn push_dir_mount_arg(
     options: MountOptions,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    quota_mib: Option<u32>,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
     let mut opts = mount_option_tokens(options);
     append_policy_options(&mut opts, stat_virtualization, host_permissions);
+    if let Some(mib) = quota_mib {
+        opts.push(format!("quota={mib}"));
+    }
     append_option_block(&mut arg, opts);
     mounts.push(arg);
 }
@@ -1268,6 +1273,7 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
+                quota_mib,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
                     push_file_mount_arg(
@@ -1280,6 +1286,9 @@ fn sandbox_cli_args(
                     );
                     push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *options);
                 } else {
+                    // A directory bind mount gets a protective guest-write
+                    // quota: the caller's override, or the default.
+                    let quota = quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB);
                     push_dir_mount_arg(
                         &mut launch.mounts,
                         guest,
@@ -1287,6 +1296,7 @@ fn sandbox_cli_args(
                         *options,
                         *stat_virtualization,
                         *host_permissions,
+                        Some(quota),
                     );
                     push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
                 }
@@ -1297,9 +1307,14 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
-                create: _,
+                create,
             } => {
                 let vol_path = local.volume_path(name);
+                // Directory named volumes honor their configured quota. The
+                // value is available here when the volume is created or ensured
+                // this spawn (`create`); a quota set on a prior run and reloaded
+                // from a persisted config is not yet re-resolved from the store.
+                let quota_mib = create.as_ref().and_then(|c| c.quota_mib);
                 push_dir_mount_arg(
                     &mut launch.mounts,
                     guest,
@@ -1307,6 +1322,7 @@ fn sandbox_cli_args(
                     *options,
                     *stat_virtualization,
                     *host_permissions,
+                    quota_mib,
                 );
                 push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
             }
@@ -2312,6 +2328,49 @@ mod tests {
         // File mount in MSB_FILE_MOUNTS.
         assert!(
             rendered.contains(&"MSB_FILE_MOUNTS=fm_11223344:file.txt:/guest/file.txt".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_gets_default_quota() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            "{data_tag}:/host/data:quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing default-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_quota_override() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data").quota(2048u32))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!("{data_tag}:/host/data:quota=2048");
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing override-quota --mount arg in {rendered:?}"
         );
     }
 

@@ -824,7 +824,22 @@ jobs:
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 20m ./integration/...
+          status=0
+          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m ./integration/... || status=$?
+
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Go sandbox runtime logs without core.ready"
+            find "$MSB_HOME/sandboxes" -path '*/logs/runtime.log' -type f -print0 2>/dev/null \
+              | while IFS= read -r -d '' log; do
+                  if ! grep -q 'agent relay: received core.ready' "$log"; then
+                    echo "--- $log"
+                    tail -120 "$log" || true
+                  fi
+                done
+            echo "::endgroup::"
+          fi
+
+          exit "$status"
 
       - name: Disk usage
         if: always()

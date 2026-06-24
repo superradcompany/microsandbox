@@ -130,7 +130,15 @@ stat_virtualization: StatVirtualization,
 /**
  * Host permission propagation policy.
  */
-host_permissions: HostPermissions, } | { "type": "Named",
+host_permissions: HostPermissions,
+/**
+ * Guest-write byte budget in MiB.
+ *
+ * Bounds how much the guest may add beyond the directory's existing
+ * contents. `None` applies the protective default at spawn time; set a
+ * value to override it.
+ */
+quota_mib: number | null, } | { "type": "Named",
 /**
  * Volume name.
  */

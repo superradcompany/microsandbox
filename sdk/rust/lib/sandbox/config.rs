@@ -24,6 +24,14 @@ const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
 pub(crate) const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
 
+/// Default guest-write budget for a bind mount, in MiB.
+///
+/// Bounds how much the guest may add beyond a bind-mounted host directory's
+/// existing contents, so a sandbox cannot fill the host disk through a mount.
+/// Anchored to [`DEFAULT_OCI_UPPER_SIZE_MIB`] for a consistent mental model;
+/// overridable per mount via [`MountBuilder::quota`](crate::sandbox::MountBuilder::quota).
+pub(crate) const DEFAULT_BIND_QUOTA_MIB: u32 = DEFAULT_OCI_UPPER_SIZE_MIB;
+
 /// Default timeout given to the existing sandbox during a `.replace()`
 /// create before it is force-killed.
 ///
@@ -1293,6 +1301,7 @@ mod tests {
                     options: MountOptions::default(),
                     stat_virtualization: crate::sandbox::StatVirtualization::Strict,
                     host_permissions: crate::sandbox::HostPermissions::Private,
+                    quota_mib: None,
                 }],
                 ..Default::default()
             },

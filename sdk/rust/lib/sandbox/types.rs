@@ -62,6 +62,7 @@ pub struct MountBuilder {
     mount: MountKind,
     options: MountOptions,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
     disk_format: Option<DiskImageFormat>,
     disk_fstype: Option<String>,
     stat_virtualization: Option<StatVirtualization>,
@@ -178,6 +179,7 @@ impl MountBuilder {
             mount: MountKind::Unset,
             options: MountOptions::default(),
             size_mib: None,
+            quota_mib: None,
             disk_format: None,
             disk_fstype: None,
             stat_virtualization: None,
@@ -329,6 +331,21 @@ impl MountBuilder {
         self
     }
 
+    /// Set a guest-write quota for a bind mount.
+    ///
+    /// Bounds how much the guest may add beyond the directory's existing
+    /// contents. Without this, a protective default is applied. Valid only for
+    /// bind mounts; for named volumes use
+    /// [`named_with`](Self::named_with) with the named builder's `quota`.
+    ///
+    /// ```ignore
+    /// .bind("./data").quota(2.gib())   // guest may add up to 2 GiB
+    /// ```
+    pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
     /// Build the volume mount.
     pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         if let Some(err) = self.error {
@@ -361,6 +378,14 @@ impl MountBuilder {
         if self.size_mib.is_some() && !is_tmpfs {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".size() is only valid for tmpfs mounts".into(),
+            ));
+        }
+        let is_bind = matches!(self.mount, MountKind::Bind(_));
+        if self.quota_mib.is_some() && !is_bind {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".quota() is only valid for bind mounts; for named volumes use \
+                 .named_with(|v| v.quota(..))"
+                    .into(),
             ));
         }
         if self.disk_format.is_some() && !is_disk {
@@ -440,6 +465,7 @@ impl MountBuilder {
                     options: self.options,
                     stat_virtualization,
                     host_permissions,
+                    quota_mib: self.quota_mib,
                 }
             }
             MountKind::Named { name, create } => {
@@ -1008,6 +1034,29 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_quota_on_bind() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .quota(2048u32)
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::Bind { quota_mib, .. } => assert_eq!(quota_mib, Some(2048)),
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_quota_rejected_on_tmpfs() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .quota(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".quota() is only valid for bind"));
+    }
+
+    #[test]
     fn test_mount_builder_format_rejected_on_non_disk() {
         let err = MountBuilder::new("/data")
             .bind("/host/data")
@@ -1124,6 +1173,7 @@ mod tests {
             options: MountOptions::default(),
             stat_virtualization: StatVirtualization::Off,
             host_permissions: HostPermissions::Mirror,
+            quota_mib: None,
         };
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
@@ -1142,6 +1192,7 @@ mod tests {
             },
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            quota_mib: None,
         };
 
         let value = serde_json::to_value(&mount).unwrap();

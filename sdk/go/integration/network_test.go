@@ -18,7 +18,7 @@ func TestNetworkPolicyNonLocal(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-nonlocal-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(microsandbox.NetworkPolicy.NonLocal()),
 	)
@@ -52,7 +52,7 @@ func TestCustomPolicyDefaultEgressDeny(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-defegress-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress:  microsandbox.PolicyActionDeny,
@@ -95,7 +95,7 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := uniqueIntegrationName(t, "go-net-ip")
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionDeny,
@@ -160,7 +160,7 @@ func TestCustomPolicyPortRange(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-portrange-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionDeny,
@@ -210,7 +210,7 @@ func TestCustomPolicyMultiProtocolCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-multiproto-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionAllow,
@@ -244,7 +244,7 @@ func TestCustomPolicyDirectionAnyCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dirany-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress:  microsandbox.PolicyActionDeny,
@@ -279,7 +279,7 @@ func TestDNSConfigCreates(t *testing.T) {
 
 	rebind := true
 	timeoutMs := uint64(5000)
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy: microsandbox.NetworkPolicyPresetAllowAll,
@@ -316,7 +316,7 @@ func TestNetworkOnSecretViolationCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-onviolation-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:            microsandbox.NetworkPolicyPresetPublicOnly,
@@ -341,7 +341,7 @@ func TestSecretWithOnViolation(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-secretviol-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithSecrets(microsandbox.Secret.Env(
 			"VIOLATION_KEY",
@@ -378,7 +378,7 @@ func TestTLSConfigUpstreamCACertsCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-upstreamcas-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy: microsandbox.NetworkPolicyPresetAllowAll,
@@ -405,7 +405,7 @@ func TestNetworkMaxConnectionsCreates(t *testing.T) {
 	name := "go-sdk-maxconn-" + t.Name()
 
 	max := uint(64)
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:         microsandbox.NetworkPolicyPresetAllowAll,

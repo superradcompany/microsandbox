@@ -239,10 +239,15 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
   });
 
   it("filters by a single label (AND across sandboxes)", async () => {
-    const names = (await Sandbox.listWith({ labels: { owner } })).map((h) => h.name);
+    const handles = await Sandbox.listWith({ labels: { owner } });
+    const names = handles.map((h) => h.name);
     expect(names).toContain(webName);
     expect(names).toContain(jobName);
     expect(names).not.toContain(otherName);
+
+    const web = handles.find((h) => h.name === webName);
+    expect(web).toBeDefined();
+    await expect(web!.refresh()).resolves.toMatchObject({ name: webName });
   });
 
   it("AND-matches multiple labels", async () => {

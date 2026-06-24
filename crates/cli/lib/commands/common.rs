@@ -755,6 +755,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -764,10 +765,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     let guest = parsed.guest.to_string();
     let options = parsed.options;
     Ok(builder.volume(guest, move |mut m| {
+        let quota_mib = options.quota_mib;
         m = if is_path {
-            m.bind(&source)
+            let mut b = m.bind(&source);
+            if let Some(q) = quota_mib {
+                b = b.quota(q);
+            }
+            b
         } else {
-            m.named_with(&source, |v| v.ensure_exists())
+            // A named volume routes its quota through the named sub-builder
+            // rather than the bind-only `.quota()`.
+            m.named_with(&source, move |mut v| {
+                v = v.ensure_exists();
+                if let Some(q) = quota_mib {
+                    v = v.quota(q);
+                }
+                v
+            })
         };
         if options.readonly {
             m = m.readonly();
@@ -829,6 +843,7 @@ pub fn apply_explicit_dir_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -976,6 +991,9 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     }
     if let Some(hp) = options.host_permissions {
         mount = mount.host_permissions(hp);
+    }
+    if let Some(quota) = options.quota_mib {
+        mount = mount.quota(quota);
     }
     mount
 }

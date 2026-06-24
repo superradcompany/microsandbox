@@ -7,7 +7,7 @@
 
 pub(crate) mod attach;
 mod builder;
-mod config;
+pub(crate) mod config;
 pub mod exec;
 pub mod fs;
 mod handle;
@@ -107,7 +107,7 @@ pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsSetAttrs, FsWriteSink, SandboxFs};
-pub use handle::SandboxHandle;
+pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
@@ -1131,19 +1131,57 @@ impl Sandbox {
         fs::SandboxFs::new(self.backend.clone(), &self.name)
     }
 
-    /// Stop the sandbox gracefully.
+    /// Stop the sandbox gracefully and wait until stopped state is observed.
     ///
-    /// Routes through the backend trait. On local this connects to the
-    /// agent UDS and sends `core.shutdown` (agentd runs `sync()` +
+    /// Uses [`DEFAULT_STOP_TIMEOUT`] before escalating to force termination.
+    pub async fn stop(&self) -> MicrosandboxResult<()> {
+        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+    }
+
+    /// Request graceful shutdown and return once the request is sent.
+    ///
+    /// Routes through the backend trait. On local this connects to the agent
+    /// UDS and sends `core.shutdown` (agentd runs `sync()` +
     /// `reboot(RB_POWER_OFF)` for a clean ext4 unmount), falling back to
     /// SIGTERM via PID if the socket is unreachable. On cloud this issues
     /// `POST /v1/sandboxes/by-name/:name/stop`.
-    pub async fn stop(&self) -> MicrosandboxResult<()> {
+    pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
             .sandboxes()
             .stop(self.backend.clone(), &self.name)
             .await
+    }
+
+    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        if timeout.is_zero() {
+            self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
+            return Ok(());
+        }
+
+        self.request_stop().await?;
+        if let Ok(result) = tokio::time::timeout(timeout, self.wait_until_stopped()).await {
+            result?;
+            return Ok(());
+        }
+
+        tracing::warn!(
+            sandbox = %self.name,
+            timeout_secs = timeout.as_secs(),
+            "graceful stop exceeded timeout, escalating to kill"
+        );
+        self.request_kill().await?;
+        match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, self.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                self.name
+            ))),
+        }
     }
 
     /// Stop the sandbox gracefully and wait for the process to exit.
@@ -1152,7 +1190,7 @@ impl Sandbox {
     /// on; use [`stop`](Self::stop) and poll [`status`](Self::status) instead.
     pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
         let local = self.require_local("stop_and_wait")?;
-        let stop_result = self.stop().await;
+        let stop_result = self.request_stop().await;
         if local.handle.is_none() {
             stop_result?;
             // No handle to wait on — return a synthetic success status.
@@ -1163,22 +1201,46 @@ impl Sandbox {
         wait_result
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
-    ///
-    /// Routes through the backend trait. On local the trait impl looks the
-    /// PID up from the DB and signals SIGKILL, then marks the row Stopped
-    /// once the process is confirmed dead. Cloud currently returns
-    /// `Unsupported`.
+    /// Kill the sandbox immediately and wait until stopped state is observed.
     pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await
+    }
+
+    /// Request force termination and return once the request is sent.
+    ///
+    /// Routes through the backend trait. On local the trait impl looks the PID
+    /// up from the DB and signals SIGKILL, then marks the row Stopped once the
+    /// process is confirmed dead. Cloud currently returns `Unsupported`.
+    pub async fn request_kill(&self) -> MicrosandboxResult<()> {
         self.backend
             .sandboxes()
             .kill(self.backend.clone(), &self.name)
             .await
     }
 
+    /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
+    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        self.request_kill().await?;
+        match tokio::time::timeout(timeout, self.wait_until_stopped()).await {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
+            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+                "timed out observing stopped state for sandbox '{}'",
+                self.name
+            ))),
+        }
+    }
+
     /// Trigger a graceful drain (SIGUSR1 to the libkrun PID on local).
     /// Cloud sandboxes currently return `Unsupported`.
     pub async fn drain(&self) -> MicrosandboxResult<()> {
+        self.request_drain().await
+    }
+
+    /// Request graceful drain without waiting for observed exit.
+    pub async fn request_drain(&self) -> MicrosandboxResult<()> {
         self.backend
             .sandboxes()
             .drain(self.backend.clone(), &self.name)
@@ -1194,6 +1256,21 @@ impl Sandbox {
                 "cannot wait: not the lifecycle owner".into(),
             )),
         }
+    }
+
+    /// Wait until this sandbox is observed in a terminal non-running state.
+    pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        if self.owns_lifecycle() {
+            let status = self.wait().await?;
+            return Ok(stop_result_from_exit_status(&self.name, status));
+        }
+
+        self.backend
+            .sandboxes()
+            .get(self.backend.clone(), &self.name)
+            .await?
+            .wait_until_stopped()
+            .await
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -1728,6 +1805,19 @@ pub(crate) fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::R
         Err(std::io::Error::last_os_error())
     } else {
         Ok(n as usize)
+    }
+}
+
+fn stop_result_from_exit_status(name: &str, status: ExitStatus) -> SandboxStopResult {
+    use std::os::unix::process::ExitStatusExt;
+
+    SandboxStopResult {
+        name: name.to_string(),
+        status: SandboxStatus::Stopped,
+        exit_code: status.code(),
+        signal: status.signal(),
+        observed_at: chrono::Utc::now(),
+        source: Some("owned process wait".to_string()),
     }
 }
 
@@ -2525,6 +2615,21 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[test]
+    fn test_live_sandbox_lifecycle_api_methods_stay_available() {
+        // These method items are intentionally referenced without invoking
+        // them. The test is a compile-time tripwire for the unified lifecycle
+        // surface that backs the language SDK bindings.
+        let _ = super::Sandbox::stop;
+        let _ = super::Sandbox::request_stop;
+        let _ = super::Sandbox::stop_with_timeout;
+        let _ = super::Sandbox::kill;
+        let _ = super::Sandbox::request_kill;
+        let _ = super::Sandbox::kill_with_timeout;
+        let _ = super::Sandbox::request_drain;
+        let _ = super::Sandbox::wait_until_stopped;
     }
 
     #[test]

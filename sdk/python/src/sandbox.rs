@@ -634,15 +634,30 @@ impl PySandbox {
     // Lifecycle
     //----------------------------------------------------------------------------------------------
 
-    /// Stop the sandbox gracefully (SIGTERM).
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// Stop the sandbox gracefully and wait until stopped.
+    #[pyo3(signature = (timeout = None))]
+    fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let timeout = optional_duration(timeout)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            match timeout {
+                Some(timeout) => sandbox
+                    .stop_with_timeout(timeout)
+                    .await
+                    .map_err(to_py_err)?,
+                None => sandbox.stop().await.map_err(to_py_err)?,
+            }
+            Ok(())
+        })
+    }
+
+    /// Request graceful shutdown without waiting.
+    fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let handle = microsandbox::sandbox::Sandbox::get(sandbox.name())
-                .await
-                .map_err(to_py_err)?;
-            handle.stop().await.map_err(to_py_err)?;
+            sandbox.request_stop().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -657,12 +672,30 @@ impl PySandbox {
         })
     }
 
-    /// Kill the sandbox (SIGKILL).
-    fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// Kill the sandbox and wait until stopped.
+    #[pyo3(signature = (timeout = None))]
+    fn kill<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let timeout = optional_duration(timeout)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            match timeout {
+                Some(timeout) => sandbox
+                    .kill_with_timeout(timeout)
+                    .await
+                    .map_err(to_py_err)?,
+                None => sandbox.kill().await.map_err(to_py_err)?,
+            }
+            Ok(())
+        })
+    }
+
+    /// Request force termination without waiting.
+    fn request_kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            sandbox.kill().await.map_err(to_py_err)?;
+            sandbox.request_kill().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -674,6 +707,26 @@ impl PySandbox {
             let sandbox = Self::clone_sandbox(&inner).await?;
             sandbox.drain().await.map_err(to_py_err)?;
             Ok(())
+        })
+    }
+
+    /// Request drain without waiting.
+    fn request_drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.request_drain().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    fn wait_until_stopped<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let result = sandbox.wait_until_stopped().await.map_err(to_py_err)?;
+            Ok(PySandboxStopResult::from_rust(result))
         })
     }
 

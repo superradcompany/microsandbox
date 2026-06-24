@@ -1058,12 +1058,18 @@ fn build_vm(
     }
 
     // Runtime directory mount — agentd mounts this at /.msb for scripts
-    // and heartbeat.
+    // and heartbeat. It is a host↔guest control channel (the host writes
+    // scripts/TLS certs and reads heartbeat.json through it), so it stays a
+    // virtiofs share rather than a block device. A fixed budget caps guest
+    // writes so the channel can never be used to fill the host disk; the
+    // legitimate guest footprint is a ~1 KiB heartbeat, so the budget is
+    // almost entirely abuse headroom and is not user-configurable.
     {
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
             root_dir: config.runtime_dir.clone(),
             inject_init: false,
+            quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -1086,6 +1092,7 @@ fn build_vm(
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
             bind_identity_map: mount_bind_identity_map,
+            quota_bytes: parsed.quota_bytes,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -1530,6 +1537,7 @@ struct ParsedMountSpec {
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     readonly: bool,
+    quota_bytes: Option<u64>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
@@ -1562,12 +1570,14 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut stat_virtualization = StatVirtualization::Strict;
     let mut host_permissions = HostPermissions::Private;
     let mut readonly = false;
+    let mut quota_bytes = None;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_access = false;
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
     let mut seen_nodev = false;
+    let mut seen_quota = false;
 
     if let Some(opts) = options {
         for opt in opts.split(',') {
@@ -1643,6 +1653,20 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                                 }
                             }
                         }
+                        "quota" => {
+                            if seen_quota {
+                                return Err(
+                                    "mount option `quota` specified more than once".to_string()
+                                );
+                            }
+                            seen_quota = true;
+                            let mib = value.parse::<u64>().map_err(|_| {
+                                format!(
+                                    "invalid quota {value:?} (expected an integer count of MiB)"
+                                )
+                            })?;
+                            quota_bytes = Some(mib.saturating_mul(1024 * 1024));
+                        }
                         other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
@@ -1656,6 +1680,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         stat_virtualization,
         host_permissions,
         readonly,
+        quota_bytes,
     })
 }
 
@@ -1746,6 +1771,33 @@ mod tests {
         let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
         assert!(!p.readonly);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_quota_in_mib() {
+        let p = parse_mount_spec("foo:/host/data:quota=2048").unwrap();
+        assert_eq!(p.quota_bytes, Some(2048 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_quota_default_none() {
+        let p = parse_mount_spec("foo:/host/data:ro").unwrap();
+        assert_eq!(p.quota_bytes, None);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_quota() {
+        let err = parse_mount_spec("foo:/host/data:quota=1,quota=2").unwrap_err();
+        assert!(
+            err.contains("`quota` specified more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_non_numeric_quota() {
+        let err = parse_mount_spec("foo:/host/data:quota=big").unwrap_err();
+        assert!(err.contains("invalid quota"), "got: {err}");
     }
 
     #[test]

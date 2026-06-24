@@ -20,6 +20,15 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
     try:
         assert await sandbox.name == name
         assert await sandbox.owns_lifecycle is True
+        for method_name in (
+            "stop",
+            "request_stop",
+            "kill",
+            "request_kill",
+            "request_drain",
+            "wait_until_stopped",
+        ):
+            assert hasattr(sandbox, method_name)
 
         handles = await Sandbox.list()
         assert any(handle.name == name for handle in handles)
