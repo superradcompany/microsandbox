@@ -107,7 +107,7 @@ build-agentd:
     docker cp "$id:/agentd" build/agentd
     touch build/agentd
 
-# Build agentd as a static Linux/musl binary via Docker cross-compilation.
+# Build agentd as a static Linux/musl binary via Docker Linux containers or WSL.
 [windows]
 build-agentd:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-agentd
@@ -181,7 +181,7 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
-# Build libkrunfw on Windows via Docker kernel build + host MSVC/LLVM linking.
+# Build libkrunfw on Windows via Docker/WSL kernel bundle build + host MSVC/LLVM linking.
 [windows]
 build-libkrunfw:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 build-libkrunfw

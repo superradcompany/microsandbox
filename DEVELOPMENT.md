@@ -9,12 +9,12 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
 - **Operating System**:
   - macOS with Apple Silicon (M1/M2/M3/M4)
   - Linux with KVM enabled
-  - Windows 11 with Windows Hypervisor Platform enabled
+  - Windows 11, or Windows Server with nested virtualization, with Windows Hypervisor Platform enabled
 - **Tools**: [`just`](https://github.com/casey/just), `git`, and `pre-commit`
   - Linux: `sudo apt install just git` and `pip install pre-commit` (or `sudo apt install pre-commit`)
   - macOS: `brew install just git pre-commit`
   - Windows: install Git for Windows, `just`, Visual Studio Build Tools with MSVC, Windows SDK, and C++ Clang tools; install `pre-commit` with `pip install pre-commit` if you want `just setup` to install Git hooks
-- **Docker** (macOS and Windows): Required for building the Linux guest `agentd` binary from non-Linux hosts and for building the libkrunfw kernel bundle when it has not already been generated
+- **Linux build backend** (macOS and Windows): Required for building the Linux guest `agentd` binary from non-Linux hosts and for building the libkrunfw kernel bundle when it has not already been generated. On Windows, Docker Desktop with Linux containers is preferred when available; Windows Server can use Ubuntu WSL instead.
 - **Rust**: Installed automatically by `just setup` if missing, or install via [rustup](https://rustup.rs)
 
 ## Initial Setup
@@ -62,7 +62,16 @@ just build && just install
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
 
-On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64), `just build-agentd` builds the Linux guest agent through Docker like macOS, and `just build-libkrunfw` delegates to `vendor/libkrunfw/scripts/build-windows.ps1`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
+On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
+
+For Windows Server development, use Ubuntu WSL as the Linux build backend:
+
+```powershell
+$env:MSB_WINDOWS_LINUX_BUILD_BACKEND = "wsl"
+wsl --install -d Ubuntu
+wsl -d Ubuntu -- bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils"
+```
 
 For a release-optimized build:
 
@@ -79,8 +88,8 @@ just build release && just install
 | `just build-msb` | Build only the `msb` CLI (debug) |
 | `just build-msb release` | Build only the `msb` CLI (release) |
 | `just build-deps` | Build only binary dependencies (agentd + libkrunfw) |
-| `just build-agentd` | Build only the Linux guest agentd binary; Windows and macOS use Docker |
-| `just build-libkrunfw` | Build only libkrunfw |
+| `just build-agentd` | Build only the Linux guest agentd binary; Windows uses Docker Linux containers or WSL |
+| `just build-libkrunfw` | Build only libkrunfw; Windows builds `kernel.c` through Docker Linux containers or WSL and links `libkrunfw.dll` natively |
 | `just install` | Install msb + libkrunfw to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows |
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |

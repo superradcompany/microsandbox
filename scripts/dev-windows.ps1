@@ -273,7 +273,7 @@ function Invoke-MsvcCommand {
 function Test-MsvcTools {
     $target = Resolve-WindowsTarget
     $devCmd = Resolve-VsDevCmd
-    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul && where link.exe >nul && where clang.exe >nul"
+    $cmdLine = "call `"$devCmd`" -arch=$($target.MsvcArch) -host_arch=$($target.HostArch) >nul && where cl.exe >nul && where link.exe >nul && where clang-cl.exe >nul"
     cmd.exe /c $cmdLine
     if ($LASTEXITCODE -ne 0) {
         throw "Visual Studio toolchain is incomplete. Install MSVC, Windows SDK, and C++ Clang tools, then retry from a new shell."
@@ -304,6 +304,154 @@ function Resolve-PreCommitCommand {
 }
 
 #--------------------------------------------------------------------------------------------------
+# Functions: Linux Build Backend
+#--------------------------------------------------------------------------------------------------
+
+function Resolve-WslDistro {
+    if (-not [string]::IsNullOrWhiteSpace($env:MSB_WSL_DISTRO)) {
+        return $env:MSB_WSL_DISTRO
+    }
+
+    return "Ubuntu"
+}
+
+function Get-DockerOsType {
+    $docker = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if (-not $docker) {
+        return $null
+    }
+
+    $osType = & docker.exe info --format "{{.OSType}}" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    return ($osType | Select-Object -First 1).Trim().ToLowerInvariant()
+}
+
+function Test-DockerLinuxContainers {
+    return (Get-DockerOsType) -eq "linux"
+}
+
+function Test-WslAvailable {
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wsl) {
+        return $false
+    }
+
+    $distro = Resolve-WslDistro
+    & wsl.exe -d $distro -- true 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Resolve-LinuxBuildBackend {
+    $requested = if ([string]::IsNullOrWhiteSpace($env:MSB_WINDOWS_LINUX_BUILD_BACKEND)) {
+        "auto"
+    } else {
+        $env:MSB_WINDOWS_LINUX_BUILD_BACKEND.ToLowerInvariant()
+    }
+
+    if ($requested -notin @("auto", "docker", "wsl")) {
+        throw "MSB_WINDOWS_LINUX_BUILD_BACKEND must be one of: auto, docker, wsl"
+    }
+
+    if ($requested -eq "docker") {
+        if (Test-DockerLinuxContainers) {
+            return "docker"
+        }
+
+        $dockerOs = Get-DockerOsType
+        if ([string]::IsNullOrWhiteSpace($dockerOs)) {
+            throw "Docker Linux containers are required, but docker.exe is unavailable or not running."
+        }
+
+        throw "Docker is running $dockerOs containers. Switch Docker to Linux containers or set MSB_WINDOWS_LINUX_BUILD_BACKEND=wsl."
+    }
+
+    if ($requested -eq "wsl") {
+        if (Test-WslAvailable) {
+            return "wsl"
+        }
+
+        throw "WSL distro '$(Resolve-WslDistro)' is not available. Install Ubuntu with `wsl --install -d Ubuntu`, or set MSB_WSL_DISTRO."
+    }
+
+    if (Test-DockerLinuxContainers) {
+        return "docker"
+    }
+
+    $dockerOs = Get-DockerOsType
+    if ($dockerOs -eq "windows") {
+        Write-Warn "docker.exe is running Windows containers; Linux build steps will use WSL."
+    }
+
+    if (Test-WslAvailable) {
+        return "wsl"
+    }
+
+    throw "No Linux build backend is available. Install Docker Desktop with Linux containers, or install Ubuntu WSL and set MSB_WINDOWS_LINUX_BUILD_BACKEND=wsl."
+}
+
+function Resolve-AgentdLinuxTarget {
+    $target = Resolve-WindowsTarget
+    if ($target.MsvcArch -eq "arm64") {
+        return "aarch64-unknown-linux-musl"
+    }
+
+    return "x86_64-unknown-linux-musl"
+}
+
+function Quote-Bash {
+    param([Parameter(Mandatory = $true)][string] $Value)
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function ConvertTo-WslPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Distro,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    $converted = & wsl.exe -d $Distro -- wslpath -a $Path
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($converted)) {
+        throw "failed to convert Windows path for WSL: $Path"
+    }
+
+    return ($converted | Select-Object -First 1).Trim()
+}
+
+function Test-WslBash {
+    param(
+        [Parameter(Mandatory = $true)][string] $Distro,
+        [Parameter(Mandatory = $true)][string] $Command
+    )
+
+    & wsl.exe -d $Distro -- bash -lc $Command
+    return $LASTEXITCODE -eq 0
+}
+
+function Invoke-WslBash {
+    param(
+        [Parameter(Mandatory = $true)][string] $Distro,
+        [Parameter(Mandatory = $true)][string] $Command
+    )
+
+    & wsl.exe -d $Distro -- bash -lc $Command
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+function Test-WslBuildTools {
+    $distro = Resolve-WslDistro
+    $command = "source `"`$HOME/.cargo/env`" 2>/dev/null || true; command -v cargo >/dev/null && command -v rustup >/dev/null && command -v musl-gcc >/dev/null && command -v make >/dev/null && command -v python3 >/dev/null && command -v gcc >/dev/null && command -v flex >/dev/null && command -v bison >/dev/null && command -v bc >/dev/null && python3 -c 'import elftools' >/dev/null"
+
+    if (-not (Test-WslBash -Distro $distro -Command $command)) {
+        throw "WSL distro '$distro' is missing Linux build tools. Install Rust and Ubuntu packages: sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils"
+    }
+}
+
+#--------------------------------------------------------------------------------------------------
 # Functions: Commands
 #--------------------------------------------------------------------------------------------------
 
@@ -319,12 +467,17 @@ function Invoke-InstallDevDeps {
         Write-Warn "pre-commit was not found; setup will skip Git hook installation. Install it with pip install pre-commit."
     }
 
-    Require-Command -Name "docker.exe" -Hint "Install Docker Desktop. Windows development builds use Docker to build the Linux guest agentd binary."
+    $backend = Resolve-LinuxBuildBackend
+    if ($backend -eq "docker") {
+        Require-Command -Name "docker.exe" -Hint "Install Docker Desktop and make sure Linux containers are enabled."
+    } else {
+        Test-WslBuildTools
+    }
 
-    Write-Done "Windows development prerequisites are available."
+    Write-Done "Windows development prerequisites are available. Linux build backend: $backend."
 }
 
-function Invoke-BuildAgentd {
+function Invoke-BuildAgentdWithDocker {
     Write-Info "Building agentd via Docker..."
     Require-Command -Name "docker.exe" -Hint "Install Docker Desktop and make sure it is running."
 
@@ -356,23 +509,134 @@ function Invoke-BuildAgentd {
     Write-Done "Built $BuildDir\agentd"
 }
 
+function Invoke-BuildAgentdWithWsl {
+    $distro = Resolve-WslDistro
+    $repo = ConvertTo-WslPath -Distro $distro -Path $RepoRoot
+    $repoQuoted = Quote-Bash $repo
+    $linuxTarget = Resolve-AgentdLinuxTarget
+
+    Write-Info "Building agentd via WSL ($distro)..."
+    $command = @"
+set -euo pipefail
+source "`$HOME/.cargo/env" 2>/dev/null || true
+cd $repoQuoted
+rustup target add $linuxTarget
+cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target $linuxTarget
+mkdir -p build
+cp target/$linuxTarget/release/agentd build/agentd
+touch build/agentd
+"@
+    Invoke-WslBash -Distro $distro -Command $command
+    Write-Done "Built $BuildDir\agentd"
+}
+
+function Invoke-BuildAgentd {
+    $backend = Resolve-LinuxBuildBackend
+    if ($backend -eq "docker") {
+        Invoke-BuildAgentdWithDocker
+    } else {
+        Invoke-BuildAgentdWithWsl
+    }
+}
+
+function Invoke-BuildLibkrunfwKernelBundleWithDocker {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    Write-Info "Building libkrunfw kernel bundle via Docker..."
+    Require-Command -Name "docker.exe" -Hint "Install Docker Desktop and make sure Linux containers are enabled."
+
+    $buildScript = "dnf install -y 'dnf-command(builddep)' python3-pyelftools curl && dnf builddep -y kernel && make -j`$(nproc) kernel.c"
+    docker.exe run --rm -v "${Submodule}:/work" -w /work fedora:latest bash -lc $buildScript
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+function Invoke-BuildLibkrunfwKernelBundleWithWsl {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $distro = Resolve-WslDistro
+    $submoduleWsl = ConvertTo-WslPath -Distro $distro -Path $Submodule
+    $submoduleQuoted = Quote-Bash $submoduleWsl
+
+    Write-Info "Building libkrunfw kernel bundle via WSL ($distro)..."
+    $command = @"
+set -euo pipefail
+cd $submoduleQuoted
+make -j`$(nproc) kernel.c
+"@
+    Invoke-WslBash -Distro $distro -Command $command
+}
+
+function Invoke-BuildLibkrunfwKernelBundle {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $backend = Resolve-LinuxBuildBackend
+    if ($backend -eq "docker") {
+        Invoke-BuildLibkrunfwKernelBundleWithDocker -Submodule $Submodule
+    } else {
+        Invoke-BuildLibkrunfwKernelBundleWithWsl -Submodule $Submodule
+    }
+
+    $kernelBundle = Join-Path $Submodule "kernel.c"
+    if (-not (Test-Path -LiteralPath $kernelBundle)) {
+        throw "libkrunfw kernel bundle was not produced at $kernelBundle"
+    }
+}
+
+function New-LibkrunfwDefFile {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    $defPath = Join-Path $BuildDir "libkrunfw.def"
+    $exports = Select-String -Path (Join-Path $Submodule "*.c") -Pattern "^\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s+(krunfw_[A-Za-z0-9_]+)\s*\(" |
+        ForEach-Object { $_.Matches[0].Groups[1].Value } |
+        Sort-Object -Unique
+
+    if (-not $exports) {
+        $exports = @("krunfw_get_kernel", "krunfw_get_version")
+    }
+
+    $lines = @("LIBRARY libkrunfw", "EXPORTS") + ($exports | ForEach-Object { "    $_" })
+    Set-Content -LiteralPath $defPath -Encoding ASCII -Value $lines
+    return $defPath
+}
+
+function Invoke-LinkLibkrunfwDll {
+    param([Parameter(Mandatory = $true)][string] $Submodule)
+
+    $kernelBundle = Join-Path $Submodule "kernel.c"
+    if (-not (Test-Path -LiteralPath $kernelBundle)) {
+        throw "libkrunfw kernel bundle is missing at $kernelBundle"
+    }
+
+    $defPath = New-LibkrunfwDefFile -Submodule $Submodule
+    Write-Info "Linking libkrunfw.dll with clang-cl..."
+    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && clang-cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fe:libkrunfw.dll kernel.c /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
+}
+
 function Invoke-BuildLibkrunfw {
     Write-Info "Building libkrunfw.dll..."
     $submodule = Join-Path $RepoRoot "vendor\libkrunfw"
     $script = Join-Path $submodule "scripts\build-windows.ps1"
-    if (-not (Test-Path -LiteralPath $script)) {
+    if (-not (Test-Path -LiteralPath $submodule)) {
         throw "vendor/libkrunfw is not initialized. Run: git submodule update --init --recursive vendor/libkrunfw"
     }
 
-    $target = Resolve-WindowsTarget
-    Push-Location $submodule
-    try {
-        & $script -AbiVersion $LibkrunfwAbi -Architecture $target.MsvcArch -HostArchitecture $target.HostArch -Output "libkrunfw.dll" -ImportLibrary "libkrunfw.lib"
-        if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+    if (Test-Path -LiteralPath $script) {
+        $target = Resolve-WindowsTarget
+        Push-Location $submodule
+        try {
+            & $script -AbiVersion $LibkrunfwAbi -Architecture $target.MsvcArch -HostArchitecture $target.HostArch -Output "libkrunfw.dll" -ImportLibrary "libkrunfw.lib"
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } finally {
+            Pop-Location
         }
-    } finally {
-        Pop-Location
+    } else {
+        Invoke-BuildLibkrunfwKernelBundle -Submodule $submodule
+        Invoke-LinkLibkrunfwDll -Submodule $submodule
     }
 
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
