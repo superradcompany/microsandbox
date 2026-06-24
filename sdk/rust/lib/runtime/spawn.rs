@@ -23,6 +23,8 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(windows)]
+use rand::Rng;
 use rand::RngExt;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};

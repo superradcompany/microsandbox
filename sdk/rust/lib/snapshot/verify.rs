@@ -2,6 +2,8 @@
 
 use std::fs::File;
 use std::io;
+#[cfg(windows)]
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
