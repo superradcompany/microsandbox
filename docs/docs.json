@@ -60,18 +60,6 @@
             ]
           },
           {
-            "group": "Security",
-            "icon": "shield-halved",
-            "pages": [
-              "security/overview",
-              "security/isolation",
-              "security/filesystem",
-              "security/network",
-              "security/secrets",
-              "security/hardening"
-            ]
-          },
-          {
             "group": "Observability",
             "icon": "gauge",
             "pages": [
@@ -222,6 +210,17 @@
               "recipes/metrics-backends/datadog"
             ]
           }
+        ]
+      },
+      {
+        "tab": "Security",
+        "pages": [
+          "security/overview",
+          "security/isolation",
+          "security/filesystem",
+          "security/network",
+          "security/secrets",
+          "security/hardening"
         ]
       },
       {
