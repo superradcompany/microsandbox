@@ -84,7 +84,7 @@ Repository layout:
 
 ## Design Principles
 
-- microsandbox is still early software. Prefer the clean current design over compatibility layers, migration shims, deprecated paths, or version checks unless a maintainer asks for them.
+- Before making or continuing a change that may introduce a regression or breaking change, stop and alert the human with the likely impact and affected workflows.
 - Keep changes narrowly scoped to the requested behavior. Avoid drive-by refactors, unrelated formatting, or dependency churn.
 - Treat sandbox isolation, host filesystem access, networking, and secret handling as security-sensitive. Validate inputs at boundaries and avoid exposing host paths, credentials, or ambient privileges.
 - For public APIs, keep the Rust SDK, CLI, Python SDK, Node SDK, Go SDK, docs, and examples consistent when they describe the same capability.
@@ -163,7 +163,7 @@ path = "bin/main.rs"
 - Keep items in dependency order inside a section: public surface first, private helpers later.
 - Keep docs on public types, fields, methods, functions, and modules. This repo uses `#![warn(missing_docs)]` in public crates, so new public items should explain what they are for.
 - Prefer explicit domain types over loosely typed strings, booleans, or tuples when the value crosses an API or subsystem boundary.
-- Avoid broad compatibility shims. If a behavior changes, update the current API, docs, and tests together instead of adding legacy branches.
+- During refactors, conflict resolution, bug fixes, and feature work, call out any expected behavior, API, or data-format changes and wait for direction when the risk is material.
 - Use `thiserror` or existing local error patterns for typed errors. Include enough context for callers to understand the failing operation.
 - In async code, avoid holding locks across `.await`. Prefer explicit ownership, short critical sections, and existing Tokio patterns in the surrounding module.
 - Keep feature-gated code close to the feature it gates and use existing `#[cfg(feature = "...")]` patterns.
