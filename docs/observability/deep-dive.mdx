@@ -142,7 +142,7 @@ creation (`msb create --label user.id=alice`). They are read from the
 catalog on first sight of each sandbox, cached, and attached to every
 datapoint as a plain attribute with the same key and value, so backends
 can group and filter by them. On by default; disable with `--no-labels`,
-or drop individual keys with `--exclude-label-keys <key>` (repeatable).
+or drop individual keys with `--exclude-label-key <key>` (repeatable).
 
 <Warning>
   Labels are emitted unconditionally and are not pre-declared, so a
