@@ -30,7 +30,8 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
-- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
+- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux and macOS.
+<!-- - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows. -->
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
 - <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times[^boot-time] under 100 milliseconds.
@@ -77,10 +78,12 @@
 > curl -fsSL https://install.microsandbox.dev | sh        # 🍎 macOS / 🐧 Linux
 > ```
 >
+<!--
 > ```powershell
 > irm https://install.microsandbox.dev/windows | iex      # 🪟 Windows
 > ```
 >
+-->
 > <details>
 > <summary><em>&nbsp;We also support other package managers  →</em></summary>
 >
@@ -90,10 +93,12 @@
 > brew install superradcompany/tap/microsandbox
 > ```
 >
+<!--
 > ```sh
 > winget install SuperRadCompany.Microsandbox
 > ```
 >
+-->
 > ```sh
 > npm i -g microsandbox
 > ```
@@ -122,7 +127,7 @@
 >
 > - <img height="14" src="https://api.iconify.design/simple-icons:apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
 > - <img height="14" src="https://api.iconify.design/simple-icons:linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
-> - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled.
+<!-- > - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled. -->
 >
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
