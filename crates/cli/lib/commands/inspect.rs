@@ -153,10 +153,17 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        quota_mib,
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
-                        println!("  {guest:<16}\u{2192} {}{flags}{suffix}", host.display());
+                        let quota = quota_mib
+                            .map(|mib| format!(" [quota={mib}MiB]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}",
+                            host.display()
+                        );
                     }
                     VolumeMount::Named {
                         name,

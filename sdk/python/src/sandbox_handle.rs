@@ -127,16 +127,14 @@ impl PySandboxHandle {
         sources: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let opts = crate::logs::parse_log_options(tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            let name = guard.name().to_string();
-            drop(guard);
-            let entries = tokio::task::spawn_blocking(move || {
-                crate::logs::read_logs_blocking(&name, tail, since_ms, until_ms, sources)
-            })
-            .await
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))??;
-            Ok(entries)
+            let entries = guard.logs(&opts).await.map_err(to_py_err)?;
+            Ok(entries
+                .into_iter()
+                .map(crate::logs::convert_entry)
+                .collect::<Vec<_>>())
         })
     }
 
@@ -172,9 +170,8 @@ impl PySandboxHandle {
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            let name = guard.name().to_string();
-            drop(guard);
-            crate::logs::open_log_stream(&name, opts).await
+            let stream = guard.log_stream(&opts).await.map_err(to_py_err)?;
+            Ok(crate::logs::PyLogStream::new(stream))
         })
     }
 

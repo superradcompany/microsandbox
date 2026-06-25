@@ -15,17 +15,25 @@ pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 pub use microsandbox_types::{VolumeKind, VolumeSpec, VolumeSpec as VolumeConfig};
 
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use microsandbox_image::ext4::{self, Ext4FormatOptions};
+use sea_orm::ConnectionTrait;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::backend::{
-    Backend, BackendKind, VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    Backend, BackendKind, LocalBackend, VolumeHandleInner, VolumeHandleLocalState, VolumeInner,
+    VolumeLocalState,
 };
 use crate::{
-    MicrosandboxError, MicrosandboxResult, db::entity::volume as volume_entity, size::Mebibytes,
+    MicrosandboxError, MicrosandboxResult,
+    db::entity::{sandbox as sandbox_entity, volume as volume_entity},
+    sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
+    size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -52,6 +60,7 @@ pub struct Volume {
 ///
 /// Like [`Volume`], holds an [`Arc<dyn Backend>`] plus a backend-private
 /// [`VolumeHandleInner`] enum; users see a single uniform type.
+#[derive(Clone)]
 pub struct VolumeHandle {
     backend: Arc<dyn Backend>,
     inner: VolumeHandleInner,
@@ -502,6 +511,7 @@ pub(crate) async fn create_local(
             available_when: "with a LocalBackend".into(),
         })?;
     let pools = local_backend.db().await?;
+    let _name_lock = lock_volume_name(local_backend, &config.name)?;
 
     // Check for existing volume.
     let existing = volume_entity::Entity::find()
@@ -511,6 +521,8 @@ pub(crate) async fn create_local(
     if existing.is_some() {
         return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
     }
+    let path = local_backend.volume_path(&config.name);
+    materialize_volume_path(&config, &path).await?;
 
     // Serialize labels.
     let labels_json = if config.labels.is_empty() {
@@ -519,8 +531,8 @@ pub(crate) async fn create_local(
         Some(serde_json::to_string(&config.labels)?)
     };
 
-    // Insert DB record first — orphaned directories are easier to clean
-    // up than orphaned DB records.
+    // The filesystem artifact is already materialized. If the DB insert
+    // loses a race, remove it so no orphaned final path remains.
     let now = chrono::Utc::now().naive_utc();
     let model = volume_entity::ActiveModel {
         name: Set(config.name.clone()),
@@ -536,19 +548,12 @@ pub(crate) async fn create_local(
         ..Default::default()
     };
 
-    volume_entity::Entity::insert(model)
+    if let Err(e) = volume_entity::Entity::insert(model)
         .exec(pools.write())
-        .await?;
-
-    // Create the volume directory. If this fails, clean up the DB record.
-    let path = local_backend.volume_path(&config.name);
-
-    if let Err(e) = provision_volume_path(&config, &path).await {
-        let _ = volume_entity::Entity::delete_many()
-            .filter(volume_entity::Column::Name.eq(&config.name))
-            .exec(pools.write())
-            .await;
-        return Err(e);
+        .await
+    {
+        let _ = tokio::fs::remove_dir_all(&path).await;
+        return Err(e.into());
     }
 
     Ok(Volume::from_local(
@@ -584,7 +589,7 @@ pub(crate) async fn get_local(
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
 
-    let handle = VolumeHandle::from_local_model(backend, model);
+    let handle = VolumeHandle::from_local_model(backend.clone(), model);
     Ok(handle)
 }
 
@@ -624,8 +629,12 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
         .one(pools.read())
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
+    let handle = VolumeHandle::from_local_model(backend.clone(), model);
+    let _name_lock = lock_volume_name(local_backend, name)?;
+    let _disk_lock = lock_disk_volume_for_remove(&handle)?;
+    ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
 
-    volume_entity::Entity::delete_by_id(model.id)
+    volume_entity::Entity::delete_by_id(handle.local().expect("local handle").db_id)
         .exec(pools.write())
         .await?;
 
@@ -640,6 +649,34 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Materialize a volume under a temporary sibling directory, then atomically
+/// rename it into place. This keeps failed disk formatting from exposing a
+/// half-populated final volume path.
+pub(crate) async fn materialize_volume_path(
+    config: &VolumeConfig,
+    path: &Path,
+) -> MicrosandboxResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(format!(
+            "volume path has no parent directory: {}",
+            path.display()
+        ))
+    })?;
+
+    tokio::fs::create_dir_all(parent).await?;
+    if path.exists() {
+        return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+    }
+
+    let temp = tempfile::Builder::new()
+        .prefix(&format!(".{}.", config.name))
+        .tempdir_in(parent)?;
+    provision_volume_path(config, temp.path()).await?;
+    tokio::fs::rename(temp.path(), path).await?;
+    let _ = temp.keep();
+    Ok(())
+}
 
 pub(crate) async fn provision_volume_path(
     config: &VolumeConfig,
@@ -669,6 +706,105 @@ pub(crate) async fn provision_volume_path(
             Ok(())
         }
     }
+}
+
+pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
+    let volumes_dir = local.volumes_dir();
+    std::fs::create_dir_all(&volumes_dir)?;
+    let locks_dir = volumes_dir.join(".locks");
+    std::fs::create_dir_all(&locks_dir)?;
+    let path = locks_dir.join(format!("{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+
+    #[cfg(unix)]
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(file)
+}
+
+fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Option<File>> {
+    if handle.kind() != VolumeKind::Disk {
+        return Ok(None);
+    }
+
+    let Some(path) = handle.disk_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|err| {
+            MicrosandboxError::InvalidConfig(format!(
+                "open disk named volume {} for removal: {err}",
+                handle.name()
+            ))
+        })?;
+
+    #[cfg(unix)]
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "volume {:?} is currently attached by a running sandbox",
+                handle.name()
+            )));
+        }
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "lock disk named volume {} for removal: {err}",
+            handle.name()
+        )));
+    }
+
+    Ok(Some(file))
+}
+
+async fn ensure_volume_not_referenced_by_active_sandbox<C>(
+    db: &C,
+    name: &str,
+) -> MicrosandboxResult<()>
+where
+    C: ConnectionTrait,
+{
+    let sandboxes = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Status.is_in([
+            SandboxStatus::Running,
+            SandboxStatus::Draining,
+            SandboxStatus::Paused,
+        ]))
+        .all(db)
+        .await?;
+
+    for sandbox in sandboxes {
+        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
+        if config.spec.mounts.iter().any(|mount| {
+            matches!(
+                mount,
+                VolumeMount::Named {
+                    name: mounted_name,
+                    ..
+                } if mounted_name == name
+            )
+        }) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "volume {name:?} is attached to active sandbox {:?}",
+                sandbox.name
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn validate_volume_config(config: &VolumeConfig) -> MicrosandboxResult<()> {
@@ -724,4 +860,78 @@ pub(crate) fn validate_volume_name(name: &str) -> MicrosandboxResult<()> {
     }
 
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sea_orm::{ActiveModelTrait, Set};
+
+    use crate::backend::{Backend, LocalBackend};
+    use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_remove_local_rejects_active_named_volume_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let backend: Arc<dyn Backend> = local.clone();
+        create_local(
+            backend.clone(),
+            VolumeConfig {
+                name: "active-cache".to_string(),
+                kind: VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let config = SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: "active-sandbox".to_string(),
+                mounts: vec![VolumeMount::Named {
+                    name: "active-cache".to_string(),
+                    guest: "/cache".to_string(),
+                    create: None,
+                    options: MountOptions::default(),
+                    stat_virtualization: StatVirtualization::Strict,
+                    host_permissions: HostPermissions::Private,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        sandbox_entity::ActiveModel {
+            name: Set("active-sandbox".to_string()),
+            config: Set(serde_json::to_string(&config).unwrap()),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        let err = remove_local(backend, "active-cache").await.unwrap_err();
+
+        assert!(err.to_string().contains("attached to active sandbox"));
+        assert!(local.volume_path("active-cache").exists());
+    }
 }

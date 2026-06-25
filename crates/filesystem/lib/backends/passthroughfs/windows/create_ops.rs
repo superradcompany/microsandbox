@@ -24,6 +24,8 @@ impl PassthroughFs {
             return Err(linux_error(LINUX_ENOTDIR));
         }
 
+        self.quota_ensure_baseline();
+
         let options = open_options_from_flags(flags, true)?;
         let file = options.open(&path).map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
@@ -122,6 +124,8 @@ impl PassthroughFs {
             return Err(linux_error(LINUX_ENOTDIR));
         }
 
+        self.quota_ensure_baseline();
+
         let mut file = StdOpenOptions::new()
             .write(true)
             .create_new(true)
@@ -129,7 +133,14 @@ impl PassthroughFs {
             .open(&path)
             .map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-        file.write_all(linkname.to_bytes()).map_err(host_error)?;
+        if let Err(error) = self.quota_charge_file_to(&file, linkname.to_bytes().len() as u64) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        if let Err(error) = file.write_all(linkname.to_bytes()).map_err(host_error) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
 
         let metadata = self.safe_metadata(&path)?;
         let data = self.intern_path(path);

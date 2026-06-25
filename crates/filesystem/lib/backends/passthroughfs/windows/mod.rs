@@ -80,6 +80,8 @@ const LINUX_EXDEV: i32 = 18;
 const LINUX_ENOTDIR: i32 = 20;
 const LINUX_EISDIR: i32 = 21;
 const LINUX_EINVAL: i32 = 22;
+#[cfg(test)]
+const LINUX_ENOSPC: i32 = 28;
 const LINUX_EROFS: i32 = 30;
 const LINUX_ENOTEMPTY: i32 = 39;
 const LINUX_ELOOP: i32 = 40;
@@ -148,6 +150,7 @@ pub struct PassthroughFs {
     next_handle: AtomicU64,
     init_file: Option<Mutex<File>>,
     stat_store: Option<StatStore>,
+    quota: Option<super::quota::DirQuota>,
 }
 
 #[repr(C, packed)]
@@ -171,6 +174,38 @@ struct StatStore {
 enum StatStoreBackend {
     AlternateDataStream,
     Sidecar { dir: PathBuf },
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl PassthroughFs {
+    /// Charge the quota for growing from `old_len` to `new_end` bytes.
+    pub(super) fn quota_charge_growth(&self, old_len: u64, new_end: u64) -> io::Result<()> {
+        if let Some(quota) = &self.quota {
+            quota.charge(new_end.saturating_sub(old_len))?;
+        }
+        Ok(())
+    }
+
+    /// Charge the quota for growing an open file to `new_end` bytes.
+    ///
+    /// Used on create-like paths where the file was just created and the
+    /// handle metadata is enough to determine growth before bytes are written.
+    pub(super) fn quota_charge_file_to(&self, file: &File, new_end: u64) -> io::Result<()> {
+        self.quota_charge_growth(super::quota::file_size(file), new_end)
+    }
+
+    /// Capture the quota baseline now if it has not been captured yet.
+    ///
+    /// The first write-intent operation pays the one-time directory walk so
+    /// pre-existing host files become baseline instead of guest growth.
+    pub(super) fn quota_ensure_baseline(&self) {
+        if let Some(quota) = &self.quota {
+            quota.ensure_baseline();
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

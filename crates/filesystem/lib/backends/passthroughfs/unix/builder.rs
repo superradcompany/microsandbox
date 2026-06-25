@@ -46,6 +46,7 @@ pub struct PassthroughFsBuilder {
     writeback: bool,
     inject_init: bool,
     bind_identity_map: Option<BindIdentityMapHandle>,
+    quota_bytes: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -66,6 +67,7 @@ impl PassthroughFsBuilder {
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
+            quota_bytes: None,
         }
     }
 
@@ -129,6 +131,12 @@ impl PassthroughFsBuilder {
         self
     }
 
+    /// Set an optional guest-write byte budget for this mount's subtree.
+    pub fn quota_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.quota_bytes = bytes;
+        self
+    }
+
     /// Build the PassthroughFs instance.
     pub fn build(self) -> io::Result<PassthroughFs> {
         let root_dir = self
@@ -163,6 +171,7 @@ impl PassthroughFsBuilder {
             writeback: self.writeback,
             inject_init: self.inject_init,
             bind_identity_map: self.bind_identity_map,
+            quota_bytes: self.quota_bytes,
         };
         if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
             let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
@@ -194,6 +203,10 @@ impl PassthroughFsBuilder {
 
         let cfg = cfg_probe;
 
+        let quota = cfg
+            .quota_bytes
+            .map(|limit| super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+
         Ok(PassthroughFs {
             cfg,
             root_fd,
@@ -208,6 +221,7 @@ impl PassthroughFsBuilder {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            quota,
         })
     }
 }

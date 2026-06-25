@@ -56,6 +56,12 @@ pub struct PassthroughConfig {
 
     /// Whether to expose the synthetic `init.krun` entry at the mount root.
     pub inject_init: bool,
+
+    /// Optional guest-write byte budget for this mount's subtree.
+    ///
+    /// `None` means unbounded. When set, guest-attributable growth past this
+    /// many bytes is rejected with `ENOSPC`.
+    pub quota_bytes: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -102,6 +108,10 @@ impl PassthroughFs {
             None
         };
 
+        let quota = cfg
+            .quota_bytes
+            .map(|limit| super::super::quota::DirQuota::new(root.clone(), limit));
+
         Ok(Self {
             cfg,
             root,
@@ -112,6 +122,7 @@ impl PassthroughFs {
             next_handle: AtomicU64::new(1),
             init_file,
             stat_store,
+            quota,
         })
     }
 
@@ -171,6 +182,7 @@ impl Default for PassthroughConfig {
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             inject_init: true,
+            quota_bytes: None,
         }
     }
 }

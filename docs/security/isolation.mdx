@@ -1,0 +1,124 @@
+---
+title: "Isolation boundary"
+description: "The microVM boundary, the host-guest control channel, and in-guest privilege"
+icon: "microchip"
+---
+
+The core of microsandbox's security is the boundary between the guest VM and the host. This page covers what that boundary is made of, how the two sides talk, and what runs with which privilege on each side.
+
+## A microVM, not a container
+
+Each sandbox is a lightweight virtual machine:
+
+- Its own **Linux kernel**, supplied by microsandbox (built from libkrunfw), not your host kernel.
+- Its own **memory and virtual CPUs**, scheduled by a hardware hypervisor (KVM on Linux, Apple's Hypervisor.framework on macOS) through the libkrun VMM.
+- A fixed, small set of **virtual devices** as its only window to the outside.
+
+The practical consequence is simple. A workload that exploits a kernel bug gets a compromised *guest* kernel, which is exactly what the VM is built to contain. Container escapes that rely on a shared host kernel, like namespace breakouts, cgroup tricks, or a kernel privilege escalation reaching the host, have no shared kernel to attack here.
+
+## Host process privileges
+
+The per-sandbox process runs as the **same user that launched it**. It does not need to be root:
+
+- **Linux.** It needs access to `/dev/kvm`, usually through membership in the `kvm` group. No setuid, no elevated capabilities.
+- **macOS.** The binary is code-signed with the hypervisor entitlement so it can use Hypervisor.framework.
+
+A sandbox therefore grants the guest no ambient host privilege. The guest runs under a normal, unprivileged host process, fenced off by the hypervisor.
+
+## The device attack surface
+
+The guest can touch the host only through paravirtual (virtio) devices. That fixed list *is* the host-facing attack surface:
+
+| Device | What it carries |
+|---|---|
+| `virtio-console` | The control channel to `agentd` |
+| `virtio-net` | Network frames into the host network stack |
+| `virtio-fs` | Host directories you explicitly mount |
+| `virtio-blk` | The root filesystem and any attached disks |
+| `virtio-rng` | Entropy |
+
+There is no general-purpose passthrough. No host PCI devices, no host sockets, and no shared memory beyond these devices.
+
+## The host-guest control channel
+
+Your application and the `msb` CLI drive a sandbox over a single control channel: framed messages on `virtio-console`, spoken by `agentd`, the agent that runs as PID 1 inside the guest. The host sends requests like run this command, read this file, or open this TCP connection, and the guest streams back the results.
+
+<Frame>
+  <img className="block dark:hidden" src="/images/security/control-channel-light.svg" alt="The host drives the control channel and the guest only answers; it cannot drive the host." />
+  <img className="hidden dark:block" src="/images/security/control-channel-dark.svg" alt="The host drives the control channel and the guest only answers; it cannot drive the host." />
+</Frame>
+
+Two properties matter for security:
+
+- **The channel is host-driven.** The guest answers requests and streams output. It cannot reach back through the channel to run commands on your host or open host-side connections. When a sandbox opens a TCP connection, `agentd` makes it from *inside* the guest, subject to the sandbox's [network policy](/security/network). The host never connects to an arbitrary target on the guest's behalf.
+- **The channel has no cryptographic authentication, and doesn't need one.** It is a virtio device wired to exactly one VM, so the hypervisor's device model guarantees that only that sandbox's host process is on the other end. A compromised guest can send any well-formed frame, but only ever to its own host process, which treats every frame as untrusted input.
+
+## In-guest privilege
+
+Inside the guest the default is permissive, and that is intentional, because the VM is the boundary:
+
+- `agentd` runs as PID 1 (root).
+- Workload commands run as **root by default**. Set a non-root user when the workload doesn't need it.
+- The default profile keeps normal root semantics so real-world images work unchanged, including init systems, `sudo`, and Docker-in-Docker.
+
+For defense-in-depth *inside* the guest, opt into the **restricted security profile**. It sets `no_new_privs`, drops the mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts. It is incompatible with workloads that need those, such as `sudo` or Docker-in-Docker.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, SecurityProfile};
+
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .user("app")
+    .security(SecurityProfile::Restricted)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .user("app")
+    .security("restricted")
+    .create();
+```
+
+```python Python
+from microsandbox import Sandbox, SecurityProfile
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    user="app",
+    security_profile=SecurityProfile.RESTRICTED,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithUser("app"),
+    m.WithSecurityProfile(m.SecurityProfileRestricted),
+)
+```
+
+```bash CLI
+msb create python --name worker --user app --security restricted
+```
+</CodeGroup>
+
+<Note>
+In-guest root is not host root. Guest root is acceptable *because* of the VM boundary above it. The restricted profile shrinks the blast radius **inside** the guest. It is not what stands between the workload and your host. The hypervisor is.
+</Note>
+
+## Cross-sandbox isolation
+
+Sandboxes share no kernel, no writable filesystem layer, no network namespace, and no process tree. Each is its own VM in its own host process, with its own per-sandbox network gateway. Two sandboxes interact only through mechanisms you set up explicitly, like a shared named volume or a published port one connects to. Absent that, they can't see or reach one another.
+
+## Resource limits
+
+vCPU count and memory are capped at VM creation and enforced by the VMM, so a guest cannot allocate beyond its memory ceiling or use more vCPUs than assigned. For lifecycle bounds you can set an idle timeout (which reclaims a sandbox when no work is happening) or a maximum duration. A workload can still burn its own allotted CPU and memory, but that self-inflicted slowdown stays within the limits you choose and is not a cross-tenant concern.
+
+## Where this boundary ends
+
+The model trusts the hypervisor, the CPU's virtualization extensions, and the small VMM and device implementation to hold the line. A bug that lets a guest break out of the VM into its host process, a VMM or hypervisor escape, is the one class this boundary cannot defend against from the inside. It is exactly the class we most want [reported](https://github.com/superradcompany/microsandbox/security/advisories/new).

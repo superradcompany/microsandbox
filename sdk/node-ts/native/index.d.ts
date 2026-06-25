@@ -394,17 +394,24 @@ export declare class MountBuilder {
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
+   * Guest-write quota in MiB (only valid with `.bind()`).
+   *
+   * Bounds how much the guest may add beyond the bind-mounted directory's
+   * existing contents. Without it, a protective default is applied.
+   */
+  quota(mib: number): this
+  /**
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * named volume mounts.
+   * directory-backed named volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
-   * Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
-   * mounts.
+   * Accepts `"private"` or `"mirror"`. Valid only for bind and
+   * directory-backed named volume mounts.
    */
   hostPermissions(policy: string): this
   /**
@@ -766,9 +773,9 @@ export declare class Sandbox {
    */
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
-  static list(): Promise<Array<SandboxInfo>>
+  static list(): Promise<Array<JsSandboxHandle>>
   /** List sandboxes matching a filter. */
-  static listWith(filter: SandboxListFilter): Promise<Array<SandboxInfo>>
+  static listWith(filter: SandboxListFilter): Promise<Array<JsSandboxHandle>>
   /**
    * Remove a stopped sandbox from the database.
    *
@@ -828,14 +835,26 @@ export declare class Sandbox {
   attachWithBuilder(cmd: string, builder: AttachOptionsBuilder): Promise<number>
   /** Attach to the sandbox's default shell. */
   attachShell(): Promise<number>
-  /** Stop the sandbox gracefully (SIGTERM). */
+  /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
   stopAndWait(): Promise<ExitStatus>
-  /** Kill the sandbox immediately (SIGKILL). */
+  /** Request graceful shutdown without waiting for observed exit. */
+  requestStop(): Promise<void>
+  /** Stop gracefully with an explicit timeout before escalating to SIGKILL. */
+  stopWithTimeout(timeoutMs: number): Promise<void>
+  /** Kill the sandbox immediately and wait for observed exit. */
   kill(): Promise<void>
+  /** Request force termination without waiting for observed exit. */
+  requestKill(): Promise<void>
+  /** Force-kill the sandbox with an explicit observation timeout. */
+  killWithTimeout(timeoutMs: number): Promise<void>
   /** Graceful drain (SIGUSR1 — for load balancing). */
   drain(): Promise<void>
+  /** Request graceful drain without waiting for observed exit. */
+  requestDrain(): Promise<void>
+  /** Wait until the sandbox is observed in a terminal non-running state. */
+  waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
   wait(): Promise<ExitStatus>
   /** Detach from the sandbox — it will continue running after this handle is dropped. */
@@ -956,6 +975,15 @@ export declare class SandboxBuilder {
   initWith(cmd: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
   /** Override the guest hostname. */
   hostname(name: string): this
+  /**
+   * Deprecated compatibility setter for older Node SDK callers.
+   *
+   * The libkrunfw path is a process-level concern (one dylib per process
+   * address space), not a per-sandbox builder setting. Keep this chainable
+   * alias so pre-backend-split code still compiles, but route it through the
+   * same process-wide override as `microsandbox.setRuntimeLibkrunfwPath(...)`.
+   */
+  libkrunfwPath(path: string): this
   /** Default running user. */
   user(user: string): this
   /** Image pull policy: `"always" | "if-missing" | "never"`. */
@@ -1866,15 +1894,6 @@ export interface Rlimit {
   hard: number
 }
 
-/** Lightweight sandbox info returned by `Sandbox.list`. */
-export interface SandboxInfo {
-  name: string
-  status: string
-  configJson: string
-  createdAt?: number
-  updatedAt?: number
-}
-
 /**
  * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
  * (AND-matched). Omit or leave empty to match every sandbox.
@@ -2115,7 +2134,10 @@ export interface VolumeMount {
   nodev: boolean
   host?: string
   name?: string
+  namedMode?: string
+  namedKind?: string
   sizeMib?: number
+  quotaMib?: number
   format?: string
   fstype?: string
   /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */

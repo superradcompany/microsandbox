@@ -18,6 +18,7 @@ impl PassthroughFs {
         }
         if open_flags_write(flags) {
             self.require_writable()?;
+            self.quota_ensure_baseline();
         }
 
         let data = self.inode(inode)?;

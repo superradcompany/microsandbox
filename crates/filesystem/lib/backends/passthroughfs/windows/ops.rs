@@ -252,17 +252,19 @@ impl DynFileSystem for PassthroughFs {
             return Err(linux_error(LINUX_EBADF));
         }
 
+        let data = self.inode(inode)?;
+        let old_len = self.safe_metadata(&data.path)?.len();
         let file = handle.file.lock().unwrap();
         let offset = if handle.flags & LINUX_O_APPEND as u32 != 0 {
             file.metadata().map_err(host_error)?.len()
         } else {
             offset
         };
+        self.quota_charge_growth(old_len, offset.saturating_add(size as u64))?;
         let written = r
             .read_to(&file, size as usize, offset)
             .map_err(host_error)?;
         if kill_priv {
-            let data = self.inode(inode)?;
             self.clear_priv_bits(data.as_ref())?;
         }
         Ok(written)
@@ -317,6 +319,14 @@ impl DynFileSystem for PassthroughFs {
     }
 
     fn statfs(&self, _ctx: Context, _inode: u64) -> io::Result<statvfs64> {
+        if let Some(quota) = &self.quota {
+            return Ok(super::super::quota::quota_statvfs(
+                quota.baseline(),
+                quota.limit(),
+                quota.used(),
+            ));
+        }
+
         Ok(statvfs64 {
             f_bsize: 4096,
             f_frsize: 4096,

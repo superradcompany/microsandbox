@@ -189,7 +189,7 @@ func TestNamedVolumeMountIntoSandbox(t *testing.T) {
 		t.Fatalf("Volume Write: %v", err)
 	}
 
-	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
+	sb, err := createSandbox(t, ctx, "sb-"+name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{}),
@@ -225,7 +225,7 @@ func TestNamedVolumeReadonlyMount(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
-	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
+	sb, err := createSandbox(t, ctx, "sb-"+name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/ro": microsandbox.Mount.Named(name, microsandbox.MountOptions{Readonly: true}),
@@ -263,7 +263,7 @@ func TestNamedVolumeNoexecMount(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
-	writer, err := microsandbox.CreateSandbox(ctx, "sb-writer-"+name,
+	writer, err := createSandbox(t, ctx, "sb-writer-"+name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{}),
@@ -291,7 +291,7 @@ chmod +x /data/run.sh`)
 		t.Fatalf("writer script failed: stdout=%q stderr=%q", out.Stdout(), out.Stderr())
 	}
 
-	sb, err := microsandbox.CreateSandbox(ctx, "sb-"+name,
+	sb, err := createSandbox(t, ctx, "sb-"+name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/data": microsandbox.Mount.Named(name, microsandbox.MountOptions{Noexec: true}),
@@ -325,7 +325,7 @@ func TestTmpfsMountWithSizeLimit(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-tmpfs-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 4}),
@@ -376,7 +376,7 @@ func TestBindMountReadonly(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-bindro-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
 			"/host-tmp": microsandbox.Mount.Bind("/tmp", microsandbox.MountOptions{Readonly: true}),

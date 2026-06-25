@@ -14,7 +14,8 @@ pub(crate) mod spawn;
 pub use handle::ProcessHandle;
 pub use spawn::{SpawnMode, spawn_sandbox};
 pub(crate) use spawn::{
-    resolve_sandbox_agent_socket_path, sandbox_agent_socket_path_candidates,
+    ensure_named_volumes, resolve_sandbox_agent_socket_path, resolve_sandbox_agent_socket_path_for,
+    rollback_created_named_volumes, sandbox_agent_socket_path_candidates,
     sandbox_agent_socket_path_candidates_for,
 };
 

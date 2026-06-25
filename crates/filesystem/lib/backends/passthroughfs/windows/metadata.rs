@@ -158,18 +158,16 @@ impl PassthroughFs {
         }
 
         if valid.contains(SetattrValid::SIZE) {
+            self.quota_ensure_baseline();
             let size: u64 = attr
                 .st_size
                 .try_into()
                 .map_err(|_| linux_error(LINUX_EINVAL))?;
             if let Some(handle) = handle {
                 let handle = self.handle(inode, handle)?;
-                handle
-                    .file
-                    .lock()
-                    .unwrap()
-                    .set_len(size)
-                    .map_err(host_error)?;
+                let file = handle.file.lock().unwrap();
+                self.quota_charge_growth(metadata.len(), size)?;
+                file.set_len(size).map_err(host_error)?;
             } else {
                 let file = StdOpenOptions::new()
                     .write(true)
@@ -177,6 +175,7 @@ impl PassthroughFs {
                     .open(&data.path)
                     .map_err(host_error)?;
                 reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
+                self.quota_charge_growth(metadata.len(), size)?;
                 file.set_len(size).map_err(host_error)?;
             }
         }

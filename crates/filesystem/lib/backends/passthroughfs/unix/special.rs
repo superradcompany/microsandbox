@@ -107,6 +107,14 @@ pub(crate) fn do_fallocate(
     let f = data.file.write().unwrap();
     let fd = f.as_raw_fd();
 
+    // Quota: a non-hole-punching fallocate reserves space and may grow the
+    // file. Charge the growth past EOF before allocating. Hole-punching frees
+    // space, so it is never charged.
+    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+    if mode & FALLOC_FL_PUNCH_HOLE == 0 {
+        fs.quota_charge_to(fd, offset.saturating_add(length))?;
+    }
+
     #[cfg(target_os = "linux")]
     {
         let ret = unsafe { libc::fallocate64(fd, mode as i32, offset as i64, length as i64) };
@@ -223,6 +231,9 @@ pub(crate) fn do_copyfilerange(
         let f_in = data_in.file.read().unwrap();
         let f_out = data_out.file.read().unwrap();
 
+        // Quota: the copy may grow the destination past EOF.
+        fs.quota_charge_to(f_out.as_raw_fd(), offset_out.saturating_add(len))?;
+
         let mut off_in = offset_in as i64;
         let mut off_out = offset_out as i64;
 
@@ -253,6 +264,16 @@ pub(crate) fn do_copyfilerange(
 
 /// Get filesystem statistics.
 pub(crate) fn do_statfs(fs: &PassthroughFs, _ctx: Context, inode: u64) -> io::Result<statvfs64> {
+    // A quota'd mount reports its budget so guest `df` reflects the cap rather
+    // than the host filesystem's (much larger) real figures.
+    if let Some(q) = &fs.quota {
+        return Ok(super::quota::quota_statvfs(
+            q.baseline(),
+            q.limit(),
+            q.used(),
+        ));
+    }
+
     // Keep InodeFd guard alive so the fd isn't closed before fstatvfs uses it.
     let inode_fd;
     let fd = if fs.is_virtual_init_inode(inode) || inode == 1 {

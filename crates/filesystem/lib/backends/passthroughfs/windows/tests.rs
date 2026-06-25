@@ -209,6 +209,73 @@ fn creates_writes_and_reads_file() {
 }
 
 #[test]
+fn quota_rejects_growth_past_limit() {
+    let temp = TempDir::new();
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(4),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let flags = (LINUX_O_CREAT | LINUX_O_RDWR) as u32;
+    let (entry, handle, _) = fs
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota.txt",
+            S_IFREG | 0o644,
+            false,
+            flags,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+
+    let mut first = SourceReader {
+        bytes: b"abcd".to_vec(),
+        pos: 0,
+    };
+    fs.write(
+        context(),
+        entry.inode,
+        handle,
+        &mut first,
+        4,
+        0,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
+    assert_eq!(fs.quota.as_ref().unwrap().used(), 4);
+
+    let mut second = SourceReader {
+        bytes: b"e".to_vec(),
+        pos: 0,
+    };
+    expect_errno(
+        fs.write(
+            context(),
+            entry.inode,
+            handle,
+            &mut second,
+            1,
+            4,
+            None,
+            false,
+            false,
+            0,
+        ),
+        LINUX_ENOSPC,
+    );
+}
+
+#[test]
 fn rejects_malicious_components() {
     for name in [c"..", c".", c"a/b", c"a\\b", c"a:b", c".msb_override_stat"] {
         expect_errno(validate_component(name), LINUX_EPERM);
