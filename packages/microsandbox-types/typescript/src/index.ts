@@ -356,7 +356,7 @@ export type SecretsConfig = {
 /**
  * List of secrets to inject.
  */
-secrets: Array<SecretEntry>,
+entries: Array<SecretEntry>,
 /**
  * Default action when a placeholder leaks to a disallowed host.
  */

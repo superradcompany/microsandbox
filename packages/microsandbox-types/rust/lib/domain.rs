@@ -419,8 +419,8 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SecretsConfig {
     /// List of secrets to inject.
-    #[serde(default)]
-    pub secrets: Vec<SecretEntry>,
+    #[serde(default, alias = "secrets")]
+    pub entries: Vec<SecretEntry>,
 
     /// Default action when a placeholder leaks to a disallowed host.
     #[serde(default)]
@@ -606,7 +606,7 @@ pub enum SecretConfigError {
 impl SecretsConfig {
     /// Validate all configured secret entries.
     pub fn validate(&self) -> Result<(), SecretConfigError> {
-        for (index, secret) in self.secrets.iter().enumerate() {
+        for (index, secret) in self.entries.iter().enumerate() {
             secret.validate(index)?;
         }
         Ok(())

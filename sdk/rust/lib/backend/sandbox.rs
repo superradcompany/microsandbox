@@ -1160,7 +1160,7 @@ pub(super) fn cloud_create_request_from_config(
         // resolvers, host-CA trust).
         let net = config.local_network_config()?;
         let has_custom_network = !net.ports.is_empty()
-            || !net.secrets.secrets.is_empty()
+            || !net.secrets.entries.is_empty()
             || !net.dns.nameservers.is_empty()
             || net.trust_host_cas;
         reject_cloud_deferred(

@@ -170,7 +170,7 @@ impl NetworkBuilder {
 
     /// Add a materialized secret entry.
     pub fn secret_entry(mut self, entry: SecretEntry) -> Self {
-        self.config.secrets.secrets.push(entry);
+        self.config.secrets.entries.push(entry);
         self
     }
 
@@ -182,7 +182,7 @@ impl NetworkBuilder {
         placeholder: impl Into<String>,
         allowed_host: impl Into<String>,
     ) -> Self {
-        self.config.secrets.secrets.push(SecretEntry {
+        self.config.secrets.entries.push(SecretEntry {
             env_var: env_var.into(),
             value: value.into(),
             placeholder: placeholder.into(),

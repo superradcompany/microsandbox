@@ -568,7 +568,7 @@ impl SandboxBuilder {
     ) -> Self {
         match self.config.local_network_config() {
             Ok(mut network) => {
-                network.secrets.secrets.push(entry);
+                network.secrets.entries.push(entry);
                 if !network.tls.enabled {
                     network.tls.enabled = true;
                 }
@@ -1497,7 +1497,7 @@ mod tests {
         assert_eq!(config.spec.network.ports[0].guest_port, 80);
         assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
         let network = config.local_network_config().unwrap();
-        assert_eq!(network.secrets.secrets.len(), 1);
+        assert_eq!(network.secrets.entries.len(), 1);
         assert_eq!(network.max_connections, Some(128));
     }
 
