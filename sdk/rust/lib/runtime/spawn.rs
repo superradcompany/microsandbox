@@ -40,7 +40,15 @@ use tokio::{
     process::Command,
 };
 #[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+};
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
@@ -118,6 +126,19 @@ struct StartupPipe {
     server: NamedPipeServer,
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+struct HandleInheritState {
+    handle: HANDLE,
+    flags: u32,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct StdioInheritGuard {
+    states: Vec<HandleInheritState>,
+}
+
 /// Local storage metadata for a named volume mounted by a sandbox.
 #[derive(Clone, Debug)]
 struct ResolvedNamedVolume {
@@ -167,6 +188,59 @@ pub enum SpawnMode {
 impl EnsuredNamedVolumes {
     pub(crate) fn is_empty(&self) -> bool {
         self.created.is_empty()
+    }
+}
+
+#[cfg(windows)]
+impl StdioInheritGuard {
+    fn new() -> MicrosandboxResult<Self> {
+        let mut states = Vec::new();
+
+        for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = unsafe { GetStdHandle(std_handle) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            if states
+                .iter()
+                .any(|state: &HandleInheritState| state.handle == handle)
+            {
+                continue;
+            }
+
+            let mut flags = 0u32;
+            if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+                continue;
+            }
+            if flags & HANDLE_FLAG_INHERIT == 0 {
+                continue;
+            }
+
+            // A redirected `msb create` can receive inheritable stdout/stderr
+            // pipe handles from its own parent. Detached sandbox children must
+            // not keep those pipes alive after the launcher exits.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            states.push(HandleInheritState { handle, flags });
+        }
+
+        Ok(Self { states })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StdioInheritGuard {
+    fn drop(&mut self) {
+        for state in self.states.iter().rev() {
+            let inherit = state.flags & HANDLE_FLAG_INHERIT;
+            if unsafe { SetHandleInformation(state.handle, HANDLE_FLAG_INHERIT, inherit) } == 0 {
+                tracing::debug!(
+                    error = %std::io::Error::last_os_error(),
+                    "failed to restore stdio handle inheritance flag"
+                );
+            }
+        }
     }
 }
 
@@ -463,11 +537,20 @@ pub async fn spawn_sandbox(
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn the sandbox process.
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err.into());
+    let mut child = {
+        #[cfg(windows)]
+        let _stdio_inherit_guard = if matches!(mode, SpawnMode::Detached) {
+            Some(StdioInheritGuard::new()?)
+        } else {
+            None
+        };
+
+        match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err.into());
+            }
         }
     };
 
