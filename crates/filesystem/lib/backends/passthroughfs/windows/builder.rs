@@ -122,6 +122,39 @@ impl PassthroughFs {
             Ok(())
         }
     }
+
+    /// Seed guest-visible permission bits for an existing host path.
+    ///
+    /// This is used before the backend is mounted, for host files that need
+    /// Linux permission bits Windows cannot represent directly. The same
+    /// strict metadata store is used by the mounted backend, so failure here
+    /// matches a mount-time stat-virtualization failure.
+    pub fn set_path_virtual_permissions(
+        root_dir: &Path,
+        path: &Path,
+        uid: u32,
+        gid: u32,
+        permissions: u32,
+    ) -> io::Result<()> {
+        let root = std::fs::canonicalize(root_dir).map_err(host_error)?;
+        let root_metadata = std::fs::symlink_metadata(&root).map_err(host_error)?;
+        reject_reparse_metadata(&root_metadata)?;
+        if !root_metadata.file_type().is_dir() {
+            return Err(linux_error(LINUX_ENOTDIR));
+        }
+
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let path = std::fs::canonicalize(path).map_err(host_error)?;
+        let metadata = safe_metadata_under_root(&root, &path)?;
+        let mode = (mode_from_metadata(&metadata) & S_IFMT) | (permissions & 0o7777);
+        let store = StatStore::new(&root, StatVirtualization::Strict)?
+            .ok_or_else(|| linux_error(LINUX_EIO))?;
+        store.write(&path, uid, gid, mode, 0)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

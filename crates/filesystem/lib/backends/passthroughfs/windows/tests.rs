@@ -325,6 +325,24 @@ fn stat_virtualization_persists_across_backend_restart() {
 }
 
 #[test]
+fn seeded_virtual_permissions_are_visible_after_backend_start() {
+    let temp = TempDir::new();
+    let script = temp.path.join("scripts").join("hello");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, b"#!/bin/sh\necho hello\n").unwrap();
+
+    PassthroughFs::set_path_virtual_permissions(&temp.path, &script, 0, 0, 0o755).unwrap();
+
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"scripts").unwrap();
+    let entry = fs.lookup(context(), dir.inode, c"hello").unwrap();
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+
+    assert_eq!(st.st_mode & S_IFMT, S_IFREG);
+    assert_eq!(st.st_mode & 0o7777, 0o755);
+}
+
+#[test]
 fn strict_uses_ads_and_does_not_create_sidecar() {
     let temp = TempDir::new();
     let fs = fs_for(&temp.path);

@@ -240,7 +240,40 @@ pub fn http_client() -> ureq::Agent {
 /// Returns true when a user-provided text value should be interpreted as a
 /// local filesystem path rather than a named resource or OCI reference.
 pub fn looks_like_local_path_text(s: &str) -> bool {
-    s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../")
+    if s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        s.starts_with(".\\")
+            || s.starts_with("..\\")
+            || s.starts_with('\\')
+            || is_windows_drive_path_text(s)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Returns true when `s` starts with a Windows drive-rooted path prefix.
+pub fn is_windows_drive_path_text(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+/// Returns true when the colon at `index` is the drive separator in a Windows path.
+pub fn is_windows_drive_separator_at(s: &str, index: usize) -> bool {
+    let bytes = s.as_bytes();
+    index == 1
+        && bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -278,5 +311,14 @@ mod tests {
             metrics_registry_shm_name(home, 2),
             format!("{}-{}-v2", METRICS_SHM_PREFIX, stable_hash_path(home))
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_looks_like_local_path_text_accepts_windows_paths() {
+        assert!(looks_like_local_path_text(r"C:\Users\Stephen\file.txt"));
+        assert!(looks_like_local_path_text(r".\relative"));
+        assert!(looks_like_local_path_text(r"\\server\share\file.txt"));
+        assert!(!looks_like_local_path_text("alpine"));
     }
 }

@@ -411,29 +411,9 @@ impl MountBuilder {
                 // `tag:host[:opts]`. Embedded separators in the host
                 // path would collide with that grammar and could
                 // silently inject policy options. Reject at the SDK
-                // boundary so callers get a clear error rather than a
-                // confusing parse failure later.
-                if let Some(s) = host.to_str() {
-                    if s.contains(',') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ',': {s}"
-                        )));
-                    }
-                    if s.contains(':') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ':': {s}"
-                        )));
-                    }
-                    if s.contains(';') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ';': {s}"
-                        )));
-                    }
-                } else {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "bind host path must be valid UTF-8".into(),
-                    ));
-                }
+                // boundary so callers get a clear error. Windows drive
+                // prefixes are the one allowed colon shape.
+                validate_host_path_wire_safe(&host, "bind host path")?;
                 VolumeMount::Bind {
                     host,
                     guest: self.guest,
@@ -856,12 +836,28 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
         )));
     };
 
-    if path.contains(',') || path.contains(':') || path.contains(';') {
+    if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
         )));
     }
     Ok(())
+}
+
+fn has_forbidden_host_path_colon(path: &str) -> bool {
+    path.char_indices().any(|(index, c)| {
+        c == ':' && {
+            #[cfg(windows)]
+            {
+                !microsandbox_utils::is_windows_drive_separator_at(path, index)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = index;
+                true
+            }
+        }
+    })
 }
 
 fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {
@@ -1100,6 +1096,29 @@ mod tests {
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
         assert!(err.to_string().contains("disk image host path"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_volume_mounts_accepts_windows_drive_host_paths() {
+        let mounts = vec![
+            VolumeMount::Bind {
+                host: PathBuf::from(r"C:\Users\Stephen\data"),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+            },
+            VolumeMount::DiskImage {
+                host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
+                guest: "/disk".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        validate_volume_mounts(&mounts).unwrap();
     }
 
     #[test]

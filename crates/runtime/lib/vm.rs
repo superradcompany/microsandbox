@@ -18,10 +18,10 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
+use microsandbox_filesystem::{BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
-    BindIdentityMapHandle, DynFileSystem, HostPermissions, StatVirtualization,
+    HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
-use microsandbox_filesystem::{PassthroughConfig, PassthroughFs};
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
     codec,
@@ -1184,18 +1184,12 @@ fn build_vm(
     }
 
     // Additional mounts.
-    #[cfg(windows)]
-    if !vm.mounts.is_empty() {
-        return Err(RuntimeError::Custom(
-            "host-directory mounts are unsupported on Windows until the passthrough backend has Windows containment and metadata virtualization".into(),
-        ));
-    }
-    #[cfg(unix)]
     for mount_spec in &vm.mounts {
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
+        #[cfg(unix)]
         let mount_bind_identity_map =
             bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
         let cfg = PassthroughConfig {
@@ -1204,6 +1198,7 @@ fn build_vm(
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
+            #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             ..Default::default()
         };
@@ -1689,7 +1684,6 @@ fn spawn_log_thread(
 /// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`. The `ro` flag is
 /// enforced by the host filesystem server; execution and suid flags are applied
 /// by agentd when the guest mount is installed.
-#[cfg(unix)]
 #[derive(Debug)]
 struct ParsedMountSpec {
     tag: String,
@@ -1704,7 +1698,6 @@ struct ParsedMountSpec {
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
 /// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`) and keyed policies
 /// (`stat-virt=...`, `host-perms=...`).
-#[cfg(unix)]
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
@@ -1713,10 +1706,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         return Err(format!("empty tag in mount spec {spec:?}"));
     }
 
-    let (host_path, options) = match rest.split_once(':') {
-        Some((path, opts)) => (path, Some(opts)),
-        None => (rest, None),
-    };
+    let (host_path, options) = split_mount_host_options(rest);
 
     if host_path.is_empty() {
         return Err(format!("empty host path in mount spec {spec:?}"));
@@ -1827,6 +1817,37 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     })
 }
 
+/// Split `host_path[:opts]`, skipping the drive colon in Windows paths.
+fn split_mount_host_options(rest: &str) -> (&str, Option<&str>) {
+    let search = if windows_drive_path_prefix_len(rest).is_some() {
+        &rest[2..]
+    } else {
+        rest
+    };
+
+    match search.rsplit_once(':') {
+        Some((_prefix, opts)) => {
+            let split_at = rest.len() - opts.len() - 1;
+            let host = &rest[..split_at];
+            (host, Some(opts))
+        }
+        None => (rest, None),
+    }
+}
+
+/// Return the length of a Windows drive prefix when this target accepts one.
+fn windows_drive_path_prefix_len(rest: &str) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        microsandbox_utils::is_windows_drive_path_text(rest).then_some(2)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = rest;
+        None
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Mount Spec Parsing
 //--------------------------------------------------------------------------------------------------
@@ -1878,12 +1899,12 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 mod tests {
     #[cfg(unix)]
     use super::{
-        BindIdentityMapRegistration, HostPermissions, PARENT_WATCH_DETACH, ParentWatchdogSignal,
-        StatVirtualization, bind_identity_map_for_mount, parse_mount_spec,
-        read_parent_watchdog_signal,
+        BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
+        bind_identity_map_for_mount, read_parent_watchdog_signal,
     };
     use super::{
-        ConsoleSharedState, append_block_root_env, prepend_scripts_path, request_guest_shutdown,
+        ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
+        parse_mount_spec, prepend_scripts_path, request_guest_shutdown,
         request_guest_shutdown_with_timeout, validate_disk_format,
     };
 
@@ -1895,7 +1916,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_minimal() {
         let p = parse_mount_spec("foo:/host/data").unwrap();
         assert_eq!(p.tag, "foo");
@@ -1906,7 +1926,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_with_ro_and_policies() {
         let p = parse_mount_spec("foo:/host/data:ro,noexec,stat-virt=relaxed,host-perms=mirror")
             .unwrap();
@@ -1917,7 +1936,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_stat_virt_off() {
         let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
@@ -1925,42 +1943,36 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_unknown_key() {
         let err = parse_mount_spec("foo:/host/data:bogus=1").unwrap_err();
         assert!(err.contains("unknown mount option"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_invalid_stat_virt() {
         let err = parse_mount_spec("foo:/host/data:stat-virt=nope").unwrap_err();
         assert!(err.contains("invalid stat-virt"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_invalid_host_perms() {
         let err = parse_mount_spec("foo:/host/data:host-perms=public").unwrap_err();
         assert!(err.contains("invalid host-perms"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_missing_colon_errors() {
         let err = parse_mount_spec("nopath").unwrap_err();
         assert!(err.contains("expected tag:host_path"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_empty_tag_errors() {
         let err = parse_mount_spec(":/host").unwrap_err();
         assert!(err.contains("empty tag"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_with_flags_before_policies() {
         let p = parse_mount_spec("foo:/host/data:ro,nosuid,stat-virt=relaxed").unwrap();
         assert_eq!(p.host_path, "/host/data");
@@ -1968,31 +1980,37 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
         let err = parse_mount_spec("foo:/host:stat-virt=strict,stat-virt=off").unwrap_err();
         assert!(err.contains("more than once"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_legacy_comma_options() {
         let err = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap_err();
         assert!(err.contains("tag:host_path:opts"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_duplicate_flags() {
         let err = parse_mount_spec("foo:/host:ro,rw").unwrap_err();
         assert!(err.contains("ro`/`rw"), "got: {err}");
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_parse_mount_spec_rejects_unsupported_flags() {
         let err = parse_mount_spec("foo:/host:exec").unwrap_err();
         assert!(err.contains("unsupported mount option"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_mount_spec_accepts_windows_drive_path() {
+        let p = parse_mount_spec(r"work:C:\Users\Stephen\data:ro,host-perms=mirror").unwrap();
+        assert_eq!(p.tag, "work");
+        assert_eq!(p.host_path, r"C:\Users\Stephen\data");
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+        assert!(p.readonly);
     }
 
     #[test]

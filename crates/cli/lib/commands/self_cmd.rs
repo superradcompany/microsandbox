@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
 
-use super::install::MARKER as INSTALL_MARKER;
+use super::install::is_generated_alias;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -737,7 +737,7 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&path)
-            && content.lines().nth(1) == Some(INSTALL_MARKER)
+            && is_generated_alias(&content)
         {
             fs::remove_file(&path)?;
             let name = entry.file_name().to_string_lossy().to_string();

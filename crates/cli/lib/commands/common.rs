@@ -689,9 +689,7 @@ fn parse_copy_arg(context: &str, spec: &str, kind: CopyKind) -> anyhow::Result<P
 
 /// Parse `SRC:DST` into a host path and guest destination.
 fn parse_patch_src_dst(context: &str, spec: &str) -> anyhow::Result<(PathBuf, String)> {
-    let (src, dst) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{context} must use SRC:DST"))?;
+    let (src, dst) = split_source_guest_spec(context, spec)?;
     if src.is_empty() {
         anyhow::bail!("{context} source path cannot be empty");
     }
@@ -986,9 +984,7 @@ fn parse_cli_mount_spec<'a>(
     spec: &'a str,
     support: CliMountOptionSupport,
 ) -> anyhow::Result<ParsedCliMountSpec<'a>> {
-    let (source, guest_and_opts) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{context} must be in format source:guest[:options]"))?;
+    let (source, guest_and_opts) = split_source_guest_spec(context, spec)?;
 
     if source.is_empty() {
         anyhow::bail!("{context} source must not be empty");
@@ -1020,6 +1016,42 @@ fn parse_cli_mount_spec<'a>(
         guest,
         options: parse_cli_mount_options(opts, support)?,
     })
+}
+
+/// Split a `SOURCE:/guest[:options]` value without mistaking `C:\...` for the separator.
+fn split_source_guest_spec<'a>(context: &str, spec: &'a str) -> anyhow::Result<(&'a str, &'a str)> {
+    let separator = find_guest_path_separator(spec)
+        .ok_or_else(|| anyhow::anyhow!("{context} must be in format source:/guest[:options]"))?;
+    Ok((&spec[..separator], &spec[separator + 1..]))
+}
+
+/// Find the separator colon immediately before an absolute guest path.
+fn find_guest_path_separator(spec: &str) -> Option<usize> {
+    for (index, byte) in spec.bytes().enumerate() {
+        if byte != b':' {
+            continue;
+        }
+        if is_windows_drive_separator(spec, index) {
+            continue;
+        }
+        if spec[index + 1..].starts_with('/') {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Return true when `index` is the drive colon in a Windows path.
+fn is_windows_drive_separator(spec: &str, index: usize) -> bool {
+    #[cfg(windows)]
+    {
+        microsandbox_utils::is_windows_drive_separator_at(spec, index)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (spec, index);
+        false
+    }
 }
 
 /// Parse public comma-separated mount options.
@@ -2354,6 +2386,37 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_apply_explicit_dir_mount_with_windows_drive_path() {
+        let dir = make_temp_dir("msb-mount-dir-drive");
+        let spec = format!("{}:/work:ro", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                ..
+            } => {
+                assert_eq!(host, dir);
+                assert_eq!(guest, "/work");
+                assert!(options.readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_copy_patch_with_windows_drive_path() {
+        let file = write_temp("fixture");
+        let spec = format!("{}:/guest/fixture", file.display());
+        let (src, dst) = parse_patch_src_dst("--copy-file", &spec).unwrap();
+        assert_eq!(src, file);
+        assert_eq!(dst, "/guest/fixture");
     }
 
     #[tokio::test]

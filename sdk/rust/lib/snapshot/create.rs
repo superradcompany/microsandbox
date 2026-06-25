@@ -97,7 +97,10 @@ pub(super) async fn create_snapshot(
 
     let dst_upper_for_sync = dst_upper.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let f = std::fs::File::open(&dst_upper_for_sync)?;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&dst_upper_for_sync)?;
         f.sync_all()?;
         Ok(())
     })
@@ -148,7 +151,10 @@ pub(super) async fn create_snapshot(
     tokio::fs::write(&tmp_path, &canonical).await?;
     let tmp_path_for_sync = tmp_path.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let f = std::fs::File::open(&tmp_path_for_sync)?;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp_path_for_sync)?;
         f.sync_all()?;
         Ok(())
     })

@@ -314,39 +314,30 @@ fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
 }
 
 fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 3 || parts.len() > 4 {
-        return Err(format!(
-            "invalid --disk entry, expected id:host:format[:ro], got: {entry:?}"
-        ));
-    }
-
-    let id = parts[0];
+    let (id, rest) = entry.split_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
     if id.is_empty() {
         return Err(format!("invalid --disk entry with empty id: {entry:?}"));
     }
-    let host = parts[1];
+
+    let (rest, readonly) = match rest.strip_suffix(":ro") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let (host, fmt_str) = rest.rsplit_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
     if host.is_empty() {
         return Err(format!(
             "invalid --disk entry with empty host path: {entry:?}"
         ));
     }
-    let fmt_str = parts[2];
     let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
         Ok(f) => f,
         Err(_) => {
             return Err(format!(
                 "invalid --disk entry with unknown format {fmt_str:?}: {entry:?}"
-            ));
-        }
-    };
-
-    let readonly = match parts.get(3) {
-        None => false,
-        Some(&"ro") => true,
-        Some(&other) => {
-            return Err(format!(
-                "invalid --disk entry with unknown flag {other:?} (expected 'ro'): {entry:?}"
             ));
         }
     };
@@ -387,6 +378,15 @@ mod tests {
     #[test]
     fn test_parse_one_disk_arg_with_ro() {
         let spec = parse_one_disk_arg("seed:/host/seed.raw:raw:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(format!("{:?}", spec.format), fmt("raw"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_one_disk_arg_with_windows_drive_path() {
+        let spec = parse_one_disk_arg(r"seed:C:\Users\Stephen\seed.raw:raw:ro").unwrap();
+        assert_eq!(spec.host, PathBuf::from(r"C:\Users\Stephen\seed.raw"));
         assert!(spec.readonly);
         assert_eq!(format!("{:?}", spec.format), fmt("raw"));
     }
@@ -500,15 +500,23 @@ mod tests {
     /// Build a `SandboxArgs` carrying only a config source; the rest is unused
     /// by `load_launch_config`.
     fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> SandboxArgs {
+        #[cfg(not(unix))]
+        let _ = config_fd;
+
         SandboxArgs {
             sandbox_name: "test".to_string(),
             sandbox_id: 1,
             log_level: None,
+            #[cfg(unix)]
             parent_watch_fd: None,
+            #[cfg(unix)]
             startup_fd: None,
+            #[cfg(windows)]
+            startup_pipe: None,
             forward_output: false,
             vcpus: 1,
             memory_mib: 512,
+            #[cfg(unix)]
             config_fd,
             config_file,
         }
@@ -535,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_load_launch_config_from_fd() {
         use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::IntoRawFd;
@@ -562,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_load_launch_config_rejects_negative_fd() {
         let err = load_launch_config(&args_with(Some(-1), None)).unwrap_err();
         assert!(err.contains("config-fd"));

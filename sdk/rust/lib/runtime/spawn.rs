@@ -185,6 +185,14 @@ pub async fn spawn_sandbox(
         tokio::fs::write(&script_path, content).await?;
         #[cfg(unix)]
         tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
+        #[cfg(windows)]
+        microsandbox_filesystem::PassthroughFs::set_path_virtual_permissions(
+            &runtime_dir,
+            &script_path,
+            0,
+            0,
+            0o755,
+        )?;
     }
 
     // Compute the agent relay socket path.
