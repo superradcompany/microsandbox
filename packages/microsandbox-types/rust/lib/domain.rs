@@ -729,6 +729,7 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct TlsConfig {
     /// Whether TLS interception is enabled.
     #[serde(default)]
@@ -754,6 +755,7 @@ pub struct TlsConfig {
     /// CA certificate PEM files to trust for upstream server verification.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<String>"))]
     pub upstream_ca_cert: Vec<PathBuf>,
 
     /// Interception CA configuration. The TLS proxy uses this CA to sign
@@ -770,17 +772,20 @@ pub struct TlsConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct InterceptCaConfig {
     /// Path to an existing CA certificate PEM file. If `None`, a CA is
     /// auto-generated and persisted.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
     pub cert_path: Option<PathBuf>,
 
     /// Path to an existing CA private key PEM file. If `None`, a key is
     /// auto-generated and persisted.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
     pub key_path: Option<PathBuf>,
 }
 
@@ -788,13 +793,16 @@ pub struct InterceptCaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct CertCacheConfig {
     /// Maximum number of cached certificates. Default: 1000.
     #[serde(default = "default_cache_capacity")]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub capacity: usize,
 
     /// Certificate validity duration in hours. Default: 24.
     #[serde(default = "default_cert_validity_hours")]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub validity_hours: u64,
 }
 
