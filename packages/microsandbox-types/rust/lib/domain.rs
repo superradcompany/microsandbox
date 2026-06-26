@@ -73,9 +73,10 @@ pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
 
-    /// Writable overlay upper size in MiB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upper_size_mib: Option<u32>,
+    /// Writable disk size in MiB (the OCI writable overlay). The legacy wire name
+    /// `upper_size_mib` still deserializes via the serde alias.
+    #[serde(default, alias = "upper_size_mib", skip_serializing_if = "Option::is_none")]
+    pub disk_size_mib: Option<u32>,
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
@@ -1286,7 +1287,7 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            upper_size_mib: None,
+            disk_size_mib: None,
         }
     }
 }
@@ -1305,10 +1306,10 @@ impl RootfsSource {
         }
     }
 
-    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
-    pub fn oci_upper_size_mib(&self) -> Option<u32> {
+    /// Return the configured OCI disk size in MiB if this is an OCI rootfs.
+    pub fn oci_disk_size_mib(&self) -> Option<u32> {
         match self {
-            Self::Oci(oci) => oci.upper_size_mib,
+            Self::Oci(oci) => oci.disk_size_mib,
             _ => None,
         }
     }

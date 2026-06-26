@@ -10,9 +10,9 @@ export type OciRootfsSource = {
  */
 reference: string,
 /**
- * Writable overlay upper size in MiB.
+ * Writable disk size in MiB (the OCI writable overlay).
  */
-upper_size_mib?: number | null, };
+disk_size_mib?: number | null, };
 
 export type RootfsSource = { "Bind": string } | { "Oci": OciRootfsSource } | { "DiskImage": {
 /**
