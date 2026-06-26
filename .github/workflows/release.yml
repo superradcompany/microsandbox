@@ -84,7 +84,7 @@ jobs:
           path: vendor/libkrunfw/kernel.c
 
   # ---------------------------------------------------------------------------
-  # Build agentd on Linux for macOS packaging
+  # Build agentd on Linux for host packages that cannot build the guest binary natively
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
@@ -114,6 +114,36 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  build-agentd-x86_64:
+    name: Build agentd (x86_64-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
           path: build/agentd
 
   # ---------------------------------------------------------------------------
@@ -367,7 +397,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build Windows (${{ matrix.target }})
-    needs: [build-kernel, build-kernel-x86_64]
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -377,17 +407,21 @@ jobs:
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
             vs_host_arch: arm64
             msb_asset: msb-windows-aarch64.exe
+            msb_metrics_asset: msb-metrics-windows-aarch64.exe
             libkrunfw_asset: libkrunfw-windows-aarch64.dll
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
             kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64
             msb_asset: msb-windows-x86_64.exe
+            msb_metrics_asset: msb-metrics-windows-x86_64.exe
             libkrunfw_asset: libkrunfw-windows-x86_64.dll
 
     steps:
@@ -409,21 +443,23 @@ jobs:
           name: ${{ matrix.kernel_artifact }}
           path: vendor/libkrunfw/
 
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
       - name: Build libkrunfw.dll
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vswhere -latest -products * -property installationPath
-          if (-not $installPath) {
-            throw "Visual Studio installation not found"
-          }
-          $devCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
-          $command = "call `"$devCmd`" -arch=${{ matrix.vs_arch }} -host_arch=${{ matrix.vs_host_arch }} >nul && cd /d `"$env:GITHUB_WORKSPACE\vendor\libkrunfw`" && cl /nologo /LD /DABI_VERSION=${{ env.LIBKRUNFW_ABI }} /Fe:libkrunfw.dll kernel.c /link /DEF:libkrunfw.def /IMPLIB:libkrunfw.lib /ALIGN:65536 /SECTION:.krunfw,R,ALIGN=65536"
-          cmd /c $command
-          if ($LASTEXITCODE -ne 0) {
-            throw "libkrunfw.dll build failed with exit code $LASTEXITCODE"
-          }
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
 
@@ -431,9 +467,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
+
+      - name: Build msb-metrics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo build --release -p microsandbox-metrics-collector --target ${{ matrix.rust_target }}
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item target\${{ matrix.rust_target }}\release\msb-metrics.exe build\msb-metrics.exe -Force
 
       - name: Stage artifacts
         shell: pwsh
@@ -441,6 +489,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Copy-Item build\msb.exe artifacts\${{ matrix.msb_asset }} -Force
+          Copy-Item build\msb-metrics.exe artifacts\${{ matrix.msb_metrics_asset }} -Force
           Copy-Item build\libkrunfw.dll artifacts\${{ matrix.libkrunfw_asset }} -Force
           Compress-Archive -Path build\msb.exe, build\libkrunfw.dll -DestinationPath artifacts\microsandbox-${{ matrix.target }}.zip -Force
 

@@ -209,25 +209,29 @@ function Add-UserPath {
         $segments = $userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     }
 
+    # Keep the installed msb first so an older msb.exe elsewhere in PATH does
+    # not shadow a freshly-installed release in new shells.
+    $filteredSegments = @()
     foreach ($segment in $segments) {
-        if ((Normalize-PathSegment -Path $segment) -ieq $normalizedBinDir) {
-            $currentPathSegments = $env:Path -split ";" |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-                ForEach-Object { Normalize-PathSegment -Path $_ }
-            if ($currentPathSegments -inotcontains $normalizedBinDir) {
-                $env:Path = "$BinDir;$env:Path"
-            }
-            Write-Success "PATH already contains $BinDir"
-            return
+        if ((Normalize-PathSegment -Path $segment) -ine $normalizedBinDir) {
+            $filteredSegments += $segment
         }
     }
 
-    $nextSegments = @($segments) + @($BinDir)
+    $nextSegments = @($BinDir) + @($filteredSegments)
     $nextUserPath = ($nextSegments | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
     [Environment]::SetEnvironmentVariable("Path", $nextUserPath, "User")
-    $env:Path = "$BinDir;$env:Path"
 
-    Write-Success "Added $BinDir to the user PATH."
+    $currentSegments = $env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $currentFilteredSegments = @()
+    foreach ($segment in $currentSegments) {
+        if ((Normalize-PathSegment -Path $segment) -ine $normalizedBinDir) {
+            $currentFilteredSegments += $segment
+        }
+    }
+    $env:Path = (@($BinDir) + @($currentFilteredSegments)) -join ";"
+
+    Write-Success "Placed $BinDir first in the user PATH."
     Write-WarningMessage "Open a new terminal if this shell does not pick up the updated PATH."
 }
 
