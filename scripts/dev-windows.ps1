@@ -925,31 +925,24 @@ function Invoke-BuildLibkrunfw {
 
     if (Test-Path -LiteralPath $script) {
         $backend = Resolve-LinuxBuildBackend
-        $target = Resolve-WindowsTarget
-        $scriptArgs = @(
-            "-AbiVersion", $LibkrunfwAbi,
-            "-Architecture", $target.MsvcArch,
-            "-HostArchitecture", $target.HostArch,
-            "-Output", "libkrunfw.dll",
-            "-ImportLibrary", "libkrunfw.lib"
-        )
-
         if ($backend -eq "wsl") {
-            # The libkrunfw helper builds kernel.c through Docker by default.
-            # Build the Linux-side bundle via WSL first, then let the helper do
-            # the Windows MSVC link and export verification without Docker.
+            # The libkrunfw helper compiles the generated kernel C bundle
+            # directly, which can exhaust MSVC heap on x64. Build kernel.c via
+            # WSL, then link a small Windows wrapper that embeds the kernel as
+            # a resource so cl.exe never has to parse the full byte array.
             Invoke-BuildLibkrunfwKernelBundleWithWsl -Submodule $submodule
-            $scriptArgs += "-SkipKernelBundle"
-        }
-
-        Push-Location $submodule
-        try {
-            & $script @scriptArgs
-            if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
+            Invoke-LinkLibkrunfwDll -Submodule $submodule
+        } else {
+            $target = Resolve-WindowsTarget
+            Push-Location $submodule
+            try {
+                & $script -AbiVersion $LibkrunfwAbi -Architecture $target.MsvcArch -HostArchitecture $target.HostArch -Output "libkrunfw.dll" -ImportLibrary "libkrunfw.lib"
+                if ($LASTEXITCODE -ne 0) {
+                    exit $LASTEXITCODE
+                }
+            } finally {
+                Pop-Location
             }
-        } finally {
-            Pop-Location
         }
     } else {
         Invoke-BuildLibkrunfwKernelBundle -Submodule $submodule
