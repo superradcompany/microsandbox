@@ -29,13 +29,11 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
     {
         let dest = out_dir.join(AGENTD_BINARY);
 
-        // In CI, prefer the locally-built agentd from workspace build/.
-        // Check both CI (standard) and GITHUB_ACTIONS (set inside maturin Docker containers
-        // where CI is not forwarded).
-        if (std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some())
-            && local.is_file()
-        {
-            std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");
+        // Local development recipes rebuild build/agentd before compiling msb.
+        // Prefer it over a cached OUT_DIR copy so the embedded PID 1 binary
+        // cannot silently lag behind the freshly built guest agent.
+        if local.is_file() {
+            copy_agentd(&local, &dest);
             return;
         }
 
@@ -77,8 +75,12 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         }
 
         let dest = out_dir.join(AGENTD_BINARY);
-        std::fs::copy(&local, &dest).expect("failed to copy agentd to OUT_DIR");
+        copy_agentd(&local, &dest);
     }
+}
+
+fn copy_agentd(local: &Path, dest: &Path) {
+    std::fs::copy(local, dest).expect("failed to copy agentd to OUT_DIR");
 }
 
 #[cfg(not(feature = "prebuilt"))]

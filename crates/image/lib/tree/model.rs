@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::path_bytes::os_string_from_bytes;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -165,6 +166,7 @@ pub struct FileTree {
 pub enum FileTreeError {
     PathEmpty,
     PathTraversal(String),
+    InvalidPathEncoding(String),
     NotADirectory(String),
     EntryExists(String),
 }
@@ -371,7 +373,7 @@ impl FileTree {
         // instead of contains_key + insert + get_mut (3 lookups).
         let mut current = &mut self.root;
         for component in parent_components {
-            let key = OsStr::from_bytes(component).to_os_string();
+            let key = tree_key(component)?;
             current = match current.entries.entry(key) {
                 Entry::Vacant(e) => {
                     let dir = TreeNode::Directory(DirectoryNode::new(InodeMetadata::default()));
@@ -392,7 +394,7 @@ impl FileTree {
 
         // Insert the final node. Directory-over-directory merges metadata
         // but keeps existing entries. Non-directory replaces non-directory.
-        let key = OsStr::from_bytes(file_name[0]).to_os_string();
+        let key = tree_key(file_name[0])?;
         match current.entries.entry(key) {
             Entry::Vacant(e) => {
                 e.insert(node);
@@ -429,8 +431,8 @@ impl FileTree {
 
         let mut current = &self.root;
         for component in parent_components {
-            let key = OsStr::from_bytes(component);
-            match current.entries.get(key) {
+            let key = tree_key(component).ok()?;
+            match current.entries.get(&key) {
                 Some(TreeNode::Directory(dir)) => {
                     current = dir;
                 }
@@ -438,7 +440,8 @@ impl FileTree {
             }
         }
 
-        current.entries.get(OsStr::from_bytes(file_name[0]))
+        let key = tree_key(file_name[0]).ok()?;
+        current.entries.get(&key)
     }
 
     pub fn get_mut(&mut self, path: &[u8]) -> Option<&mut TreeNode> {
@@ -451,8 +454,8 @@ impl FileTree {
 
         let mut current = &mut self.root;
         for component in parent_components {
-            let key = OsStr::from_bytes(component);
-            match current.entries.get_mut(key) {
+            let key = tree_key(component).ok()?;
+            match current.entries.get_mut(&key) {
                 Some(TreeNode::Directory(dir)) => {
                     current = dir;
                 }
@@ -460,7 +463,8 @@ impl FileTree {
             }
         }
 
-        current.entries.get_mut(OsStr::from_bytes(file_name[0]))
+        let key = tree_key(file_name[0]).ok()?;
+        current.entries.get_mut(&key)
     }
 
     pub fn remove(&mut self, path: &[u8]) -> Option<TreeNode> {
@@ -473,8 +477,8 @@ impl FileTree {
 
         let mut current = &mut self.root;
         for component in parent_components {
-            let key = OsStr::from_bytes(component);
-            match current.entries.get_mut(key) {
+            let key = tree_key(component).ok()?;
+            match current.entries.get_mut(&key) {
                 Some(TreeNode::Directory(dir)) => {
                     current = dir;
                 }
@@ -482,7 +486,8 @@ impl FileTree {
             }
         }
 
-        current.entries.remove(OsStr::from_bytes(file_name[0]))
+        let key = tree_key(file_name[0]).ok()?;
+        current.entries.remove(&key)
     }
 
     pub fn node_count(&self) -> u64 {
@@ -555,6 +560,9 @@ impl fmt::Display for FileTreeError {
             FileTreeError::PathTraversal(p) => {
                 write!(f, "path traversal attempt: \"..\" in path \"{p}\"")
             }
+            FileTreeError::InvalidPathEncoding(p) => {
+                write!(f, "path is not valid host encoding: \"{p}\"")
+            }
             FileTreeError::NotADirectory(p) => {
                 write!(f, "not a directory: \"{p}\"")
             }
@@ -589,6 +597,11 @@ fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, FileTreeError> {
     }
 
     Ok(components)
+}
+
+fn tree_key(component: &[u8]) -> Result<OsString, FileTreeError> {
+    os_string_from_bytes(component)
+        .map_err(|_| FileTreeError::InvalidPathEncoding(String::from_utf8_lossy(component).into()))
 }
 
 fn count_nodes_in_dir(dir: &DirectoryNode) -> u64 {

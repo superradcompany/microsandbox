@@ -5,12 +5,17 @@
 //! guest sends a frame and [`read_frame()`](NetBackend::read_frame) to deliver
 //! frames back to the guest. Frames flow through [`SharedState`]'s
 //! `tx_ring`/`rx_ring` queues with [`WakePipe`](crate::shared::WakePipe)
-//! notifications. libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
-//! in edge-triggered mode, so reads must drain the wake pipe before returning.
+//! notifications. Unix libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
+//! in edge-triggered mode, while Windows libkrun waits on an event source. Reads
+//! must drain the wake primitive before returning.
 
-use std::{os::fd::RawFd, sync::Arc};
+#[cfg(unix)]
+use std::os::fd::RawFd;
+use std::sync::Arc;
 
 use msb_krun::backends::net::{NetBackend, ReadError, WriteError};
+#[cfg(windows)]
+use msb_krun_utils::event::{EventSource, EventToken};
 
 use crate::shared::SharedState;
 
@@ -36,8 +41,8 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 ///   ethernet frame to `tx_ring`, wakes the smoltcp poll thread.
 /// - **RX path** (`read_frame`): pops a frame from `rx_ring`, prepends a
 ///   zeroed virtio-net header for the guest.
-/// - **Wake fd** (`raw_socket_fd`): returns `rx_wake`'s read end so the
-///   NetWorker's epoll can detect new frames.
+/// - **Wake source**: returns `rx_wake`'s pollable fd on Unix or waitable
+///   event handle on Windows so the NetWorker can detect new frames.
 pub struct SmoltcpBackend {
     shared: Arc<SharedState>,
 }
@@ -109,8 +114,15 @@ impl NetBackend for SmoltcpBackend {
     /// File descriptor for NetWorker's epoll. Becomes readable when
     /// `rx_ring` has frames for the guest (i.e. when smoltcp's
     /// `SmoltcpDevice::transmit()` pushes a frame and wakes `rx_wake`).
+    #[cfg(unix)]
     fn raw_socket_fd(&self) -> RawFd {
         self.shared.rx_wake.as_raw_fd()
+    }
+
+    /// Waitable event source for NetWorker on Windows.
+    #[cfg(windows)]
+    fn event_source(&self, token: EventToken) -> EventSource {
+        EventSource::waitable_handle(self.shared.rx_wake.as_raw_handle(), token)
     }
 }
 
@@ -118,7 +130,7 @@ impl NetBackend for SmoltcpBackend {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::Arc;
 

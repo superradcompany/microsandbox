@@ -69,6 +69,7 @@ use futures::Stream;
 
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
+use crate::backend::LocalBackend;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -126,13 +127,18 @@ pub struct LogSnapshot {
 pub fn log_dir_for(name: &str) -> PathBuf {
     crate::backend::default_backend()
         .as_local()
-        .map(|local| local.config().sandboxes_dir().join(name).join("logs"))
+        .map(|local| log_dir_for_local(local, name))
         .unwrap_or_else(|| {
             microsandbox_utils::resolve_home()
                 .join(microsandbox_utils::SANDBOXES_SUBDIR)
                 .join(name)
                 .join("logs")
         })
+}
+
+/// Compute the on-disk log directory for an explicit local backend.
+pub(crate) fn log_dir_for_local(local: &LocalBackend, name: &str) -> PathBuf {
+    local.config().sandboxes_dir().join(name).join("logs")
 }
 
 /// Read all matching log entries for the named sandbox.
@@ -152,12 +158,33 @@ pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<
     Ok(read_logs_snapshot(name, opts).await?.entries)
 }
 
+/// Read all matching log entries through an explicit local backend.
+pub(crate) async fn read_logs_local(
+    local: &LocalBackend,
+    name: &str,
+    opts: &LogOptions,
+) -> MicrosandboxResult<Vec<LogEntry>> {
+    Ok(
+        read_logs_snapshot_from_dir(name, log_dir_for_local(local, name), opts)
+            .await?
+            .entries,
+    )
+}
+
 /// Read all matching log entries and return the snapshot end cursor.
 ///
 /// This is useful when handing a bounded historical read to
 /// [`log_stream`] with [`LogStreamStart::From`] without losing log
 /// lines written between the snapshot drain and follow startup.
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
+    read_logs_snapshot_from_dir(name, log_dir_for(name), opts).await
+}
+
+async fn read_logs_snapshot_from_dir(
+    name: &str,
+    log_dir: PathBuf,
+    opts: &LogOptions,
+) -> MicrosandboxResult<LogSnapshot> {
     crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
         sources: opts.sources.clone(),
@@ -167,7 +194,6 @@ pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxRe
         until: None,
         follow: false,
     };
-    let log_dir = log_dir_for(name);
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
         return Err(MicrosandboxError::SandboxNotFound(name.to_string()));
     }
@@ -197,8 +223,24 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
+    log_stream_from_dir(name, log_dir_for(name), opts).await
+}
+
+/// Stream log entries through an explicit local backend.
+pub(crate) async fn log_stream_local(
+    local: &LocalBackend,
+    name: &str,
+    opts: &LogStreamOptions,
+) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
+    log_stream_from_dir(name, log_dir_for_local(local, name), opts).await
+}
+
+async fn log_stream_from_dir(
+    name: &str,
+    log_dir: PathBuf,
+    opts: &LogStreamOptions,
+) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
-    let log_dir = log_dir_for(name);
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
         return Err(MicrosandboxError::SandboxNotFound(name.to_string()));
     }

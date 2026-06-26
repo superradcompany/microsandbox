@@ -43,7 +43,7 @@ Common flags:
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
-| `-p`, `--port` | Publish a port, such as `8000:8000` or `0.0.0.0:8000:8000` |
+| `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
@@ -56,6 +56,8 @@ Common flags:
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
 
 Use `msb run --help` for the full flag list.
+
+Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
 
 ### Network rule syntax
 
@@ -375,6 +377,10 @@ msb uninstall ubuntu alpine   # Remove multiple
 Manage the msb installation itself.
 
 ```bash
+msb doctor                   # Alias for msb self doctor
+msb doctor --fix             # Try supported host setup fixes
+msb self doctor              # Check runtime and host virtualization prerequisites
+msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
 msb self uninstall            # Remove msb (with confirmation prompt)
@@ -383,10 +389,12 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
+| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
+| `--fix` | `doctor` | Try supported host setup fixes; on Windows this opens an elevated PowerShell prompt to enable Windows Hypervisor Platform without forcing an immediate reboot |
 | `-f`, `--force` | `update` | Re-download even if already on the latest version |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |

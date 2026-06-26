@@ -561,13 +561,11 @@ pub(crate) mod local {
     }
 
     fn metadata_to_entry(path: &str, meta: &std::fs::Metadata) -> FsEntry {
-        use std::os::unix::fs::MetadataExt;
-
         FsEntry {
             path: path.to_string(),
             kind: std_kind(meta),
             size: meta.len(),
-            mode: meta.mode(),
+            mode: metadata_mode(meta),
             modified: std_modified(meta),
         }
     }
@@ -580,15 +578,30 @@ pub(crate) mod local {
     }
 
     fn std_metadata_to_fs(meta: &std::fs::Metadata) -> FsMetadata {
-        use std::os::unix::fs::MetadataExt;
-
         FsMetadata {
             kind: std_kind(meta),
             size: meta.len(),
-            mode: meta.mode(),
+            mode: metadata_mode(meta),
             readonly: meta.permissions().readonly(),
             modified: std_modified(meta),
             created: std_created(meta),
+        }
+    }
+
+    #[cfg(unix)]
+    fn metadata_mode(meta: &std::fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+
+        meta.mode()
+    }
+
+    #[cfg(windows)]
+    fn metadata_mode(meta: &std::fs::Metadata) -> u32 {
+        match (meta.is_dir(), meta.permissions().readonly()) {
+            (true, true) => 0o555,
+            (true, false) => 0o755,
+            (false, true) => 0o444,
+            (false, false) => 0o644,
         }
     }
 }

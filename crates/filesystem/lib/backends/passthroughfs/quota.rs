@@ -42,7 +42,6 @@
 
 use std::{
     io,
-    os::fd::RawFd,
     path::{Path, PathBuf},
     sync::{
         OnceLock,
@@ -50,7 +49,14 @@ use std::{
     },
 };
 
-use crate::{backends::shared::platform, statvfs64};
+#[cfg(windows)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::RawFd;
+
+#[cfg(unix)]
+use crate::backends::shared::platform;
+use crate::statvfs64;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -141,7 +147,7 @@ impl DirQuota {
             Ok(())
         } else {
             self.used.store(real, Ordering::Relaxed);
-            Err(platform::enospc())
+            Err(enospc())
         }
     }
 }
@@ -151,10 +157,29 @@ impl DirQuota {
 //--------------------------------------------------------------------------------------------------
 
 /// Logical size of an open file by fd, or 0 if it cannot be stat'd.
+#[cfg(unix)]
 pub(crate) fn fd_size(fd: RawFd) -> u64 {
     platform::fstat(fd)
         .map(|st| st.st_size.max(0) as u64)
         .unwrap_or(0)
+}
+
+/// Logical size of an open file handle, or 0 if it cannot be stat'd.
+#[cfg(windows)]
+pub(crate) fn file_size(file: &File) -> u64 {
+    file.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+}
+
+/// Linux `ENOSPC` error for the guest FUSE ABI.
+fn enospc() -> io::Error {
+    #[cfg(unix)]
+    {
+        platform::enospc()
+    }
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(28)
+    }
 }
 
 /// Sum the logical size of every regular file beneath `root`.
@@ -219,6 +244,16 @@ pub(crate) fn quota_statvfs(baseline: u64, limit: u64, used: u64) -> statvfs64 {
         st.f_namemax = 255;
     }
 
+    #[cfg(windows)]
+    {
+        st.f_bsize = bsize;
+        st.f_frsize = bsize;
+        st.f_blocks = total / bsize;
+        st.f_bfree = free / bsize;
+        st.f_bavail = free / bsize;
+        st.f_namemax = 255;
+    }
+
     st
 }
 
@@ -252,7 +287,7 @@ mod tests {
         // A second 1 KiB write crosses the ceiling; the recount finds the real
         // 1 KiB already on disk and refuses the new growth.
         let err = q.charge(1024).unwrap_err();
-        assert_eq!(err.raw_os_error(), platform::enospc().raw_os_error());
+        assert_eq!(err.raw_os_error(), enospc().raw_os_error());
     }
 
     #[test]

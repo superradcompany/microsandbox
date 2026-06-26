@@ -23,6 +23,20 @@ use crate::layout::{
 };
 use crate::snapshot::LiveMetric;
 use crate::{MetricsError, MetricsResult};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError,
+    HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+    OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -135,9 +149,16 @@ struct RegistryInner {
     // Currently only used for the open path; suppress the dead-code warning.
     #[allow(dead_code)]
     name: CString,
-    ptr: NonNull<u8>,
+    mapping: MappedRegion,
     capacity: u32,
-    map_len: usize,
+}
+
+struct MappedRegion {
+    ptr: NonNull<u8>,
+    #[cfg(unix)]
+    len: usize,
+    #[cfg(target_os = "windows")]
+    handle: HANDLE,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -149,12 +170,23 @@ struct RegistryInner {
 unsafe impl Send for RegistryInner {}
 unsafe impl Sync for RegistryInner {}
 
-impl Drop for RegistryInner {
+impl Drop for MappedRegion {
     fn drop(&mut self) {
-        // Unmap only — do not `shm_unlink`. The segment outlives this
-        // process and is shared by sibling sandboxes.
+        // Unmap only. The named backing object is managed separately: POSIX
+        // registries intentionally outlive individual mappings, while Windows
+        // pagefile mappings live as long as at least one process has a handle
+        // or mapped view open.
+        #[cfg(unix)]
         unsafe {
-            libc::munmap(self.ptr.as_ptr().cast(), self.map_len);
+            libc::munmap(self.ptr.as_ptr().cast(), self.len);
+        }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.ptr.as_ptr().cast(),
+            });
+            CloseHandle(self.handle);
         }
     }
 }
@@ -202,55 +234,31 @@ impl MetricsRegistry {
         // Two-pass: first map with the header-only length to discover the
         // capacity, then remap with the full length.
         let header_only_len = HEADER_SIZE;
-        let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        if let Err(err) = wait_for_size(fd, header_only_len) {
-            unsafe { libc::close(fd) };
-            return Err(err);
-        }
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                header_only_len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        // Closing the fd is fine: the mapping stays alive.
-        unsafe { libc::close(fd) };
-        if ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let header = unsafe { &*(ptr as *const Header) };
+        let header_mapping = open_existing_region(&cname, header_only_len)?.ok_or_else(|| {
+            MetricsError::from(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "metrics registry does not exist",
+            ))
+        })?;
+        let header = unsafe { &*(header_mapping.ptr.as_ptr() as *const Header) };
         let ready_result = wait_for_ready(header);
         let capacity = match ready_result {
             Ok(()) => match validate_header(header, None) {
                 Ok(()) => header.capacity,
-                Err(err) => {
-                    unsafe { libc::munmap(ptr, header_only_len) };
-                    return Err(err);
-                }
+                Err(err) => return Err(err),
             },
             Err(WaitForReadyError::Stuck) => {
-                unsafe { libc::munmap(ptr, header_only_len) };
                 return Err(MetricsError::Custom(
                     "metrics registry is still initializing".into(),
                 ));
             }
             Err(WaitForReadyError::Invalid(state)) => {
-                unsafe { libc::munmap(ptr, header_only_len) };
                 return Err(MetricsError::Custom(format!(
                     "invalid registry header state: {state}"
                 )));
             }
         };
-        unsafe {
-            libc::munmap(ptr, header_only_len);
-        }
+        drop(header_mapping);
 
         let map_len = registry_size(capacity);
         let reg = try_open_existing(&cname, capacity, map_len)?
@@ -571,12 +579,12 @@ impl MetricsRegistry {
     }
 
     fn header(&self) -> &Header {
-        unsafe { &*(self.inner.ptr.as_ptr() as *const Header) }
+        unsafe { &*(self.inner.mapping.ptr.as_ptr() as *const Header) }
     }
 
     fn slot(&self, idx: u32) -> &Slot {
         debug_assert!(idx < self.inner.capacity);
-        let base = self.inner.ptr.as_ptr();
+        let base = self.inner.mapping.ptr.as_ptr();
         let offset = HEADER_SIZE + (idx as usize) * SLOT_SIZE;
         unsafe { &*(base.add(offset) as *const Slot) }
     }
@@ -821,103 +829,45 @@ fn try_open_existing(
     expected_capacity: u32,
     map_len: usize,
 ) -> MetricsResult<Option<MetricsRegistry>> {
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0) };
-    if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(None);
-        }
-        return Err(err.into());
-    }
-
-    if let Err(err) = wait_for_size(fd, HEADER_SIZE) {
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            HEADER_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
+    let Some(header_mapping) = open_existing_region(name, HEADER_SIZE)? else {
+        return Ok(None);
     };
-    if ptr == libc::MAP_FAILED {
-        unsafe { libc::close(fd) };
-        return Err(std::io::Error::last_os_error().into());
-    }
 
-    let header_ref = unsafe { &*(ptr as *const Header) };
+    let header_ref = unsafe { &*(header_mapping.ptr.as_ptr() as *const Header) };
     match wait_for_ready(header_ref) {
         Ok(()) => {}
         Err(WaitForReadyError::Stuck) => {
-            unsafe {
-                libc::munmap(ptr, HEADER_SIZE);
-                libc::close(fd);
-            }
             return Err(MetricsError::Custom(
                 "metrics registry is still initializing".into(),
             ));
         }
         Err(WaitForReadyError::Invalid(state)) => {
-            unsafe {
-                libc::munmap(ptr, HEADER_SIZE);
-                libc::close(fd);
-            }
             return Err(MetricsError::Custom(format!(
                 "invalid registry header state: {state}"
             )));
         }
     }
-    if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
-        unsafe {
-            libc::munmap(ptr, HEADER_SIZE);
-            libc::close(fd);
-        }
-        return Err(e);
-    }
-    unsafe { libc::munmap(ptr, HEADER_SIZE) };
+    validate_header(header_ref, Some(expected_capacity))?;
+    drop(header_mapping);
 
-    if let Err(err) = wait_for_size(fd, map_len) {
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            map_len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
+    let Some(mapping) = open_existing_region(name, map_len)? else {
+        return Ok(None);
     };
-    unsafe { libc::close(fd) };
-    if ptr == libc::MAP_FAILED {
-        return Err(std::io::Error::last_os_error().into());
-    }
 
-    let header_ref = unsafe { &*(ptr as *const Header) };
-    if let Err(e) = validate_header(header_ref, Some(expected_capacity)) {
-        unsafe { libc::munmap(ptr, map_len) };
-        return Err(e);
-    }
+    let header_ref = unsafe { &*(mapping.ptr.as_ptr() as *const Header) };
+    validate_header(header_ref, Some(expected_capacity))?;
 
     let inner = RegistryInner {
         name: name.to_owned(),
-        ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
+        mapping,
         capacity: header_ref.capacity,
-        map_len,
     };
     Ok(Some(MetricsRegistry {
         inner: Arc::new(inner),
     }))
 }
 
+#[cfg(unix)]
 fn wait_for_size(fd: libc::c_int, min_size: usize) -> MetricsResult<()> {
     let deadline = Instant::now() + INIT_WAIT_TIMEOUT;
     loop {
@@ -946,6 +896,96 @@ fn create_and_init(
     capacity: u32,
     map_len: usize,
 ) -> MetricsResult<MetricsRegistry> {
+    let mapping = create_region(name, map_len)?;
+
+    // Initialize header and slots while the state is still UNINIT/INITIALIZING.
+    let header = unsafe { &mut *(mapping.ptr.as_ptr() as *mut Header) };
+    // SAFETY: just-truncated memory is zero-filled. We're the exclusive
+    // initializer thanks to O_EXCL.
+    header
+        .state
+        .store(HEADER_STATE_INITIALIZING, Ordering::Release);
+    header.magic = REGISTRY_MAGIC;
+    header.version = REGISTRY_VERSION;
+    header.header_len = HEADER_SIZE as u32;
+    header.slot_len = SLOT_SIZE as u32;
+    header.capacity = capacity;
+    header.created_at_unix_ms = chrono::Utc::now().timestamp_millis();
+    header.global_generation.store(0, Ordering::Release);
+    // Slots are already zero-filled by ftruncate; SLOT_FREE == 0 and
+    // seq == 0 (even), so they are already in a valid initial state.
+    header.state.store(HEADER_STATE_READY, Ordering::Release);
+
+    let inner = RegistryInner {
+        name: name.to_owned(),
+        mapping,
+        capacity,
+    };
+    Ok(MetricsRegistry {
+        inner: Arc::new(inner),
+    })
+}
+
+#[cfg(unix)]
+fn open_existing_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+) -> MetricsResult<Option<MappedRegion>> {
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(err.into());
+    }
+
+    if let Err(err) = wait_for_size(fd, map_len) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            map_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    unsafe { libc::close(fd) };
+    if ptr == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(Some(MappedRegion {
+        ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
+        len: map_len,
+    }))
+}
+
+#[cfg(target_os = "windows")]
+fn open_existing_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+) -> MetricsResult<Option<MappedRegion>> {
+    let name = windows_mapping_name(name)?;
+    let handle = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, name.as_ptr()) };
+    if handle.is_null() {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+            return Ok(None);
+        }
+        return Err(err.into());
+    }
+
+    map_windows_region(handle, map_len).map(Some)
+}
+
+#[cfg(unix)]
+fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
     let fd = unsafe {
         libc::shm_open(
             name.as_ptr(),
@@ -989,33 +1029,84 @@ fn create_and_init(
         return Err(e.into());
     }
 
-    // Initialize header and slots while the state is still UNINIT/INITIALIZING.
-    let header = unsafe { &mut *(ptr as *mut Header) };
-    // SAFETY: just-truncated memory is zero-filled. We're the exclusive
-    // initializer thanks to O_EXCL.
-    header
-        .state
-        .store(HEADER_STATE_INITIALIZING, Ordering::Release);
-    header.magic = REGISTRY_MAGIC;
-    header.version = REGISTRY_VERSION;
-    header.header_len = HEADER_SIZE as u32;
-    header.slot_len = SLOT_SIZE as u32;
-    header.capacity = capacity;
-    header.created_at_unix_ms = chrono::Utc::now().timestamp_millis();
-    header.global_generation.store(0, Ordering::Release);
-    // Slots are already zero-filled by ftruncate; SLOT_FREE == 0 and
-    // seq == 0 (even), so they are already in a valid initial state.
-    header.state.store(HEADER_STATE_READY, Ordering::Release);
-
-    let inner = RegistryInner {
-        name: name.to_owned(),
+    Ok(MappedRegion {
         ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
-        capacity,
-        map_len,
-    };
-    Ok(MetricsRegistry {
-        inner: Arc::new(inner),
+        len: map_len,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
+    let name = windows_mapping_name(name)?;
+    let max_size = map_len as u64;
+    let handle = unsafe {
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            std::ptr::null(),
+            PAGE_READWRITE,
+            (max_size >> 32) as u32,
+            max_size as u32,
+            name.as_ptr(),
+        )
+    };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe { CloseHandle(handle) };
+        return Err(MetricsError::AlreadyExists);
+    }
+
+    map_windows_region(handle, map_len)
+}
+
+#[cfg(all(unix, test))]
+fn unlink_region(name: &std::ffi::CStr) {
+    unsafe {
+        libc::shm_unlink(name.as_ptr());
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+fn unlink_region(_name: &std::ffi::CStr) {}
+
+#[cfg(target_os = "windows")]
+fn map_windows_region(handle: HANDLE, map_len: usize) -> MetricsResult<MappedRegion> {
+    let ptr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, map_len) };
+    if ptr.Value.is_null() {
+        let err = std::io::Error::last_os_error();
+        unsafe { CloseHandle(handle) };
+        return Err(err.into());
+    }
+
+    Ok(MappedRegion {
+        ptr: NonNull::new(ptr.Value.cast()).expect("MapViewOfFile returned non-null"),
+        handle,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mapping_name(name: &std::ffi::CStr) -> MetricsResult<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let name = name
+        .to_str()
+        .map_err(|_| MetricsError::Custom("metrics registry name is not UTF-8".into()))?;
+    let suffix: String = name
+        .trim_start_matches('/')
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' => '_',
+            other => other,
+        })
+        .collect();
+    let object_name = format!("Local\\{suffix}");
+
+    Ok(std::ffi::OsStr::new(&object_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect())
 }
 
 /// Outcome of `wait_for_ready`.
@@ -1207,6 +1298,7 @@ fn quiesce_seq(slot: &Slot, force_if_busy: bool) -> MetricsResult<()> {
     }
 }
 
+#[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -1218,6 +1310,26 @@ fn pid_is_alive(pid: i32) -> bool {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::EPERM)
     )
+}
+
+#[cfg(target_os = "windows")]
+fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+    if handle.is_null() {
+        return matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(code) if code == ERROR_ACCESS_DENIED as i32
+        );
+    }
+
+    let mut exit_code = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe { CloseHandle(handle) };
+    ok != 0 && exit_code == STILL_ACTIVE as u32
 }
 
 fn ms_to_datetime(ms: i64) -> DateTime<Utc> {
@@ -1265,9 +1377,7 @@ mod tests {
 
     fn cleanup(name: &str) {
         let cname = CString::new(name).unwrap();
-        unsafe {
-            libc::shm_unlink(cname.as_ptr());
-        }
+        unlink_region(&cname);
     }
 
     #[test]

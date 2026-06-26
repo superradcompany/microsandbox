@@ -9,10 +9,12 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
 - **Operating System**:
   - macOS with Apple Silicon (M1/M2/M3/M4)
   - Linux with KVM enabled
+  - Windows 11, or Windows Server with nested virtualization, with Windows Hypervisor Platform enabled
 - **Tools**: [`just`](https://github.com/casey/just), `git`, and `pre-commit`
   - Linux: `sudo apt install just git` and `pip install pre-commit` (or `sudo apt install pre-commit`)
   - macOS: `brew install just git pre-commit`
-- **Docker** (macOS only): Required for cross-compiling `agentd` and building the kernel
+  - Windows: install Git for Windows, `just`, Visual Studio Build Tools with MSVC, and Windows SDK; install `pre-commit` with `pip install pre-commit` if you want `just setup` to install Git hooks
+- **Linux build backend** (macOS and Windows): Required for building the Linux guest `agentd` binary from non-Linux hosts and for building the libkrunfw kernel bundle when it has not already been generated. On Windows, Docker Desktop with Linux containers is preferred when available; Windows Server can use Ubuntu WSL instead.
 - **Rust**: Installed automatically by `just setup` if missing, or install via [rustup](https://rustup.rs)
 
 ## Initial Setup
@@ -27,20 +29,22 @@ just setup
 
 `just setup` does the following:
 
-1. Installs system dependencies (build tools, musl toolchain, etc.)
+1. Installs or checks system dependencies (build tools, musl toolchain, Visual Studio toolchain, etc.)
 2. Initializes git submodules (`vendor/libkrunfw`, etc.)
 3. Builds binary dependencies (`agentd` and `libkrunfw`)
 4. Builds the `msb` CLI
-5. Installs binaries to `~/.microsandbox/bin/` and libraries to `~/.microsandbox/lib/`
-6. Installs pre-commit hooks
+5. Installs binaries to `~/.microsandbox/bin/` and libraries to `~/.microsandbox/lib/` on Unix, or `%USERPROFILE%\.microsandbox\{bin,lib}\` on Windows
+6. Installs pre-commit hooks when `pre-commit` is available
 
 > During the build, kernel config prompts may appear — press **Enter** to accept defaults.
 
-After setup, add these to your shell profile (e.g. `~/.bashrc`, `~/.zshrc`):
+On Linux and macOS, add these to your shell profile (e.g. `~/.bashrc`, `~/.zshrc`):
 
 ```bash
 export PATH="$HOME/.microsandbox/bin:$PATH"
 ```
+
+On Windows, `just install` places `%USERPROFILE%\.microsandbox\bin` first in the persistent user `PATH`; open a new PowerShell, Command Prompt, or Windows Terminal tab before running `msb` from a fresh shell. Already-open shells keep their old process-local `PATH`.
 
 Verify the installation:
 
@@ -56,7 +60,18 @@ The core development cycle is:
 just build && just install
 ```
 
-This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/`.
+This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
+
+On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
+
+For Windows Server development, use Ubuntu WSL as the Linux build backend:
+
+```powershell
+$env:MSB_WINDOWS_LINUX_BUILD_BACKEND = "wsl"
+wsl --install -d Ubuntu
+wsl -d Ubuntu -- bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y build-essential musl-tools flex bison libelf-dev libssl-dev bc python3 python3-pyelftools curl xz-utils patch"
+```
 
 For a release-optimized build:
 
@@ -73,9 +88,9 @@ just build release && just install
 | `just build-msb` | Build only the `msb` CLI (debug) |
 | `just build-msb release` | Build only the `msb` CLI (release) |
 | `just build-deps` | Build only binary dependencies (agentd + libkrunfw) |
-| `just build-agentd` | Build only agentd |
-| `just build-libkrunfw` | Build only libkrunfw |
-| `just install` | Install msb + libkrunfw to `~/.microsandbox/` |
+| `just build-agentd` | Build only the Linux guest agentd binary; Windows uses Docker Linux containers or WSL |
+| `just build-libkrunfw` | Build only libkrunfw; Windows builds `kernel.c` through Docker Linux containers or WSL and links `libkrunfw.dll` natively |
+| `just install` | Install msb + libkrunfw to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows |
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 
@@ -199,9 +214,9 @@ git push origin v0.X.Y
 
 The release workflow (`.github/workflows/release.yml`) will:
 
-1. Build `msb`, `agentd`, and `libkrunfw` for all platforms (linux-x86_64, linux-aarch64, darwin-aarch64)
-2. Create platform bundles (`.tar.gz`) with SHA256 checksums
-3. Create a GitHub release with the bundles
+1. Build `msb`, `agentd`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
+2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
+3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
 4. Publish the Node.js SDK to npm (`microsandbox` + platform packages)
 5. Publish the MCP server to npm (`microsandbox-mcp`)
 6. Publish Rust crates to crates.io (in dependency order, 10 crates)

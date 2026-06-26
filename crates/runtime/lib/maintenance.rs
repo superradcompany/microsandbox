@@ -97,7 +97,7 @@ pub struct MaintenanceLimits {
 /// Summary of what one maintenance sweep did. Best-effort counters only.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MaintenanceReport {
-    /// Stale active sandboxes reconciled to `Crashed`.
+    /// Stale active sandboxes reconciled to a terminal status.
     pub reconciled: u64,
     /// Terminal ephemeral sandboxes removed.
     pub removed: u64,
@@ -177,7 +177,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
     let start = Instant::now();
 
     // Phase 1: stale active reconciliation. Mark sandboxes whose owning
-    // runtime died (dead PID) as Crashed.
+    // runtime died (dead PID) as terminal.
     let active = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Status.is_in([
             sandbox_entity::SandboxStatus::Running,
@@ -394,7 +394,7 @@ async fn record_completion(db: &DbWriteConnection) -> RuntimeResult<()> {
 //--------------------------------------------------------------------------------------------------
 
 /// Reconcile one active sandbox whose owning runtime may have died. Returns
-/// `true` when the sandbox was marked `Crashed`.
+/// `true` when the sandbox was marked terminal.
 async fn reconcile_stale_active(
     db: &DbWriteConnection,
     sandbox: &sandbox_entity::Model,
@@ -412,41 +412,36 @@ async fn reconcile_stale_active(
         return Ok(false);
     };
 
-    // NOTE: `pid_is_alive` uses `kill(pid, 0)`, which cannot distinguish a
-    // genuinely live runtime from an unrelated process that reused the PID
-    // after a reboot. A post-reboot stale row whose PID was reused therefore
-    // stays Running until that PID exits. Addressing this needs a boot-id or
-    // process-start-time check stored alongside the PID; left as a known,
-    // pre-existing limitation (the prior SDK reaper had the same gap).
+    // NOTE: `pid_is_alive` treats zombies as dead, but still cannot
+    // distinguish a genuinely live runtime from an unrelated process that
+    // reused the PID after a reboot. A post-reboot stale row whose PID was
+    // reused therefore stays Running until that PID exits. Addressing this
+    // needs a boot-id or process-start-time check stored alongside the PID;
+    // left as a known, pre-existing limitation.
     if run.pid.is_some_and(pid_is_alive) {
         return Ok(false);
     }
 
     let now = chrono::Utc::now().naive_utc();
+    let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
 
-    // Mark the dead run Terminated/InternalError only while still Running.
+    // Mark the dead run Terminated only while still Running.
     run_entity::Entity::update_many()
         .col_expr(
             run_entity::Column::Status,
             Expr::value(run_entity::RunStatus::Terminated),
         )
-        .col_expr(
-            run_entity::Column::TerminationReason,
-            Expr::value(run_entity::TerminationReason::InternalError),
-        )
+        .col_expr(run_entity::Column::TerminationReason, Expr::value(reason))
         .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
         .filter(run_entity::Column::Id.eq(run.id))
         .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
         .exec(db)
         .await?;
 
-    // Mark Crashed only while still Running/Draining so a concurrent start
-    // that flipped the row back to Running is not clobbered.
+    // Reconcile only while still active so a concurrent lifecycle transition
+    // is not clobbered.
     let result = sandbox_entity::Entity::update_many()
-        .col_expr(
-            sandbox_entity::Column::Status,
-            Expr::value(sandbox_entity::SandboxStatus::Crashed),
-        )
+        .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Status.is_in([
@@ -457,6 +452,24 @@ async fn reconcile_stale_active(
         .await?;
 
     Ok(result.rows_affected > 0)
+}
+
+fn stale_runtime_terminal_state(
+    status: sandbox_entity::SandboxStatus,
+) -> (sandbox_entity::SandboxStatus, run_entity::TerminationReason) {
+    match status {
+        // Draining means a stop/drain request was already accepted. If the
+        // owning runtime is now gone, the lifecycle reached its requested
+        // terminal state even when the original observer could not reap it.
+        sandbox_entity::SandboxStatus::Draining => (
+            sandbox_entity::SandboxStatus::Stopped,
+            run_entity::TerminationReason::ShutdownRequested,
+        ),
+        _ => (
+            sandbox_entity::SandboxStatus::Crashed,
+            run_entity::TerminationReason::InternalError,
+        ),
+    }
 }
 
 /// Whether the sandbox has any run that is still Running with a live PID.
@@ -477,16 +490,10 @@ fn is_terminal(status: sandbox_entity::SandboxStatus) -> bool {
     )
 }
 
-/// Best-effort liveness probe for a PID. Treats `EPERM` as alive (the PID
-/// exists but is owned by another user).
+/// Best-effort liveness probe for a PID. Zombies are treated as dead because
+/// the runtime has exited even if its parent has not reaped the process yet.
 fn pid_is_alive(pid: i32) -> bool {
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(code) if code == libc::EPERM
-    )
+    microsandbox_utils::process::pid_is_alive(pid)
 }
 
 /// Remove a directory tree, treating a missing directory as success.
@@ -706,6 +713,22 @@ mod tests {
         let dead = insert_sandbox(&db, "dead", sandbox_entity::SandboxStatus::Running, false).await;
         insert_run(&db, dead, Some(DEAD_PID), run_entity::RunStatus::Running).await;
 
+        // Persistent Draining sandbox with a dead PID completed a requested stop.
+        let draining = insert_sandbox(
+            &db,
+            "draining",
+            sandbox_entity::SandboxStatus::Draining,
+            false,
+        )
+        .await;
+        insert_run(
+            &db,
+            draining,
+            Some(DEAD_PID),
+            run_entity::RunStatus::Running,
+        )
+        .await;
+
         // Ephemeral Stopped sandbox should be removed in phase 2.
         let eph = insert_sandbox(&db, "eph", sandbox_entity::SandboxStatus::Stopped, true).await;
         std::fs::create_dir_all(dir.path().join("eph")).unwrap();
@@ -715,12 +738,16 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(report.reconciled, 1);
+        assert_eq!(report.reconciled, 2);
         assert_eq!(report.removed, 1);
         assert_eq!(report.errors, 0);
         assert_eq!(
             status_of(&db, dead).await,
             Some(sandbox_entity::SandboxStatus::Crashed)
+        );
+        assert_eq!(
+            status_of(&db, draining).await,
+            Some(sandbox_entity::SandboxStatus::Stopped)
         );
         assert!(status_of(&db, eph).await.is_none());
         assert!(!dir.path().join("eph").exists());

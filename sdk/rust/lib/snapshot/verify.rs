@@ -2,6 +2,9 @@
 
 use std::fs::File;
 use std::io;
+#[cfg(windows)]
+use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -110,6 +113,19 @@ async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
 }
 
 fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
+    #[cfg(unix)]
+    {
+        sparse_integrity_blocking_unix(path)
+    }
+
+    #[cfg(windows)]
+    {
+        sparse_integrity_blocking_full_read(path)
+    }
+}
+
+#[cfg(unix)]
+fn sparse_integrity_blocking_unix(path: &Path) -> io::Result<UpperIntegrity> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
     let fd = file.as_raw_fd();
@@ -164,6 +180,31 @@ fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
     })
 }
 
+#[cfg(windows)]
+fn sparse_integrity_blocking_full_read(path: &Path) -> io::Result<UpperIntegrity> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"msb-sparse-sha256-v1\0");
+    hasher.update(len.to_le_bytes());
+
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(UpperIntegrity {
+        algorithm: SPARSE_SHA256_V1.into(),
+        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
+    })
+}
+
+#[cfg(unix)]
 fn hash_extent(fd: i32, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<()> {
     const BUF_SIZE: usize = 1024 * 1024;
     let mut buf = vec![0u8; BUF_SIZE];
@@ -191,6 +232,7 @@ fn hash_extent(fd: i32, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<(
     Ok(())
 }
 
+#[cfg(unix)]
 fn hash_zeroes(mut len: u64, hasher: &mut Sha256) {
     static ZEROES: [u8; 1024 * 1024] = [0; 1024 * 1024];
 

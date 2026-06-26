@@ -4,15 +4,27 @@
 //! methods for lifecycle management (signals, wait).
 
 use std::fs::File;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
 
+#[cfg(unix)]
 use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
 use tempfile::TempDir;
 use tokio::process::Child;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
 use microsandbox_metrics::MetricsRegistry;
 
@@ -38,7 +50,12 @@ pub struct ProcessHandle {
 
     /// Writer side of the attached-parent watchdog pipe. Keeping this open
     /// lets the child detect when the owner process disappears.
+    #[cfg(unix)]
     parent_watchdog: Option<OwnedFd>,
+
+    /// Windows job object that owns the sandbox process tree.
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
 
     /// Best-effort cleanup token for a metrics slot that may still be in
     /// `Reserved` if the runtime exits before activation.
@@ -54,12 +71,22 @@ pub struct ProcessHandle {
 }
 
 /// Token used to release a metrics reservation that never reached Active.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct MetricsReservationCleanup {
     shm_name: String,
     slot: u32,
     generation: u64,
+    registry: Option<MetricsRegistry>,
 }
+
+/// Windows job object used to scope sandbox process cleanup.
+#[cfg(windows)]
+pub(crate) struct WindowsJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsJob {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -73,7 +100,8 @@ impl ProcessHandle {
         child: Child,
         file_mounts_staging: Option<TempDir>,
         disk_locks: Vec<File>,
-        parent_watchdog: Option<OwnedFd>,
+        #[cfg(unix)] parent_watchdog: Option<OwnedFd>,
+        #[cfg(windows)] job: Option<WindowsJob>,
         metrics_reservation: Option<MetricsReservationCleanup>,
     ) -> Self {
         Self {
@@ -83,7 +111,10 @@ impl ProcessHandle {
             detached: false,
             _file_mounts_staging: file_mounts_staging,
             _disk_locks: disk_locks,
+            #[cfg(unix)]
             parent_watchdog,
+            #[cfg(windows)]
+            job,
             metrics_reservation,
         }
     }
@@ -100,9 +131,24 @@ impl ProcessHandle {
 
     /// Send SIGKILL to the sandbox process for immediate termination.
     pub fn kill(&self) -> MicrosandboxResult<()> {
-        tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
-        signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
+            signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL)?;
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(job) = &self.job {
+                tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "terminating job");
+                job.terminate(1)?;
+            } else {
+                tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "terminating process");
+                terminate_process(self.pid)?;
+            }
+            Ok(())
+        }
     }
 
     /// Send SIGUSR1 to the sandbox process to trigger a graceful drain.
@@ -110,9 +156,19 @@ impl ProcessHandle {
     /// The libkrun signal handler catches SIGUSR1, writes to the exit event
     /// fd, exit observers run, and the process terminates.
     pub fn drain(&self) -> MicrosandboxResult<()> {
-        tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
-        signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGUSR1)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
+            signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGUSR1)?;
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        {
+            Err(crate::MicrosandboxError::Runtime(
+                "graceful drain is not supported on Windows yet".into(),
+            ))
+        }
     }
 
     /// Wait for the sandbox process to exit.
@@ -137,14 +193,17 @@ impl ProcessHandle {
     pub fn disarm(&mut self) {
         self.detached = true;
 
-        if let Some(parent_watchdog) = &self.parent_watchdog
-            && let Err(err) = send_parent_watchdog_detach(parent_watchdog)
+        #[cfg(unix)]
         {
-            tracing::debug!(
-                error = %err,
-                sandbox = %self.sandbox_name,
-                "failed to send parent-watch detach"
-            );
+            if let Some(parent_watchdog) = &self.parent_watchdog
+                && let Err(err) = send_parent_watchdog_detach(parent_watchdog)
+            {
+                tracing::debug!(
+                    error = %err,
+                    sandbox = %self.sandbox_name,
+                    "failed to send parent-watch detach"
+                );
+            }
         }
 
         // Consume the TempDir without deleting its contents — the detached
@@ -164,25 +223,37 @@ impl ProcessHandle {
 
 impl MetricsReservationCleanup {
     /// Create a cleanup token for a reserved metrics slot.
-    pub(crate) fn new(shm_name: String, slot: u32, generation: u64) -> Self {
+    pub(crate) fn new(
+        shm_name: String,
+        slot: u32,
+        generation: u64,
+        registry: Option<MetricsRegistry>,
+    ) -> Self {
         Self {
             shm_name,
             slot,
             generation,
+            registry,
         }
     }
 
     fn release_reserved(&self, sandbox_name: &str) {
-        let registry = match MetricsRegistry::open(&self.shm_name) {
-            Ok(registry) => registry,
-            Err(err) => {
-                tracing::debug!(
-                    error = %err,
-                    sandbox = %sandbox_name,
-                    "metrics reservation cleanup: failed to open registry"
-                );
-                return;
-            }
+        let opened;
+        let registry = if let Some(registry) = &self.registry {
+            registry
+        } else {
+            opened = match MetricsRegistry::open(&self.shm_name) {
+                Ok(registry) => registry,
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        sandbox = %sandbox_name,
+                        "metrics reservation cleanup: failed to open registry"
+                    );
+                    return;
+                }
+            };
+            &opened
         };
         if let Err(err) = registry.release_reserved(self.slot, self.generation) {
             tracing::debug!(
@@ -192,6 +263,65 @@ impl MetricsReservationCleanup {
                 "metrics reservation cleanup: failed to release reserved slot"
             );
         }
+    }
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    /// Create an unnamed job object that terminates its process tree when the
+    /// final job handle closes.
+    pub(crate) fn new_kill_on_close() -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let result = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if result == 0 {
+            let err = std::io::Error::last_os_error();
+            let _ = unsafe { CloseHandle(handle) };
+            return Err(err);
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// Assign a process to this job.
+    pub(crate) fn assign_pid(&self, pid: u32) -> std::io::Result<()> {
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let result = unsafe { AssignProcessToJobObject(self.handle, process) };
+        let result_err = (result == 0).then(std::io::Error::last_os_error);
+        let close_result = unsafe { CloseHandle(process) };
+        if let Some(err) = result_err {
+            return Err(err);
+        }
+        if close_result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Terminate every process currently assigned to this job.
+    fn terminate(&self, exit_code: u32) -> std::io::Result<()> {
+        let result = unsafe { TerminateJobObject(self.handle, exit_code) };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 
@@ -212,20 +342,44 @@ impl Drop for ProcessHandle {
         // shutdown and lets the runtime distinguish owner-exit cleanup from a
         // normal explicit stop. Keep SIGTERM only for legacy/non-watchdog
         // cases.
-        if self.parent_watchdog.is_some() {
-            tracing::debug!(
-                sandbox = %self.sandbox_name,
-                "drop: closing parent watchdog writer for attached sandbox cleanup"
-            );
-            return;
+        #[cfg(unix)]
+        {
+            if self.parent_watchdog.is_some() {
+                tracing::debug!(
+                    sandbox = %self.sandbox_name,
+                    "drop: closing parent watchdog writer for attached sandbox cleanup"
+                );
+                return;
+            }
         }
 
         if let Ok(None) = self.child.try_wait()
             && let Some(pid) = self.child.id()
         {
-            tracing::debug!(pid, sandbox = %self.sandbox_name, "drop: sending SIGTERM safety net");
-            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            #[cfg(unix)]
+            {
+                tracing::debug!(pid, sandbox = %self.sandbox_name, "drop: sending SIGTERM safety net");
+                let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            }
+
+            #[cfg(windows)]
+            {
+                if let Some(job) = &self.job {
+                    tracing::debug!(pid, sandbox = %self.sandbox_name, "drop: terminating job");
+                    let _ = job.terminate(1);
+                } else {
+                    tracing::debug!(pid, sandbox = %self.sandbox_name, "drop: terminating child process");
+                    let _ = self.child.start_kill();
+                }
+            }
         }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.handle) };
     }
 }
 
@@ -233,6 +387,7 @@ impl Drop for ProcessHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
     let byte = [microsandbox_runtime::vm::PARENT_WATCH_DETACH];
 
@@ -261,11 +416,30 @@ fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
     }
 }
 
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> std::io::Result<()> {
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let result = unsafe { windows_sys::Win32::System::Threading::TerminateProcess(handle, 1) };
+    let result_err = (result == 0).then(std::io::Error::last_os_error);
+    let close_result = unsafe { CloseHandle(handle) };
+    if let Some(err) = result_err {
+        return Err(err);
+    }
+    if close_result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::Read;
     use std::os::fd::FromRawFd;

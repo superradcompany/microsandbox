@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use microsandbox::VolumeKind as RustVolumeKind;
 use microsandbox::sandbox::{
     DiskImageFormat as RustDiskImageFormat, HostPermissions as RustHostPermissions,
-    MountBuilder as RustMountBuilder, StatVirtualization as RustStatVirtualization,
-    VolumeMount as RustVolumeMount,
+    MountBuilder as RustMountBuilder, NamedVolumeMode as RustNamedVolumeMode,
+    StatVirtualization as RustStatVirtualization, VolumeMount as RustVolumeMount,
 };
 use microsandbox::size::Mebibytes;
 
@@ -30,6 +31,8 @@ pub struct JsBuiltVolumeMount {
     pub nodev: bool,
     pub host: Option<String>,
     pub name: Option<String>,
+    pub named_mode: Option<String>,
+    pub named_kind: Option<String>,
     pub size_mib: Option<u32>,
     pub quota_mib: Option<u32>,
     pub format: Option<String>,
@@ -225,7 +228,7 @@ impl JsMountBuilder {
     /// Set the guest stat virtualization policy.
     ///
     /// Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-    /// named volume mounts.
+    /// directory-backed named volume mounts.
     #[napi]
     pub fn stat_virtualization(&mut self, policy: String) -> Result<&Self> {
         let p = match policy.as_str() {
@@ -245,8 +248,8 @@ impl JsMountBuilder {
 
     /// Set the host permission propagation policy.
     ///
-    /// Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
-    /// mounts.
+    /// Accepts `"private"` or `"mirror"`. Valid only for bind and
+    /// directory-backed named volume mounts.
     #[napi]
     pub fn host_permissions(&mut self, policy: String) -> Result<&Self> {
         let p = match policy.as_str() {
@@ -311,6 +314,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             nodev: options.nodev,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
+            named_mode: None,
+            named_kind: None,
             size_mib: None,
             quota_mib,
             format: None,
@@ -321,26 +326,42 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
         RustVolumeMount::Named {
             name,
             guest,
-            create: _,
+            create,
             options,
             stat_virtualization,
             host_permissions,
-        } => JsBuiltVolumeMount {
-            kind: "named".into(),
-            guest,
-            readonly: options.readonly,
-            noexec: options.noexec,
-            nosuid: options.nosuid,
-            nodev: options.nodev,
-            host: None,
-            name: Some(name),
-            size_mib: None,
-            quota_mib: None,
-            format: None,
-            fstype: None,
-            stat_virtualization: Some(sv_str(stat_virtualization)),
-            host_permissions: Some(hp_str(host_permissions)),
-        },
+        } => {
+            let named_mode = create.as_ref().map(|create| match create.mode() {
+                RustNamedVolumeMode::Existing => "existing".to_string(),
+                RustNamedVolumeMode::Create => "create".to_string(),
+                RustNamedVolumeMode::EnsureExists => "ensure-exists".to_string(),
+            });
+            let named_kind = create.as_ref().map(|create| match create.kind() {
+                RustVolumeKind::Directory => "dir".to_string(),
+                RustVolumeKind::Disk => "disk".to_string(),
+            });
+            let size_mib = create.as_ref().and_then(|create| create.capacity_mib());
+            let quota_mib = create.as_ref().and_then(|create| create.quota_mib());
+
+            JsBuiltVolumeMount {
+                kind: "named".into(),
+                guest,
+                readonly: options.readonly,
+                noexec: options.noexec,
+                nosuid: options.nosuid,
+                nodev: options.nodev,
+                host: None,
+                name: Some(name),
+                named_mode,
+                named_kind,
+                size_mib,
+                quota_mib,
+                format: None,
+                fstype: None,
+                stat_virtualization: Some(sv_str(stat_virtualization)),
+                host_permissions: Some(hp_str(host_permissions)),
+            }
+        }
         RustVolumeMount::Tmpfs {
             guest,
             size_mib,
@@ -354,6 +375,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             nodev: options.nodev,
             host: None,
             name: None,
+            named_mode: None,
+            named_kind: None,
             size_mib,
             quota_mib: None,
             format: None,
@@ -376,6 +399,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             nodev: options.nodev,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
+            named_mode: None,
+            named_kind: None,
             size_mib: None,
             quota_mib: None,
             format: Some(

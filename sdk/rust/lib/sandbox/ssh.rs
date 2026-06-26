@@ -548,132 +548,227 @@ impl SshClient {
         f: impl FnOnce(SshAttachOptionsBuilder) -> SshAttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
         let options = f(SshAttachOptionsBuilder::default()).build();
-        let detach_keys = match &options.detach_keys {
-            Some(spec) => attach::DetachKeys::parse(spec)?,
-            None => attach::DetachKeys::default_keys(),
-        };
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| ssh_error("open session channel", e))?;
-        channel
-            .request_pty(
-                true,
-                &options.term,
-                u32::from(cols),
-                u32::from(rows),
-                0,
-                0,
-                &[],
-            )
-            .await
-            .map_err(|e| ssh_error("request PTY", e))?;
-        wait_channel_success(&mut channel, "request PTY").await?;
-        channel
-            .request_shell(true)
-            .await
-            .map_err(|e| ssh_error("request shell", e))?;
-        wait_channel_success(&mut channel, "request shell").await?;
 
-        crossterm::terminal::enable_raw_mode()
-            .map_err(|e| MicrosandboxError::Terminal(e.to_string()))?;
-        let _raw_guard = scopeguard::guard((), |_| {
-            let _ = crossterm::terminal::disable_raw_mode();
-        });
+        #[cfg(windows)]
+        {
+            let detach_keys = match &options.detach_keys {
+                Some(spec) => attach::DetachKeys::parse(spec)?,
+                None => attach::DetachKeys::default_keys(),
+            };
+            let (cols, rows) = attach::local::current_terminal_size().unwrap_or((80, 24));
+            let mut channel = self
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| ssh_error("open session channel", e))?;
+            channel
+                .request_pty(
+                    true,
+                    &options.term,
+                    u32::from(cols),
+                    u32::from(rows),
+                    0,
+                    0,
+                    &[],
+                )
+                .await
+                .map_err(|e| ssh_error("request PTY", e))?;
+            wait_channel_success(&mut channel, "request PTY").await?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| ssh_error("request shell", e))?;
+            wait_channel_success(&mut channel, "request shell").await?;
 
-        let tty_input_path = terminal_path_for_fd(std::io::stdin().as_raw_fd())
-            .map_err(|e| MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
-        let tty_input = open_nonblocking_terminal_input(&tty_input_path)
-            .map_err(|e| MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
-        let stdin_async = tokio::io::unix::AsyncFd::new(tty_input)
-            .map_err(|e| MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
-        let mut stdout = tokio::io::stdout();
-        let mut sigwinch =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-                .map_err(|e| MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
-        let detach_seq = detach_keys.sequence();
-        let mut match_pos = 0usize;
-        let mut exit_code = 0i32;
-        let (mut channel_rx, channel_tx) = channel.split();
+            let terminal_guard = attach::local::WindowsTerminalGuard::enter()?;
+            let mut terminal_events =
+                attach::local::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
+            let detach_seq = detach_keys.sequence();
+            let mut match_pos = 0usize;
+            let mut exit_code = 0i32;
+            let (mut channel_rx, channel_tx) = channel.split();
 
-        loop {
-            tokio::select! {
-                result = stdin_async.readable() => {
-                    let mut guard = match result {
-                        Ok(guard) => guard,
-                        Err(_) => break,
-                    };
-                    let mut input_buf = [0u8; 1024];
-                    match guard.try_io(|inner| {
-                        read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
-                    }) {
-                        Ok(Ok(0)) => {
-                            let _ = channel_tx.eof().await;
-                            break;
-                        }
-                        Ok(Ok(n)) => {
-                            let data = &input_buf[..n];
-                            let mut detached = false;
-                            for &byte in data {
-                                if byte == detach_seq[match_pos] {
-                                    match_pos += 1;
-                                    if match_pos == detach_seq.len() {
-                                        detached = true;
-                                        break;
-                                    }
-                                } else {
-                                    match_pos = 0;
-                                    if byte == detach_seq[0] {
-                                        match_pos = 1;
-                                    }
+            loop {
+                tokio::select! {
+                    Some(event) = terminal_events.recv() => {
+                        match event {
+                            attach::local::WindowsTerminalEvent::Input(data) => {
+                                if attach::input_contains_detach_sequence(
+                                    &data,
+                                    detach_seq,
+                                    &mut match_pos,
+                                ) {
+                                    break;
                                 }
+
+                                channel_tx
+                                    .data_bytes(Bytes::from(data))
+                                    .await
+                                    .map_err(|e| ssh_error("write channel data", e))?;
                             }
-                            if detached {
-                                break;
+                            attach::local::WindowsTerminalEvent::Resize { cols, rows } => {
+                                let _ = channel_tx
+                                    .window_change(u32::from(cols), u32::from(rows), 0, 0)
+                                    .await;
                             }
-                            channel_tx
-                                .data_bytes(Bytes::copy_from_slice(data))
-                                .await
-                                .map_err(|e| ssh_error("write channel data", e))?;
+                            attach::local::WindowsTerminalEvent::Error(error) => {
+                                return Err(MicrosandboxError::Terminal(error));
+                            }
                         }
-                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Ok(Err(_)) => break,
-                        Err(_) => continue,
                     }
-                }
-                msg = channel_rx.wait() => {
-                    let Some(msg) = msg else {
-                        break;
-                    };
-                    match msg {
-                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                            use tokio::io::AsyncWriteExt;
-                            stdout.write_all(&data).await?;
-                            stdout.flush().await?;
+                    msg = channel_rx.wait() => {
+                        let Some(msg) = msg else {
+                            break;
+                        };
+                        match msg {
+                            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                                terminal_guard.write_output(&data)?;
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => {
+                                exit_code = exit_status as i32;
+                            }
+                            ChannelMsg::ExitSignal { .. } => {
+                                exit_code = 128;
+                            }
+                            ChannelMsg::Close => break,
+                            _ => {}
                         }
-                        ChannelMsg::ExitStatus { exit_status } => {
-                            exit_code = exit_status as i32;
-                        }
-                        ChannelMsg::ExitSignal { .. } => {
-                            exit_code = 128;
-                        }
-                        ChannelMsg::Close => break,
-                        _ => {}
-                    }
-                }
-                _ = sigwinch.recv() => {
-                    if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
-                        let _ = channel_tx
-                            .window_change(u32::from(new_cols), u32::from(new_rows), 0, 0)
-                            .await;
                     }
                 }
             }
+
+            Ok(exit_code)
         }
 
-        Ok(exit_code)
+        #[cfg(unix)]
+        {
+            let detach_keys = match &options.detach_keys {
+                Some(spec) => attach::DetachKeys::parse(spec)?,
+                None => attach::DetachKeys::default_keys(),
+            };
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            let mut channel = self
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| ssh_error("open session channel", e))?;
+            channel
+                .request_pty(
+                    true,
+                    &options.term,
+                    u32::from(cols),
+                    u32::from(rows),
+                    0,
+                    0,
+                    &[],
+                )
+                .await
+                .map_err(|e| ssh_error("request PTY", e))?;
+            wait_channel_success(&mut channel, "request PTY").await?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| ssh_error("request shell", e))?;
+            wait_channel_success(&mut channel, "request shell").await?;
+
+            crossterm::terminal::enable_raw_mode()
+                .map_err(|e| MicrosandboxError::Terminal(e.to_string()))?;
+            let _raw_guard = scopeguard::guard((), |_| {
+                let _ = crossterm::terminal::disable_raw_mode();
+            });
+
+            let tty_input_path = terminal_path_for_fd(std::io::stdin().as_raw_fd())
+                .map_err(|e| MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
+            let tty_input = open_nonblocking_terminal_input(&tty_input_path)
+                .map_err(|e| MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
+            let stdin_async = tokio::io::unix::AsyncFd::new(tty_input)
+                .map_err(|e| MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
+            let mut stdout = tokio::io::stdout();
+            let mut sigwinch =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                    .map_err(|e| MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
+            let detach_seq = detach_keys.sequence();
+            let mut match_pos = 0usize;
+            let mut exit_code = 0i32;
+            let (mut channel_rx, channel_tx) = channel.split();
+
+            loop {
+                tokio::select! {
+                    result = stdin_async.readable() => {
+                        let mut guard = match result {
+                            Ok(guard) => guard,
+                            Err(_) => break,
+                        };
+                        let mut input_buf = [0u8; 1024];
+                        match guard.try_io(|inner| {
+                            read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
+                        }) {
+                            Ok(Ok(0)) => {
+                                let _ = channel_tx.eof().await;
+                                break;
+                            }
+                            Ok(Ok(n)) => {
+                                let data = &input_buf[..n];
+                                let mut detached = false;
+                                for &byte in data {
+                                    if byte == detach_seq[match_pos] {
+                                        match_pos += 1;
+                                        if match_pos == detach_seq.len() {
+                                            detached = true;
+                                            break;
+                                        }
+                                    } else {
+                                        match_pos = 0;
+                                        if byte == detach_seq[0] {
+                                            match_pos = 1;
+                                        }
+                                    }
+                                }
+                                if detached {
+                                    break;
+                                }
+                                channel_tx
+                                    .data_bytes(Bytes::copy_from_slice(data))
+                                    .await
+                                    .map_err(|e| ssh_error("write channel data", e))?;
+                            }
+                            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Ok(Err(_)) => break,
+                            Err(_) => continue,
+                        }
+                    }
+                    msg = channel_rx.wait() => {
+                        let Some(msg) = msg else {
+                            break;
+                        };
+                        match msg {
+                            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                                use tokio::io::AsyncWriteExt;
+                                stdout.write_all(&data).await?;
+                                stdout.flush().await?;
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => {
+                                exit_code = exit_status as i32;
+                            }
+                            ChannelMsg::ExitSignal { .. } => {
+                                exit_code = 128;
+                            }
+                            ChannelMsg::Close => break,
+                            _ => {}
+                        }
+                    }
+                    _ = sigwinch.recv() => {
+                        if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
+                            let _ = channel_tx
+                                .window_change(u32::from(new_cols), u32::from(new_rows), 0, 0)
+                                .await;
+                        }
+                    }
+                }
+            }
+
+            Ok(exit_code)
+        }
     }
 
     /// Open an SFTP client session over this SSH connection.
@@ -1763,11 +1858,11 @@ fn create_secure_dir(path: &Path) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> MicrosandboxResult<()> {
+fn set_private_file_permissions(_path: &Path) -> MicrosandboxResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -1810,6 +1905,7 @@ async fn wait_channel_success(
     }
 }
 
+#[cfg(unix)]
 fn signal_to_libc(signal: Sig) -> Option<i32> {
     match signal {
         Sig::ABRT => Some(libc::SIGABRT),
@@ -1824,6 +1920,25 @@ fn signal_to_libc(signal: Sig) -> Option<i32> {
         Sig::SEGV => Some(libc::SIGSEGV),
         Sig::TERM => Some(libc::SIGTERM),
         Sig::USR1 => Some(libc::SIGUSR1),
+        Sig::Custom(_) => None,
+    }
+}
+
+#[cfg(windows)]
+fn signal_to_libc(signal: Sig) -> Option<i32> {
+    match signal {
+        Sig::ABRT => Some(6),
+        Sig::ALRM => Some(14),
+        Sig::FPE => Some(8),
+        Sig::HUP => Some(1),
+        Sig::ILL => Some(4),
+        Sig::INT => Some(2),
+        Sig::KILL => Some(9),
+        Sig::PIPE => Some(13),
+        Sig::QUIT => Some(3),
+        Sig::SEGV => Some(11),
+        Sig::TERM => Some(15),
+        Sig::USR1 => Some(10),
         Sig::Custom(_) => None,
     }
 }
@@ -2153,6 +2268,7 @@ fn default_ssh_term() -> String {
 }
 
 #[cfg(unix)]
+#[cfg(unix)]
 fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
     let mut buf = [0u8; 1024];
     let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -2176,6 +2292,7 @@ fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::Pa
 }
 
 #[cfg(unix)]
+#[cfg(unix)]
 fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
 
@@ -2191,6 +2308,7 @@ fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<st
     Ok(file)
 }
 
+#[cfg(unix)]
 #[cfg(unix)]
 fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };

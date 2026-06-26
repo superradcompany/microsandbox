@@ -51,15 +51,15 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
-    logs::{self, LogOptions, LogSource},
+    logs::{LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
-    volume::{Volume, VolumeBuilder, VolumeHandle},
+    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
 use tokio::io::AsyncWriteExt;
@@ -449,6 +449,9 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
+    pub const METRICS_DISABLED: &str = "metrics_disabled";
+    pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
+    pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
     pub const IO: &str = "io";
 }
 
@@ -506,6 +509,9 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
+            MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
+            MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
+            MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -912,6 +918,7 @@ struct SandboxCreateOpts {
     ephemeral: bool,
     hostname: Option<String>,
     user: Option<String>,
+    security_profile: Option<String>,
     #[serde(default)]
     replace: bool,
     /// Timeout in milliseconds between SIGTERM and SIGKILL when
@@ -1022,6 +1029,8 @@ struct SnapshotExportOpts {
 struct MountSpec {
     bind: Option<String>,
     named: Option<String>,
+    named_mode: Option<String>,
+    named_kind: Option<String>,
     #[serde(default)]
     tmpfs: bool,
     /// Mount a host disk image (.img/.qcow2/etc.).
@@ -1034,13 +1043,25 @@ struct MountSpec {
     readonly: bool,
     #[serde(default)]
     noexec: bool,
+    #[serde(default)]
+    nosuid: bool,
+    #[serde(default)]
+    nodev: bool,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
     stat_virtualization: Option<String>,
     /// Per-mount host-permission policy ("private" | "mirror").
     /// Only valid for bind / named mounts.
     host_permissions: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum FfiNamedMode {
+    Existing,
+    Create,
+    EnsureExists,
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,6 +1468,16 @@ fn parse_pull_policy(s: &str) -> Result<PullPolicy, FfiError> {
     }
 }
 
+fn parse_security_profile(s: &str) -> Result<SecurityProfile, FfiError> {
+    match s {
+        "" | "default" => Ok(SecurityProfile::Default),
+        "restricted" => Ok(SecurityProfile::Restricted),
+        other => Err(FfiError::invalid_argument(format!(
+            "unknown security profile: {other}"
+        ))),
+    }
+}
+
 fn apply_secret(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     s: &SecretOpts,
@@ -1604,7 +1635,12 @@ fn apply_volume(
     let fstype = m.fstype.clone();
     let readonly = m.readonly;
     let noexec = m.noexec;
+    let nosuid = m.nosuid;
+    let nodev = m.nodev;
     let size_mib = m.size_mib;
+    let quota_mib = m.quota_mib;
+    let raw_named_mode = m.named_mode.clone();
+    let raw_named_kind = m.named_kind.clone();
 
     let kinds_set: u8 =
         bind.is_some() as u8 + named.is_some() as u8 + tmpfs as u8 + disk.is_some() as u8;
@@ -1614,11 +1650,58 @@ fn apply_volume(
         ));
     }
 
+    let named_mode = if named.is_some() {
+        raw_named_mode
+            .as_deref()
+            .map(parse_named_mode)
+            .transpose()?
+    } else {
+        None
+    };
+    let named_kind = if named.is_some() {
+        raw_named_kind
+            .as_deref()
+            .map(parse_volume_kind)
+            .transpose()?
+    } else {
+        None
+    };
+    let needs_named_create_options = raw_named_mode.is_some()
+        || raw_named_kind.is_some()
+        || size_mib.is_some()
+        || quota_mib.is_some();
+    if size_mib.is_some() && !tmpfs && named.is_none() {
+        return Err(FfiError::invalid_argument(
+            "size_mib is only valid for tmpfs mounts or named volume provisioning",
+        ));
+    }
+
     Ok(builder.volume(guest_path, move |mb| {
         let mut mb = if let Some(ref host) = bind {
             mb.bind(host)
         } else if let Some(ref name) = named {
-            mb.named(name)
+            if needs_named_create_options {
+                mb.named_with(name, |mut nb| {
+                    nb = match named_mode.unwrap_or(FfiNamedMode::Existing) {
+                        FfiNamedMode::Existing => nb.existing(),
+                        FfiNamedMode::Create => nb.create(),
+                        FfiNamedMode::EnsureExists => nb.ensure_exists(),
+                    };
+                    nb = match named_kind.unwrap_or(VolumeKind::Directory) {
+                        VolumeKind::Directory => nb.directory(),
+                        VolumeKind::Disk => nb.disk(),
+                    };
+                    if let Some(siz) = size_mib {
+                        nb = nb.size(siz);
+                    }
+                    if let Some(quota) = quota_mib {
+                        nb = nb.quota(quota);
+                    }
+                    nb
+                })
+            } else {
+                mb.named(name)
+            }
         } else if tmpfs {
             mb.tmpfs()
         } else if let Some(ref host) = disk {
@@ -1638,7 +1721,13 @@ fn apply_volume(
         if noexec {
             mb = mb.noexec();
         }
-        if let Some(siz) = size_mib {
+        if nosuid {
+            mb = mb.nosuid();
+        }
+        if nodev {
+            mb = mb.nodev();
+        }
+        if tmpfs && let Some(siz) = size_mib {
             mb = mb.size(siz);
         }
         if let Some(p) = stat_virt {
@@ -1649,6 +1738,27 @@ fn apply_volume(
         }
         mb
     }))
+}
+
+fn parse_named_mode(s: &str) -> Result<FfiNamedMode, FfiError> {
+    match s {
+        "" | "existing" => Ok(FfiNamedMode::Existing),
+        "create" => Ok(FfiNamedMode::Create),
+        "ensure-exists" | "ensure_exists" => Ok(FfiNamedMode::EnsureExists),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid named volume mode {other:?} (expected existing|create|ensure-exists)"
+        ))),
+    }
+}
+
+fn parse_volume_kind(s: &str) -> Result<VolumeKind, FfiError> {
+    match s {
+        "" | "dir" | "directory" => Ok(VolumeKind::Directory),
+        "disk" => Ok(VolumeKind::Disk),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid volume kind {other:?} (expected dir|disk)"
+        ))),
+    }
 }
 
 fn parse_stat_virt(s: &str) -> Result<microsandbox::sandbox::StatVirtualization, FfiError> {
@@ -1728,6 +1838,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_log_level(s)?),
             None => None,
         };
+        let security_profile = match opts.security_profile.as_deref() {
+            Some(s) => Some(parse_security_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -1771,6 +1885,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(u) = opts.user {
                 builder = builder.user(u);
+            }
+            if let Some(profile) = security_profile {
+                builder = builder.security(profile);
             }
             if let Some(timeout_ms) = opts.replace_with_timeout_ms {
                 builder =
@@ -2568,9 +2685,8 @@ pub unsafe extern "C" fn msb_sandbox_handle_logs(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
-            let entries = logs::read_logs(&name, &opts)
-                .await
-                .map_err(FfiError::from)?;
+            let handle = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let entries = handle.logs(&opts).await.map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -3526,6 +3642,10 @@ pub unsafe extern "C" fn msb_fs_exists(
 struct VolumeCreateOpts {
     #[serde(default)]
     quota_mib: u32,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    size_mib: u32,
     /// Optional key-value labels.
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -3554,6 +3674,17 @@ pub unsafe extern "C" fn msb_volume_create(
         };
         Ok(Box::pin(async move {
             let mut b: VolumeBuilder = Volume::builder(&name);
+            match parse_volume_kind(&opts.kind)? {
+                VolumeKind::Directory => {
+                    b = b.directory();
+                }
+                VolumeKind::Disk => {
+                    b = b.disk();
+                }
+            }
+            if opts.size_mib > 0 {
+                b = b.size(opts.size_mib);
+            }
             if opts.quota_mib > 0 {
                 b = b.quota(opts.quota_mib);
             }
@@ -3570,37 +3701,31 @@ pub unsafe extern "C" fn msb_volume_create(
 
 /// Serialise a `VolumeHandle` into the public JSON shape.
 fn volume_handle_json(vh: &VolumeHandle) -> String {
-    let quota = match vh.quota_mib() {
-        Some(q) => format!("{q}"),
-        None => "null".to_string(),
-    };
-    let created = match vh.created_at() {
-        Some(dt) => format!("{}", dt.timestamp()),
-        None => "null".to_string(),
-    };
     // Use serde_json for the labels object so escaping is correct.
     let labels_map: HashMap<&str, &str> = vh
         .labels()
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".into());
-    // Best-effort: when the default backend is local we surface the host
-    // path; otherwise fall back to an empty path since cloud volumes don't
-    // expose a host-side directory.
-    let path = microsandbox::backend::default_backend()
-        .as_local()
-        .map(|local| local.volume_path(vh.name()).to_string_lossy().into_owned())
+    // Best-effort: local handles carry their exact backend path; cloud
+    // volumes don't expose a host-side directory.
+    let path = vh
+        .local()
+        .map(|local| local.path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name_json = serde_json::to_string(vh.name()).unwrap_or_else(|_| "\"\"".into());
-    let path_json = serde_json::to_string(&path).unwrap_or_else(|_| "\"\"".into());
-    format!(
-        r#"{{"name":{name},"path":{path},"quota_mib":{quota},"used_bytes":{used},"labels":{labels},"created_at_unix":{created}}}"#,
-        name = name_json,
-        path = path_json,
-        used = vh.used_bytes(),
-        labels = labels_json,
-    )
+    serde_json::json!({
+        "name": vh.name(),
+        "path": path,
+        "kind": vh.kind().as_str(),
+        "quota_mib": vh.quota_mib(),
+        "used_bytes": vh.used_bytes(),
+        "capacity_bytes": vh.capacity_bytes(),
+        "disk_format": vh.disk_format(),
+        "disk_fstype": vh.disk_fstype(),
+        "labels": labels_map,
+        "created_at_unix": vh.created_at().map(|dt| dt.timestamp()),
+    })
+    .to_string()
 }
 
 #[unsafe(no_mangle)]
@@ -3812,14 +3937,16 @@ fn remove_log_stream(handle: Handle) {
 
 /// Spawn a forwarder that drives the engine stream into an unbounded mpsc
 /// channel, register the receiver, and return the handle.
-async fn start_log_stream_for(
-    log_dir_name: &str,
-    opts: microsandbox::logs::LogStreamOptions,
+async fn start_log_stream_from_stream(
+    mut stream: std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = microsandbox::MicrosandboxResult<microsandbox::logs::LogEntry>,
+                > + Send
+                + 'static,
+        >,
+    >,
 ) -> Result<Handle, FfiError> {
-    let stream = microsandbox::logs::log_stream(log_dir_name, &opts)
-        .await
-        .map_err(FfiError::from)?;
-    let mut stream = Box::pin(stream);
     let (tx, rx) = tokio::sync::mpsc::channel::<LogStreamItem>(16);
     // The forwarder task is moved off the foreground future so the caller
     // can return the stream handle immediately. The task stops naturally
@@ -3848,8 +3975,8 @@ pub unsafe extern "C" fn msb_sandbox_log_stream(
         let opts = parse_log_stream_options(opts_json)?;
         Ok(Box::pin(async move {
             let sb = get(handle)?;
-            let name = sb.name().to_string();
-            let sh = start_log_stream_for(&name, opts).await?;
+            let stream = sb.log_stream(&opts).await.map_err(FfiError::from)?;
+            let sh = start_log_stream_from_stream(stream).await?;
             Ok(format!(r#"{{"stream_handle":{sh}}}"#))
         }))
     })
@@ -3869,7 +3996,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_log_stream(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_stream_options(opts_json)?;
         Ok(Box::pin(async move {
-            let sh = start_log_stream_for(&name, opts).await?;
+            let handle = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let stream = handle.log_stream(&opts).await.map_err(FfiError::from)?;
+            let sh = start_log_stream_from_stream(stream).await?;
             Ok(format!(r#"{{"stream_handle":{sh}}}"#))
         }))
     })
@@ -5651,6 +5780,27 @@ mod tests {
         let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, None);
+    }
+
+    #[test]
+    fn apply_volume_rejects_size_on_non_tmpfs_or_named_provisioning() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            bind: Some("/host/data".to_string()),
+            size_mib: Some(64),
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("size_mib on bind mounts should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.message.contains("size_mib is only valid"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

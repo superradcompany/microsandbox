@@ -7,16 +7,20 @@
 
 use std::io::Write;
 use std::num::NonZero;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
+#[cfg(unix)]
+use microsandbox_filesystem::{BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
-    BindIdentityMapHandle, DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs,
-    StatVirtualization,
+    HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
@@ -27,6 +31,10 @@ use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+use crate::bootstrap_fs::AgentBootstrapFs;
+#[cfg(windows)]
+use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
 use crate::logging::LogLevel;
@@ -112,9 +120,18 @@ pub struct Config {
     ///
     /// When present, startup info is written here instead of stdout so
     /// detached launchers can detach stdout/stderr from birth.
+    #[cfg(unix)]
     pub startup_fd: Option<OwnedFd>,
 
+    /// Dedicated Windows startup JSON pipe.
+    ///
+    /// When present, startup info is written here instead of stdout so
+    /// detached launchers can detach stdout/stderr from birth.
+    #[cfg(windows)]
+    pub startup_pipe: Option<String>,
+
     /// Read end of the attached-parent watchdog pipe.
+    #[cfg(unix)]
     pub parent_watchdog: Option<OwnedFd>,
 
     /// Whether to forward VM console output to stdout.
@@ -170,6 +187,7 @@ pub struct StartupCommand {
     pub user: Option<String>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Eq, PartialEq)]
 enum ParentWatchdogSignal {
     ParentExited,
@@ -272,6 +290,7 @@ pub struct VmConfig {
     pub disks: Vec<DiskMountSpec>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
+    #[cfg(unix)]
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
@@ -306,7 +325,9 @@ struct StartupInfo {
 
 /// Shared bind identity map registration for user-volume passthrough mounts.
 struct BindIdentityMapRegistration {
+    #[cfg(unix)]
     handle: Option<BindIdentityMapHandle>,
+    #[cfg(unix)]
     mount_count: usize,
 }
 
@@ -330,12 +351,28 @@ type VmBuildOutput = (
 );
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl BindIdentityMapRegistration {
+    fn new() -> Self {
+        Self {
+            #[cfg(unix)]
+            handle: None,
+            #[cfg(unix)]
+            mount_count: 0,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
 impl std::fmt::Debug for VmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VmConfig")
+        let mut debug = f.debug_struct("VmConfig");
+        debug
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
@@ -347,8 +384,10 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
             .field("mounts", &self.mounts)
-            .field("disks", &self.disks)
-            .field("backends", &format!("[{} backend(s)]", self.backends.len()))
+            .field("disks", &self.disks);
+        #[cfg(unix)]
+        debug.field("backends", &format!("[{} backend(s)]", self.backends.len()));
+        debug
             .field("init_path", &self.init_path)
             .field("env", &self.env)
             .field("workdir", &self.workdir)
@@ -399,10 +438,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let startup_json = serde_json::to_string(&startup)
         .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
 
+    #[cfg(unix)]
     write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
+    #[cfg(windows)]
+    write_startup_info(config.startup_pipe.as_deref(), &startup_json)?;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
+
+    let shutdown_flush_timeout = guest_shutdown_flush_timeout(config.vm.init_path.is_some());
 
     // Create console shared state (ring buffers + wake pipes).
     let shared = Arc::new(ConsoleSharedState::new());
@@ -489,6 +533,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // without re-opening the registry (saving two mmap syscalls and a
     // potential `wait_for_ready` round-trip on the VMM's exit path).
     let exit_metrics_writer = metrics_writer.clone();
+    #[cfg(windows)]
+    let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
+        agent_console_pipe_name(config.sandbox_id),
+        Arc::clone(&shared),
+        tokio_rt.handle(),
+    )
+    .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
     let build_result = build_vm(
         &config,
         console_backend,
@@ -602,28 +653,40 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 return Err(e);
             }
         };
-    relay = relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
+    #[cfg(unix)]
+    {
+        relay =
+            relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
+    }
+    #[cfg(windows)]
+    {
+        let _ = bind_identity_map;
+    }
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
-    if let Some(parent_watchdog) = config.parent_watchdog
-        && let Err(e) = spawn_parent_watchdog(
-            parent_watchdog,
-            Arc::clone(&shared),
-            Arc::clone(&exit_reason),
-            exit_handle.clone(),
-            config.sandbox_name.clone(),
-        )
+    #[cfg(unix)]
     {
-        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
-        if let Some(writer) = metrics_writer.clone() {
-            let _ = writer.release(ReleaseMode::Free);
-        } else {
-            release_reserved_metrics_slot(config.metrics_slot.as_ref());
+        if let Some(parent_watchdog) = config.parent_watchdog
+            && let Err(e) = spawn_parent_watchdog(
+                parent_watchdog,
+                Arc::clone(&shared),
+                Arc::clone(&exit_reason),
+                exit_handle.clone(),
+                config.sandbox_name.clone(),
+                shutdown_flush_timeout,
+            )
+        {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+            }
+            let _ = std::fs::remove_file(&config.agent_sock_path);
+            return Err(e);
         }
-        let _ = std::fs::remove_file(&config.agent_sock_path);
-        return Err(e);
     }
 
     #[cfg(feature = "net")]
@@ -755,12 +818,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     });
 
     // Shutdown listener: when the relay forwards a `core.shutdown` frame to
-    // agentd, we give the guest a window to flush block-backed roots and
-    // power off cleanly. If the VM doesn't exit on its own within
-    // `SHUTDOWN_FLUSH_TIMEOUT`, the host triggers exit as a fallback so a
-    // wedged guest doesn't strand the VMM. The window's relationship to
-    // agentd's internal `HANDOFF_POWEROFF_TIMEOUT` is enforced at compile
-    // time in microsandbox-protocol.
+    // agentd, we give the guest a mode-specific window to flush block-backed
+    // roots and power off cleanly. Normal agentd-as-PID1 sandboxes use a short
+    // fallback; handoff-init sandboxes keep the longer PID-1 grace.
     {
         let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
@@ -773,7 +833,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
-                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                tokio::time::sleep(shutdown_flush_timeout).await;
                 tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
@@ -788,6 +848,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let startup_shared = Arc::clone(&shared);
         let startup_exit_handle = exit_handle.clone();
         let startup_reason = Arc::clone(&exit_reason);
+        let startup_shutdown_flush_timeout = shutdown_flush_timeout;
         tokio_rt.spawn(async move {
             tracing::info!(
                 cmd = %startup_command.cmd,
@@ -826,7 +887,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
             match request_guest_shutdown(&startup_shared) {
                 Ok(()) => {
-                    tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                    tokio::time::sleep(startup_shutdown_flush_timeout).await;
                     tracing::info!("startup command shutdown flush window elapsed");
                 }
                 Err(err) => {
@@ -850,6 +911,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let heartbeat_exit_handle = exit_handle.clone();
         let heartbeat_reason = Arc::clone(&exit_reason);
         let heartbeat_shared = Arc::clone(&shared);
+        let heartbeat_shutdown_flush_timeout = shutdown_flush_timeout;
         tokio_rt.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -875,8 +937,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         );
                         match request_guest_shutdown(&heartbeat_shared) {
                             Ok(()) => {
-                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT)
-                                    .await;
+                                tokio::time::sleep(heartbeat_shutdown_flush_timeout).await;
                                 tracing::info!(
                                     "idle shutdown flush window elapsed, triggering host exit"
                                 );
@@ -937,6 +998,14 @@ fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
         .or_else(|| vm.rootfs_upper.clone())
 }
 
+#[cfg(windows)]
+fn agent_console_pipe_name(sandbox_id: i32) -> String {
+    format!(
+        r"\\.\pipe\msb-agent-console-{sandbox_id}-{}",
+        std::process::id()
+    )
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
@@ -953,10 +1022,10 @@ fn build_vm(
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));
-    let mut bind_identity_map = BindIdentityMapRegistration {
-        handle: None,
-        mount_count: 0,
-    };
+    #[cfg(unix)]
+    let mut bind_identity_map = BindIdentityMapRegistration::new();
+    #[cfg(windows)]
+    let bind_identity_map = BindIdentityMapRegistration::new();
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
@@ -984,23 +1053,45 @@ fn build_vm(
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        let cfg = PassthroughConfig {
-            root_dir: rootfs_path.clone(),
-            ..Default::default()
-        };
-        let backend =
-            PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
-        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        #[cfg(unix)]
+        {
+            let cfg = PassthroughConfig {
+                root_dir: rootfs_path.clone(),
+                ..Default::default()
+            };
+            let backend = PassthroughFs::new(cfg)
+                .map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = rootfs_path;
+            return Err(RuntimeError::Custom(
+                "host-directory rootfs is unsupported on Windows; use a disk-image rootfs".into(),
+            ));
+        }
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
-        let empty_trampoline = tempfile::tempdir()?;
-        let cfg = PassthroughConfig {
-            root_dir: empty_trampoline.path().to_path_buf(),
-            ..Default::default()
-        };
-        let backend = PassthroughFs::new(cfg)
-            .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
-        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        #[cfg(unix)]
+        {
+            let empty_trampoline = tempfile::tempdir()?;
+            let trampoline_path = empty_trampoline.path().to_path_buf();
+            let cfg = PassthroughConfig {
+                root_dir: trampoline_path,
+                ..Default::default()
+            };
+            let backend = PassthroughFs::new(cfg)
+                .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+            let _ = empty_trampoline.keep();
+        }
+        #[cfg(windows)]
+        {
+            let backend = AgentBootstrapFs::new()
+                .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
 
         // Attach VMDK as read-only VMDK-format block device.
         let vmdk = vmdk_path.clone();
@@ -1036,16 +1127,26 @@ fn build_vm(
         }
 
         // MSB_BLOCK_ROOT env var is set by the caller (spawn_sandbox).
-        let _ = empty_trampoline.keep();
     } else if let Some(ref disk_path) = vm.rootfs_disk {
-        let empty_trampoline = tempfile::tempdir()?;
-        let cfg = PassthroughConfig {
-            root_dir: empty_trampoline.path().to_path_buf(),
-            ..Default::default()
-        };
-        let backend = PassthroughFs::new(cfg)
-            .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
-        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        #[cfg(unix)]
+        {
+            let empty_trampoline = tempfile::tempdir()?;
+            let trampoline_path = empty_trampoline.path().to_path_buf();
+            let cfg = PassthroughConfig {
+                root_dir: trampoline_path,
+                ..Default::default()
+            };
+            let backend = PassthroughFs::new(cfg)
+                .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+            let _ = empty_trampoline.keep();
+        }
+        #[cfg(windows)]
+        {
+            let backend = AgentBootstrapFs::new()
+                .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
 
         let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
             .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
@@ -1053,8 +1154,6 @@ fn build_vm(
         let readonly = vm.rootfs_disk_readonly;
         builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
         append_block_root_env(&mut exec_env);
-
-        let _ = empty_trampoline.keep();
     }
 
     // Runtime directory mount — agentd mounts this at /.msb for scripts
@@ -1083,6 +1182,7 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
+        #[cfg(unix)]
         let mount_bind_identity_map =
             bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
         let cfg = PassthroughConfig {
@@ -1091,6 +1191,7 @@ fn build_vm(
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
+            #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             quota_bytes: parsed.quota_bytes,
             ..Default::default()
@@ -1196,16 +1297,30 @@ fn build_vm(
     });
 
     // Console — ring-buffer-based custom backend for agent protocol, plus
-    // implicit console output routed to kernel.log for kernel/init logs.
-    // NOTE: The implicit console must remain enabled (do not call
-    // `disable_implicit()`) because disk image rootfs boots depend on it.
+    // console output routed to kernel.log for kernel/init logs.
     let kernel_log_path = config.log_dir.join("kernel.log");
-    builder = builder.console(|c| {
-        c.output(&kernel_log_path).custom(
-            microsandbox_protocol::AGENT_PORT_NAME,
-            Box::new(console_backend),
-        )
-    });
+    #[cfg(unix)]
+    {
+        builder = builder.console(|c| {
+            c.output(&kernel_log_path).custom(
+                microsandbox_protocol::AGENT_PORT_NAME,
+                Box::new(console_backend),
+            )
+        });
+    }
+    #[cfg(windows)]
+    {
+        let _ = console_backend;
+        let agent_pipe = agent_console_pipe_name(config.sandbox_id);
+        builder = builder.console(|c| {
+            // Windows WHP/x64 currently uses virtio-console for reliable
+            // guest logs; the implicit serial console is present but silent
+            // on the dev hosts used for WHP testing.
+            c.disable_implicit()
+                .virtio_output(&kernel_log_path)
+                .named_pipe(microsandbox_protocol::AGENT_PORT_NAME, agent_pipe)
+        });
+    }
 
     // Exit observer — runs synchronously before _exit() for DB cleanup.
     builder = builder.on_exit(on_exit);
@@ -1267,6 +1382,7 @@ fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
     }
 }
 
+#[cfg(unix)]
 fn bind_identity_map_for_mount(
     registration: &mut BindIdentityMapRegistration,
     stat_virtualization: StatVirtualization,
@@ -1290,6 +1406,7 @@ fn bind_identity_map_for_mount(
 /// `console_output` in the VM builder.
 ///
 /// If `forward` is true, stderr is also tee'd to the original fd.
+#[cfg(unix)]
 fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<()> {
     // Redirect stdout to /dev/null — kernel console goes to kernel.log
     // via console_output, so nothing useful writes to stdout after the
@@ -1319,8 +1436,15 @@ fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<
     Ok(())
 }
 
+/// Set up host log capture.
+#[cfg(windows)]
+fn setup_log_capture(_log_dir: &std::path::Path, _forward: bool) -> RuntimeResult<()> {
+    Ok(())
+}
+
 /// Write startup info JSON to the dedicated startup fd when supplied,
 /// otherwise stdout.
+#[cfg(unix)]
 fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult<()> {
     if let Some(fd) = startup_fd {
         let dup = unsafe { libc::dup(fd.as_raw_fd()) };
@@ -1328,6 +1452,26 @@ fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult
             return Err(std::io::Error::last_os_error().into());
         }
         let mut file = unsafe { std::fs::File::from_raw_fd(dup) };
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        return Ok(());
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{json}")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Write startup info JSON to the dedicated startup pipe when supplied,
+/// otherwise stdout.
+#[cfg(windows)]
+fn write_startup_info(startup_pipe: Option<&str>, json: &str) -> RuntimeResult<()> {
+    if let Some(pipe) = startup_pipe {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(pipe)
+            .map_err(|err| RuntimeError::Custom(format!("open startup pipe {pipe}: {err}")))?;
         writeln!(file, "{json}")?;
         file.flush()?;
         return Ok(());
@@ -1414,12 +1558,22 @@ fn request_guest_shutdown_with_timeout(
     relay::push_guest_frame_until(shared, frame, timeout)
 }
 
+fn guest_shutdown_flush_timeout(has_handoff_init: bool) -> Duration {
+    if has_handoff_init {
+        microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+    } else {
+        microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+    }
+}
+
+#[cfg(unix)]
 fn spawn_parent_watchdog(
     parent_watchdog: OwnedFd,
     shared: Arc<ConsoleSharedState>,
     exit_reason: Arc<std::sync::atomic::AtomicU8>,
     exit_handle: msb_krun::ExitHandle,
     sandbox_name: String,
+    shutdown_flush_timeout: Duration,
 ) -> RuntimeResult<()> {
     std::thread::Builder::new()
         .name(format!("msb-parent-watch-{sandbox_name}"))
@@ -1433,7 +1587,7 @@ fn spawn_parent_watchdog(
                     if let Err(err) = request_guest_shutdown(&shared) {
                         tracing::warn!(error = %err, "parent-watch shutdown request failed");
                     } else {
-                        std::thread::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT);
+                        std::thread::sleep(shutdown_flush_timeout);
                     }
                     exit_handle.trigger();
                 }
@@ -1452,6 +1606,7 @@ fn spawn_parent_watchdog(
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_parent_watchdog_signal(file: &mut std::fs::File) -> std::io::Result<ParentWatchdogSignal> {
     let mut buf = [0_u8; 1];
 
@@ -1467,6 +1622,7 @@ fn read_parent_watchdog_signal(file: &mut std::fs::File) -> std::io::Result<Pare
 }
 
 /// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.
+#[cfg(unix)]
 fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -1478,6 +1634,7 @@ fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
 /// Spawn a background thread that reads from a pipe and writes to a
 /// rotating log file. If `forward` is `Some`, also tees to that file
 /// (typically the original stdout/stderr saved before redirect).
+#[cfg(unix)]
 fn spawn_log_thread(
     name: &str,
     pipe_read: OwnedFd,
@@ -1553,10 +1710,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         return Err(format!("empty tag in mount spec {spec:?}"));
     }
 
-    let (host_path, options) = match rest.split_once(':') {
-        Some((path, opts)) => (path, Some(opts)),
-        None => (rest, None),
-    };
+    let (host_path, options) = split_mount_host_options(rest);
 
     if host_path.is_empty() {
         return Err(format!("empty host path in mount spec {spec:?}"));
@@ -1684,6 +1838,37 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     })
 }
 
+/// Split `host_path[:opts]`, skipping the drive colon in Windows paths.
+fn split_mount_host_options(rest: &str) -> (&str, Option<&str>) {
+    let search = if windows_drive_path_prefix_len(rest).is_some() {
+        &rest[2..]
+    } else {
+        rest
+    };
+
+    match search.rsplit_once(':') {
+        Some((_prefix, opts)) => {
+            let split_at = rest.len() - opts.len() - 1;
+            let host = &rest[..split_at];
+            (host, Some(opts))
+        }
+        None => (rest, None),
+    }
+}
+
+/// Return the length of a Windows drive prefix when this target accepts one.
+fn windows_drive_path_prefix_len(rest: &str) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        microsandbox_utils::is_windows_drive_path_text(rest).then_some(2)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = rest;
+        None
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Mount Spec Parsing
 //--------------------------------------------------------------------------------------------------
@@ -1733,16 +1918,21 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::{
-        BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, PARENT_WATCH_DETACH,
-        ParentWatchdogSignal, StatVirtualization, append_block_root_env,
-        bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
-        read_parent_watchdog_signal, request_guest_shutdown, request_guest_shutdown_with_timeout,
-        validate_disk_format,
+        BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
+        bind_identity_map_for_mount, read_parent_watchdog_signal,
+    };
+    use super::{
+        ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
+        guest_shutdown_flush_timeout, parse_mount_spec, prepend_scripts_path,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
     };
 
     use microsandbox_protocol::{codec, message::MessageType};
+    #[cfg(unix)]
     use std::io::Write;
+    #[cfg(unix)]
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1862,6 +2052,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn test_parse_mount_spec_accepts_windows_drive_path() {
+        let p = parse_mount_spec(r"work:C:\Users\Stephen\data:ro,host-perms=mirror").unwrap();
+        assert_eq!(p.tag, "work");
+        assert_eq!(p.host_path, r"C:\Users\Stephen\data");
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+        assert!(p.readonly);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_bind_identity_map_registration_shares_handle_for_virtualized_mounts() {
         let mut registration = BindIdentityMapRegistration {
             handle: None,
@@ -1892,6 +2093,18 @@ mod tests {
     }
 
     #[test]
+    fn test_guest_shutdown_flush_timeout_tracks_handoff_mode() {
+        assert_eq!(
+            guest_shutdown_flush_timeout(false),
+            microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout(true),
+            microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+        );
+    }
+
+    #[test]
     fn test_request_guest_shutdown_with_timeout_fails_when_ring_full() {
         let shared = ConsoleSharedState::with_capacity(1);
         shared.rx_ring.push(b"occupied".to_vec()).unwrap();
@@ -1905,6 +2118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parent_watchdog_signal_reports_parent_exit_on_eof() {
         let (read_fd, write_fd) = super::create_pipe().unwrap();
         drop(write_fd);
@@ -1916,6 +2130,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parent_watchdog_signal_reports_detach_byte() {
         let (read_fd, write_fd) = super::create_pipe().unwrap();
         let mut writer = std::fs::File::from(write_fd);

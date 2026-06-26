@@ -10,6 +10,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
   LIBKRUNFW_VERSION: "5.2.1"
   LIBKRUNFW_ABI: "5"
 
@@ -25,13 +28,13 @@ jobs:
     name: Build kernel.c (aarch64)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
       - name: Cache kernel.c
         id: cache-kernel
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: vendor/libkrunfw/kernel.c
           key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -52,14 +55,45 @@ jobs:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
 
+  build-kernel-x86_64:
+    name: Build kernel.c (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: true
+
+      - name: Cache kernel.c
+        id: cache-kernel
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: vendor/libkrunfw/kernel.c
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install kernel build deps
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build kernel.c
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+
+      - name: Upload kernel.c
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kernel-c-x86_64
+          path: vendor/libkrunfw/kernel.c
+
   # ---------------------------------------------------------------------------
-  # Build agentd on Linux for macOS packaging
+  # Build agentd on Linux for host packages that cannot build the guest binary natively
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -83,6 +117,36 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  build-agentd-x86_64:
+    name: Build agentd (x86_64-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
           path: build/agentd
 
   # ---------------------------------------------------------------------------
@@ -129,7 +193,7 @@ jobs:
             npm_dir: darwin-arm64
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -164,7 +228,7 @@ jobs:
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
         id: cache-libkrunfw
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: build/libkrunfw*
           key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -332,14 +396,121 @@ jobs:
           path: artifacts/
 
   # ---------------------------------------------------------------------------
+  # Build Windows release bundles
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-aarch64
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+            msb_asset: msb-windows-aarch64.exe
+            msb_metrics_asset: msb-metrics-windows-aarch64.exe
+            libkrunfw_asset: libkrunfw-windows-aarch64.dll
+          - target: windows-x86_64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+            msb_asset: msb-windows-x86_64.exe
+            msb_metrics_asset: msb-metrics-windows-x86_64.exe
+            libkrunfw_asset: libkrunfw-windows-x86_64.dll
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Download kernel.c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.kernel_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+
+      - name: Build msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
+
+      - name: Build msb-metrics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo build --release -p microsandbox-metrics-collector --target ${{ matrix.rust_target }}
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item target\${{ matrix.rust_target }}\release\msb-metrics.exe build\msb-metrics.exe -Force
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item build\msb.exe artifacts\${{ matrix.msb_asset }} -Force
+          Copy-Item build\msb-metrics.exe artifacts\${{ matrix.msb_metrics_asset }} -Force
+          Copy-Item build\libkrunfw.dll artifacts\${{ matrix.libkrunfw_asset }} -Force
+          Compress-Archive -Path build\msb.exe, build\libkrunfw.dll -DestinationPath artifacts\microsandbox-${{ matrix.target }}.zip -Force
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: artifacts/
+
+  # ---------------------------------------------------------------------------
   # Assemble: collect all artifacts, generate checksums, create GitHub release
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -351,6 +522,10 @@ jobs:
       - name: Copy install script
         if: hashFiles('scripts/install.sh') != ''
         run: cp scripts/install.sh release-artifacts/install.sh
+
+      - name: Copy Windows install script
+        if: hashFiles('scripts/install.ps1') != ''
+        run: cp scripts/install.ps1 release-artifacts/install.ps1
 
       - name: Generate checksums
         working-directory: release-artifacts
@@ -391,7 +566,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: mintlify
           fetch-depth: 0
@@ -453,7 +628,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -543,7 +718,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
 
@@ -577,7 +752,7 @@ jobs:
     needs: npm-publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -604,7 +779,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -648,7 +823,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/microsandbox
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
@@ -686,7 +861,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
@@ -758,7 +933,7 @@ jobs:
             msb_asset: msb-linux-aarch64
             libkrunfw_asset: libkrunfw-linux-aarch64.so
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

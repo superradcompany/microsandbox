@@ -205,7 +205,7 @@ impl PassthroughFsBuilder {
 
         let quota = cfg
             .quota_bytes
-            .map(|limit| super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+            .map(|limit| super::super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
 
         Ok(PassthroughFs {
             cfg,

@@ -318,9 +318,20 @@ impl JsSandboxBuilder {
         self
     }
 
-    // `libkrunfwPath` is a process-level concern (one dylib per process
-    // address space), not a per-sandbox builder method. Users set it once via
-    // `microsandbox.setLibkrunfwPath(...)` or the `MSB_LIBKRUNFW_PATH` env var.
+    /// Deprecated compatibility setter for older Node SDK callers.
+    ///
+    /// The libkrunfw path is a process-level concern (one dylib per process
+    /// address space), not a per-sandbox builder setting. Keep this chainable
+    /// alias so pre-backend-split code still compiles, but route it through the
+    /// same process-wide override as `microsandbox.setRuntimeLibkrunfwPath(...)`.
+    #[napi(js_name = "libkrunfwPath")]
+    pub fn libkrunfw_path(&mut self, path: String) -> Result<&Self> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        microsandbox::config::set_sdk_libkrunfw_path(path);
+        Ok(self)
+    }
 
     /// Default running user.
     #[napi]

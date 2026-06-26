@@ -232,13 +232,24 @@ impl SandboxHandle {
         &self,
         opts: &crate::logs::LogOptions,
     ) -> MicrosandboxResult<Vec<crate::logs::LogEntry>> {
-        if self.backend.as_local().is_none() {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::logs on cloud".into(),
-                available_when: "when cloud logs land".into(),
-            });
-        }
-        crate::logs::read_logs(&self.name, opts).await
+        self.backend
+            .sandboxes()
+            .logs(self.backend.clone(), &self.name, opts)
+            .await
+    }
+
+    /// Stream captured output for this sandbox.
+    ///
+    /// Same backing data as [`Sandbox::log_stream`](super::Sandbox::log_stream).
+    /// Works without starting the sandbox.
+    pub async fn log_stream(
+        &self,
+        opts: &crate::logs::LogStreamOptions,
+    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+        self.backend
+            .sandboxes()
+            .log_stream(self.backend.clone(), &self.name, opts)
+            .await
     }
 
     /// Get the latest metrics snapshot for this sandbox. **Local handles only**.
@@ -523,9 +534,19 @@ impl SandboxHandle {
     /// backend trait so cloud handles hit `DELETE /v1/sandboxes/by-name/:name`.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
         match &self.inner {
-            SandboxHandleInner::Local(local) => {
-                if local.status == SandboxStatus::Running || local.status == SandboxStatus::Draining
-                {
+            SandboxHandleInner::Local(_) => {
+                let refreshed = self.refresh().await?;
+                let local =
+                    refreshed
+                        .local()
+                        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                            feature: "SandboxHandle::remove on cloud".into(),
+                            available_when: "wired via Cloud variant".into(),
+                        })?;
+                if matches!(
+                    local.status,
+                    SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+                ) {
                     return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                         "cannot remove sandbox '{}': still running",
                         self.name

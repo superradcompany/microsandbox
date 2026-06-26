@@ -15,11 +15,18 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
-use std::collections::HashMap;
-use std::num::NonZero;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    num::NonZero,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+#[cfg(unix)]
+use std::{
+    fs::{File, OpenOptions},
+    os::fd::AsRawFd,
+};
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait};
@@ -75,6 +82,11 @@ pub struct LocalBackendBuilder {
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
+}
+
+struct MigrationLock {
+    #[cfg(unix)]
+    file: File,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -399,6 +411,36 @@ impl LocalBackendBuilder {
     }
 }
 
+impl MigrationLock {
+    #[cfg(unix)]
+    fn acquire(path: PathBuf) -> MicrosandboxResult<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|err| {
+                MicrosandboxError::Runtime(format!("open migration lock {}: {err}", path.display()))
+            })?;
+
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(MicrosandboxError::Runtime(format!(
+                "lock migration file {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(Self { file })
+    }
+
+    #[cfg(not(unix))]
+    fn acquire(_path: PathBuf) -> MicrosandboxResult<Self> {
+        Ok(Self {})
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -433,6 +475,13 @@ impl From<LocalBackend> for Arc<dyn Backend> {
     }
 }
 
+#[cfg(unix)]
+impl Drop for MigrationLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -446,6 +495,7 @@ async fn connect_and_migrate(
     database: &DatabaseConfig,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
+    let _migration_lock = acquire_migration_lock(db_dir).await?;
 
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
     let pools = DbPools::open(
@@ -460,6 +510,16 @@ async fn connect_and_migrate(
     Migrator::up(pools.write().inner(), None).await?;
 
     Ok(pools)
+}
+
+async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLock> {
+    let path = db_dir.join(format!(
+        "{}.migration.lock",
+        microsandbox_utils::DB_FILENAME
+    ));
+    tokio::task::spawn_blocking(move || MigrationLock::acquire(path))
+        .await
+        .map_err(|err| MicrosandboxError::Runtime(format!("migration lock task failed: {err}")))?
 }
 
 //--------------------------------------------------------------------------------------------------

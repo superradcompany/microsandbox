@@ -5,7 +5,7 @@ icon: "bolt"
 ---
 
 <Note>
-  microsandbox requires **Linux with KVM** enabled, or **macOS with Apple Silicon** (M-series chip). Both use hardware virtualization.
+  microsandbox requires **Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization.
 </Note>
 
 <Tip>
@@ -44,6 +44,34 @@ icon: "bolt"
     </CodeGroup>
 
     The CLI installer creates command links in `~/.local/bin/` and does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it.
+
+    <Note>
+      Windows support is currently in preview. A Windows MSI or winget package is not published yet; use the PowerShell installer from the latest GitHub release:
+
+      ```powershell
+      irm https://github.com/superradcompany/microsandbox/releases/latest/download/install.ps1 | iex
+      ```
+    </Note>
+
+    On Windows, run the doctor check before starting local sandboxes:
+
+    ```powershell
+    msb doctor
+    ```
+
+    If it reports that Windows Hypervisor Platform is unavailable, let `msb` open the elevated fix prompt:
+
+    ```powershell
+    msb doctor --fix
+    ```
+
+    You can also enable the optional feature manually from an elevated PowerShell:
+
+    ```powershell
+    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
+    ```
+
+    Reboot after the command completes. `HypervisorPlatform` exposes the WHP API used by libkrun; it is separate from `VirtualMachinePlatform`, which Docker Desktop and WSL2 commonly enable. See [Windows troubleshooting](/getting-started/windows-troubleshooting) for the full checklist.
   </Step>
 
   <Step title="Run code in a sandbox">
@@ -143,6 +171,7 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
 ## Next steps
 
 - [Understand sandbox configuration](/sandboxes/overview): resources, images, volumes, and lifecycle
+- [Troubleshoot Windows setup](/getting-started/windows-troubleshooting): WHP, runtime files, firewall prompts, and source-build toolchains
 - [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
 - [Control network access](/networking/overview): policies, DNS interception, and secret protection
 - [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

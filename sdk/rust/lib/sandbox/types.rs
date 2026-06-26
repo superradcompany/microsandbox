@@ -400,13 +400,35 @@ impl MountBuilder {
         }
         if self.stat_virtualization.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".stat_virtualization() is only valid for bind and named volume mounts".into(),
+                ".stat_virtualization() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
         }
         if self.host_permissions.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".host_permissions() is only valid for bind and named volume mounts".into(),
+                ".host_permissions() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
+        }
+        if let MountKind::Named {
+            name,
+            create: Some(create),
+        } = &self.mount
+            && create.kind() == VolumeKind::Disk
+        {
+            // Disk-backed named volumes are passed to the VMM as block
+            // devices, so virtiofs-only policies are invalid even when the
+            // caller explicitly sets the same values as the defaults.
+            if self.stat_virtualization.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "stat_virtualization is only valid for directory named volumes: {name}"
+                )));
+            }
+            if self.host_permissions.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "host_permissions is only valid for directory named volumes: {name}"
+                )));
+            }
         }
 
         // `Off + Mirror` is a contradiction. With xattr disabled there is no
@@ -436,29 +458,9 @@ impl MountBuilder {
                 // `tag:host[:opts]`. Embedded separators in the host
                 // path would collide with that grammar and could
                 // silently inject policy options. Reject at the SDK
-                // boundary so callers get a clear error rather than a
-                // confusing parse failure later.
-                if let Some(s) = host.to_str() {
-                    if s.contains(',') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ',': {s}"
-                        )));
-                    }
-                    if s.contains(':') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ':': {s}"
-                        )));
-                    }
-                    if s.contains(';') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ';': {s}"
-                        )));
-                    }
-                } else {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "bind host path must be valid UTF-8".into(),
-                    ));
-                }
+                // boundary so callers get a clear error. Windows drive
+                // prefixes are the one allowed colon shape.
+                validate_host_path_wire_safe(&host, "bind host path")?;
                 VolumeMount::Bind {
                     host,
                     guest: self.guest,
@@ -831,11 +833,19 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             guest,
             stat_virtualization,
             host_permissions,
+            create,
             ..
         } => {
             validate_guest_mount_path(guest)?;
             crate::volume::validate_volume_name(name)?;
-            validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            if create
+                .as_ref()
+                .is_some_and(|create| create.kind() == VolumeKind::Disk)
+            {
+                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+            } else {
+                validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            }
         }
         VolumeMount::Tmpfs { guest, .. } => {
             validate_guest_mount_path(guest)?;
@@ -882,12 +892,28 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
         )));
     };
 
-    if path.contains(',') || path.contains(':') || path.contains(';') {
+    if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
         )));
     }
     Ok(())
+}
+
+fn has_forbidden_host_path_colon(path: &str) -> bool {
+    path.char_indices().any(|(index, c)| {
+        c == ':' && {
+            #[cfg(windows)]
+            {
+                !microsandbox_utils::is_windows_drive_separator_at(path, index)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = index;
+                true
+            }
+        }
+    })
 }
 
 fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {
@@ -917,6 +943,24 @@ fn validate_virtiofs_policies(
              Drop one or the other."
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_named_disk_mount_options(
+    name: &str,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) -> crate::MicrosandboxResult<()> {
+    if stat_virtualization != StatVirtualization::Strict {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "stat_virtualization is only valid for directory named volumes: {name}"
+        )));
+    }
+    if host_permissions != HostPermissions::Private {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "host_permissions is only valid for directory named volumes: {name}"
+        )));
     }
     Ok(())
 }
@@ -1095,6 +1139,51 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_rejects_named_disk_virtiofs_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_stat_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Strict)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_host_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .host_permissions(HostPermissions::Private)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn test_mount_builder_rejects_invalid_named_volume() {
         let err = MountBuilder::new("/data")
             .named("cache/../../secrets")
@@ -1149,6 +1238,30 @@ mod tests {
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
         assert!(err.to_string().contains("disk image host path"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_volume_mounts_accepts_windows_drive_host_paths() {
+        let mounts = vec![
+            VolumeMount::Bind {
+                host: PathBuf::from(r"C:\Users\Stephen\data"),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+                quota_mib: None,
+            },
+            VolumeMount::DiskImage {
+                host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
+                guest: "/disk".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        validate_volume_mounts(&mounts).unwrap();
     }
 
     #[test]

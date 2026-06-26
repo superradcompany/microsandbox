@@ -203,6 +203,32 @@ describe("MountBuilder", () => {
     });
   });
 
+  it("preserves namedWith disk creation metadata in the flat mount shape", () => {
+    const m = new MountBuilder("/var/lib/docker")
+      .namedWith("docker-data", "ensure-exists", "disk", 10240)
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "docker-data",
+      namedMode: "ensure-exists",
+      namedKind: "disk",
+      sizeMib: 10240,
+    });
+  });
+
+  it("preserves namedWith directory quota metadata in the flat mount shape", () => {
+    const m = new MountBuilder("/cache")
+      .namedWith("build-cache", "create", "dir", undefined, 512)
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "build-cache",
+      namedMode: "create",
+      namedKind: "dir",
+      quotaMib: 512,
+    });
+  });
+
   it("rejects unknown stat-virt strings at the FFI boundary", () => {
     expect(() =>
       new MountBuilder("/data").bind("/host").statVirtualization("bogus"),
@@ -306,6 +332,11 @@ describe("SandboxBuilder.build", () => {
       .ephemeral(true)
       .build();
     expect((cfg.lifecycle as { ephemeral: boolean }).ephemeral).toBe(true);
+  });
+
+  it("keeps libkrunfwPath as a chainable compatibility alias", async () => {
+    const builder = Sandbox.builder("x");
+    expect(builder.libkrunfwPath("/tmp/libkrunfw.dylib")).toBe(builder);
   });
 
   it("invalid volume invocations defer to .build() / .create()", async () => {

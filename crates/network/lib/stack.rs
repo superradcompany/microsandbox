@@ -10,6 +10,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+#[cfg(windows)]
+use msb_krun_utils::event::{EventSet, EventSource, WaitContext, WaitEvent};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant;
 
@@ -35,6 +37,16 @@ use crate::secrets::config::SecretsConfig;
 use crate::shared::SharedState;
 use crate::tls::{proxy as tls_proxy, state::TlsState};
 use crate::udp_relay::UdpRelay;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+const TX_WAKE_TOKEN: u64 = 1;
+
+#[cfg(windows)]
+const PROXY_WAKE_TOKEN: u64 = 2;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -171,8 +183,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// 2. **smoltcp egress + maintenance** — transmit queued packets, run timers.
 /// 3. **Service connections** — relay data between smoltcp sockets and proxy
 ///    tasks (added by later tasks).
-/// 4. **Sleep** — `poll(2)` on `tx_wake` + `proxy_wake` pipes with smoltcp's
-///    requested timeout.
+/// 4. **Sleep** — wait on `tx_wake` + `proxy_wake` with smoltcp's requested
+///    timeout.
 ///
 /// # Arguments
 ///
@@ -265,7 +277,8 @@ pub fn smoltcp_poll_loop(
     // Rate-limit cleanup operations: run at most once per second.
     let mut last_cleanup = std::time::Instant::now();
 
-    // poll(2) file descriptors for sleeping.
+    // Wake sources for sleeping.
+    #[cfg(unix)]
     let mut poll_fds = [
         libc::pollfd {
             fd: shared.tx_wake.as_raw_fd(),
@@ -278,6 +291,14 @@ pub fn smoltcp_poll_loop(
             revents: 0,
         },
     ];
+    #[cfg(windows)]
+    let wait_context = match windows_stack_wait_context(&shared) {
+        Ok(context) => context,
+        Err(err) => {
+            tracing::error!(error = %err, "network poll loop: failed to create wait context");
+            return;
+        }
+    };
 
     loop {
         let now = smoltcp_now();
@@ -559,28 +580,73 @@ pub fn smoltcp_poll_loop(
             .map(|d| d.total_millis().min(i32::MAX as u64) as i32)
             .unwrap_or(100); // 100ms fallback when no timers pending.
 
-        // SAFETY: poll_fds is a valid array of pollfd structs with valid fds.
-        unsafe {
-            libc::poll(
-                poll_fds.as_mut_ptr(),
-                poll_fds.len() as libc::nfds_t,
-                timeout_ms,
-            );
-        }
-
-        // Conditional drain: only drain pipes that actually have data.
-        if poll_fds[0].revents & libc::POLLIN != 0 {
-            shared.tx_wake.drain();
-        }
-        if poll_fds[1].revents & libc::POLLIN != 0 {
-            shared.proxy_wake.drain();
-        }
+        #[cfg(unix)]
+        sleep_until_stack_wake(&shared, timeout_ms, &mut poll_fds);
+        #[cfg(windows)]
+        sleep_until_stack_wake_windows(&shared, timeout_ms, &wait_context);
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn sleep_until_stack_wake(shared: &SharedState, timeout_ms: i32, poll_fds: &mut [libc::pollfd; 2]) {
+    // SAFETY: poll_fds is a valid array of pollfd structs with valid fds.
+    unsafe {
+        libc::poll(
+            poll_fds.as_mut_ptr(),
+            poll_fds.len() as libc::nfds_t,
+            timeout_ms,
+        );
+    }
+
+    if poll_fds[0].revents & libc::POLLIN != 0 {
+        shared.tx_wake.drain();
+    }
+    if poll_fds[1].revents & libc::POLLIN != 0 {
+        shared.proxy_wake.drain();
+    }
+}
+
+#[cfg(windows)]
+fn windows_stack_wait_context(shared: &SharedState) -> std::io::Result<WaitContext> {
+    let mut context = WaitContext::new();
+    context.add(
+        EventSource::waitable_handle(shared.tx_wake.as_raw_handle(), TX_WAKE_TOKEN),
+        EventSet::IN,
+    )?;
+    context.add(
+        EventSource::waitable_handle(shared.proxy_wake.as_raw_handle(), PROXY_WAKE_TOKEN),
+        EventSet::IN,
+    )?;
+    Ok(context)
+}
+
+#[cfg(windows)]
+fn sleep_until_stack_wake_windows(
+    shared: &SharedState,
+    timeout_ms: i32,
+    wait_context: &WaitContext,
+) {
+    let mut events = [WaitEvent::default(); 2];
+    let count = match wait_context.wait(timeout_ms, &mut events) {
+        Ok(count) => count,
+        Err(err) => {
+            tracing::warn!(error = %err, "network poll loop: wait failed");
+            return;
+        }
+    };
+
+    for event in events.iter().take(count) {
+        match event.token() {
+            TX_WAKE_TOKEN => shared.tx_wake.drain(),
+            PROXY_WAKE_TOKEN => shared.proxy_wake.drain(),
+            token => tracing::warn!(token, "network poll loop: unknown wake token"),
+        }
+    }
+}
 
 /// Map a guest-wire destination to its host-socket equivalent.
 ///

@@ -4,10 +4,14 @@
 //! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
 //! — the VMM calls `_exit()` on guest shutdown.
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::{os::fd::FromRawFd, os::fd::OwnedFd};
 
 use clap::Args;
@@ -42,12 +46,19 @@ pub struct SandboxArgs {
     pub log_level: Option<LogLevel>,
 
     /// Read end of the attached-parent watchdog pipe.
+    #[cfg(unix)]
     #[arg(long = "parent-watch-fd", hide = true)]
     pub parent_watch_fd: Option<i32>,
 
     /// Write end of the startup JSON pipe.
+    #[cfg(unix)]
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
+
+    /// Windows named pipe used to write startup JSON.
+    #[cfg(windows)]
+    #[arg(long = "startup-pipe", hide = true)]
+    pub startup_pipe: Option<String>,
 
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
@@ -62,6 +73,7 @@ pub struct SandboxArgs {
     pub memory_mib: u32,
 
     /// Inherited fd carrying the JSON [`LaunchConfig`] (set by the SDK).
+    #[cfg(unix)]
     #[arg(long = "config-fd", hide = true)]
     pub config_fd: Option<i32>,
 
@@ -97,6 +109,7 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    #[cfg(unix)]
     let parent_watchdog = match args
         .parent_watch_fd
         .map(parent_watchdog_from_fd)
@@ -108,6 +121,7 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    #[cfg(unix)]
     let startup_fd = match args.startup_fd.map(startup_from_fd).transpose() {
         Ok(fd) => fd,
         Err(err) => {
@@ -144,6 +158,7 @@ pub fn run(args: SandboxArgs) -> ! {
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
         mounts: launch.mounts,
         disks,
+        #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
         env: launch.env,
@@ -167,7 +182,11 @@ pub fn run(args: SandboxArgs) -> ! {
         sandboxes_dir: launch.sandboxes_dir,
         agent_sock_path: launch.agent_sock,
         startup_command: launch.startup,
+        #[cfg(unix)]
         startup_fd,
+        #[cfg(windows)]
+        startup_pipe: args.startup_pipe,
+        #[cfg(unix)]
         parent_watchdog,
         forward_output: args.forward_output,
         idle_timeout_secs: launch.lifecycle.idle_timeout_secs,
@@ -192,6 +211,7 @@ pub fn run(args: SandboxArgs) -> ! {
 /// paths — to an inherited fd, so they no longer appear in `ps` or
 /// `/proc/<pid>/cmdline`. See issue #997.
 fn load_launch_config(args: &SandboxArgs) -> Result<LaunchConfig, String> {
+    #[cfg(unix)]
     let bytes = match (args.config_fd, &args.config_file) {
         (Some(fd), _) => read_config_fd(fd)?,
         (None, Some(path)) => std::fs::read(path)
@@ -200,11 +220,18 @@ fn load_launch_config(args: &SandboxArgs) -> Result<LaunchConfig, String> {
             return Err("missing --config-fd or --config-file for `msb sandbox`".to_string());
         }
     };
+    #[cfg(windows)]
+    let bytes = match &args.config_file {
+        Some(path) => std::fs::read(path)
+            .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
+        None => return Err("missing --config-file for `msb sandbox`".to_string()),
+    };
     serde_json::from_slice(&bytes).map_err(|e| format!("invalid launch config: {e}"))
 }
 
 /// Read the full contents of the inherited config fd, taking ownership so it
 /// is closed once consumed.
+#[cfg(unix)]
 fn read_config_fd(fd: i32) -> Result<Vec<u8>, String> {
     if fd < 0 {
         return Err(format!(
@@ -218,6 +245,7 @@ fn read_config_fd(fd: i32) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
     validate_pipe_fd(
         fd,
@@ -227,11 +255,13 @@ fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+#[cfg(unix)]
 fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
     validate_pipe_fd(fd, microsandbox_runtime::vm::STARTUP_FD, "startup-fd")?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+#[cfg(unix)]
 fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
     if fd < 0 {
         return Err(format!(
@@ -284,39 +314,30 @@ fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
 }
 
 fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 3 || parts.len() > 4 {
-        return Err(format!(
-            "invalid --disk entry, expected id:host:format[:ro], got: {entry:?}"
-        ));
-    }
-
-    let id = parts[0];
+    let (id, rest) = entry.split_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
     if id.is_empty() {
         return Err(format!("invalid --disk entry with empty id: {entry:?}"));
     }
-    let host = parts[1];
+
+    let (rest, readonly) = match rest.strip_suffix(":ro") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let (host, fmt_str) = rest.rsplit_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
     if host.is_empty() {
         return Err(format!(
             "invalid --disk entry with empty host path: {entry:?}"
         ));
     }
-    let fmt_str = parts[2];
     let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
         Ok(f) => f,
         Err(_) => {
             return Err(format!(
                 "invalid --disk entry with unknown format {fmt_str:?}: {entry:?}"
-            ));
-        }
-    };
-
-    let readonly = match parts.get(3) {
-        None => false,
-        Some(&"ro") => true,
-        Some(&other) => {
-            return Err(format!(
-                "invalid --disk entry with unknown flag {other:?} (expected 'ro'): {entry:?}"
             ));
         }
     };
@@ -333,6 +354,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     use super::*;
@@ -356,6 +378,15 @@ mod tests {
     #[test]
     fn test_parse_one_disk_arg_with_ro() {
         let spec = parse_one_disk_arg("seed:/host/seed.raw:raw:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(format!("{:?}", spec.format), fmt("raw"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_one_disk_arg_with_windows_drive_path() {
+        let spec = parse_one_disk_arg(r"seed:C:\Users\Stephen\seed.raw:raw:ro").unwrap();
+        assert_eq!(spec.host, PathBuf::from(r"C:\Users\Stephen\seed.raw"));
         assert!(spec.readonly);
         assert_eq!(format!("{:?}", spec.format), fmt("raw"));
     }
@@ -419,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_negative_fd() {
         let err = validate_pipe_fd(
             -1,
@@ -431,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_wrong_fd_number() {
         let err = validate_pipe_fd(
             0,
@@ -443,6 +476,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_rejects_regular_file() {
         let file = tempfile::tempfile().unwrap();
         let fd = file.as_raw_fd();
@@ -453,6 +487,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_parent_watchdog_fd_accepts_pipe() {
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
@@ -465,15 +500,23 @@ mod tests {
     /// Build a `SandboxArgs` carrying only a config source; the rest is unused
     /// by `load_launch_config`.
     fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> SandboxArgs {
+        #[cfg(not(unix))]
+        let _ = config_fd;
+
         SandboxArgs {
             sandbox_name: "test".to_string(),
             sandbox_id: 1,
             log_level: None,
+            #[cfg(unix)]
             parent_watch_fd: None,
+            #[cfg(unix)]
             startup_fd: None,
+            #[cfg(windows)]
+            startup_pipe: None,
             forward_output: false,
             vcpus: 1,
             memory_mib: 512,
+            #[cfg(unix)]
             config_fd,
             config_file,
         }
@@ -500,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_load_launch_config_from_fd() {
         use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::IntoRawFd;
@@ -527,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_load_launch_config_rejects_negative_fd() {
         let err = load_launch_config(&args_with(Some(-1), None)).unwrap_err();
         assert!(err.contains("config-fd"));

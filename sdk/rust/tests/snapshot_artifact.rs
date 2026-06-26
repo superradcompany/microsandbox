@@ -496,6 +496,7 @@ async fn import_rejects_symlink_entries_without_writing_outside_dest() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn import_does_not_follow_preexisting_symlink_parent() {
     let tmp = TempDir::new().unwrap();

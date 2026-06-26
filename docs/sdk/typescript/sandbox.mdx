@@ -79,6 +79,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()`. Use `.detached(true)` before `.create()` for detached/background mode. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
+`libkrunfw` selection is process-level, not per sandbox. To use a custom library, call `setRuntimeLibkrunfwPath(path)` before creating local sandboxes, set `MSB_LIBKRUNFW_PATH`, or configure `paths.libkrunfw`.
+
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript
@@ -1106,6 +1108,26 @@ Set the guest hostname.
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">libkrunfwPath()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag">deprecated</span></div>
+
+```typescript
+libkrunfwPath(path: string): this
+```
+
+Deprecated compatibility alias for older builder chains. This sets the same process-level override as `setRuntimeLibkrunfwPath(path)` and returns the builder; it is not a per-sandbox setting.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to the libkrunfw shared library.</div>
+  </div>
+</div>
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">idleTimeout()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
@@ -1288,28 +1310,6 @@ Attach many labels at once.
     <div className="msb-param-desc">Map of label keys to values.</div>
   </div>
 </div>
-
----
-
-#### <span className="msb-recv">.</span><span className="msb-hn">libkrunfwPath()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
-
-```typescript
-libkrunfwPath(path: string): this
-```
-
-Override the path to the `libkrunfw` library used to boot the microVM. Rarely needed; set it only when running against a custom or non-default libkrunfw build.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Filesystem path to the <code>libkrunfw</code> library.</div>
-  </div>
-</div>
-
----
 
 #### <span className="msb-recv">.</span><span className="msb-hn">logLevel()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>

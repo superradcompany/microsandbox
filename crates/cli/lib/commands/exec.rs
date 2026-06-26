@@ -101,10 +101,11 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Resolve the command using the same OCI-aware logic as `msb run`:
-    // user command > entrypoint [+ cmd] > cmd > config.spec.runtime.shell > /bin/sh.
+    // Resolve the command with exec semantics: an explicit command runs
+    // directly, while omitted commands can still fall back to the sandbox's
+    // configured image command/default shell.
     let (cmd, cmd_args) =
-        match super::common::resolve_command(sandbox.config(), args.command, interactive)? {
+        match super::common::resolve_exec_command(sandbox.config(), args.command, interactive)? {
             (Some(cmd), cmd_args) => (cmd, cmd_args),
             (None, _) => {
                 super::maybe_stop(&sandbox).await;

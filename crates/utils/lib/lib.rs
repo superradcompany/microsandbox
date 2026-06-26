@@ -3,6 +3,7 @@
 pub mod copy;
 pub mod format;
 pub mod log_text;
+pub mod process;
 pub mod size;
 pub mod ttl_reverse_index;
 pub mod wake_pipe;
@@ -172,8 +173,19 @@ pub fn resolve_home() -> std::path::PathBuf {
 pub fn libkrunfw_filename(os: &str) -> String {
     if os == "macos" {
         format!("libkrunfw.{LIBKRUNFW_ABI}.dylib")
+    } else if os == "windows" {
+        "libkrunfw.dll".to_string()
     } else {
         format!("libkrunfw.so.{LIBKRUNFW_VERSION}")
+    }
+}
+
+/// Returns the platform-specific msb executable filename.
+pub fn msb_binary_filename(os: &str) -> String {
+    if os == "windows" {
+        format!("{MSB_BINARY}.exe")
+    } else {
+        MSB_BINARY.to_string()
     }
 }
 
@@ -181,6 +193,8 @@ pub fn libkrunfw_filename(os: &str) -> String {
 pub fn libkrunfw_download_url(version: &str, arch: &str, os: &str) -> String {
     let (target_os, ext) = if os == "macos" {
         ("darwin", "dylib")
+    } else if os == "windows" {
+        ("windows", "dll")
     } else {
         ("linux", "so")
     };
@@ -199,7 +213,13 @@ pub fn agentd_download_url(version: &str, arch: &str) -> String {
 
 /// Returns the GitHub release download URL for the microsandbox bundle tarball.
 pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
-    let target_os = if os == "macos" { "darwin" } else { "linux" };
+    let target_os = if os == "macos" {
+        "darwin"
+    } else if os == "windows" {
+        "windows"
+    } else {
+        "linux"
+    };
     format!(
         "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{MICROSANDBOX_REPO}-{target_os}-{arch}.tar.gz"
     )
@@ -221,7 +241,40 @@ pub fn http_client() -> ureq::Agent {
 /// Returns true when a user-provided text value should be interpreted as a
 /// local filesystem path rather than a named resource or OCI reference.
 pub fn looks_like_local_path_text(s: &str) -> bool {
-    s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../")
+    if s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        s.starts_with(".\\")
+            || s.starts_with("..\\")
+            || s.starts_with('\\')
+            || is_windows_drive_path_text(s)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Returns true when `s` starts with a Windows drive-rooted path prefix.
+pub fn is_windows_drive_path_text(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+/// Returns true when the colon at `index` is the drive separator in a Windows path.
+pub fn is_windows_drive_separator_at(s: &str, index: usize) -> bool {
+    let bytes = s.as_bytes();
+    index == 1
+        && bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -259,5 +312,14 @@ mod tests {
             metrics_registry_shm_name(home, 2),
             format!("{}-{}-v2", METRICS_SHM_PREFIX, stable_hash_path(home))
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_looks_like_local_path_text_accepts_windows_paths() {
+        assert!(looks_like_local_path_text(r"C:\Users\Stephen\file.txt"));
+        assert!(looks_like_local_path_text(r".\relative"));
+        assert!(looks_like_local_path_text(r"\\server\share\file.txt"));
+        assert!(!looks_like_local_path_text("alpine"));
     }
 }
