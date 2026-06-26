@@ -44,8 +44,6 @@ use windows_sys::Win32::Foundation::{
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
 };
 #[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-#[cfg(windows)]
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -1456,22 +1454,27 @@ fn lock_disk_image_unix(
 #[cfg(windows)]
 fn lock_disk_image_windows(
     path: &Path,
-    readonly: bool,
+    _readonly: bool,
     volume_name: Option<&str>,
 ) -> MicrosandboxResult<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    if readonly {
-        options.share_mode(FILE_SHARE_READ);
-    } else {
-        options.write(true).share_mode(0);
+    let lock_path = windows_disk_lock_path(path)?;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
-    options.open(path).map_err(|err| {
-        let message = if matches!(
-            err.kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
-        ) {
+    // Windows share modes are mandatory. Holding an exclusive handle on the
+    // disk image itself would also block the child VMM from opening it, so use
+    // a sidecar lock file while leaving the image handle-free until launch.
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .share_mode(0);
+
+    options.open(&lock_path).map_err(|err| {
+        let message = if is_windows_lock_conflict(&err) {
             match volume_name {
                 Some(name) => {
                     format!("volume {name:?} is already attached with an incompatible disk mode")
@@ -1486,6 +1489,28 @@ fn lock_disk_image_windows(
         };
         MicrosandboxError::InvalidConfig(message)
     })
+}
+
+#[cfg(windows)]
+fn windows_disk_lock_path(path: &Path) -> MicrosandboxResult<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(format!(
+            "disk image path has no file name: {}",
+            path.display()
+        ))
+    })?;
+
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    Ok(path.with_file_name(lock_name))
+}
+
+#[cfg(windows)]
+fn is_windows_lock_conflict(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+    ) || err.raw_os_error() == Some(32)
 }
 
 #[cfg(unix)]
@@ -3823,6 +3848,28 @@ mod tests {
 
         let err = super::lock_disk_mounts(&config, &named_volumes).unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_lock_disk_image_windows_uses_sidecar_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let _lock = super::lock_disk_image_windows(&disk, false, Some("data")).unwrap();
+        let _disk_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&disk)
+            .unwrap();
+
+        let lock_path = super::windows_disk_lock_path(&disk).unwrap();
+        assert_eq!(lock_path.file_name().unwrap(), "disk.raw.lock");
+        assert!(lock_path.exists());
+
+        let err = super::lock_disk_image_windows(&disk, false, Some("data")).unwrap_err();
+        assert!(err.to_string().contains("already attached"));
     }
 
     #[tokio::test]

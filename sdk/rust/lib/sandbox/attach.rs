@@ -347,7 +347,9 @@ pub(crate) mod local {
                             }
 
                             let payload = ExecStdin { data: data.to_vec() };
-                            let _ = client.send(id, MessageType::ExecStdin, &payload).await;
+                            if client.send(id, MessageType::ExecStdin, &payload).await.is_err() {
+                                break;
+                            }
                         }
                         Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Ok(Err(_)) => break,
@@ -355,7 +357,11 @@ pub(crate) mod local {
                     }
                 }
 
-                Some(msg) = rx.recv() => {
+                msg = rx.recv() => {
+                    let Some(msg) = msg else {
+                        break;
+                    };
+
                     let mut should_break = false;
 
                     match msg.t {

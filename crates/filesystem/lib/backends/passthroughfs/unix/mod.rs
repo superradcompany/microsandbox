@@ -149,6 +149,12 @@ pub struct PassthroughConfig {
 
     /// Optional user-volume identity map for host metadata fallback.
     pub bind_identity_map: Option<stat_override::BindIdentityMapHandle>,
+
+    /// Optional guest-write byte budget for this mount's subtree.
+    ///
+    /// `None` means unbounded. When set, guest-attributable growth past this
+    /// many bytes is rejected with `ENOSPC`.
+    pub quota_bytes: Option<u64>,
 }
 
 /// Passthrough filesystem backend.
@@ -193,6 +199,9 @@ pub struct PassthroughFs {
     /// after first rejecting real host symlinks on the pinned inode.
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
+
+    /// Optional guest-write byte budget for this mount's subtree.
+    pub(crate) quota: Option<super::quota::DirQuota>,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -288,6 +297,10 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        let quota = cfg
+            .quota_bytes
+            .map(|limit| super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+
         Ok(Self {
             cfg,
             root_fd,
@@ -302,6 +315,7 @@ impl PassthroughFs {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            quota,
         })
     }
 }
@@ -401,6 +415,24 @@ impl PassthroughFs {
     pub(crate) fn is_virtual_init_inode(&self, inode: u64) -> bool {
         self.injects_init() && inode == init_binary::INIT_INODE
     }
+
+    /// Charge the quota for growing an open file to `new_end` bytes.
+    pub(crate) fn quota_charge_to(&self, fd: std::os::fd::RawFd, new_end: u64) -> io::Result<()> {
+        if let Some(quota) = &self.quota {
+            quota.charge(new_end.saturating_sub(super::quota::fd_size(fd)))?;
+        }
+        Ok(())
+    }
+
+    /// Capture the quota baseline now if it has not been captured yet.
+    ///
+    /// The first write-intent operation pays the one-time directory walk so
+    /// pre-existing host files become baseline instead of guest growth.
+    pub(crate) fn quota_ensure_baseline(&self) {
+        if let Some(quota) = &self.quota {
+            quota.ensure_baseline();
+        }
+    }
 }
 
 impl PassthroughConfig {
@@ -444,6 +476,7 @@ impl Default for PassthroughConfig {
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
+            quota_bytes: None,
         }
     }
 }

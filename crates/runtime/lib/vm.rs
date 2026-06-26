@@ -446,6 +446,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
 
+    let shutdown_flush_timeout = guest_shutdown_flush_timeout(config.vm.init_path.is_some());
+
     // Create console shared state (ring buffers + wake pipes).
     let shared = Arc::new(ConsoleSharedState::new());
     let console_backend = AgentConsoleBackend::new(Arc::clone(&shared));
@@ -673,6 +675,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 Arc::clone(&exit_reason),
                 exit_handle.clone(),
                 config.sandbox_name.clone(),
+                shutdown_flush_timeout,
             )
         {
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
@@ -815,12 +818,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     });
 
     // Shutdown listener: when the relay forwards a `core.shutdown` frame to
-    // agentd, we give the guest a window to flush block-backed roots and
-    // power off cleanly. If the VM doesn't exit on its own within
-    // `SHUTDOWN_FLUSH_TIMEOUT`, the host triggers exit as a fallback so a
-    // wedged guest doesn't strand the VMM. The window's relationship to
-    // agentd's internal `HANDOFF_POWEROFF_TIMEOUT` is enforced at compile
-    // time in microsandbox-protocol.
+    // agentd, we give the guest a mode-specific window to flush block-backed
+    // roots and power off cleanly. Normal agentd-as-PID1 sandboxes use a short
+    // fallback; handoff-init sandboxes keep the longer PID-1 grace.
     {
         let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
@@ -833,7 +833,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
-                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                tokio::time::sleep(shutdown_flush_timeout).await;
                 tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
@@ -848,6 +848,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let startup_shared = Arc::clone(&shared);
         let startup_exit_handle = exit_handle.clone();
         let startup_reason = Arc::clone(&exit_reason);
+        let startup_shutdown_flush_timeout = shutdown_flush_timeout;
         tokio_rt.spawn(async move {
             tracing::info!(
                 cmd = %startup_command.cmd,
@@ -886,7 +887,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
             match request_guest_shutdown(&startup_shared) {
                 Ok(()) => {
-                    tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                    tokio::time::sleep(startup_shutdown_flush_timeout).await;
                     tracing::info!("startup command shutdown flush window elapsed");
                 }
                 Err(err) => {
@@ -910,6 +911,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let heartbeat_exit_handle = exit_handle.clone();
         let heartbeat_reason = Arc::clone(&exit_reason);
         let heartbeat_shared = Arc::clone(&shared);
+        let heartbeat_shutdown_flush_timeout = shutdown_flush_timeout;
         tokio_rt.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -935,8 +937,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         );
                         match request_guest_shutdown(&heartbeat_shared) {
                             Ok(()) => {
-                                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT)
-                                    .await;
+                                tokio::time::sleep(heartbeat_shutdown_flush_timeout).await;
                                 tracing::info!(
                                     "idle shutdown flush window elapsed, triggering host exit"
                                 );
@@ -1557,6 +1558,14 @@ fn request_guest_shutdown_with_timeout(
     relay::push_guest_frame_until(shared, frame, timeout)
 }
 
+fn guest_shutdown_flush_timeout(has_handoff_init: bool) -> Duration {
+    if has_handoff_init {
+        microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+    } else {
+        microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+    }
+}
+
 #[cfg(unix)]
 fn spawn_parent_watchdog(
     parent_watchdog: OwnedFd,
@@ -1564,6 +1573,7 @@ fn spawn_parent_watchdog(
     exit_reason: Arc<std::sync::atomic::AtomicU8>,
     exit_handle: msb_krun::ExitHandle,
     sandbox_name: String,
+    shutdown_flush_timeout: Duration,
 ) -> RuntimeResult<()> {
     std::thread::Builder::new()
         .name(format!("msb-parent-watch-{sandbox_name}"))
@@ -1577,7 +1587,7 @@ fn spawn_parent_watchdog(
                     if let Err(err) = request_guest_shutdown(&shared) {
                         tracing::warn!(error = %err, "parent-watch shutdown request failed");
                     } else {
-                        std::thread::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT);
+                        std::thread::sleep(shutdown_flush_timeout);
                     }
                     exit_handle.trigger();
                 }
@@ -1915,8 +1925,8 @@ mod tests {
     };
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        parse_mount_spec, prepend_scripts_path, request_guest_shutdown,
-        request_guest_shutdown_with_timeout, validate_disk_format,
+        guest_shutdown_flush_timeout, parse_mount_spec, prepend_scripts_path,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
     };
 
     use microsandbox_protocol::{codec, message::MessageType};
@@ -2080,6 +2090,18 @@ mod tests {
         let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
         assert_eq!(msg.t, MessageType::Shutdown);
         assert_eq!(msg.id, 0);
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_tracks_handoff_mode() {
+        assert_eq!(
+            guest_shutdown_flush_timeout(false),
+            microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout(true),
+            microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+        );
     }
 
     #[test]

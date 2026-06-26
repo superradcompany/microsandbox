@@ -38,12 +38,9 @@ use sea_orm::{
 };
 use tokio::sync::Mutex;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    TerminateProcess,
-};
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
 use microsandbox_image::{
     Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4,
@@ -887,14 +884,23 @@ pub(crate) async fn stop_local(
         return Ok(());
     }
 
+    if model.status == SandboxStatus::Running {
+        update_sandbox_status(
+            local_backend.db().await?.write(),
+            model.id,
+            SandboxStatus::Draining,
+        )
+        .await?;
+    }
+
     match request_agent_shutdown(local_backend, name).await {
         Ok(()) => Ok(()),
         Err(e) => {
             // Graceful degradation: agent endpoint unreachable (socket/pipe
-            // missing, ECONNREFUSED, handshake timeout). Fall back to direct
-            // process termination so we still attempt a stop — at the cost
-            // of skipping the in-guest sync(). The reaper updates DB status
-            // on PID exit.
+            // missing, ECONNREFUSED, handshake timeout) or shutdown delivery
+            // failed. Fall back to direct process termination so we still
+            // attempt a stop, at the cost of skipping the in-guest sync().
+            // The reaper updates DB status on PID exit.
             tracing::warn!(
                 sandbox = %name,
                 error = %e,
@@ -977,6 +983,15 @@ pub(crate) async fn drain_local(
     let (model, pid) = get_local_handle_state(local_backend, name).await?;
     if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
         return Ok(());
+    }
+
+    if model.status == SandboxStatus::Running {
+        update_sandbox_status(
+            local_backend.db().await?.write(),
+            model.id,
+            SandboxStatus::Draining,
+        )
+        .await?;
     }
 
     #[cfg(windows)]
@@ -1976,7 +1991,15 @@ pub(super) async fn reconcile_sandbox_runtime_state(
         return Ok(sandbox);
     }
 
-    mark_sandbox_runtime_stale(pools.write(), sandbox.id, Some(run.id)).await?;
+    let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
+    mark_sandbox_runtime_stale(
+        pools.write(),
+        sandbox.id,
+        Some(run.id),
+        terminal_status,
+        reason,
+    )
+    .await?;
 
     sandbox_entity::Entity::find_by_id(sandbox.id)
         .one(pools.read())
@@ -2030,10 +2053,30 @@ fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
         .filter(|pid| pid_is_alive(*pid))
 }
 
+fn stale_runtime_terminal_state(
+    status: SandboxStatus,
+) -> (SandboxStatus, run_entity::TerminationReason) {
+    match status {
+        // Draining means a stop/drain request was already accepted. If the
+        // owning runtime is now gone, the lifecycle reached its requested
+        // terminal state even when the original observer could not reap it.
+        SandboxStatus::Draining => (
+            SandboxStatus::Stopped,
+            run_entity::TerminationReason::ShutdownRequested,
+        ),
+        _ => (
+            SandboxStatus::Crashed,
+            run_entity::TerminationReason::InternalError,
+        ),
+    }
+}
+
 async fn mark_sandbox_runtime_stale(
     db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
+    terminal_status: SandboxStatus,
+    reason: run_entity::TerminationReason,
 ) -> MicrosandboxResult<()> {
     db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
@@ -2044,23 +2087,17 @@ async fn mark_sandbox_runtime_stale(
                     run_entity::Column::Status,
                     Expr::value(run_entity::RunStatus::Terminated),
                 )
-                .col_expr(
-                    run_entity::Column::TerminationReason,
-                    Expr::value(run_entity::TerminationReason::InternalError),
-                )
+                .col_expr(run_entity::Column::TerminationReason, Expr::value(reason))
                 .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
                 .filter(run_entity::Column::Id.eq(run_id))
                 .exec(&txn)
                 .await?;
         }
 
-        // Only mark Crashed if the sandbox is still Running or Draining. This
-        // prevents a concurrent start() from having its Running status overwritten.
+        // Only reconcile an active row. This prevents a concurrent start()
+        // from having its newly-terminal or newly-running status overwritten.
         sandbox_entity::Entity::update_many()
-            .col_expr(
-                sandbox_entity::Column::Status,
-                Expr::value(SandboxStatus::Crashed),
-            )
+            .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
             .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .filter(
@@ -2075,33 +2112,8 @@ async fn mark_sandbox_runtime_stale(
     .await
 }
 
-#[cfg(unix)]
 pub(super) fn pid_is_alive(pid: i32) -> bool {
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(code) if code == libc::EPERM
-    )
-}
-
-#[cfg(windows)]
-pub(super) fn pid_is_alive(pid: i32) -> bool {
-    let Ok(pid) = u32::try_from(pid) else {
-        return false;
-    };
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return false;
-    }
-
-    let mut exit_code = 0;
-    let result = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-    let _ = unsafe { CloseHandle(handle) };
-    result != 0 && exit_code == STILL_ACTIVE as u32
+    microsandbox_utils::process::pid_is_alive(pid)
 }
 
 #[cfg(unix)]
@@ -2731,6 +2743,8 @@ mod tests {
         sandbox::OciRootfsSource,
     };
     use microsandbox_migration::{Migrator, MigratorTrait};
+    #[cfg(unix)]
+    use sea_orm::{ColumnTrait, QueryFilter};
     use sea_orm::{EntityTrait, Set};
     use tempfile::tempdir;
 
@@ -3316,6 +3330,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_sandbox_runtime_state_marks_dead_draining_stopped() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let config = test_config("draining-stale");
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        super::update_sandbox_status(pools.write(), sandbox_id, SandboxStatus::Draining)
+            .await
+            .unwrap();
+
+        let run = run_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(dead_pid())),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        };
+        let run_id = run_entity::Entity::insert(run)
+            .exec(pools.write())
+            .await
+            .unwrap()
+            .last_insert_id;
+
+        let sandbox = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        let reconciled = reconcile_sandbox_runtime_state(&pools, sandbox)
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status, SandboxStatus::Stopped);
+
+        let run = run_entity::Entity::find_by_id(run_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, run_entity::RunStatus::Terminated);
+        assert_eq!(
+            run.termination_reason,
+            Some(run_entity::TerminationReason::ShutdownRequested)
+        );
+        assert!(run.terminated_at.is_some());
+    }
+
+    #[tokio::test]
     async fn test_prepare_create_target_force_replaces_stale_running_sandbox_state() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3483,7 +3544,7 @@ mod tests {
         .await
         .unwrap();
 
-        // --- Sandbox C: Draining + dead PID → should become Crashed ---
+        // --- Sandbox C: Draining + dead PID → should become Stopped ---
         let cfg_c = test_config("draining-dead");
         let id_c = insert_sandbox_record(pools.write(), &cfg_c).await.unwrap();
         super::update_sandbox_status(pools.write(), id_c, SandboxStatus::Draining)
@@ -3538,7 +3599,7 @@ mod tests {
 
         assert_eq!(load(id_a).await.status, SandboxStatus::Crashed);
         assert_eq!(load(id_b).await.status, SandboxStatus::Running);
-        assert_eq!(load(id_c).await.status, SandboxStatus::Crashed);
+        assert_eq!(load(id_c).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_d).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_e).await.status, SandboxStatus::Running);
 

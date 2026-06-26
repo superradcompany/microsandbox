@@ -1934,6 +1934,26 @@ pub fn resolve_command(
     Ok((None, vec![]))
 }
 
+/// Resolve the command for `msb exec`.
+///
+/// Unlike `msb run`, an explicit `msb exec SANDBOX -- CMD ...` should execute
+/// `CMD` directly. The sandbox's persisted entrypoint describes the original
+/// workload start shape; reapplying it here would turn ordinary maintenance
+/// commands like `msb exec app -- date` into `entrypoint date`.
+pub fn resolve_exec_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+    user_command: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    if !user_command.is_empty() {
+        let mut parts = user_command;
+        let cmd = parts.remove(0);
+        return Ok((Some(cmd), parts));
+    }
+
+    resolve_command(config, user_command, interactive)
+}
+
 /// Resolve the default process from OCI image config.
 ///
 /// Follows OCI semantics:
@@ -2047,7 +2067,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use microsandbox::sandbox::{
-        HostPermissions, MountOptions, Patch, RootfsSource, StatVirtualization, VolumeMount,
+        HostPermissions, MountOptions, Patch, RootfsSource, SandboxConfig, StatVirtualization,
+        VolumeMount,
     };
 
     use super::*;
@@ -2690,6 +2711,69 @@ mod tests {
         let builder = SandboxBuilder::new("test").image("alpine");
         let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
         config.spec.mounts.into_iter().next().unwrap()
+    }
+
+    fn command_config(entrypoint: Option<&[&str]>, cmd: Option<&[&str]>) -> SandboxConfig {
+        let mut config = SandboxConfig::default();
+        config.spec.runtime.entrypoint = entrypoint.map(|items| {
+            items
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect::<Vec<_>>()
+        });
+        config.spec.runtime.cmd = cmd.map(|items| {
+            items
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect::<Vec<_>>()
+        });
+        config
+    }
+
+    // --- resolve_command / resolve_exec_command ---
+
+    #[test]
+    fn resolve_command_prepends_entrypoint_to_explicit_run_command() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) =
+            resolve_command(&config, vec!["date".to_string()], false).expect("resolve command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(args, vec!["date".to_string()]);
+    }
+
+    #[test]
+    fn resolve_exec_command_runs_explicit_command_directly() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) = resolve_exec_command(&config, vec!["date".to_string()], false)
+            .expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("date"));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_exec_command_keeps_explicit_command_args() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) = resolve_exec_command(
+            &config,
+            vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
+            false,
+        )
+        .expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("sh"));
+        assert_eq!(args, vec!["-lc".to_string(), "echo ok".to_string()]);
+    }
+
+    #[test]
+    fn resolve_exec_command_without_explicit_command_uses_image_defaults() {
+        let config = command_config(Some(&["start"]), Some(&["default"]));
+        let (cmd, args) =
+            resolve_exec_command(&config, Vec::new(), false).expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(args, vec!["default".to_string()]);
     }
 
     // --- apply_volume ---
