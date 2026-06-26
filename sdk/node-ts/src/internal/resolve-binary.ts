@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 
 function detectTriple(): string {
   const p = process.platform;
@@ -8,7 +9,13 @@ function detectTriple(): string {
   if (p === "darwin" && a === "arm64") return "darwin-arm64";
   if (p === "linux" && a === "x64") return "linux-x64-gnu";
   if (p === "linux" && a === "arm64") return "linux-arm64-gnu";
+  if (p === "win32" && a === "x64") return "win32-x64-msvc";
+  if (p === "win32" && a === "arm64") return "win32-arm64-msvc";
   throw new Error(`microsandbox: unsupported platform ${p}-${a}`);
+}
+
+function msbFileName(): string {
+  return process.platform === "win32" ? "msb.exe" : "msb";
 }
 
 // Search from multiple roots so the platform package resolves whether
@@ -36,7 +43,7 @@ function resolvePlatformRoot(): string | null {
       // Only accept this base if it actually carries the bundled binaries —
       // the published 0.x platform package may exist in the resolver's
       // path with only the .node file.
-      if (existsSync(join(root, "bin", "msb"))) return root;
+      if (existsSync(join(root, "bin", msbFileName()))) return root;
     } catch {
       // try next base
     }
@@ -54,7 +61,7 @@ function resolveBinDir(): string {
     return cachedBinDir;
   }
   // Fall back to ~/.microsandbox if no platform package carries binaries.
-  const home = process.env.HOME ?? "";
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
   cachedBinDir = join(home, ".microsandbox", "bin");
   return cachedBinDir;
 }
@@ -66,6 +73,6 @@ function resolveBinDir(): string {
  * read at the JS layer just adds an alternate code path for the same
  * outcome. */
 export function msbPath(): string | null {
-  const p = join(resolveBinDir(), "msb");
+  const p = join(resolveBinDir(), msbFileName());
   return existsSync(p) ? p : null;
 }
