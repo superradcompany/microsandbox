@@ -1126,7 +1126,10 @@ mod tests {
 
         #[cfg(unix)]
         {
-            std::env::temp_dir()
+            // These tests instantiate the relay directly, bypassing the SDK's
+            // hashed runtime socket resolver. Keep the synthetic socket short
+            // enough for macOS sockaddr_un limits.
+            PathBuf::from("/tmp")
                 .join(format!(
                     "msb-runtime-relay-{name}-{}-{nanos}",
                     std::process::id()
