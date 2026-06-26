@@ -599,7 +599,53 @@ function Invoke-BuildLibkrunfwKernelBundleWithDocker {
     Write-Info "Building libkrunfw kernel bundle via Docker..."
     Require-Command -Name "docker.exe" -Hint "Install Docker Desktop and make sure Linux containers are enabled."
 
-    $buildScript = "dnf install -y 'dnf-command(builddep)' python3-pyelftools curl && dnf builddep -y kernel && make -j`$(nproc) kernel.c"
+    # Docker Desktop bind mounts on Windows are fine for source snapshots and final
+    # artifacts, but extracting the full Linux tree there can fail partway through.
+    # Build inside the container filesystem and copy only the generated C bundle out.
+    $buildScript = @'
+set -euo pipefail
+dnf install -y 'dnf-command(builddep)' python3-pyelftools curl
+dnf builddep -y kernel
+
+build_dir="$(mktemp -d /tmp/libkrunfw.XXXXXX)"
+cleanup() {
+    rm -rf "$build_dir"
+}
+trap cleanup EXIT
+
+cd /work
+tar --exclude='.git' \
+    --exclude='./.git' \
+    --exclude='kernel.c' \
+    --exclude='./kernel.c' \
+    --exclude='qboot.c' \
+    --exclude='./qboot.c' \
+    --exclude='initrd.c' \
+    --exclude='./initrd.c' \
+    --exclude='linux-*' \
+    --exclude='./linux-*' \
+    --exclude='*.dll' \
+    --exclude='./*.dll' \
+    --exclude='*.lib' \
+    --exclude='./*.lib' \
+    --exclude='*.exp' \
+    --exclude='./*.exp' \
+    --exclude='*.pdb' \
+    --exclude='./*.pdb' \
+    --exclude='*.obj' \
+    --exclude='./*.obj' \
+    -cf - . | tar -xf - -C "$build_dir"
+
+cd "$build_dir"
+make clean
+make -j"$(nproc)" kernel.c
+cp kernel.c /work/kernel.c
+if [ -d tarballs ]; then
+    mkdir -p /work/tarballs
+    cp -a tarballs/. /work/tarballs/
+fi
+'@
+    $buildScript = $buildScript.Replace("`r`n", "`n").Replace("`r", "`n")
     docker.exe run --rm -v "${Submodule}:/work" -w /work fedora:latest bash -lc $buildScript
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
