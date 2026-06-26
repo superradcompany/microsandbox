@@ -602,12 +602,15 @@ function Invoke-BuildLibkrunfwKernelBundleWithDocker {
     # Docker Desktop bind mounts on Windows are fine for source snapshots and final
     # artifacts, but extracting the full Linux tree there can fail partway through.
     # Build inside the container filesystem and copy only the generated C bundle out.
+    $makeJobs = [Math]::Max(1, [Environment]::ProcessorCount)
     $buildScript = @'
 set -euo pipefail
 dnf install -y 'dnf-command(builddep)' python3-pyelftools curl
 dnf builddep -y kernel
 
-build_dir="$(mktemp -d /tmp/libkrunfw.XXXXXX)"
+build_dir=/tmp/libkrunfw-build
+rm -rf "$build_dir"
+mkdir -p "$build_dir"
 cleanup() {
     rm -rf "$build_dir"
 }
@@ -638,13 +641,14 @@ tar --exclude='.git' \
 
 cd "$build_dir"
 make clean
-make -j"$(nproc)" kernel.c
+make -j__MSB_MAKE_JOBS__ kernel.c
 cp kernel.c /work/kernel.c
 if [ -d tarballs ]; then
     mkdir -p /work/tarballs
     cp -a tarballs/. /work/tarballs/
 fi
 '@
+    $buildScript = $buildScript.Replace("__MSB_MAKE_JOBS__", $makeJobs.ToString())
     $buildScript = $buildScript.Replace("`r`n", "`n").Replace("`r", "`n")
     docker.exe run --rm -v "${Submodule}:/work" -w /work fedora:latest bash -lc $buildScript
     if ($LASTEXITCODE -ne 0) {
