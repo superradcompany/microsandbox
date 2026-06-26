@@ -50,6 +50,16 @@ impl JsImageBuilder {
         self
     }
 
+    /// Use a host directory directly as the root filesystem (bind rootfs).
+    /// The directory's contents become the guest rootfs as-is — no OCI pull
+    /// and no overlay.
+    #[napi]
+    pub fn bind(&mut self, host: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.bind(PathBuf::from(host)));
+        self
+    }
+
     /// Set the inner filesystem type (e.g. `"ext4"`). Omit to let agentd
     /// auto-detect by probing `/proc/filesystems`.
     #[napi]

@@ -242,6 +242,12 @@ export declare class ImageBuilder {
    */
   disk(path: string): this
   /**
+   * Use a host directory directly as the root filesystem (bind rootfs).
+   * The directory's contents become the guest rootfs as-is — no OCI pull
+   * and no overlay.
+   */
+  bind(host: string): this
+  /**
    * Set the inner filesystem type (e.g. `"ext4"`). Omit to let agentd
    * auto-detect by probing `/proc/filesystems`.
    */

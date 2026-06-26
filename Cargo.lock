@@ -1488,7 +1488,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3561,8 +3561,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2056e23685de155d8a910bf1a2617e856bd21ced656ac442490df973812fc69"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -3580,8 +3581,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5645c3721d9a65c8887da750b70e5ca56ee6d583c82920924b464f42192377c9"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3594,13 +3596,15 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch_gen"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a71adce997cb6fecc01c49c9fcd523f5620005f70fc49900b8ba38eaaa37d118"
 
 [[package]]
 name = "msb_krun_cpuid"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b765b590a3f8e9a8c338b12d9dd3ba9f72ae343b33c0994058f9149ae13ffd4a"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3609,8 +3613,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_devices"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "189eb43f486c539058df8e65c687180ac5d4728f88fe96aee35af8ec8c59e947"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -3638,8 +3643,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_hvf"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3803b2ddabc1de061dd89fed560c9cf83531be58ff7a6797a6583c8ceb7c048"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -3649,8 +3655,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_kernel"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d162cf9076f336c396276326ab91967bf46064e0aaf5d6fe2795974b1e08d79"
 dependencies = [
  "msb_krun_utils",
  "vm-memory",
@@ -3658,8 +3665,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_polly"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65006b25aa67bb43304a9ca46e7b5ed4e8c4785436a7029f81915ad9a2e395e4"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -3667,16 +3675,18 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_smbios"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88e72f780e8add110df1c5b77cebf73f92a382e1c765ed6d0c9531b08f3fed45"
 dependencies = [
  "vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_utils"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a16d982c2f6894cf6e2786940351f04dee2c69d7b640432314722a8fed88f2d3"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -3690,8 +3700,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_vmm"
-version = "0.1.17"
-source = "git+https://github.com/superradcompany/libkrun?branch=appcypher%2Finitial-windows-support#0a55f68092c73896be2182df9ebe689c508f2c85"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f19898b23d6b4327f09eacae6a48e7bc7d91cfdf7b97a25672af7188ef8d29b"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
@@ -3937,7 +3948,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4847,7 +4858,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

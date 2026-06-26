@@ -905,6 +905,9 @@ struct RegistryAuthOpts {
 struct SandboxCreateOpts {
     image: Option<String>,
     image_fstype: Option<String>,
+    /// Host directory used directly as the root filesystem (bind rootfs).
+    /// Mutually exclusive with `image` and `snapshot`.
+    image_bind: Option<String>,
     oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
     memory_mib: Option<u32>,
@@ -1855,12 +1858,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     "disk_size is not valid when booting from a snapshot",
                 ));
             }
+            if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
+                return Err(FfiError::invalid_argument(
+                    "image_bind is mutually exclusive with image and snapshot",
+                ));
+            }
             if let Some(img) = opts.image {
                 if let Some(fstype) = opts.image_fstype {
                     builder = builder.image_with(|i| i.disk(img).fstype(fstype));
                 } else {
                     builder = builder.image(img.as_str());
                 }
+            }
+            if let Some(bind_path) = opts.image_bind {
+                builder = builder.image_with(|i| i.bind(bind_path));
             }
             if let Some(size_mib) = opts.oci_upper_size_mib {
                 builder = builder.disk_size(size_mib);

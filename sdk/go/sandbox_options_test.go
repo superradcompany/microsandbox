@@ -81,6 +81,16 @@ func TestFFIWireShape_WithImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithBindRootfs(t *testing.T) {
+	got := marshalCreateOptions(t, WithBindRootfs("/srv/rootfs"))
+	if v := mustField(t, got, "image_bind"); v != "/srv/rootfs" {
+		t.Fatalf("image_bind = %v, want %q", v, "/srv/rootfs")
+	}
+	if _, present := got["image"]; present {
+		t.Fatal("image must not appear in payload when only image_bind is set")
+	}
+}
+
 func TestFFIWireShape_WithDiskSize(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"), WithDiskSize(8192))
 	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {

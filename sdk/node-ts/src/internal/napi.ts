@@ -1025,5 +1025,6 @@ export interface NapiRegistryConfigBuilder {
 export interface NapiImageBuilder {
   oci(reference: string): this;
   disk(path: string): this;
+  bind(host: string): this;
   fstype(fstype: string): this;
 }

@@ -766,6 +766,20 @@ impl ImageBuilder {
         self
     }
 
+    /// Use a host directory directly as the root filesystem (bind rootfs).
+    ///
+    /// The directory's contents become the guest root filesystem as-is — no
+    /// OCI pull and no overlay. Mutually exclusive with [`oci`](Self::oci) and
+    /// [`disk`](Self::disk).
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.bind("/srv/rootfs"))
+    /// ```
+    pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
+        self.source = Some(RootfsSource::Bind(host.into()));
+        self
+    }
+
     /// Consume the builder and return the resolved [`RootfsSource`].
     pub fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
         if let Some(e) = self.error {
@@ -773,7 +787,7 @@ impl ImageBuilder {
         }
         self.source.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "ImageBuilder: no image source set (call .oci() or .disk())".into(),
+                "ImageBuilder: no image source set (call .oci(), .disk(), or .bind())".into(),
             )
         })
     }
@@ -1517,6 +1531,17 @@ mod tests {
             .fstype("key=value")
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_builder_bind() {
+        let rootfs = ImageBuilder::new().bind("/srv/rootfs").build().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/srv/rootfs"))
+            }
+            _ => panic!("expected Bind"),
+        }
     }
 }
 
