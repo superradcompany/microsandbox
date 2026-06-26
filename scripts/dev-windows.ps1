@@ -962,7 +962,7 @@ function Invoke-LinkLibkrunfwDll {
     $defPath = New-LibkrunfwDefFile -Submodule $Submodule
     $sources = New-WindowsLibkrunfwLinkSources -Submodule $Submodule
     Write-Info "Linking libkrunfw.dll with cl.exe..."
-    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && rc.exe /nologo /fo`"$($sources.ResourceRes)`" `"$($sources.ResourceRc)`" && cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fo:libkrunfw.obj /Fe:libkrunfw.dll `"$($sources.Wrapper)`" `"$($sources.ResourceRes)`" /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib /ALIGN:65536"
+    Invoke-MsvcCommand -CommandLine "cd /d `"$Submodule`" && rc.exe /nologo /fo`"$($sources.ResourceRes)`" `"$($sources.ResourceRc)`" && cl.exe /nologo /LD /DABI_VERSION=$LibkrunfwAbi /Fo:libkrunfw.obj /Fe:libkrunfw.dll `"$($sources.Wrapper)`" `"$($sources.ResourceRes)`" /link /DEF:`"$defPath`" /IMPLIB:libkrunfw.lib"
 }
 
 function Invoke-BuildLibkrunfw {
@@ -986,7 +986,19 @@ function Invoke-BuildLibkrunfw {
             $target = Resolve-WindowsTarget
             Push-Location $submodule
             try {
-                & $script -AbiVersion $LibkrunfwAbi -Architecture $target.MsvcArch -HostArchitecture $target.HostArch -Output "libkrunfw.dll" -ImportLibrary "libkrunfw.lib"
+                $scriptArgs = @{
+                    AbiVersion = $LibkrunfwAbi
+                    Architecture = $target.MsvcArch
+                    HostArchitecture = $target.HostArch
+                    Output = "libkrunfw.dll"
+                    ImportLibrary = "libkrunfw.lib"
+                }
+
+                if (Test-Path -LiteralPath (Join-Path $submodule "kernel.c")) {
+                    $scriptArgs.SkipKernelBundle = $true
+                }
+
+                & $script @scriptArgs
                 if ($LASTEXITCODE -ne 0) {
                     exit $LASTEXITCODE
                 }
