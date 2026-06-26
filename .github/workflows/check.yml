@@ -15,6 +15,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
   LIBKRUNFW_VERSION: "5.2.1"
   LIBKRUNFW_ABI: "5"
 
@@ -30,7 +33,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
@@ -47,13 +50,13 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
       - name: Cache kernel.c
         id: cache-kernel
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: vendor/libkrunfw/kernel.c
           key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -83,7 +86,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -140,7 +143,7 @@ jobs:
             libkrunfw_file: libkrunfw.5.dylib
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -177,7 +180,7 @@ jobs:
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
         id: cache-libkrunfw
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: build/libkrunfw*
           key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -234,6 +237,9 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
 
+      - name: Check generated microsandbox types
+        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+
       # -- Checks (agentd — Linux-only) --
       - name: Format agentd
         if: matrix.os == 'linux'
@@ -247,6 +253,14 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
+
+      - name: Build agent client package
+        working-directory: packages/agent-client/typescript
+        run: npm ci && npm run build && npm run typecheck && npm test
+
+      - name: Build microsandbox types package
+        working-directory: packages/microsandbox-types/typescript
+        run: npm ci && npm run build && npm run typecheck
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
@@ -293,7 +307,7 @@ jobs:
         run: uv build --wheel
 
       # -- Checks (Go SDK) --
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -383,13 +397,22 @@ jobs:
     needs: [check, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
@@ -415,16 +438,25 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [check, changes]
+    needs: [check, changes, cli-smoke-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -437,7 +469,7 @@ jobs:
         with:
           cache-bin: false
 
-      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
         with:
           tool: cargo-nextest
 
@@ -470,17 +502,17 @@ jobs:
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
-      # (see crates/test-utils), so nextest can run tests in parallel without
-      # sqlite/image-cache contention.
-      # Keep real microVM/network concurrency bounded even on large self-hosted
-      # runners; num-cpus fan-out can overwhelm guest package installs.
+      # (see crates/test-utils), so tests avoid sqlite/image-cache contention.
+      # Run the VM integration suite serially on the shared self-hosted KVM
+      # runner; overlapping microVM boots and stdin-heavy exec tests can
+      # intermittently lose relay/session readiness under CI load.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
+          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 1
 
       - name: Disk usage
         if: always()
@@ -501,9 +533,18 @@ jobs:
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, integration-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -516,10 +557,10 @@ jobs:
           df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
           rm -rf "${GITHUB_WORKSPACE}"/{sdk,build,target}
           rm -rf ~/.microsandbox
-          sudo find /tmp -mindepth 1 -maxdepth 1 -type d \
+          find /tmp -mindepth 1 -maxdepth 1 -type d \
             \( -name 'msb-*' -o -name 'TestSandbox*' -o -name 'go-build*' \) \
             -mmin +120 -exec rm -rf {} + 2>/dev/null || true
-          sudo find /tmp -mindepth 1 -maxdepth 1 -type d \
+          find /tmp -mindepth 1 -maxdepth 1 -type d \
             \( -name 'codex-*' -o -name 'microsandbox-*' -o -name 'libkrun-*' \) \
             -mmin +360 -exec rm -rf {} + 2>/dev/null || true
           find "${RUNNER_WORKSPACE}" -mindepth 1 -maxdepth 1 -type d \
@@ -595,7 +636,20 @@ jobs:
       # setup-bun downloads a zipped release; unzip isn't preinstalled on
       # the self-hosted runner.
       - name: Install unzip
-        run: sudo apt-get update && sudo apt-get install -y unzip
+        run: |
+          if command -v unzip >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          for attempt in {1..10}; do
+            if sudo apt-get update && sudo apt-get install -y unzip; then
+              exit 0
+            fi
+            echo "apt-get install unzip failed on attempt ${attempt}; retrying..."
+            sleep 10
+          done
+
+          exit 1
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
@@ -624,16 +678,25 @@ jobs:
   # ---------------------------------------------------------------------------
   python-sdk-test:
     name: Python SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, node-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
@@ -698,21 +761,30 @@ jobs:
   # ---------------------------------------------------------------------------
   go-sdk-test:
     name: Go SDK Tests
-    needs: [check, changes]
+    needs: [check, changes, python-sdk-test]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
+    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    timeout-minutes: 45
+    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
+    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
+    # starve microVM boots past the 180s agent-relay deadline (flaky
+    # "timed out waiting for agent relay"). Cap per-job build parallelism so
+    # several jobs can build at once without crushing VM boot latency.
+    env:
+      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -755,7 +827,22 @@ jobs:
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 20m ./integration/...
+          status=0
+          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m ./integration/... || status=$?
+
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Go sandbox runtime logs without core.ready"
+            find "$MSB_HOME/sandboxes" -path '*/logs/runtime.log' -type f -print0 2>/dev/null \
+              | while IFS= read -r -d '' log; do
+                  if ! grep -q 'agent relay: received core.ready' "$log"; then
+                    echo "--- $log"
+                    tail -120 "$log" || true
+                  fi
+                done
+            echo "::endgroup::"
+          fi
+
+          exit "$status"
 
       - name: Disk usage
         if: always()

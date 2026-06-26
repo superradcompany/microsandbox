@@ -4,6 +4,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(windows)]
+mod bootstrap_fs;
 mod clock;
 mod error;
 
@@ -15,10 +17,13 @@ pub mod boot_error;
 pub mod console;
 pub mod exec_log;
 pub mod heartbeat;
+pub mod launch;
 pub mod logging;
+pub mod maintenance;
 pub mod metrics;
 pub mod policy;
 pub mod relay;
+mod startup;
 pub mod vm;
 
 pub use error::*;

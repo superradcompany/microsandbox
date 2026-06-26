@@ -3,11 +3,13 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
 
-use super::install::MARKER as INSTALL_MARKER;
+use super::install::is_generated_alias;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -16,7 +18,10 @@ use crate::ui;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 const MARKER_START: &str = "# >>> microsandbox >>>";
+
+#[cfg(unix)]
 const MARKER_END: &str = "# <<< microsandbox <<<";
 
 //--------------------------------------------------------------------------------------------------
@@ -34,6 +39,10 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
+    /// Check local runtime and host virtualization prerequisites.
+    #[command(visible_alias = "check")]
+    Doctor(DoctorArgs),
+
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
     Update(SelfUpdateArgs),
@@ -48,6 +57,14 @@ pub struct SelfUpdateArgs {
     /// Re-download even if already on the latest version.
     #[arg(short, long)]
     pub force: bool,
+}
+
+/// Arguments for `msb doctor` and `msb self doctor`.
+#[derive(Debug, Args, Clone, Copy)]
+pub struct DoctorArgs {
+    /// Attempt supported host virtualization setup fixes.
+    #[arg(long)]
+    pub fix: bool,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -117,9 +134,92 @@ impl UninstallCategory {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
+        SelfCommand::Doctor(args) => run_doctor(args),
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,
     }
+}
+
+/// Check local runtime files and host virtualization prerequisites.
+pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
+    if microsandbox::setup::is_installed() {
+        done("Runtime dependencies are installed.");
+    } else {
+        anyhow::bail!("microsandbox runtime is not installed; run `msb self update`");
+    }
+
+    #[cfg(windows)]
+    {
+        check_windows_host_prerequisites(args.fix)?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        if args.fix {
+            ui::warn("No automatic host setup fixes are available for this platform yet.");
+        }
+    }
+
+    done("Host setup is ready.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn check_windows_host_prerequisites(fix: bool) -> anyhow::Result<()> {
+    match microsandbox::setup::verify_windows_host_prerequisites() {
+        Ok(()) => {
+            done("Windows Hypervisor Platform is available.");
+            Ok(())
+        }
+        Err(err) if fix => {
+            ui::warn(&format!(
+                "Windows Hypervisor Platform is unavailable: {}",
+                err.cause()
+            ));
+            enable_windows_hypervisor_platform()?;
+
+            match microsandbox::setup::verify_windows_host_prerequisites() {
+                Ok(()) => {
+                    done("Windows Hypervisor Platform is available.");
+                    Ok(())
+                }
+                Err(err) => {
+                    ui::warn("Windows may require a reboot before WHP is available.");
+                    Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into())
+                }
+            }
+        }
+        Err(err) => Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into()),
+    }
+}
+
+#[cfg(windows)]
+fn enable_windows_hypervisor_platform() -> anyhow::Result<()> {
+    let command = microsandbox::setup::ENABLE_HYPERVISOR_PLATFORM_COMMAND;
+    let script = format!(
+        "$p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command','{}') -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        command.replace('\'', "''")
+    );
+
+    info("Opening elevated PowerShell to enable Windows Hypervisor Platform.");
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "failed to enable Windows Hypervisor Platform (status: {status}); rerun without --fix for manual instructions"
+        );
+    }
+
+    done("Windows Hypervisor Platform enable command completed.");
+    Ok(())
 }
 
 async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
@@ -235,10 +335,87 @@ async fn run_uninstall(args: SelfUninstallArgs) -> anyhow::Result<()> {
 fn uninstall_all(base_dir: &Path) -> anyhow::Result<()> {
     remove_public_command_links(base_dir)?;
     clean_legacy_shell_config()?;
-    fs::remove_dir_all(base_dir)?;
-    ui::success("Removed", &base_dir.display().to_string());
-    done("Uninstall complete.");
+
+    #[cfg(windows)]
+    {
+        return uninstall_all_windows(base_dir);
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::remove_dir_all(base_dir)?;
+        ui::success("Removed", &base_dir.display().to_string());
+        done("Uninstall complete.");
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn uninstall_all_windows(base_dir: &Path) -> anyhow::Result<()> {
+    let base_dir = fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    let base_dir_script = powershell_single_quote(&base_dir.display().to_string());
+    let parent_pid = std::process::id();
+
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$base = {base_dir_script}
+$parent = {parent_pid}
+try {{
+    Wait-Process -Id $parent -Timeout 30 -ErrorAction SilentlyContinue
+}} catch {{
+    Start-Sleep -Milliseconds 500
+}}
+for ($i = 0; $i -lt 80; $i++) {{
+    if (-not (Test-Path -LiteralPath $base)) {{
+        exit 0
+    }}
+    try {{
+        Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction Stop
+        exit 0
+    }} catch {{
+        Start-Sleep -Milliseconds 250
+    }}
+}}
+exit 1
+"#
+    );
+
+    // Windows keeps the running executable locked, so self-uninstall cannot remove the install
+    // directory in-process. This helper waits for the CLI to exit, then removes the directory.
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encode_powershell_command(&script),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    ui::success("Scheduled removal", &base_dir.display().to_string());
+    done("Uninstall will complete after this msb process exits.");
     Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn encode_powershell_command(script: &str) -> String {
+    use base64::Engine as _;
+
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -410,10 +587,12 @@ fn resolve_base_dir() -> anyhow::Result<PathBuf> {
     Ok(microsandbox_utils::resolve_home())
 }
 
+#[cfg(unix)]
 fn local_bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".local").join("bin"))
 }
 
+#[cfg(unix)]
 fn public_command_links(base_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
     let local_bin = local_bin_dir()?;
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
@@ -425,57 +604,78 @@ fn public_command_links(base_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
 }
 
 fn link_public_commands(base_dir: &Path) -> anyhow::Result<()> {
-    let Some(links) = public_command_links(base_dir) else {
-        ui::warn("Skipped command links because no home directory was found");
+    #[cfg(not(unix))]
+    {
+        info(&format!(
+            "Add {} to PATH to run msb from any terminal.",
+            base_dir.join(microsandbox_utils::BIN_SUBDIR).display()
+        ));
         return Ok(());
-    };
-
-    if let Some(parent) = links.first().and_then(|(link, _)| link.parent()) {
-        fs::create_dir_all(parent)?;
     }
 
-    for (link, target) in links {
-        if link.exists() && !link.is_symlink() {
-            ui::warn(&format!(
-                "Skipped {} because it already exists",
-                link.display()
-            ));
-            continue;
+    #[cfg(unix)]
+    {
+        let Some(links) = public_command_links(base_dir) else {
+            ui::warn("Skipped command links because no home directory was found");
+            return Ok(());
+        };
+
+        if let Some(parent) = links.first().and_then(|(link, _)| link.parent()) {
+            fs::create_dir_all(parent)?;
         }
 
-        if link.is_symlink() {
-            fs::remove_file(&link)?;
+        for (link, target) in links {
+            if link.exists() && !link.is_symlink() {
+                ui::warn(&format!(
+                    "Skipped {} because it already exists",
+                    link.display()
+                ));
+                continue;
+            }
+
+            if link.is_symlink() {
+                fs::remove_file(&link)?;
+            }
+
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &link)?;
+
+            ui::success(
+                "Linked",
+                &format!("{} -> {}", link.display(), target.display()),
+            );
         }
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link)?;
-
-        ui::success(
-            "Linked",
-            &format!("{} -> {}", link.display(), target.display()),
-        );
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
-    let Some(links) = public_command_links(base_dir) else {
+    #[cfg(not(unix))]
+    {
+        let _ = base_dir;
         return Ok(());
-    };
-
-    for (link, target) in links {
-        if !link.is_symlink() {
-            continue;
-        }
-
-        if fs::read_link(&link)? == target {
-            fs::remove_file(&link)?;
-            ui::success("Removed", &link.display().to_string());
-        }
     }
 
-    Ok(())
+    #[cfg(unix)]
+    {
+        let Some(links) = public_command_links(base_dir) else {
+            return Ok(());
+        };
+
+        for (link, target) in links {
+            if !link.is_symlink() {
+                continue;
+            }
+
+            if fs::read_link(&link)? == target {
+                fs::remove_file(&link)?;
+                ui::success("Removed", &link.display().to_string());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn info(msg: &str) {
@@ -537,7 +737,7 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&path)
-            && content.lines().nth(1) == Some(INSTALL_MARKER)
+            && is_generated_alias(&content)
         {
             fs::remove_file(&path)?;
             let name = entry.file_name().to_string_lossy().to_string();
@@ -549,6 +749,7 @@ fn remove_installed_aliases(base_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Remove microsandbox marker blocks from shell config files left by older installers.
+#[cfg(unix)]
 fn clean_legacy_shell_config() -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
 
@@ -571,7 +772,14 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows installers do not write Unix shell marker blocks.
+#[cfg(not(unix))]
+fn clean_legacy_shell_config() -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// Remove the marker block from a shell config file. Returns true if modified.
+#[cfg(unix)]
 fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
     let content = std::fs::read_to_string(path)?;
     if !content.contains(MARKER_START) {

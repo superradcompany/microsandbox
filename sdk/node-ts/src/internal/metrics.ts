@@ -13,6 +13,9 @@ export function metricsFromNapi(raw: NapiSandboxMetrics): SandboxMetrics {
     diskWriteBytes: raw.diskWriteBytes,
     netRxBytes: raw.netRxBytes,
     netTxBytes: raw.netTxBytes,
+    upperUsedBytes: raw.upperUsedBytes ?? null,
+    upperFreeBytes: raw.upperFreeBytes ?? null,
+    upperHostAllocatedBytes: raw.upperHostAllocatedBytes ?? null,
     uptimeMs: raw.uptimeMs,
     timestamp: new Date(raw.timestampMs),
   };

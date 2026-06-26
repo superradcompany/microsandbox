@@ -61,6 +61,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Env:             o.Env,
 		Labels:          o.Labels,
 		Detached:        o.Detached,
+		Ephemeral:       o.Ephemeral,
 		Entrypoint:      o.Entrypoint,
 		LogLevel:        string(o.LogLevel),
 		QuietLogs:       o.QuietLogs,
@@ -329,6 +330,9 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 			DiskWriteBytes:          m.DiskWriteBytes,
 			NetRxBytes:              m.NetRxBytes,
 			NetTxBytes:              m.NetTxBytes,
+			UpperUsedBytes:          m.UpperUsedBytes,
+			UpperFreeBytes:          m.UpperFreeBytes,
+			UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 			Uptime:                  m.Uptime,
 		}
 	}
@@ -501,6 +505,9 @@ func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          m.DiskWriteBytes,
 		NetRxBytes:              m.NetRxBytes,
 		NetTxBytes:              m.NetTxBytes,
+		UpperUsedBytes:          m.UpperUsedBytes,
+		UpperFreeBytes:          m.UpperFreeBytes,
+		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 		Uptime:                  m.Uptime,
 	}, nil
 }
@@ -691,6 +698,9 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          m.DiskWriteBytes,
 		NetRxBytes:              m.NetRxBytes,
 		NetTxBytes:              m.NetTxBytes,
+		UpperUsedBytes:          m.UpperUsedBytes,
+		UpperFreeBytes:          m.UpperFreeBytes,
+		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 		Uptime:                  m.Uptime,
 	}, nil
 }
@@ -722,6 +732,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          m.DiskWriteBytes,
 		NetRxBytes:              m.NetRxBytes,
 		NetTxBytes:              m.NetTxBytes,
+		UpperUsedBytes:          m.UpperUsedBytes,
+		UpperFreeBytes:          m.UpperFreeBytes,
+		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 		Uptime:                  m.Uptime,
 	}, nil
 }
@@ -760,5 +773,8 @@ type Metrics struct {
 	DiskWriteBytes          uint64
 	NetRxBytes              uint64
 	NetTxBytes              uint64
+	UpperUsedBytes          *uint64
+	UpperFreeBytes          *uint64
+	UpperHostAllocatedBytes *uint64
 	Uptime                  time.Duration
 }

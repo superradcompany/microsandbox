@@ -122,6 +122,17 @@ char *msb_sandbox_request_stop(uint64_t cancel_id,
                                unsigned char *buf,
                                uintptr_t buf_len);
 
+/**
+ * Stop and wait for full shutdown. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_stop_and_wait(uint64_t cancel_id,
+                                Handle handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Kill the sandbox immediately (SIGKILL on the VM process).
+ */
 char *msb_sandbox_kill(uint64_t cancel_id,
                        Handle handle,
                        uint64_t timeout_ms,
@@ -133,10 +144,20 @@ char *msb_sandbox_request_kill(uint64_t cancel_id,
                                unsigned char *buf,
                                uintptr_t buf_len);
 
+/**
+ * Trigger graceful drain (SIGUSR1). Returns `{"ok":true}`.
+ */
+char *msb_sandbox_drain(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
 char *msb_sandbox_request_drain(uint64_t cancel_id,
                                 Handle handle,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
+
+/**
+ * Wait for the sandbox process to exit. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_wait(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_wait_until_stopped(uint64_t cancel_id,
                                      Handle handle,
@@ -187,6 +208,11 @@ char *msb_ssh_server_close(uint64_t cancel_id,
                            Handle server_handle,
                            unsigned char *buf,
                            uintptr_t buf_len);
+
+char *msb_ssh_server_serve_stdio(uint64_t cancel_id,
+                                 Handle server_handle,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
 
 char *msb_ssh_server_serve_connection(uint64_t cancel_id,
                                       Handle server_handle,
@@ -528,6 +554,16 @@ char *msb_sandbox_handle_metrics(uint64_t cancel_id,
                                  uintptr_t buf_len);
 
 /**
+ * Remove the sandbox's persisted filesystem + database state.
+ * The sandbox must be stopped. Consumes the live handle.
+ * Returns `{"ok":true}`.
+ */
+char *msb_sandbox_remove_persisted(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
+
+/**
  * Look up a volume by name and return its metadata.
  * Returns `{"name":"...","quota_mib":<int|null>,"used_bytes":<int>,
  *           "labels":{"k":"v",...},"created_at_unix":<int|null>}`.
@@ -558,6 +594,10 @@ char *msb_image_remove(uint64_t cancel_id,
                        bool force,
                        unsigned char *buf,
                        uintptr_t buf_len);
+
+char *msb_image_gc_layers(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_image_gc(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_image_prune(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
 
@@ -676,6 +716,8 @@ char *msb_fs_write_stream_close(uint64_t cancel_id,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
+char *msb_agent_socket_path(const char *name, unsigned char *buf, uintptr_t buf_len);
+
 char *msb_agent_open_sandbox(uint64_t cancel_id,
                              const char *name,
                              uint64_t timeout_ms,
@@ -685,20 +727,6 @@ char *msb_agent_open_path(uint64_t cancel_id,
                           const char *path,
                           uint64_t timeout_ms,
                           Handle *out_handle);
-
-/**
- * Resolve the host-side path of a sandbox's agentd relay socket by name.
- *
- * Synchronous; touches no Rust-side handle state and does not connect. Writes
- * `{"path":"..."}` to `buf`. The Go SDK exposes this so a caller can dial
- * agentd over a raw byte transport (e.g. a transparent relay) instead of the
- * frame-protocol client returned by `msb_agent_open_*`.
- *
- * # Safety
- * `name` must be a valid null-terminated C string; `buf`/`buf_len` follow the
- * shared `run` output-buffer contract.
- */
-char *msb_agent_socket_path(const char *name, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_agent_request(uint64_t cancel_id,
                         Handle agent_handle,

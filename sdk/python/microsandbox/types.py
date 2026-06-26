@@ -287,8 +287,10 @@ class InitConfig:
     as a bare string: ``init="auto"``.
 
     ``cmd`` is either an absolute path inside the guest rootfs or the
-    literal ``"auto"`` (probes /sbin/init, /lib/systemd/systemd,
-    /usr/lib/systemd/systemd).
+    literal ``"auto"``. Auto honors a known init at the start of the
+    image ENTRYPOINT, preserves attached init-entrypoint commands, then
+    probes /sbin/init, /lib/systemd/systemd, and /usr/lib/systemd/systemd
+    inside the guest.
     """
     cmd: str
     args: tuple[str, ...] = ()
@@ -345,6 +347,8 @@ class MountConfig:
             if self.bind is None:
                 raise ValueError("MountConfig kind=BIND requires bind=...")
             d["bind"] = self.bind
+            if self.quota_mib is not None:
+                d["quota_mib"] = self.quota_mib
         elif self.kind == MountKind.NAMED:
             if self.named is None:
                 raise ValueError("MountConfig kind=NAMED requires named=...")

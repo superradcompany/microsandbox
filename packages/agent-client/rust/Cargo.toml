@@ -1,0 +1,34 @@
+[package]
+name = "microsandbox-agent-client"
+description = "Transport-agnostic client for the microsandbox agent protocol."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[features]
+default = []
+# Generic byte-stream transport: drive the client over any
+# `AsyncRead + AsyncWrite` (e.g. a caller-owned, pre-authenticated WebSocket
+# adapted to bytes). No extra dependencies.
+stream = []
+# Unix domain socket transport. Builds on the generic byte-stream path.
+uds = ["stream"]
+# Windows named-pipe transport. Builds on the generic byte-stream path.
+named-pipe = ["stream"]
+
+[dependencies]
+ciborium.workspace = true
+microsandbox-protocol.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }

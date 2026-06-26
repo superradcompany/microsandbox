@@ -10,6 +10,20 @@ use sea_orm::entity::prelude::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum SandboxStatus {
+    /// The sandbox has been created but not yet started.
+    ///
+    /// Cloud-only today: msb-cloud's create-without-start state. Local
+    /// sandboxes transition straight to `Running` after create.
+    #[sea_orm(string_value = "Created")]
+    Created,
+
+    /// A start request has been submitted but the sandbox is not yet running.
+    ///
+    /// Cloud-only today: covers the gap between accepting a start request
+    /// and the runtime reporting the VM as live.
+    #[sea_orm(string_value = "Starting")]
+    Starting,
+
     /// The sandbox is running.
     #[sea_orm(string_value = "Running")]
     Running,
@@ -41,6 +55,12 @@ pub struct Model {
     pub name: String,
     pub config: String,
     pub status: SandboxStatus,
+    /// Denormalized copy of `config.policy.ephemeral`.
+    ///
+    /// Indexed alongside `status` so host-runtime lifecycle maintenance can
+    /// find terminal ephemeral cleanup candidates without scanning and
+    /// parsing every stopped sandbox's serialized config.
+    pub ephemeral: bool,
     pub created_at: Option<DateTime>,
     pub updated_at: Option<DateTime>,
 }

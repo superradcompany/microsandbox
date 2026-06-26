@@ -45,8 +45,6 @@ sea-orm = { workspace = true }
 microsandbox-utils.workspace = true
 # CLI duration parsing (e.g. "1s", "500ms").
 humantime = "2"
-# Resolving the default `~/.microsandbox` path when --msb-home is omitted.
-dirs.workspace = true
 
 # OTel exporter (backs the `msb-metrics otel` subcommand).
 opentelemetry = "0.32"

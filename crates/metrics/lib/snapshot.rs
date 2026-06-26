@@ -46,6 +46,12 @@ pub struct LiveMetric {
     pub net_rx_bytes: u64,
     /// Cumulative guest-facing network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Guest-visible OCI upper filesystem used bytes when available.
+    pub upper_used_bytes: Option<u64>,
+    /// Guest-visible OCI upper filesystem free bytes when available.
+    pub upper_free_bytes: Option<u64>,
+    /// Host-allocated bytes for the writable upper image when available.
+    pub upper_host_allocated_bytes: Option<u64>,
 }
 
 /// Point-in-time metrics for a running sandbox (no identity fields).
@@ -71,6 +77,12 @@ pub struct SandboxMetrics {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted from the guest into the runtime.
     pub net_tx_bytes: u64,
+    /// Guest-visible OCI upper filesystem used bytes when available.
+    pub upper_used_bytes: Option<u64>,
+    /// Guest-visible OCI upper filesystem free bytes when available.
+    pub upper_free_bytes: Option<u64>,
+    /// Host-allocated bytes for the writable upper image when available.
+    pub upper_host_allocated_bytes: Option<u64>,
     /// Sandbox uptime at the moment the sample was taken.
     pub uptime: Duration,
     /// Timestamp of the sample.
@@ -114,6 +126,9 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 disk_write_bytes: live.disk_write_bytes,
                 net_rx_bytes: live.net_rx_bytes,
                 net_tx_bytes: live.net_tx_bytes,
+                upper_used_bytes: live.upper_used_bytes,
+                upper_free_bytes: live.upper_free_bytes,
+                upper_host_allocated_bytes: live.upper_host_allocated_bytes,
                 uptime: live.uptime,
                 timestamp: live.timestamp,
             },

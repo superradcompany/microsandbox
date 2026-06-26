@@ -13,17 +13,36 @@ mod error;
 // Constants: Host↔Guest Shutdown Timings
 //--------------------------------------------------------------------------------------------------
 
+const HANDOFF_POWEROFF_TIMEOUT_SECS: u64 = 5;
+const SHUTDOWN_FLUSH_MARGIN_SECS: u64 = 3;
+const NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS: u64 = 2;
+
 /// Maximum time agentd spends in its handoff-mode poweroff sequence.
 ///
 /// In init-handoff sandboxes (systemd, openrc, …) agentd's shutdown
 /// handler signals the new PID 1 with `SIGRTMIN+4`, sleeps for this
 /// duration to give the init a chance to act, then falls back to
-/// `SIGTERM`. The host's [`SHUTDOWN_FLUSH_TIMEOUT`] must exceed this
-/// so the host's fallback exit doesn't cut the sequence short.
-pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// `SIGTERM`. The host's handoff shutdown fallback must exceed this
+/// so it doesn't cut the sequence short.
+pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(HANDOFF_POWEROFF_TIMEOUT_SECS);
 
-/// How long the host waits after forwarding `core.shutdown` to agentd
-/// before triggering its own VMM exit fallback.
+/// Additional host-side margin after agentd's handoff poweroff grace.
+///
+/// This gives the guest init time to react to agentd's fallback signal before
+/// the host gives up and tears down the VMM process.
+pub const SHUTDOWN_FLUSH_MARGIN: std::time::Duration =
+    std::time::Duration::from_secs(SHUTDOWN_FLUSH_MARGIN_SECS);
+
+/// Host fallback window for normal sandboxes where agentd remains PID 1.
+///
+/// agentd can synchronously `sync()`, remount the root read-only, and request
+/// kernel poweroff directly in this mode, so normal development sandboxes
+/// should not pay the longer handoff-init grace.
+pub const NORMAL_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS);
+
+/// Host fallback window for sandboxes that hand PID 1 to another init.
 ///
 /// agentd uses this window to `sync()` block-backed root filesystems
 /// and power off the kernel cleanly (or run its handoff sequence —
@@ -31,17 +50,25 @@ pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// exits well inside the window and the host fallback is a no-op;
 /// the fallback only fires when the guest is wedged.
 ///
-/// Must exceed [`HANDOFF_POWEROFF_TIMEOUT`] plus margin for the
+/// Equals [`HANDOFF_POWEROFF_TIMEOUT`] plus [`SHUTDOWN_FLUSH_MARGIN`] for the
 /// init's own signal handling — enforced at compile time below.
-pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+pub const HANDOFF_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(HANDOFF_POWEROFF_TIMEOUT_SECS + SHUTDOWN_FLUSH_MARGIN_SECS);
+
+/// Legacy name for the handoff-init shutdown fallback window.
+///
+/// New runtime code should choose between [`NORMAL_SHUTDOWN_FLUSH_TIMEOUT`]
+/// and [`HANDOFF_SHUTDOWN_FLUSH_TIMEOUT`] based on whether a sandbox uses
+/// handoff init.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = HANDOFF_SHUTDOWN_FLUSH_TIMEOUT;
 
 // Compile-time invariant: the host must wait at least as long as
 // agentd's longest internal grace, otherwise the host fallback will
 // cut agentd's handoff sequence short and we'll silently strand
 // init-handoff sandboxes.
 const _: () = assert!(
-    SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
-    "SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
+    HANDOFF_SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
+    "HANDOFF_SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
 );
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +80,16 @@ pub const AGENT_PORT_NAME: &str = "agent";
 
 /// Virtiofs tag for the runtime filesystem (scripts, heartbeat).
 pub const RUNTIME_FS_TAG: &str = "msb_runtime";
+
+/// Guest-write byte budget for the runtime (`/.msb`) virtiofs mount.
+///
+/// `/.msb` is a host↔guest control channel, not bulk storage: the only
+/// guest-written payload is a ~1 KiB heartbeat (host-written scripts and TLS
+/// certs form the mount's baseline and are not charged). This 16 MiB ceiling is
+/// therefore almost entirely abuse headroom — it exists so the channel cannot be
+/// used to fill the host disk. It is intentionally a fixed constant rather than
+/// a user-facing knob.
+pub const RUNTIME_FS_QUOTA_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
@@ -255,7 +292,7 @@ pub const ENV_USER: &str = "MSB_USER";
 /// - `MSB_HOSTNAME=worker-01`
 ///
 /// agentd calls `sethostname()` and adds the name to `/etc/hosts`.
-/// Defaults to the sandbox name when not explicitly set.
+/// Defaults to a sandbox-name-derived hostname when not explicitly set.
 pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 
 /// Environment variable carrying the DNS name the guest uses to reach
@@ -284,19 +321,6 @@ pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
 pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
-/// Separator byte for argv/env entries in handoff-init env vars.
-///
-/// ASCII Unit Separator (`0x1F`). Argv entries and `KEY=VAL` env pairs
-/// are arbitrary user strings, so the `;` separator other MSB_* vars use
-/// is unsafe — they collide with realistic shell input. `0x1F` is
-/// purpose-built for this and absent from any printable string.
-pub const HANDOFF_INIT_SEP: char = '\x1f';
-
-/// String form of [`HANDOFF_INIT_SEP`] for use with `&str`-friendly
-/// APIs like `[T]::join`. Avoids per-call `char.to_string()` allocations
-/// on the host's encoder side.
-pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
-
 /// Environment variable selecting a guest init binary for PID 1 handoff.
 ///
 /// When set, agentd performs initial setup (mounts, runtime dirs), then
@@ -315,11 +339,28 @@ pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
 
 /// Sentinel value for [`ENV_HANDOFF_INIT`] requesting auto-detection.
 ///
-/// When the env var matches this exact string, agentd probes
-/// [`HANDOFF_INIT_AUTO_CANDIDATES`] in order and uses the first path
-/// that exists and is executable. If none match, boot fails with a
-/// clear error in `kernel.log` listing the paths it checked.
+/// The host may resolve this sentinel before boot when an OCI image
+/// declares a known init as the first entrypoint token. If the sentinel
+/// reaches the guest unchanged, agentd probes [`HANDOFF_INIT_AUTO_CANDIDATES`]
+/// in order and uses the first path that exists and is executable. If
+/// none match, boot fails with a clear error in `kernel.log` listing the
+/// paths it checked.
 pub const HANDOFF_INIT_AUTO: &str = "auto";
+
+/// Ordered list of image entrypoint paths that `--init auto` may treat
+/// as an explicit handoff init.
+///
+/// This host-side list is intentionally slightly wider than
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`]: `/init` is common in s6-overlay
+/// images but too broad to probe blindly inside every guest rootfs.
+/// Matching it only when the image declares it as ENTRYPOINT keeps the
+/// behavior image-directed.
+pub const HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES: &[&str] = &[
+    "/init",
+    "/sbin/init",
+    "/lib/systemd/systemd",
+    "/usr/lib/systemd/systemd",
+];
 
 /// Ordered list of init-binary paths agentd probes when
 /// [`ENV_HANDOFF_INIT`] is set to [`HANDOFF_INIT_AUTO`].
@@ -339,21 +380,37 @@ pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
 
 /// Argv list for the handoff init binary.
 ///
-/// Format: entries separated by [`HANDOFF_INIT_SEP`] (ASCII `0x1F`).
+/// Format: base64url-no-padding encoded JSON array of strings.
 /// Empty or unset means the init is exec'd with `argv = [program]`.
+/// This deliberately differs from the delimiter-based `MSB_*` boot env
+/// formats because argv entries are arbitrary strings; wrapping JSON in
+/// base64url preserves spaces, separators, empty strings, and Unicode
+/// without inventing a second escaping language.
 ///
 /// Example:
-/// - `MSB_HANDOFF_INIT_ARGS=--unit=multi-user.target\x1f--log-level=warning`
+/// - `MSB_HANDOFF_INIT_ARGS=WyItdW5pdD1tdWx0aS11c2VyLnRhcmdldCJd`
 pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
+
+/// Working directory for the handoff init binary.
+///
+/// Docker applies `WORKDIR` before executing `ENTRYPOINT + CMD`. Init handoff
+/// uses this optional path so image-declared init entrypoints receive the same
+/// process cwd as they would under container startup.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_CWD=/opt/app`
+pub const ENV_HANDOFF_INIT_CWD: &str = "MSB_HANDOFF_INIT_CWD";
 
 /// Extra environment variables for the handoff init binary.
 ///
-/// Format: `KEY=VAL` pairs separated by [`HANDOFF_INIT_SEP`]
-/// (ASCII `0x1F`). Each entry must contain at least one `=`. Merged on
-/// top of the inherited env.
+/// Format: base64url-no-padding encoded JSON array of `[key, value]`
+/// pairs. Merged on top of the inherited env.
+/// This uses the same structured payload exception as
+/// [`ENV_HANDOFF_INIT_ARGS`] so env values can contain the delimiter
+/// characters used by older `MSB_*` boot env formats.
 ///
 /// Example:
-/// - `MSB_HANDOFF_INIT_ENV=container=microsandbox\x1fLANG=C.UTF-8`
+/// - `MSB_HANDOFF_INIT_ENV=W1siY29udGFpbmVyIiwibWljcm9zYW5kYm94Il1d`
 pub const ENV_HANDOFF_INIT_ENV: &str = "MSB_HANDOFF_INIT_ENV";
 
 /// Guest-side path to the CA certificate for TLS interception.

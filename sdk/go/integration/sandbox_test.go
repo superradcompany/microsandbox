@@ -16,11 +16,20 @@ import (
 
 var goIntegrationImage = getenv("MICROSANDBOX_GO_INTEGRATION_IMAGE", "mirror.gcr.io/library/alpine")
 
+const (
+	// The self-hosted Linux runner can occasionally boot a guest that never
+	// reaches agentd's core.ready event. Keep the per-test budget large enough
+	// for bounded retries while the package-level go test timeout remains the
+	// final guardrail.
+	integrationTestTimeout = 12 * time.Minute
+	createSandboxAttempts  = 3
+)
+
 // TestMain ensures the microsandbox runtime is loaded once before any
 // integration test runs. Without this every test would fail with
 // ErrLibraryNotLoaded.
 func TestMain(m *testing.M) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if err := microsandbox.EnsureInstalled(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "microsandbox: EnsureInstalled: %v\n", err)
@@ -32,9 +41,76 @@ func TestMain(m *testing.M) {
 // integrationCtx returns a context with a generous timeout for VM boot.
 func integrationCtx(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTestTimeout)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+func createSandbox(
+	t *testing.T,
+	ctx context.Context,
+	name string,
+	opts ...microsandbox.SandboxOption,
+) (*microsandbox.Sandbox, error) {
+	t.Helper()
+
+	var lastErr error
+	for attempt := 1; attempt <= createSandboxAttempts; attempt++ {
+		sb, err := microsandbox.CreateSandbox(ctx, name, opts...)
+		if err == nil {
+			return sb, nil
+		}
+		lastErr = err
+		if !isAgentRelayTimeout(err) || attempt == createSandboxAttempts {
+			return nil, err
+		}
+
+		t.Logf(
+			"CreateSandbox(%q) hit agent-relay boot timeout on attempt %d/%d; retrying",
+			name,
+			attempt,
+			createSandboxAttempts,
+		)
+		cleanupFailedCreate(t, name)
+		if err := sleepBeforeRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func isAgentRelayTimeout(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "timed out waiting for agent relay") ||
+		strings.Contains(msg, "timed out waiting for core.ready")
+}
+
+func cleanupFailedCreate(t *testing.T, name string) {
+	t.Helper()
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if h, err := microsandbox.GetSandbox(cleanupCtx, name); err == nil {
+		_ = h.Kill(cleanupCtx, microsandbox.WithKillTimeout(10*time.Second))
+		_ = h.Remove(cleanupCtx)
+		return
+	}
+
+	_ = microsandbox.RemoveSandbox(cleanupCtx, name)
+}
+
+func sleepBeforeRetry(ctx context.Context, attempt int) error {
+	timer := time.NewTimer(time.Duration(attempt) * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func getenv(key, fallback string) string {
@@ -49,7 +125,7 @@ func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 	t.Helper()
 	ctx := integrationCtx(t)
 	name := "go-sdk-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -68,7 +144,7 @@ func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 func TestCreateSandboxAndClose(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-lifecycle-" + t.Name()
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -382,7 +458,7 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-detached-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithDetached(),
 	)
@@ -431,7 +507,7 @@ func TestPortPublishing(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-ports-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPorts(map[uint16]uint16{17777: 7777}),
 	)
@@ -499,7 +575,7 @@ func TestNetworkPolicyNone(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netpolicy-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "none"}),
 	)
@@ -533,7 +609,7 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netallow-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "allow-all"}),
 	)
@@ -567,7 +643,7 @@ func TestDNSBlockDomain(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dns-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:      microsandbox.NetworkPolicyPresetAllowAll,
@@ -604,7 +680,7 @@ func TestDNSBlockDomainSuffix(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dnssuffix-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:             microsandbox.NetworkPolicyPresetAllowAll,
@@ -646,7 +722,7 @@ func TestPatchText(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-patch-text-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Text("/etc/go-sdk-test.conf", "hello-from-patch\n", microsandbox.PatchOptions{}),
@@ -677,7 +753,7 @@ func TestPatchMkdir(t *testing.T) {
 	name := "go-sdk-patch-mkdir-" + t.Name()
 
 	mode := uint32(0o755)
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Mkdir("/opt/go-sdk-dir", microsandbox.PatchOptions{Mode: &mode}),
@@ -710,7 +786,7 @@ func TestPatchAppend(t *testing.T) {
 	name := "go-sdk-patch-append-" + t.Name()
 
 	const marker = "go-sdk-append-marker"
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Append("/etc/profile", "\n# "+marker+"\n"),
@@ -742,7 +818,7 @@ func TestPatchSymlink(t *testing.T) {
 
 	// /etc, not /tmp: alpine's default sandbox config mounts a fresh
 	// tmpfs over /tmp at boot, which wipes anything patches put there.
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithPatches(
 			microsandbox.Patch.Text("/etc/original.txt", "original\n", microsandbox.PatchOptions{}),
@@ -955,7 +1031,7 @@ func TestSecretPlaceholderSubstitution(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-secret-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithSecrets(microsandbox.Secret.Env(
 			"MY_API_KEY",
@@ -1000,7 +1076,7 @@ func TestRemoveSandbox(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-remove-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage(goIntegrationImage))
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
@@ -1039,7 +1115,7 @@ func TestListSandboxesWithLabels(t *testing.T) {
 	other := owner + "-other"
 
 	create := func(name string, labels map[string]string) {
-		sb, err := microsandbox.CreateSandbox(ctx, name,
+		sb, err := createSandbox(t, ctx, name,
 			microsandbox.WithImage(goIntegrationImage),
 			microsandbox.WithLabels(labels),
 		)

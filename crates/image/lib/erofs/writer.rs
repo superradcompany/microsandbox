@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::crc32c;
+use crate::path_bytes::os_str_bytes;
 use crate::tree::{DirectoryNode, FileTree, InodeMetadata, RegularFileId, TreeNode, Xattr};
 
 use super::format::{
@@ -318,7 +318,7 @@ pub(super) fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
     names.push(b".");
     names.push(b"..");
     for name in dir.entries.keys() {
-        names.push(name.as_bytes());
+        names.push(os_str_bytes(name));
     }
     // EROFS requires dirents sorted by name in byte order.
     names.sort();
@@ -409,7 +409,7 @@ pub(super) fn serialize_dir_blocks(
     for (name, child) in &dir.entries {
         let nid = *child_nids.get(name).expect("child NID not found") as u64;
         entries.push(DirEntryInfo {
-            name: name.as_bytes().to_vec(),
+            name: os_str_bytes(name).to_vec(),
             nid,
             file_type: dirent_file_type(child),
         });

@@ -203,6 +203,32 @@ describe("MountBuilder", () => {
     });
   });
 
+  it("preserves namedWith disk creation metadata in the flat mount shape", () => {
+    const m = new MountBuilder("/var/lib/docker")
+      .namedWith("docker-data", "ensure-exists", "disk", 10240)
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "docker-data",
+      namedMode: "ensure-exists",
+      namedKind: "disk",
+      sizeMib: 10240,
+    });
+  });
+
+  it("preserves namedWith directory quota metadata in the flat mount shape", () => {
+    const m = new MountBuilder("/cache")
+      .namedWith("build-cache", "create", "dir", undefined, 512)
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "build-cache",
+      namedMode: "create",
+      namedKind: "dir",
+      quotaMib: 512,
+    });
+  });
+
   it("rejects unknown stat-virt strings at the FFI boundary", () => {
     expect(() =>
       new MountBuilder("/data").bind("/host").statVirtualization("bogus"),
@@ -269,7 +295,7 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .memory(GiB(2))
       .build();
-    expect(cfg.memoryMib).toBe(2048);
+    expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
   });
 
   it("collects volumes through the MountBuilder callback", async () => {
@@ -300,6 +326,19 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.securityProfile).toBe("restricted");
   });
 
+  it("sets lifecycle ephemeral policy", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .ephemeral(true)
+      .build();
+    expect((cfg.lifecycle as { ephemeral: boolean }).ephemeral).toBe(true);
+  });
+
+  it("keeps libkrunfwPath as a chainable compatibility alias", async () => {
+    const builder = Sandbox.builder("x");
+    expect(builder.libkrunfwPath("/tmp/libkrunfw.dylib")).toBe(builder);
+  });
+
   it("invalid volume invocations defer to .build() / .create()", async () => {
     const builder = Sandbox.builder("x")
       .image("alpine")
@@ -309,7 +348,9 @@ describe("SandboxBuilder.build", () => {
 
   it("defaults metricsSampleIntervalMs to 1000", async () => {
     const cfg = await Sandbox.builder("x").image("alpine").build();
-    expect(cfg.metricsSampleIntervalMs).toBe(1000);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      1000,
+    );
   });
 
   it("metricsSampleIntervalMs sets the persisted value", async () => {
@@ -317,7 +358,9 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .metricsSampleIntervalMs(5000)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(5000);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      5000,
+    );
   });
 
   it("metricsSampleIntervalMs(0) disables sampling", async () => {
@@ -325,7 +368,9 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .metricsSampleIntervalMs(0)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(0);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number | null }).metricsSampleIntervalMs).toBe(
+      null,
+    );
   });
 
   it("disableMetricsSample overrides metricsSampleIntervalMs", async () => {
@@ -334,8 +379,10 @@ describe("SandboxBuilder.build", () => {
       .metricsSampleIntervalMs(5000)
       .disableMetricsSample()
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(5000);
-    expect(cfg.disableMetricsSample).toBe(true);
+    expect((cfg.runtime as { metricsSampleIntervalMs: number }).metricsSampleIntervalMs).toBe(
+      5000,
+    );
+    expect((cfg.runtime as { disableMetricsSample: boolean }).disableMetricsSample).toBe(true);
   });
 });
 

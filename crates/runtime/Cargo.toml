@@ -22,11 +22,13 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 crossbeam-queue = { workspace = true }
 libc.workspace = true
+microsandbox-agent-client.workspace = true
 microsandbox-db.workspace = true
 microsandbox-filesystem.workspace = true
 microsandbox-metrics.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
+microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
@@ -38,3 +40,16 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+microsandbox-agent-client = { workspace = true, features = ["uds"] }
+
+[target.'cfg(windows)'.dependencies.microsandbox-agent-client]
+workspace = true
+features = ["named-pipe"]
+
+[dev-dependencies]
+microsandbox-migration.workspace = true

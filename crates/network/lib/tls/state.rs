@@ -1,9 +1,11 @@
 //! Shared TLS state: CA, certificate cache, and upstream connector.
 
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
+use microsandbox_utils::TLS_SUBDIR;
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -65,8 +67,8 @@ impl TlsState {
     ///
     /// CA resolution order:
     /// 1. User-provided paths (`config.intercept_ca.cert_path` + `config.intercept_ca.key_path`)
-    /// 2. Default persistence path (`~/.microsandbox/tls/ca.{crt,key}`)
-    /// 3. Auto-generate and persist to default path
+    /// 2. Microsandbox home TLS path (`$MSB_HOME/tls` or `~/.microsandbox/tls`)
+    /// 3. Auto-generate and persist to the microsandbox home TLS path
     pub fn new(config: TlsConfig, secrets: SecretsConfig) -> Self {
         let ca = load_or_generate_ca(&config);
 
@@ -180,6 +182,16 @@ mod tests {
 
         assert!(state.get_or_generate_cert("snowman.☃").is_err());
         assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
+    }
+
+    #[test]
+    fn default_ca_dir_uses_microsandbox_home_tls_subdir() {
+        let home = PathBuf::from("isolated-msb-home");
+
+        assert_eq!(
+            default_ca_dir_from_home(&home),
+            home.join(microsandbox_utils::TLS_SUBDIR)
+        );
     }
 }
 
@@ -301,8 +313,8 @@ fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
 ///
 /// Resolution order:
 /// 1. User-provided paths (`cert_path` + `key_path`)
-/// 2. Default persistence path (`~/.microsandbox/tls/ca.{crt,key}`)
-/// 3. Auto-generate and persist to default path
+/// 2. Microsandbox home TLS path (`$MSB_HOME/tls` or `~/.microsandbox/tls`)
+/// 3. Auto-generate and persist to the microsandbox home TLS path
 fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
     // Warn if only one of cert_path/key_path is set (likely a config error).
     if config.intercept_ca.cert_path.is_some() != config.intercept_ca.key_path.is_some() {
@@ -339,56 +351,55 @@ fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
         }
     }
 
-    // 2. Try default persistence path.
-    if let Some(default_dir) = default_ca_dir() {
-        let cert_path = default_dir.join("ca.crt");
-        let key_path = default_dir.join("ca.key");
+    // 2. Try the same microsandbox home root used by cache/db/logs/metrics.
+    let default_dir = default_ca_dir();
+    let cert_path = default_dir.join("ca.crt");
+    let key_path = default_dir.join("ca.key");
 
-        if cert_path.exists()
-            && key_path.exists()
-            && let (Ok(cert_pem), Ok(key_pem)) =
-                (std::fs::read(&cert_path), std::fs::read(&key_path))
-            && let Ok(ca) = CertAuthority::load(&cert_pem, &key_pem)
-        {
-            tracing::debug!("loaded persisted CA from {:?}", cert_path);
-            return ca;
-        }
-
-        // 3. Auto-generate and persist.
-        let ca = CertAuthority::generate();
-        if let Err(e) = std::fs::create_dir_all(&default_dir) {
-            tracing::warn!(error = %e, "failed to create CA directory, CA will not persist");
-        } else {
-            if let Err(e) = std::fs::write(&cert_path, ca.cert_pem()) {
-                tracing::warn!(error = %e, "failed to persist CA certificate");
-            }
-            if let Err(e) = write_key_file(&key_path, &ca.key_pem()) {
-                tracing::warn!(error = %e, "failed to persist CA key");
-            } else {
-                tracing::info!("generated and persisted CA to {:?}", default_dir);
-            }
-        }
+    if cert_path.exists()
+        && key_path.exists()
+        && let (Ok(cert_pem), Ok(key_pem)) = (std::fs::read(&cert_path), std::fs::read(&key_path))
+        && let Ok(ca) = CertAuthority::load(&cert_pem, &key_pem)
+    {
+        tracing::debug!("loaded persisted CA from {:?}", cert_path);
         return ca;
     }
 
-    // Fallback: generate without persistence.
-    tracing::warn!("could not determine CA persistence path, generating ephemeral CA");
-    CertAuthority::generate()
+    // 3. Auto-generate and persist.
+    let ca = CertAuthority::generate();
+    if let Err(e) = std::fs::create_dir_all(&default_dir) {
+        tracing::warn!(error = %e, "failed to create CA directory, CA will not persist");
+    } else {
+        if let Err(e) = std::fs::write(&cert_path, ca.cert_pem()) {
+            tracing::warn!(error = %e, "failed to persist CA certificate");
+        }
+        if let Err(e) = write_key_file(&key_path, &ca.key_pem()) {
+            tracing::warn!(error = %e, "failed to persist CA key");
+        } else {
+            tracing::info!("generated and persisted CA to {:?}", default_dir);
+        }
+    }
+    ca
 }
 
-/// Default CA persistence directory: `~/.microsandbox/tls/`.
-fn default_ca_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".microsandbox").join("tls"))
+/// Default CA persistence directory under the resolved microsandbox home.
+fn default_ca_dir() -> PathBuf {
+    default_ca_dir_from_home(microsandbox_utils::resolve_home())
+}
+
+/// Build the CA directory from a known microsandbox home.
+fn default_ca_dir_from_home(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join(TLS_SUBDIR)
 }
 
 /// Write a private key file with restricted permissions (0o600) from creation.
 ///
 /// Uses `OpenOptions` with mode set at creation time to avoid the TOCTOU race
 /// of write-then-chmod where the file is briefly world-readable.
-fn write_key_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+fn write_key_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)

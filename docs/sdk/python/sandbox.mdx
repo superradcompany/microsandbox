@@ -3,60 +3,130 @@ title: Sandbox
 description: Python SDK - Sandbox API reference
 ---
 
-See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Static<span className="msb-ct">7</span></p>
+  <a className="msb-row" href="#sandbox-create"><span className="msb-rn">Sandbox.create()</span><span className="msb-rg">configure and boot a sandbox</span></a>
+  <a className="msb-row" href="#sandbox-create_with_progress"><span className="msb-rn">Sandbox.create_with_progress()</span><span className="msb-rg">boot with pull progress</span></a>
+  <a className="msb-row" href="#sandbox-start"><span className="msb-rn">Sandbox.start()</span><span className="msb-rg">restart a stopped one</span></a>
+  <a className="msb-row" href="#sandbox-get"><span className="msb-rn">Sandbox.get()</span><span className="msb-rg">handle to an existing one</span></a>
+  <a className="msb-row" href="#sandbox-list"><span className="msb-rn">Sandbox.list()</span><span className="msb-rg">all sandboxes</span></a>
+  <a className="msb-row" href="#sandbox-list_with"><span className="msb-rn">Sandbox.list_with()</span><span className="msb-rg">filter by labels</span></a>
+  <a className="msb-row" href="#sandbox-remove"><span className="msb-rn">Sandbox.remove()</span><span className="msb-rg">delete a stopped one</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Properties<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#sb-name"><span className="msb-rn">sb.name()</span><span className="msb-rg">sandbox name (async method)</span></a>
+  <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle</span><span className="msb-rg">attached vs detached (async)</span></a>
+  <a className="msb-row" href="#sb-fs"><span className="msb-rn">sb.fs</span><span className="msb-rg">read / write files</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">18</span></p>
+  <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run a command</span></a>
+  <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.exec_stream()</span><span className="msb-rg">run, stream events</span></a>
+  <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.shell()</span><span className="msb-rg">run through a shell</span></a>
+  <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.shell_stream()</span><span className="msb-rg">shell, stream events</span></a>
+  <a className="msb-row" href="/sdk/python/ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH client / server</span></a>
+  <a className="msb-row" href="#sb-attach"><span className="msb-rn">sb.attach()</span><span className="msb-rg">interactive PTY session</span></a>
+  <a className="msb-row" href="#sb-attach_shell"><span className="msb-rn">sb.attach_shell()</span><span className="msb-rg">attach to the shell</span></a>
+  <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.metrics()</span><span className="msb-rg">resource snapshot</span></a>
+  <a className="msb-row" href="#sb-metrics_stream"><span className="msb-rn">sb.metrics_stream()</span><span className="msb-rg">stream metrics</span></a>
+  <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.logs()</span><span className="msb-rg">captured output</span></a>
+  <a className="msb-row" href="#sb-log_stream"><span className="msb-rn">sb.log_stream()</span><span className="msb-rg">stream / follow logs</span></a>
+  <a className="msb-row" href="#sb-stop"><span className="msb-rn">sb.stop()</span><span className="msb-rg">graceful shutdown</span></a>
+  <a className="msb-row" href="#sb-request_stop"><span className="msb-rn">sb.request_stop()</span><span className="msb-rg">request stop, don't wait</span></a>
+  <a className="msb-row" href="#sb-kill"><span className="msb-rn">sb.kill()</span><span className="msb-rg">force terminate</span></a>
+  <a className="msb-row" href="#sb-request_kill"><span className="msb-rn">sb.request_kill()</span><span className="msb-rg">signal kill, don't wait</span></a>
+  <a className="msb-row" href="#sb-request_drain"><span className="msb-rn">sb.request_drain()</span><span className="msb-rg">graceful drain</span></a>
+  <a className="msb-row" href="#sb-wait_until_stopped"><span className="msb-rn">sb.wait_until_stopped()</span><span className="msb-rg">block until it exits</span></a>
+  <a className="msb-row" href="#sb-detach"><span className="msb-rn">sb.detach()</span><span className="msb-rg">release, keep running</span></a>
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Patch factory · Patch<span className="msb-ct">7</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#patch-text">Patch.text()</a>
+    <a className="msb-chip" href="#patch-append">Patch.append()</a>
+    <a className="msb-chip" href="#patch-mkdir">Patch.mkdir()</a>
+    <a className="msb-chip" href="#patch-remove">Patch.remove()</a>
+    <a className="msb-chip" href="#patch-copy_file">Patch.copy_file()</a>
+    <a className="msb-chip" href="#patch-copy_dir">Patch.copy_dir()</a>
+    <a className="msb-chip" href="#patch-symlink">Patch.symlink()</a>
+  </div>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#sandboxconfig">SandboxConfig</a>
+    <a className="msb-typepill" href="#initconfig">InitConfig</a>
+    <a className="msb-typepill" href="#securityprofile">SecurityProfile</a>
+    <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
+    <a className="msb-typepill" href="#sandboxstopresult">SandboxStopResult</a>
+    <a className="msb-typepill" href="#sandboxstatus">SandboxStatus</a>
+    <a className="msb-typepill" href="#sandboxmetrics">SandboxMetrics</a>
+    <a className="msb-typepill" href="#metricsstream">MetricsStream</a>
+    <a className="msb-typepill" href="#logentry">LogEntry</a>
+    <a className="msb-typepill" href="#logstream">LogStream</a>
+    <a className="msb-typepill" href="#logsource">LogSource</a>
+    <a className="msb-typepill" href="#loglevel">LogLevel</a>
+    <a className="msb-typepill" href="#pullpolicy">PullPolicy</a>
+    <a className="msb-typepill" href="#registryauth">RegistryAuth</a>
+    <a className="msb-typepill" href="#patchconfig">PatchConfig</a>
+    <a className="msb-typepill" href="#pullsession">PullSession</a>
+    <a className="msb-typepill" href="#pullevent">PullEvent</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```python
+from microsandbox import Sandbox
+
+# 1. configure + 2. boot the microVM
+async with await Sandbox.create("api", image="python", memory=1024) as sb:
+    # 3. run
+    out = await sb.exec("python", ["-V"])
+    print(out.stdout_text)
+# 4. on exit the sandbox is killed and its state removed
+```
 
 ## Static methods
 
 ---
 
-#### Sandbox.create()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def create(name: str, **kwargs) -> Sandbox
 ```
 
-Create and boot a sandbox. Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
+Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
-**Parameters**
+The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed.
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
-| snapshot | `str \| os.PathLike` | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
-| cpus | `int` | Virtual CPUs (default `1`) |
-| memory | `int` | Guest memory in MiB (default `512`) |
-| workdir | `str` | Default working directory for commands |
-| shell | `str` | Shell for `shell()` calls (default `"/bin/sh"`) |
-| security | [`SecurityProfile`](#securityprofile) \| `str` | In-guest security profile. `RESTRICTED` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
-| hostname | `str` | Guest hostname |
-| user | `str` | Default guest user |
-| entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
-| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
-| replace | `bool` | Replace existing sandbox with same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_timeout | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | Maximum sandbox lifetime in seconds |
-| idle_timeout | `float` | Idle timeout in seconds |
-| env | `dict[str, str]` | Environment variables visible to all commands |
-| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
-| pull_policy | `str \| PullPolicy` | Image pull behavior |
-| log_level | `str \| LogLevel` | Override log verbosity |
-| registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
-| volumes | `dict[str, MountConfig]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
-| patches | `list[PatchConfig]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
-| network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
-| secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
-| detached | `bool` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
+<p className="msb-label">Parameters</p>
 
-**Returns**
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>**kwargs</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
+    <div className="msb-param-desc">Configuration fields: <code>image</code>, <code>cpus</code>, <code>memory</code>, <code>volumes</code>, <code>ports</code>, <code>network</code>, <code>secrets</code>, <code>detached</code>, and more.</div>
+  </div>
+</div>
 
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](#instance-methods) | Running sandbox |
+<p className="msb-label">Returns</p>
 
-The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed:
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Sandbox</a></div>
+    <div className="msb-param-desc">Running sandbox, usable as an async context manager.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```python
 async with await Sandbox.create("my-sandbox", image="alpine") as sb:
@@ -65,30 +135,58 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 # sandbox is automatically killed and removed on exit
 ```
 
+</Accordion>
+
 ---
 
-#### Sandbox.create_with_progress()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create_with_progress()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
 def create_with_progress(name: str, **kwargs) -> PullSession
 ```
 
-Same parameters as [`Sandbox.create()`](#sandboxcreate) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable) -- the async work happens through the `PullSession`.
+Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable); the async work happens through the `PullSession`.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-Same as [`Sandbox.create()`](#sandboxcreate).
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>**kwargs</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
+    <div className="msb-param-desc">Same configuration fields as <a href="#sandbox-create">create()</a>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`PullSession`](#pullsession) | Session for tracking pull progress and obtaining the final sandbox |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#pullsession">PullSession</a></div>
+    <div className="msb-param-desc">Session for tracking pull progress and obtaining the final sandbox.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event.event_type)
+    sb = await session.result()
+```
+
+</Accordion>
 
 ---
 
-#### Sandbox.start()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">start()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -97,45 +195,79 @@ async def start(name: str, *, detached: bool = False) -> Sandbox
 
 Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Name of a stopped sandbox, up to 128 UTF-8 bytes |
-| detached | `bool` | If `True`, sandbox survives after your process exits (default `False`) |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Name of a stopped sandbox, up to 128 UTF-8 bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, the sandbox survives after your process exits. Default <code>False</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](#instance-methods) | Running sandbox |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Sandbox</a></div>
+    <div className="msb-param-desc">Running sandbox.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.start("api")
+```
+
+</Accordion>
 
 ---
 
-#### Sandbox.get()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def get(name: str) -> SandboxHandle
 ```
 
-Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control.
+Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxHandle`](#sandboxhandle) | Handle with status and lifecycle control |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">SandboxHandle</a></div>
+    <div className="msb-param-desc">Handle with status and lifecycle control.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+handle = await Sandbox.get("api")
+print(handle.status)
+```
+
+</Accordion>
 
 ---
 
-#### Sandbox.list()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -144,28 +276,90 @@ async def list() -> list[SandboxHandle]
 
 List all sandboxes (running, stopped, and crashed).
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `list[`[`SandboxHandle`](#sandboxhandle)`]` | All sandboxes |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">list[SandboxHandle]</a></div>
+    <div className="msb-param-desc">All sandbox handles.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+for h in await Sandbox.list():
+    print(h.name, h.status)
+```
+
+</Accordion>
 
 ---
 
-#### Sandbox.remove()
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list_with()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def list_with(*, labels: Mapping[str, str] | None = None) -> list[SandboxHandle]
+```
+
+List sandboxes filtered by label. Only sandboxes whose labels match every supplied key/value pair are returned.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Label key/value pairs to match. <code>None</code> returns every sandbox, like <a href="#sandbox-list">list()</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">list[SandboxHandle]</a></div>
+    <div className="msb-param-desc">Matching sandbox handles.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+workers = await Sandbox.list_with(labels={"role": "worker"})
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def remove(name: str) -> None
 ```
 
-Delete a stopped sandbox and all its state from disk. Fails if the sandbox is still running.
+Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running; stop it first.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+await Sandbox.remove("api")
+```
+
+</Accordion>
 
 ---
 
@@ -173,53 +367,96 @@ Delete a stopped sandbox and all its state from disk. Fails if the sandbox is st
 
 ---
 
-#### name
+#### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-@property
 async def name(self) -> str
 ```
 
-Sandbox name. Names are limited to 128 UTF-8 bytes. This is an async property -- use `await sb.name`.
+The sandbox name. This is an async method; call `await sb.name()`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+print(await sb.name())
+```
+
+</Accordion>
 
 ---
 
-#### owns_lifecycle
+#### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
+<div className="msb-tags"><span className="msb-tag is-instance">property</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @property
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandboxcreate) or [`start()`](#sandboxstart) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#detach). Handles returned by [`connect()`](#connect) do not own lifecycle. This is an async property -- use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>True</code> if this handle owns the lifecycle.</div>
+  </div>
+</div>
 
 ---
 
-#### fs
+#### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
+<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
 
 ```python
 @property
 def fs(self) -> SandboxFsOps
 ```
 
-Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property -- use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
+Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxFsOps`](/sdk/python/filesystem) | Filesystem handle |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem">SandboxFsOps</a></div>
+    <div className="msb-param-desc">Filesystem handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/tmp/hello.txt", b"hi")
+```
+
+</Accordion>
 
 ---
 
 ## Instance methods
 
+Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
+
 ---
 
-#### attach()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach(
+    self,
     cmd: str,
     args: list[str] | None = None,
     *,
@@ -230,405 +467,504 @@ async def attach(
 ) -> int
 ```
 
-Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session.
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Returns the process exit code once the session ends.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `str` | Command to run |
-| args | `list[str] \| None` | Command arguments |
-| cwd | `str \| None` | Working directory |
-| user | `str \| None` | Guest user |
-| env | `Mapping[str, str] \| None` | Environment variables |
-| detach_keys | `str \| None` | Custom detach key sequence |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Command arguments.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Working directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Guest user.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Environment variables.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detach_keys</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Custom detach key sequence.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `int` | Exit code of the process |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the process.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+code = await sb.attach("python", ["-i"])
+```
+
+</Accordion>
 
 ---
 
-#### attach_shell()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">attach_shell()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def attach_shell() -> int
+async def attach_shell(self) -> int
 ```
 
-Attach to the sandbox's default shell.
+Attach your terminal to the sandbox's default shell for an interactive session.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| `int` | Exit code |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+await sb.attach_shell()
+```
+
+</Accordion>
 
 ---
 
-#### detach()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def detach() -> None
+async def metrics(self) -> SandboxMetrics
 ```
 
-Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, optional upper disk usage, and uptime.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmetrics">SandboxMetrics</a></div>
+    <div className="msb-param-desc">Resource metrics.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+m = await sb.metrics()
+print(f"cpu {m.cpu_percent:.1f}% · mem {m.memory_bytes // 1_048_576} MiB")
+```
+
+</Accordion>
 
 ---
 
-#### request_drain()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def request_drain() -> None
+async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
 ```
 
-Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. Use [`wait_until_stopped()`](#wait_until_stopped) when the caller needs stopped-state observation.
+Stream resource metrics at a regular interval. The returned [`MetricsStream`](#metricsstream) supports both `recv()` and `async for`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>interval</code><span className="msb-type">float</span></div>
+    <div className="msb-param-desc">Seconds between metric snapshots. Default <code>1.0</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#metricsstream">MetricsStream</a></div>
+    <div className="msb-param-desc">Async stream yielding a snapshot each interval.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+stream = await sb.metrics_stream(1.0)
+async for snapshot in stream:
+    print(f"{snapshot.cpu_percent:.1f}%")
+```
+
+</Accordion>
 
 ---
 
-#### exec()
-
-```python
-async def exec(
-    cmd: str,
-    args: list[str] | None = None,
-    *,
-    cwd: str | None = None,
-    user: str | None = None,
-    env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
-    tty: bool = False,
-    rlimits: list[Rlimit] | None = None,
-) -> ExecOutput
-```
-
-Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
-
-Pass per-execution options as keyword-only arguments. The SDK still accepts the older second-positional options dict for compatibility, but prefer kwargs for new code.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args | `list[str] \| None` | Command arguments |
-| cwd | `str \| None` | Working directory |
-| user | `str \| None` | Guest user |
-| env | `Mapping[str, str] \| None` | Environment variables |
-| timeout | `float \| None` | Kill the process after this many seconds |
-| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
-| tty | `bool` | Allocate a pseudo-terminal |
-| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
-
-```python
-output = await sb.exec(
-    "python",
-    ["compute.py"],
-    cwd="/app",
-    env={"PYTHONPATH": "/app/lib"},
-    timeout=30.0,
-)
-```
-
----
-
-#### exec_stream()
-
-```python
-async def exec_stream(
-    cmd: str,
-    args: list[str] | None = None,
-    *,
-    cwd: str | None = None,
-    user: str | None = None,
-    env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
-    tty: bool = False,
-    rlimits: list[Rlimit] | None = None,
-) -> ExecHandle
-```
-
-Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
-
-Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. The older second-positional options dict remains accepted for compatibility.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `str` | Command to execute |
-| args | `list[str] \| None` | Command arguments |
-| cwd | `str \| None` | Working directory |
-| user | `str \| None` | Guest user |
-| env | `Mapping[str, str] \| None` | Environment variables |
-| timeout | `float \| None` | Kill the process after this many seconds |
-| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
-| tty | `bool` | Allocate a pseudo-terminal |
-| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecHandle`](/sdk/python/execution#exechandle) | Streaming handle for receiving events and controlling the process |
-
----
-
-#### kill()
-
-```python
-async def kill(timeout: float | None = None) -> None
-```
-
-Force-terminate the sandbox and wait until stopped state is observed. Pass `timeout` to control the observation timeout. No graceful shutdown. Pending writes that the workload hasn't `fsync`'d may be lost — same durability semantics as a sudden power loss on a physical machine. Use [`stop()`](#stop) for graceful shutdown that gives the workload a chance to flush.
-
----
-
-#### metrics()
-
-```python
-async def metrics() -> SandboxMetrics
-```
-
-Get a point-in-time snapshot of the sandbox's resource usage.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
-
----
-
-#### metrics_stream()
-
-```python
-async def metrics_stream(interval: float = 1.0) -> MetricsStream
-```
-
-Stream resource metrics at a regular interval. The returned stream supports both `recv()` and `async for`.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| interval | `float` | Seconds between metric snapshots (default `1.0`) |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`MetricsStream`](#metricsstream) | Async stream of metrics |
-
----
-
-#### logs()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def logs(
+    self,
     tail: int | None = None,
     since_ms: float | None = None,
     until_ms: float | None = None,
-    sources: list[str] | None = None,
+    sources: list[LogReadSource] | None = None,
 ) -> list[LogEntry]
 ```
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
-The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines, or `"all"` as shorthand for all four. Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with [`SandboxMetrics.timestamp_ms`](#sandboxmetrics).
 
-```python
-import asyncio
-import microsandbox
+<p className="msb-label">Parameters</p>
 
-async def main():
-    handle = await microsandbox.Sandbox.get("web")
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tail</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Show only the last N entries after other filters apply.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>since_ms</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Inclusive lower bound on entry timestamp (ms since epoch).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>until_ms</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Exclusive upper bound on entry timestamp (ms since epoch).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logsource">list[LogReadSource] | None</a></div>
+    <div className="msb-param-desc">Sources to include. <code>None</code> = <code>["stdout", "stderr", "output"]</code>. Add <code>"system"</code> to merge runtime/kernel diagnostics, or use <code>"all"</code> for all four.</div>
+  </div>
+</div>
 
-    # Default — all user-program output, regardless of pipe/pty mode
-    entries = await handle.logs()
+<p className="msb-label">Returns</p>
 
-    for e in entries:
-        source = {
-            "stdout": "OUT",
-            "stderr": "ERR",
-            "output": "PTY",
-            "system": "SYS",
-        }[e.source]
-        print(
-            f"[{e.timestamp_ms / 1000:.3f}] "
-            f"{source} {e.session_id}: {e.text().rstrip()}"
-        )
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#logentry">list[LogEntry]</a></div>
+    <div className="msb-param-desc">Matching entries in chronological order.</div>
+  </div>
+</div>
 
-    # Filtered: last 50 entries from the past hour, including system lines
-    import time
-    recent = await handle.logs(
-        tail=50,
-        since_ms=(time.time() - 3600) * 1000,
-        sources=["stdout", "stderr", "output", "system"],
-    )
-
-asyncio.run(main())
-```
-
-Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with `SandboxMetrics.timestamp_ms`. Convert to `datetime` if needed:
+<Accordion title="Example">
 
 ```python
-from datetime import datetime, timezone
-dt = datetime.fromtimestamp(e.timestamp_ms / 1000, timezone.utc)
+import time
+from microsandbox import Sandbox
+
+handle = await Sandbox.get("web")
+
+# Default — all user-program output, regardless of pipe/pty mode
+entries = await handle.logs()
+for e in entries:
+    label = {"stdout": "OUT", "stderr": "ERR", "output": "PTY", "system": "SYS"}[e.source]
+    print(f"[{e.timestamp_ms / 1000:.3f}] {label} {e.session_id}: {e.text().rstrip()}")
+
+# Filtered: last 50 entries from the past hour, including system lines
+recent = await handle.logs(
+    tail=50,
+    since_ms=(time.time() - 3600) * 1000,
+    sources=["stdout", "stderr", "output", "system"],
+)
 ```
 
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| tail | `int \| None` | Show only the last N entries after other filters apply |
-| since_ms | `float \| None` | Inclusive lower bound on entry timestamp (ms since epoch) |
-| until_ms | `float \| None` | Exclusive upper bound on entry timestamp (ms since epoch) |
-| sources | `list[str] \| None` | Sources to include. `None` = `["stdout", "stderr", "output"]`. Add `"system"` to merge runtime/kernel diagnostics. Use `"all"` as shorthand for all four. |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `list[`[`LogEntry`](#logentry)`]` | Matching entries in chronological order |
+</Accordion>
 
 ---
 
-#### remove()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def remove() -> None
+async def log_stream(
+    self,
+    sources: list[LogReadSource] | None = None,
+    since_ms: float | None = None,
+    from_cursor: str | None = None,
+    until_ms: float | None = None,
+    follow: bool = False,
+) -> LogStream
 ```
 
-Remove the sandbox and all its persisted state from disk.
+Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` the stream stays open and yields new entries as they are written, like `tail -f`. Resume an earlier stream by passing the [`cursor`](#logentry) of the last entry you saw as `from_cursor`. Also available on [`SandboxHandle`](#sandboxhandle).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logsource">list[LogReadSource] | None</a></div>
+    <div className="msb-param-desc">Sources to include. Same semantics as <a href="#sb-logs">logs()</a>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>since_ms</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Inclusive lower bound on entry timestamp (ms since epoch).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from_cursor</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Resume after this opaque cursor (from a prior <a href="#logentry">LogEntry.cursor</a>).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>until_ms</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Exclusive upper bound on entry timestamp (ms since epoch).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>follow</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, keep the stream open and yield new entries as they arrive. Default <code>False</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#logstream">LogStream</a></div>
+    <div className="msb-param-desc">Async stream of log entries.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+stream = await sb.log_stream(follow=True)
+async for entry in stream:
+    print(entry.text().rstrip())
+```
+
+</Accordion>
 
 ---
 
-#### shell()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def shell(
-    script: str,
-    *,
-    cwd: str | None = None,
-    user: str | None = None,
-    env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
-    tty: bool = False,
-    rlimits: list[Rlimit] | None = None,
-) -> ExecOutput
-```
-
-Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| script | `str` | Shell command string (e.g. `"ls -la /app && echo done"`) |
-| cwd | `str \| None` | Working directory |
-| user | `str \| None` | Guest user |
-| env | `Mapping[str, str] \| None` | Environment variables |
-| timeout | `float \| None` | Kill the process after this many seconds |
-| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
-| tty | `bool` | Allocate a pseudo-terminal |
-| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
-
----
-
-#### shell_stream()
-
-```python
-async def shell_stream(script: str) -> ExecHandle
-```
-
-Shell command with streaming output.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| script | `str` | Shell command string |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecHandle`](/sdk/python/execution#exechandle) | Streaming handle |
-
----
-
-#### stop()
-
-```python
-async def stop(timeout: float | None = None) -> None
+async def stop(self, timeout: float | None = None) -> None
 ```
 
 Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
 
----
+<p className="msb-label">Parameters</p>
 
-#### request_stop()
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Seconds to wait for graceful exit before force-kill. <code>None</code> uses the ten-second default.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
 
 ```python
-async def request_stop() -> None
+await sb.stop()
 ```
 
-Request graceful shutdown and return once the request is sent.
+</Accordion>
 
 ---
 
-#### request_kill()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def request_kill() -> None
+async def request_stop(self) -> None
 ```
 
-Request force termination and return once the signal is sent.
+Request graceful shutdown and return once the request is sent, without waiting for stopped state. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs to observe the terminal state.
+
+<Accordion title="Example">
+
+```python
+await sb.request_stop()
+```
+
+</Accordion>
 
 ---
 
-#### wait_until_stopped()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
-async def wait_until_stopped() -> SandboxStopResult
+async def kill(self, timeout: float | None = None) -> None
+```
+
+Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown; use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Seconds to wait for the stopped state to be observed.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+await sb.kill()  # SIGKILL, no graceful shutdown
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def request_kill(self) -> None
+```
+
+Request force termination and return once the signal is sent, without waiting for stopped state.
+
+<Accordion title="Example">
+
+```python
+await sb.request_kill()
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def request_drain(self) -> None
+```
+
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
+
+<Accordion title="Example">
+
+```python
+await sb.request_drain()
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_stopped()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def wait_until_stopped(self) -> SandboxStopResult
 ```
 
 Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxStopResult`](#sandboxstopresult) | Terminal status and optional observed exit code |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxstopresult">SandboxStopResult</a></div>
+    <div className="msb-param-desc">Terminal status and optional observed exit code.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+result = await sb.wait_until_stopped()
+print(result.status, result.exit_code)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def detach(self) -> None
+```
+
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create("worker", image="python", detached=True)
+await sb.detach()  # keeps running in the background
+```
+
+</Accordion>
 
 ---
 
 ## Patch
 
-Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
-
-See [Patches](/sandboxes/customize#patches) for conceptual context.
+Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
 
 ---
 
-#### Patch.append()
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
+
+```python
+@staticmethod
+def text(path: str, content: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig
+```
+
+Write UTF-8 text content at `path`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>content</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Text content.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mode</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">File mode, e.g. <code>0o644</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, overwrite an existing path.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+from microsandbox import Patch, Sandbox
+
+sb = await Sandbox.create(
+    "api",
+    image="python",
+    patches=[Patch.text("/etc/app.conf", "debug=1\n", mode=0o644)],
+)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">append()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -637,61 +973,23 @@ def append(path: str, content: str) -> PatchConfig
 
 Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Absolute path inside the guest |
-| content | `str` | Text to append |
-
----
-
-#### Patch.copy_dir()
-
-```python
-@staticmethod
-def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig
-```
-
-Recursively copy a host directory at `src` into the guest rootfs at `dst`.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| src | `str` | Host source directory |
-| dst | `str` | Absolute destination path inside the guest |
-| replace | `bool` | When `True`, overwrite an existing path at `dst` |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>content</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Text to append.</div>
+  </div>
+</div>
 
 ---
 
-#### Patch.copy_file()
-
-```python
-@staticmethod
-def copy_file(
-    src: str,
-    dst: str,
-    *,
-    mode: int | None = None,
-    replace: bool = False,
-) -> PatchConfig
-```
-
-Copy a single host file at `src` into the guest rootfs at `dst`.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| src | `str` | Host source file |
-| dst | `str` | Absolute destination path inside the guest |
-| mode | `int \| None` | File mode, e.g. `0o644`. `None` keeps the source mode |
-| replace | `bool` | When `True`, overwrite an existing path at `dst` |
-
----
-
-#### Patch.mkdir()
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">mkdir()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -700,16 +998,23 @@ def mkdir(path: str, *, mode: int | None = None) -> PatchConfig
 
 Create a directory at `path`. Idempotent: a no-op if the directory already exists.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Absolute path inside the guest |
-| mode | `int \| None` | Directory mode, e.g. `0o755` |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mode</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Directory mode, e.g. <code>0o755</code>.</div>
+  </div>
+</div>
 
 ---
 
-#### Patch.remove()
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -718,15 +1023,81 @@ def remove(path: str) -> PatchConfig
 
 Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Absolute path inside the guest |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
 
 ---
 
-#### Patch.symlink()
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
+
+```python
+@staticmethod
+def copy_file(src: str, dst: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>src</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Host source file.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dst</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute destination path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mode</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">File mode, e.g. <code>0o644</code>. <code>None</code> keeps the source mode.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, overwrite an existing path at <code>dst</code>.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
+
+```python
+@staticmethod
+def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>src</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Host source directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dst</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute destination path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, overwrite an existing path at <code>dst</code>.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">symlink()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -735,242 +1106,79 @@ def symlink(target: str, link: str, *, replace: bool = False) -> PatchConfig
 
 Create a symlink at `link` pointing to `target`.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| target | `str` | What the symlink points to (literal symlink target text) |
-| link | `str` | Absolute path of the symlink itself |
-| replace | `bool` | When `True`, overwrite an existing path at `link` |
-
----
-
-#### Patch.text()
-
-```python
-@staticmethod
-def text(
-    path: str,
-    content: str,
-    *,
-    mode: int | None = None,
-    replace: bool = False,
-) -> PatchConfig
-```
-
-Write UTF-8 text content at `path`.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `str` | Absolute path inside the guest |
-| content | `str` | Text content |
-| mode | `int \| None` | File mode, e.g. `0o644` |
-| replace | `bool` | When `True`, overwrite an existing path |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>target</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">What the symlink points to (literal symlink target text).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>link</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path of the symlink itself.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, overwrite an existing path at <code>link</code>.</div>
+  </div>
+</div>
 
 ---
 
 ## Types
 
-### LogLevel
-
-Sandbox process log verbosity.
-
-| Value | Description |
-|-------|-------------|
-| `"debug"` | Debug and higher |
-| `"error"` | Errors only |
-| `"info"` | Info and higher |
-| `"trace"` | Most verbose -- all diagnostic output |
-| `"warn"` | Warnings and errors only |
-
-### SecurityProfile
-
-```python
-class SecurityProfile(StrEnum):
-    DEFAULT = "default"
-    RESTRICTED = "restricted"
-```
-
-Sandbox-wide in-guest security profile.
-
-### LogEntry
-
-A single captured log entry returned by [`logs()`](#logs).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
-| source | `str` | Where the chunk came from. See [LogSource](#logsource). |
-| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
-| data | `bytes` | The chunk's bytes (UTF-8 lossy decoded by default) |
-| `text()` | `str` | Convenience: UTF-8 decode of `data` (lossy — invalid bytes are replaced) |
-
-### LogSource
-
-The string values that the `source` field on a [`LogEntry`](#logentry) can take, also accepted by `logs(sources=[...])`.
-
-| Value | Description |
-|-------|-------------|
-| `"stdout"` | Captured from a session's stdout (pipe mode — streams stayed separated) |
-| `"stderr"` | Captured from a session's stderr (pipe mode) |
-| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `"output"` rather than mislabelled as `"stdout"`. |
-| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
-
-In addition, `logs(sources=["all"])` is a shorthand for all four.
-
-### MetricsStream
-
-Async stream for receiving periodic metrics snapshots.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` | `AsyncIterator[`[`SandboxMetrics`](#sandboxmetrics)`]` | Use with `async for` |
-| `recv()` | [`SandboxMetrics`](#sandboxmetrics) `\| None` | Receive next snapshot. Returns `None` when the stream ends. |
-
-### PatchConfig
-
-A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally not construct one directly. Frozen dataclass.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| kind | `str` | One of `"text"`, `"file"`, `"copy_file"`, `"copy_dir"`, `"symlink"`, `"mkdir"`, `"remove"`, `"append"` |
-| path | `str \| None` | Absolute guest path (used by text / file / mkdir / remove / append) |
-| content | `str \| None` | Text content (text / append) |
-| src | `str \| None` | Host source path (copy_file / copy_dir) |
-| dst | `str \| None` | Guest destination path (copy_file / copy_dir) |
-| target | `str \| None` | Symlink target |
-| link | `str \| None` | Symlink path |
-| mode | `int \| None` | File / directory mode (e.g. `0o644`) |
-| replace | `bool` | When `True`, overwrite an existing path at the destination. Defaults to `False` |
-
-### PullPolicy
-
-Controls when the SDK fetches an OCI image from the registry.
-
-| Value | Description |
-|-------|-------------|
-| `"always"` | Pull the image every time, even if cached locally |
-| `"if-missing"` | Pull only if the image is not already cached. This is the default. |
-| `"never"` | Never pull; fail if the image is not cached locally |
-
-### PullEvent
-
-Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `event_type` and the fields relevant to that event:
-
-| event_type | Fields |
-|------------|--------|
-| `"resolving"` | `reference` |
-| `"resolved"` | `reference`, `manifest_digest`, `layer_count`, `total_download_bytes` |
-| `"layer_download_progress"` | `layer_index`, `digest`, `downloaded_bytes`, `total_bytes` |
-| `"layer_download_complete"` | `layer_index`, `digest`, `downloaded_bytes` |
-| `"layer_download_verifying"` | `layer_index`, `digest` |
-| `"layer_materialize_started"` | `layer_index`, `diff_id` |
-| `"layer_materialize_progress"` | `layer_index`, `bytes_read`, `total_bytes` |
-| `"layer_materialize_writing"` | `layer_index` |
-| `"layer_materialize_complete"` | `layer_index`, `diff_id` |
-| `"stitch_merging_trees"` | `layer_count` |
-| `"stitch_writing_fsmeta"` | - |
-| `"stitch_writing_vmdk"` | - |
-| `"stitch_complete"` | - |
-| `"complete"` | `reference`, `layer_count` |
-
-Fields that do not apply to a particular event are `None`.
-
-```python
-from microsandbox import Sandbox
-
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        if event.event_type == "resolved":
-            print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
-        elif event.event_type == "layer_download_progress":
-            print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
-    sb = await session.result()
-```
-
-### PullSession
-
-Returned by [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress). `Sandbox.create_with_progress()` itself is synchronous; use the returned session as an async context manager to track image pull progress.
-
-```python
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        print(event)
-    sb = await session.result()
-```
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError`. |
-
-### RegistryAuth
-
-Private registry credentials.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| username | `str` | Registry username |
-| password | `str` | Registry password |
-
 ### SandboxConfig
 
-The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress).
+<div className="msb-tags"><span className="msb-tag is-type">kwargs</span></div>
+
+<p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_with_progress()`](#sandbox-create_with_progress). There is no `SandboxConfig` object you construct directly; these are passed as `**kwargs`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| ImageSource` | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
+| image | `str \| `[`ImageSource`](/sdk/python/snapshots) | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
 | snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
-| cpus | `int` | `1` | Virtual CPUs |
-| memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
+| cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
+| memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
-| security | [`SecurityProfile`](#securityprofile) \| `str` | `SecurityProfile.DEFAULT` | In-guest security profile |
+| security | [`SecurityProfile`](#securityprofile) `\| str` | `"default"` | In-guest security profile. `"restricted"` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
-| entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
-| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |
-| replace | `bool` | `False` | Replace existing sandbox with same name |
-| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL`; implies `replace=True` |
+| entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` which pass `cmd` literally |
+| init | `str \| dict \| `[`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
+| replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
+| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
 | env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
 | scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
-| pull_policy | `str \| PullPolicy` | `"if-missing"` | Image pull behavior |
-| log_level | `str \| LogLevel` | - | Override log verbosity |
+| pull_policy | `str \| `[`PullPolicy`](#pullpolicy) | `"if-missing"` | Image pull behavior |
+| log_level | `str \| `[`LogLevel`](#loglevel) | - | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
-| volumes | `dict[str, MountConfig]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
-| patches | `list[PatchConfig]` | `[]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int] \| Sequence[PortBinding]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
+| volumes | `dict[str, `[`MountConfig`](/sdk/python/volumes)`]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes) |
+| patches | `list[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
+| ports | `dict[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
+| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig
 
-Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`Sandbox.create()`](#sandboxcreate) to hand PID 1 inside the guest off to your own init binary after agentd's setup. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
-```python
-from dataclasses import dataclass
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(init=...)</a></p>
 
-@dataclass(frozen=True, slots=True)
-class InitConfig:
-    cmd: str
-    args: tuple[str, ...] = ()
-    env: Mapping[str, str] = {}
-```
+Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`create()`](#sandbox-create) to hand PID 1 inside the guest off to your own init binary after agentd's setup. Frozen dataclass. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| cmd | `str` | Absolute path or `"auto"` to the init binary inside the guest rootfs |
-| args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
-| env | `dict[str, str]` | Extra env vars merged on top of the inherited env |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| cmd | `str` | - | Absolute path or `"auto"` to the init binary. Auto honors a known image ENTRYPOINT init before probing `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd`, and preserves attached init-entrypoint commands |
+| args | `tuple[str, ...]` | `()` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
+| env | `Mapping[str, str]` | `{}` | Extra env vars merged on top of the inherited env |
 
-The `init=` kwarg follows the same shape as other `Sandbox.create` kwargs that carry structured values (`image=`, `network=`, etc.): a bare scalar for the simple case, or a dataclass / dict for the rich case.
+The `init=` kwarg follows the same shape as other structured `create` kwargs: a bare scalar for the simple case, or a dataclass / dict for the rich case.
 
 | Form | Equivalent to |
 |------|---------------|
@@ -996,17 +1204,36 @@ sb = await Sandbox.create(
 )
 ```
 
+### SecurityProfile
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(security=...)</a></p>
+
+Sandbox-wide in-guest security profile. A `StrEnum`, so the string values are accepted directly.
+
+| Value | Description |
+|-------|-------------|
+| `"default"` | Standard profile |
+| `"restricted"` | Sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
+
 ### SandboxHandle
 
-A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandboxget) or [`Sandbox.list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. Call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
+
+A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| status | `str` | Current status (`"running"`, `"stopped"`, `"crashed"`, `"draining"`, `"paused"`) |
+| status | `str` | Current status. See [`SandboxStatus`](#sandboxstatus) |
 | config_json | `str` | Raw JSON configuration |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
 | updated_at | `float \| None` | Last update timestamp (ms since epoch) |
+| config() | `dict[str, Any]` | Parsed configuration |
+| refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
 | connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
 | stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
@@ -1017,29 +1244,240 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
 | remove() | `Awaitable[None]` | Delete sandbox and state |
 | metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
-| logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
+| logs(...) | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
+| log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
+| snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
+| snapshot_to(path) | `Awaitable[Snapshot]` | Create a [snapshot](/sdk/python/snapshots) at a path |
 
 ### SandboxStopResult
 
-Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until_stopped).
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-| Field | Type | Description |
-|-------|------|-------------|
-| status | `str` | Terminal status that was observed |
+<p className="msb-backref">Returned by <a href="#sb-wait_until_stopped">wait_until_stopped()</a></p>
+
+Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_until_stopped).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| name | `str` | Sandbox name |
+| status | `str` | Terminal status that was observed. See [`SandboxStatus`](#sandboxstatus) |
 | exit_code | `int \| None` | Process exit code when it is available |
+| signal | `int \| None` | Terminating signal number when the sandbox was killed by a signal |
+| observed_at | `float` | When the terminal state was observed (ms since epoch) |
+| source | `str \| None` | Where the terminal observation came from |
+
+### SandboxStatus
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
+
+The string status values a sandbox can report. A `StrEnum`, exposed as plain strings on `status` fields.
+
+| Value | Description |
+|-------|-------------|
+| `"running"` | Guest agent is ready; `exec`, `shell`, `fs` work |
+| `"stopped"` | VM shut down; configuration persisted; can be restarted |
+| `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
+| `"paused"` | VM paused |
 
 ### SandboxMetrics
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
 Point-in-time resource usage snapshot.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | cpu_percent | `float` | CPU usage as a percentage |
+| vcpu_time_ns | `int` | Cumulative vCPU time consumed since boot, in nanoseconds |
+| memory_bytes | `int` | Current memory usage in bytes |
+| memory_available_bytes | `int \| None` | Guest-reported available memory in bytes when known |
+| memory_host_resident_bytes | `int \| None` | Host-resident memory backing the guest in bytes when known |
+| memory_limit_bytes | `int` | Memory limit in bytes |
 | disk_read_bytes | `int` | Total bytes read from disk since boot |
 | disk_write_bytes | `int` | Total bytes written to disk since boot |
-| memory_bytes | `int` | Current memory usage in bytes |
-| memory_limit_bytes | `int` | Memory limit in bytes |
 | net_rx_bytes | `int` | Total bytes received over the network since boot |
 | net_tx_bytes | `int` | Total bytes sent over the network since boot |
-| timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
+| upper_used_bytes | `int \| None` | Guest-visible OCI upper filesystem used bytes when the protected reporter is available and fresh |
+| upper_free_bytes | `int \| None` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
+| upper_host_allocated_bytes | `int \| None` | Host-allocated bytes for the writable OCI upper image when available |
 | uptime_ms | `int` | Time since the sandbox was created (ms) |
+| timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
+
+### MetricsStream
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
+
+Async stream for receiving periodic metrics snapshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `__aiter__` / `__anext__` | [`SandboxMetrics`](#sandboxmetrics) | Use with `async for` |
+
+### LogEntry
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
+
+A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| cursor | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
+| data | `bytes` | The chunk's raw bytes |
+| text() | `str` | Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced) |
+
+### LogStream
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
+
+Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `__aiter__` / `__anext__` | [`LogEntry`](#logentry) | Use with `async for` |
+
+### LogSource
+
+<div className="msb-tags"><span className="msb-tag is-type">literal</span></div>
+
+<p className="msb-backref">Used by <a href="#logentry">LogEntry.source</a> · <a href="#sb-logs">logs(sources=...)</a></p>
+
+The string values the `source` field on a [`LogEntry`](#logentry) can take, also accepted by `logs(sources=[...])` and `log_stream(sources=[...])`. The read form additionally accepts `"all"`.
+
+| Value | Description |
+|-------|-------------|
+| `"stdout"` | Captured from a session's stdout (pipe mode, streams stayed separated) |
+| `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `"output"` rather than mislabelled as `"stdout"` |
+| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested |
+| `"all"` | Read shorthand for all four sources (accepted by `sources=`, never returned on an entry) |
+
+### LogLevel
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(log_level=...)</a></p>
+
+Sandbox process log verbosity. A `StrEnum`, so the string values are accepted directly.
+
+| Value | Description |
+|-------|-------------|
+| `"trace"` | Most verbose, all diagnostic output |
+| `"debug"` | Debug and higher |
+| `"info"` | Info and higher |
+| `"warn"` | Warnings and errors only |
+| `"error"` | Errors only |
+
+### PullPolicy
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(pull_policy=...)</a></p>
+
+Controls when the SDK fetches an OCI image from the registry. A `StrEnum`, so the string values are accepted directly.
+
+| Value | Description |
+|-------|-------------|
+| `"always"` | Pull the image every time, even if cached locally |
+| `"if-missing"` | Pull only if the image is not already cached. This is the default |
+| `"never"` | Never pull; fail if the image is not cached locally |
+
+### RegistryAuth
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(registry_auth=...)</a></p>
+
+Credentials for authenticating to a private container registry. Frozen dataclass; construct directly or via `RegistryAuth.basic(username, password)`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| username | `str` | Registry username |
+| password | `str` | Registry password |
+
+### PatchConfig
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Returned by <a href="#patch-text">Patch.* factory methods</a> · used by <a href="#sandboxconfig">create(patches=...)</a></p>
+
+A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally not construct one directly. Frozen dataclass.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | `str` | One of `"text"`, `"file"`, `"copy_file"`, `"copy_dir"`, `"symlink"`, `"mkdir"`, `"remove"`, `"append"` |
+| path | `str \| None` | Absolute guest path (text / mkdir / remove / append) |
+| content | `str \| None` | Text content (text / append) |
+| src | `str \| None` | Host source path (copy_file / copy_dir) |
+| dst | `str \| None` | Guest destination path (copy_file / copy_dir) |
+| target | `str \| None` | Symlink target |
+| link | `str \| None` | Symlink path |
+| mode | `int \| None` | File / directory mode (e.g. `0o644`) |
+| replace | `bool` | When `True`, overwrite an existing path at the destination. Defaults to `False` |
+
+### PullSession
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
+| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError` |
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event)
+    sb = await session.result()
+```
+
+### PullEvent
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Iterated from <a href="#pullsession">PullSession.progress</a></p>
+
+Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `event_type` and the fields relevant to that event; fields that do not apply to a particular event are `None`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| event_type | `str` | Event tag, e.g. `"resolving"`, `"resolved"`, `"layer_download_progress"`, `"complete"` |
+| reference | `str \| None` | Image reference being pulled |
+| manifest_digest | `str \| None` | Resolved manifest digest |
+| layer_count | `int \| None` | Number of layers |
+| total_download_bytes | `int \| None` | Total bytes to download across layers |
+| layer_index | `int \| None` | Index of the layer this event concerns |
+| digest | `str \| None` | Layer blob digest |
+| diff_id | `str \| None` | Layer diff id |
+| downloaded_bytes | `int \| None` | Bytes downloaded so far for the layer |
+| total_bytes | `int \| None` | Total bytes for the layer |
+| bytes_read | `int \| None` | Bytes read during materialization |
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        if event.event_type == "resolved":
+            print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
+        elif event.event_type == "layer_download_progress":
+            print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
+    sb = await session.result()
+```

@@ -3,303 +3,1246 @@ title: Execution
 description: Rust SDK - Command execution API reference
 ---
 
-See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox: buffer the output in one call, stream it event by event, drive a shell, or bridge your terminal to an interactive PTY session. See [Commands](/sandboxes/commands) for usage examples.
 
----
+<div className="msb-glance">
 
-#### attach()
+  <p className="msb-gl"><span className="msb-dot instance"></span>Run · buffered<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#sb-exec"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run, wait, collect output</span></a>
+  <a className="msb-row" href="#sb-exec_with"><span className="msb-rn">sb.exec_with()</span><span className="msb-rg">run with per-exec options</span></a>
+  <a className="msb-row" href="#sb-shell"><span className="msb-rn">sb.shell()</span><span className="msb-rg">run through the shell</span></a>
+  <a className="msb-row" href="#sb-shell_with"><span className="msb-rn">sb.shell_with()</span><span className="msb-rg">shell with options</span></a>
 
-```rust
-async fn attach(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<i32>
-```
+  <p className="msb-gl"><span className="msb-dot instance"></span>Run · streaming<span className="msb-ct">4</span></p>
+  <a className="msb-row" href="#sb-exec_stream"><span className="msb-rn">sb.exec_stream()</span><span className="msb-rg">stream stdout/stderr events</span></a>
+  <a className="msb-row" href="#sb-exec_stream_with"><span className="msb-rn">sb.exec_stream_with()</span><span className="msb-rg">stream with options</span></a>
+  <a className="msb-row" href="#sb-shell_stream"><span className="msb-rn">sb.shell_stream()</span><span className="msb-rg">stream a shell command</span></a>
+  <a className="msb-row" href="#sb-shell_stream_with"><span className="msb-rn">sb.shell_stream_with()</span><span className="msb-rg">stream shell with options</span></a>
 
-Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Your terminal's stdin, stdout, and stderr are connected to the guest process. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process - it keeps running and can be reattached via its session ID.
+  <p className="msb-gl"><span className="msb-dot instance"></span>Attach · interactive<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#sb-attach"><span className="msb-rn">sb.attach()</span><span className="msb-rg">bridge terminal to a process</span></a>
+  <a className="msb-row" href="#sb-attach_with"><span className="msb-rn">sb.attach_with()</span><span className="msb-rg">attach with options</span></a>
+  <a className="msb-row" href="#sb-attach_shell"><span className="msb-rn">sb.attach_shell()</span><span className="msb-rg">attach to the default shell</span></a>
 
-**Parameters**
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · ExecOptionsBuilder<span className="msb-ct">14</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#arg">.arg()</a>
+    <a className="msb-chip" href="#args">.args()</a>
+    <a className="msb-chip" href="#cwd">.cwd()</a>
+    <a className="msb-chip" href="#user">.user()</a>
+    <a className="msb-chip" href="#env">.env()</a>
+    <a className="msb-chip" href="#envs">.envs()</a>
+    <a className="msb-chip" href="#timeout">.timeout()</a>
+    <a className="msb-chip" href="#tty">.tty()</a>
+    <a className="msb-chip" href="#stdin_null">.stdin_null()</a>
+    <a className="msb-chip" href="#stdin_pipe">.stdin_pipe()</a>
+    <a className="msb-chip" href="#stdin_bytes">.stdin_bytes()</a>
+    <a className="msb-chip" href="#rlimit">.rlimit()</a>
+    <a className="msb-chip" href="#rlimit_range">.rlimit_range()</a>
+    <a className="msb-chip" href="#build">.build()</a>
+  </div>
 
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to run |
-| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments |
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · AttachOptionsBuilder<span className="msb-ct">10</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-chip" href="#arg-2">.arg()</a>
+    <a className="msb-chip" href="#args-2">.args()</a>
+    <a className="msb-chip" href="#cwd-2">.cwd()</a>
+    <a className="msb-chip" href="#user-2">.user()</a>
+    <a className="msb-chip" href="#env-2">.env()</a>
+    <a className="msb-chip" href="#envs-2">.envs()</a>
+    <a className="msb-chip" href="#detach_keys">.detach_keys()</a>
+    <a className="msb-chip" href="#rlimit-3">.rlimit()</a>
+    <a className="msb-chip" href="#rlimit_range-2">.rlimit_range()</a>
+    <a className="msb-chip" href="#build-2">.build()</a>
+  </div>
 
-**Returns**
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#exechandle">ExecHandle</a>
+    <a className="msb-typepill" href="#execcontrol">ExecControl</a>
+    <a className="msb-typepill" href="#execsink">ExecSink</a>
+    <a className="msb-typepill" href="#execevent">ExecEvent</a>
+    <a className="msb-typepill" href="#execoutput">ExecOutput</a>
+    <a className="msb-typepill" href="#exitstatus">ExitStatus</a>
+    <a className="msb-typepill" href="#rlimit-2">Rlimit</a>
+    <a className="msb-typepill" href="#rlimitresource">RlimitResource</a>
+  </div>
 
-| Type | Description |
-|------|-------------|
-| `i32` | Exit code of the process |
+</div>
 
----
-
-#### attach_shell()
-
-```rust
-async fn attach_shell(&self) -> MicrosandboxResult<i32>
-```
-
-Attach to the sandbox's default shell (configured via `SandboxBuilder::shell()`, defaults to `/bin/sh`).
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `i32` | Exit code |
-
----
-
-#### attach_with()
-
-```rust
-async fn attach_with(&self, cmd: impl Into<String>, f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder) -> MicrosandboxResult<i32>
-```
-
-Interactive PTY attach with options for environment variables, working directory, user, and custom detach keys.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to run |
-| f | `AttachOptionsBuilder` | Configure attach options (env, cwd, user, detach keys). |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `i32` | Exit code of the process |
-
----
-
-#### exec()
-
-```rust
-async fn exec(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<ExecOutput>
-```
-
-Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments (e.g. `["-c", "print('hello')"]`) |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
-
----
-
-#### exec_stream()
+<p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust
-async fn exec_stream(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<ExecHandle>
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("api").image("python").create().await?;
+
+// Buffered: run and collect everything
+let out = sb.exec("python", ["-c", "print('hi')"]).await?;
+println!("{}", out.stdout()?);
+
+// Streaming: process output as it arrives
+let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
+while let Some(event) = handle.recv().await {
+    if let microsandbox::ExecEvent::Stdout(chunk) = event {
+        print!("{}", String::from_utf8_lossy(&chunk));
+    }
+}
+
+sb.stop().await?;
 ```
 
-Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything until the command finishes. Use this for long-running processes, large output, or when you need to process output incrementally.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to execute |
-| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecHandle`](#exechandle) | Streaming handle for receiving events and controlling the process |
+## Run methods
 
 ---
 
-#### exec_stream_with()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
-async fn exec_stream_with(&self, cmd: impl Into<String>, f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder) -> MicrosandboxResult<ExecHandle>
+async fn exec(
+    &self,
+    cmd: impl Into<String>,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> MicrosandboxResult<ExecOutput>
 ```
 
-Streaming execution with per-execution overrides. Enable `stdin_pipe()` to write to the process's stdin, and `tty(true)` to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
+Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit status. `cmd` is passed literally to the guest agent: the image ENTRYPOINT is **not** consulted, and `args` are not shell-interpreted. For long-running processes or large output, use [`exec_stream()`](#sb-exec_stream); for shell syntax like pipes and redirects, use [`shell()`](#sb-shell).
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to execute |
-| f | [`ExecOptionsBuilder`](#execoptionsbuilder) | Configure execution options. |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to execute, e.g. <code>"python"</code> or <code>"/usr/bin/node"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Command arguments, e.g. <code>["-c", "print('hi')"]</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`ExecHandle`](#exechandle) | Streaming handle |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
 
----
-
-#### exec_with()
+<Accordion title="Example">
 
 ```rust
-async fn exec_with(&self, cmd: impl Into<String>, f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder) -> MicrosandboxResult<ExecOutput>
+let out = sb.exec("python", ["-V"]).await?;
+println!("{}", out.stdout()?);
 ```
 
-Run a command with per-execution overrides. The closure receives an [`ExecOptionsBuilder`](#execoptionsbuilder) to configure working directory, environment variables, timeout, resource limits, stdin mode, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `impl Into<String>` | Command to execute |
-| f | [`ExecOptionsBuilder`](#execoptionsbuilder) | Configure execution options. |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+</Accordion>
 
 ---
 
-#### shell()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn exec_with(
+    &self,
+    cmd: impl Into<String>,
+    f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> MicrosandboxResult<ExecOutput>
+```
+
+Run a command with per-execution overrides and wait for completion. The closure receives an [`ExecOptionsBuilder`](#execoptionsbuilder) to set args, working directory, environment variables, user, timeout, resource limits, stdin mode, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to execute.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#execoptionsbuilder">FnOnce(ExecOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure execution options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+use std::time::Duration;
+
+let out = sb.exec_with("python", |e| e
+    .args(["compute.py"])
+    .cwd("/app")
+    .env("LOG_LEVEL", "debug")
+    .timeout(Duration::from_secs(30)))
+    .await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">shell()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput>
 ```
 
-Run a command through the sandbox's configured shell (defaults to `/bin/sh`). The script is passed as `sh -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
+Run a command through the sandbox's configured shell (default: `/bin/sh`, set via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell)). The script is run as `<shell> -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| script | `impl Into<String>` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Shell command string, e.g. <code>"ls -la /app && echo done"</code>.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let out = sb.shell("cat /etc/os-release | grep PRETTY_NAME").await?;
+println!("{}", out.stdout()?);
+```
+
+</Accordion>
 
 ---
 
-#### shell_stream()
+#### <span className="msb-recv">sb.</span><span className="msb-hn">shell_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn shell_with(
+    &self,
+    script: impl Into<String>,
+    f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> MicrosandboxResult<ExecOutput>
+```
+
+Run a shell command with per-execution overrides and wait for completion. The `-c <script>` arguments are prepended to whatever the [`ExecOptionsBuilder`](#execoptionsbuilder) configures, so use the builder for env, cwd, user, timeout, and resource limits rather than for positional args.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Shell command string.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#execoptionsbuilder">FnOnce(ExecOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure execution options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execoutput">ExecOutput</a></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let out = sb.shell_with("env | sort", |e| e.env("STAGE", "build")).await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn exec_stream(
+    &self,
+    cmd: impl Into<String>,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> MicrosandboxResult<ExecHandle>
+```
+
+Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, started, and exit events as they happen, rather than buffering everything until the command finishes. Use this for long-running processes, large output, or when you need to process output incrementally.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to execute.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Command arguments.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle for receiving events and controlling the process.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::ExecEvent;
+
+let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
+while let Some(event) = handle.recv().await {
+    match event {
+        ExecEvent::Stdout(chunk) => print!("{}", String::from_utf8_lossy(&chunk)),
+        ExecEvent::Exited { code } => { println!("exited {code}"); break; }
+        _ => {}
+    }
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec_stream_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn exec_stream_with(
+    &self,
+    cmd: impl Into<String>,
+    f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> MicrosandboxResult<ExecHandle>
+```
+
+Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#stdin_pipe) to write to the process's stdin via [`ExecHandle::take_stdin()`](#exechandle), and [`tty(true)`](#tty) to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to execute.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#execoptionsbuilder">FnOnce(ExecOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure execution options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
+if let Some(stdin) = handle.take_stdin() {
+    stdin.write(b"print(2 + 2)\n").await?;
+    stdin.close().await?;
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">shell_stream()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle>
 ```
 
-Shell command with streaming output.
+Like [`shell()`](#sb-shell), but returns a streaming [`ExecHandle`](#exechandle) instead of waiting for completion.
 
-**Parameters**
+<p className="msb-label">Parameters</p>
 
-| Name | Type | Description |
-|------|------|-------------|
-| script | `impl Into<String>` | Shell command string |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Shell command string.</div>
+  </div>
+</div>
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`ExecHandle`](#exechandle) | Streaming handle |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done").await?;
+let out = handle.collect().await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">shell_stream_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn shell_stream_with(
+    &self,
+    script: impl Into<String>,
+    f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> MicrosandboxResult<ExecHandle>
+```
+
+Run a shell command with per-execution overrides and streaming I/O. As with [`shell_with()`](#sb-shell_with), the `-c <script>` arguments are prepended to whatever the builder configures.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Shell command string.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#execoptionsbuilder">FnOnce(ExecOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure execution options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#exechandle">ExecHandle</a></div>
+    <div className="msb-param-desc">Streaming handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.shell_stream_with("npm run build", |e| e.cwd("/app")).await?;
+```
+
+</Accordion>
+
+---
+
+## Attach methods
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn attach(
+    &self,
+    cmd: impl Into<String>,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> MicrosandboxResult<i32>
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. The host terminal is put into raw mode and its stdin, stdout, and window-size changes are wired to the guest process. Press the detach key (default `Ctrl+]`) to disconnect without stopping the process; it keeps running in the guest. Returns when the process exits or you detach.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Command arguments.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">i32</span></div>
+    <div className="msb-param-desc">Exit code of the process, or <code>-1</code> if you detached before it exited.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach("bash", ["-l"]).await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">attach_with()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn attach_with(
+    &self,
+    cmd: impl Into<String>,
+    f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
+) -> MicrosandboxResult<i32>
+```
+
+Interactive PTY attach with options. The closure receives an [`AttachOptionsBuilder`](#attachoptionsbuilder) to set args, environment variables, working directory, user, custom detach keys, and resource limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#attachoptionsbuilder">FnOnce(AttachOptionsBuilder)</a></div>
+    <div className="msb-param-desc">Configure attach options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">i32</span></div>
+    <div className="msb-param-desc">Exit code of the process, or <code>-1</code> if you detached.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach_with("zsh", |a| a
+    .env("TERM", "xterm-256color")
+    .detach_keys("ctrl-p,ctrl-q"))
+    .await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">attach_shell()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn attach_shell(&self) -> MicrosandboxResult<i32>
+```
+
+Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell), default `/bin/sh`) with an interactive PTY session.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">i32</span></div>
+    <div className="msb-param-desc">Exit code, or <code>-1</code> if you detached.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach_shell().await?;
+```
+
+</Accordion>
+
+---
+
+## ExecOptionsBuilder
+
+Builder for per-execution overrides passed to [`exec_with()`](#sb-exec_with), [`exec_stream_with()`](#sb-exec_stream_with), [`shell_with()`](#sb-shell_with), and [`shell_stream_with()`](#sb-shell_stream_with). Does not change the sandbox's defaults. Every setter returns `Self`, so calls chain.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">arg()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn arg(self, arg: impl Into<String>) -> Self
+```
+
+Append a single command-line argument, e.g. `"-la"` or `"/tmp"`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>arg</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Argument to append.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">args()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn args(self, args: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Append multiple command-line arguments.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Arguments to append.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cwd()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn cwd(self, cwd: impl Into<String>) -> Self
+```
+
+Override the working directory for this command. Overrides the sandbox default set via the builder's `workdir`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">user()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn user(self, user: impl Into<String>) -> Self
+```
+
+Override the guest user for this command.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">User name or UID.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">env()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
+```
+
+Set an environment variable for this command. Merged on top of the sandbox-level env vars.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable value.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">envs()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn envs(
+    self,
+    vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+) -> Self
+```
+
+Set multiple environment variables for this command at once.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>vars</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Key-value pairs to set.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">timeout()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn timeout(self, timeout: Duration) -> Self
+```
+
+Kill the process with SIGKILL if it hasn't exited within this duration.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Duration</span></div>
+    <div className="msb-param-desc">Maximum run time before SIGKILL.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">tty()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn tty(self, enabled: bool) -> Self
+```
+
+Allocate a pseudo-terminal. Enable for interactive programs (shells, editors, `top`); disable for scripts and batch jobs. When enabled, stdout and stderr are merged at the kernel level inside the guest. Default: `false`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to allocate a PTY.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">stdin_null()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn stdin_null(self) -> Self
+```
+
+Stdin reads from `/dev/null`. This is the default.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">stdin_pipe()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn stdin_pipe(self) -> Self
+```
+
+Enable a stdin writer via [`ExecSink`](#execsink). Use with [`ExecHandle::take_stdin()`](#exechandle) on the returned streaming handle to send data to the process.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">stdin_bytes()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn stdin_bytes(self, data: impl Into<Vec<u8>>) -> Self
+```
+
+Provide fixed bytes as stdin. The process reads them and then sees EOF.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">impl Into&lt;Vec&lt;u8&gt;&gt;</span></div>
+    <div className="msb-param-desc">Bytes fed to the process's stdin.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">rlimit()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn rlimit(self, resource: RlimitResource, limit: u64) -> Self
+```
+
+Set a POSIX resource limit with soft equal to hard. Applied via `setrlimit()` before exec.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resource</code><a className="msb-type" href="#rlimitresource">RlimitResource</a></div>
+    <div className="msb-param-desc">Which resource to limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Limit value (soft = hard).</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::sandbox::RlimitResource;
+
+let out = sb.exec_with("./worker", |e| e.rlimit(RlimitResource::Nofile, 1024)).await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">rlimit_range()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn rlimit_range(self, resource: RlimitResource, soft: u64, hard: u64) -> Self
+```
+
+Set a resource limit with different soft and hard values. [`build()`](#build) errors if `soft > hard`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resource</code><a className="msb-type" href="#rlimitresource">RlimitResource</a></div>
+    <div className="msb-param-desc">Which resource to limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>soft</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Soft limit (raisable by the process up to hard).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hard</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Hard ceiling.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn build(self) -> MicrosandboxResult<ExecOptions>
+```
+
+Finalize the options. Called automatically by the `*_with` methods when you use the closure form. Returns an error if any rlimit has `soft > hard`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">ExecOptions</span></div>
+    <div className="msb-param-desc">Validated execution options.</div>
+  </div>
+</div>
+
+---
+
+## AttachOptionsBuilder
+
+Builder for interactive attach options passed to [`attach_with()`](#sb-attach_with). Every setter returns `Self`, so calls chain.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">arg()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn arg(self, arg: impl Into<String>) -> Self
+```
+
+Append a single command-line argument to the attached command.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>arg</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Argument to append.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">args()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn args(self, args: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Append multiple command-line arguments.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Arguments to append.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cwd()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn cwd(self, cwd: impl Into<String>) -> Self
+```
+
+Override the working directory for the attached session.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">user()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn user(self, user: impl Into<String>) -> Self
+```
+
+Override the guest user for the attached session.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">User name or UID.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">env()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
+```
+
+Set an environment variable for the attached session. Merged on top of the sandbox-level env vars.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable value.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">envs()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn envs(
+    self,
+    vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+) -> Self
+```
+
+Set multiple environment variables for the attached session at once.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>vars</code><span className="msb-type">impl IntoIterator</span></div>
+    <div className="msb-param-desc">Key-value pairs to set.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">detach_keys()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn detach_keys(self, keys: impl Into<String>) -> Self
+```
+
+Set the key sequence that detaches from the session without stopping the process. Docker-style syntax: `"ctrl-]"` (default), `"ctrl-p,ctrl-q"` for a multi-key sequence, or a single character like `"q"`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>keys</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Detach key specification.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">rlimit()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn rlimit(self, resource: RlimitResource, limit: u64) -> Self
+```
+
+Set a POSIX resource limit with soft equal to hard for the attached process.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resource</code><a className="msb-type" href="#rlimitresource">RlimitResource</a></div>
+    <div className="msb-param-desc">Which resource to limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Limit value (soft = hard).</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">rlimit_range()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn rlimit_range(self, resource: RlimitResource, soft: u64, hard: u64) -> Self
+```
+
+Set a resource limit with different soft and hard values for the attached process. [`build()`](#build-2) errors if `soft > hard`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resource</code><a className="msb-type" href="#rlimitresource">RlimitResource</a></div>
+    <div className="msb-param-desc">Which resource to limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>soft</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Soft limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hard</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Hard ceiling.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn build(self) -> MicrosandboxResult<AttachOptions>
+```
+
+Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with). Returns an error if any rlimit has `soft > hard`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">AttachOptions</span></div>
+    <div className="msb-param-desc">Validated attach options.</div>
+  </div>
+</div>
 
 ---
 
 ## Types
 
-### ExecEvent
-
-Events emitted by a streaming execution.
-
-| Variant | Fields | Description |
-|---------|--------|-------------|
-| `Exited` | `code: i32` | The process has exited. `code` is the exit code. |
-| `Started` | `pid: u32` | The process has started. `pid` is the guest-side PID. |
-| `Stderr` | `Bytes` | A chunk of stderr data. |
-| `Stdout` | `Bytes` | A chunk of stdout data. May arrive in arbitrary sizes. |
-
 ### ExecHandle
 
-A handle to a running streaming execution. Receives events as the process produces output, and provides control over stdin and signals.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-exec_stream">exec_stream()</a> · <a href="#sb-exec_stream_with">exec_stream_with()</a> · <a href="#sb-shell_stream">shell_stream()</a> · <a href="#sb-shell_stream_with">shell_stream_with()</a></p>
+
+A handle to a running streaming execution. Receives [`ExecEvent`](#execevent)s as the process produces output, and provides control over stdin, signals, and the PTY size.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| collect() | [`ExecOutput`](#execoutput) | Wait for exit and collect all remaining stdout/stderr. |
+| recv() | `Option<`[`ExecEvent`](#execevent)`>` | Receive the next event. `None` when the session has ended and all output has been delivered. |
+| wait() | `Result<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit, discarding any remaining output. |
+| collect() | `Result<`[`ExecOutput`](#execoutput)`>` | Wait for exit and collect all remaining stdout/stderr. |
 | id() | `String` | Session ID for this execution. Can be used to reattach later. |
-| kill() | `()` | Send SIGKILL to the process. |
-| recv() | `Option<`[`ExecEvent`](#execevent)`>` | Receive the next event. Returns `None` when the process has exited and all output has been delivered. |
-| signal(signal) | `()` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
-| take_stdin() | `Option<`[`ExecSink`](#execsink)`>` | Take the stdin writer. Only available if `stdin_pipe()` was enabled. Returns `None` after the first call. |
-| wait() | [`ExitStatus`](#exitstatus) | Wait for the process to exit, discarding any remaining output. |
+| control() | [`ExecControl`](#execcontrol) | A cloneable control handle for sending signals and resizes from another task. |
+| take_stdin() | `Option<`[`ExecSink`](#execsink)`>` | Take the stdin writer. Only available if `stdin_pipe()` was set; returns `None` after the first call. |
+| signal(signal) | `Result<()>` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
+| kill() | `Result<()>` | Send SIGKILL to the process. |
+| resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
-### ExecOptionsBuilder
+### ExecControl
 
-Builder for per-execution overrides. Does not change the sandbox's defaults.
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| args() | `impl IntoIterator<Item = impl Into<String>>` | Append command-line arguments. |
-| cwd() | `impl Into<String>` | Override the working directory for this command. |
-| env() | - `key: impl Into<String>` <br/> - `value: impl Into<String>` | Set an environment variable. Merged on top of sandbox-level env vars. |
-| envs() | `impl IntoIterator<Item = (String, String)>` | Set multiple environment variables at once. |
-| rlimit() | - `resource:` [`RlimitResource`](#rlimitresource) <br/> - `limit: u64` | Set a POSIX resource limit (soft = hard). Applied via `setrlimit()` before exec. |
-| rlimit_range() | - `resource:` [`RlimitResource`](#rlimitresource) <br/> - `soft: u64` <br/> - `hard: u64` | Set a resource limit with different soft and hard values. |
-| stdin_bytes() | `impl Into<Vec<u8>>` | Provide fixed bytes as stdin. The process reads them and then sees EOF. |
-| stdin_null() | - | Stdin reads from `/dev/null`. This is the default. |
-| stdin_pipe() | - | Enable a stdin writer via [`ExecSink`](#execsink). Use with [`ExecHandle::take_stdin()`](#exechandle). |
-| timeout() | `Duration` | Kill the process with SIGKILL if it hasn't exited within this duration. |
-| tty() | `bool` | Allocate a pseudo-terminal. Enable for interactive programs (shells, editors, `top`); disable for scripts and batch jobs. Default: `false`. |
-| user() | `impl Into<String>` | Override the guest user for this command. |
+<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.control()</a></p>
 
-### ExecOutput
+A cloneable, lightweight control handle for a streaming exec session. Lets a task other than the one owning the [`ExecHandle`](#exechandle) send signals and PTY resizes. Carries no event stream.
 
-The result of a completed command execution. Holds the exit status and all captured output.
-
-| Field / Method | Type | Description |
-|----------------|------|-------------|
-| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag |
-| stderr() | `Result<String>` | Collected stderr decoded as UTF-8 |
-| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding |
-| stdout() | `Result<String>` | Collected stdout decoded as UTF-8. Returns `Err` if the output is not valid UTF-8. |
-| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding |
+| Method | Returns | Description |
+|--------|---------|-------------|
+| id() | `String` | Session ID for this execution. |
+| signal(signal) | `Result<()>` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
+| kill() | `Result<()>` | Send SIGKILL to the process. |
+| resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
 ### ExecSink
 
-A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
+
+A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle) after enabling [`stdin_pipe()`](#stdin_pipe).
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
+| write(data) | `data: impl AsRef<[u8]>` | Write bytes to the process's stdin. |
 | close() | - | Close stdin. The process sees EOF on its stdin. |
-| write() | `data: impl AsRef<[u8]>` | Write bytes to the process's stdin. |
+
+### ExecEvent
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Yielded by <a href="#exechandle">ExecHandle.recv()</a></p>
+
+An event emitted by a streaming execution.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Started` | `pid: u32` | The process has started. `pid` is the guest-side PID. |
+| `Stdout` | `Bytes` | A chunk of stdout data. May arrive in arbitrary sizes. |
+| `Stderr` | `Bytes` | A chunk of stderr data. |
+| `Exited` | `code: i32` | The process exited normally. `code` is the exit code. |
+| `Failed` | `ExecFailed` | The process failed to spawn (binary not found, permission denied, etc.). The user code never ran. Terminal: no further events follow. |
+| `StdinError` | `ExecStdinError` | A stdin write to the child failed (e.g. broken pipe). Non-terminal: the session keeps running and may still emit output and an `Exited` event. |
+
+### ExecOutput
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-exec">exec()</a> · <a href="#sb-exec_with">exec_with()</a> · <a href="#sb-shell">shell()</a> · <a href="#sb-shell_with">shell_with()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
+
+The result of a completed command execution. Holds the exit status and all captured output.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag. |
+| stdout() | `Result<String, FromUtf8Error>` | Collected stdout decoded as UTF-8. Errors if the output is not valid UTF-8. |
+| stderr() | `Result<String, FromUtf8Error>` | Collected stderr decoded as UTF-8. |
+| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding. |
+| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding. |
 
 ### ExitStatus
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.wait()</a> · <a href="#execoutput">ExecOutput.status()</a> · <a href="/sdk/rust/sandbox#sb-wait">sb.wait()</a> · <a href="/sdk/rust/sandbox#sb-stop_and_wait">sb.stop_and_wait()</a></p>
 
 The exit status of a completed process.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | code | `i32` | Exit code. `0` typically means success. |
-| success | `bool` | `true` if code is `0` |
+| success | `bool` | `true` if `code` is `0`. |
+
+### Rlimit
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Configured via <a href="#rlimit">rlimit()</a> · <a href="#rlimit_range">rlimit_range()</a></p>
+
+A POSIX resource limit. Built indirectly by [`rlimit()`](#rlimit) and [`rlimit_range()`](#rlimit_range) on the option builders; you rarely construct it by hand.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| resource | [`RlimitResource`](#rlimitresource) | Which resource to limit. |
+| soft | `u64` | Soft limit; the process may raise it up to `hard`. |
+| hard | `u64` | Hard ceiling; raising it requires privileges. |
 
 ### RlimitResource
 
-POSIX resource limit identifiers. Maps to `RLIMIT_*` constants.
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#rlimit">rlimit()</a> · <a href="#rlimit_range">rlimit_range()</a> · <a href="#rlimit-3">AttachOptionsBuilder.rlimit()</a></p>
+
+POSIX resource limit identifiers. Each maps to an `RLIMIT_*` constant.
 
 | Value | Description |
 |-------|-------------|
-| `As` | Max address space size |
-| `Core` | Max core file size |
-| `Cpu` | Max CPU time in seconds |
-| `Data` | Max data segment size |
-| `Fsize` | Max file size in bytes |
-| `Locks` | Max file locks |
-| `Memlock` | Max locked memory |
-| `Msgqueue` | Max bytes in POSIX message queues |
-| `Nice` | Max nice priority |
-| `Nofile` | Max open file descriptors |
-| `Nproc` | Max number of processes |
-| `Rss` | Max resident set size |
-| `Rtprio` | Max real-time priority |
-| `Rttime` | Max real-time timeout |
-| `Sigpending` | Max pending signals |
-| `Stack` | Max stack size |
+| `Cpu` | Max CPU time in seconds (`RLIMIT_CPU`) |
+| `Fsize` | Max file size in bytes (`RLIMIT_FSIZE`) |
+| `Data` | Max data segment size (`RLIMIT_DATA`) |
+| `Stack` | Max stack size (`RLIMIT_STACK`) |
+| `Core` | Max core file size (`RLIMIT_CORE`) |
+| `Rss` | Max resident set size (`RLIMIT_RSS`) |
+| `Nproc` | Max number of processes (`RLIMIT_NPROC`) |
+| `Nofile` | Max open file descriptors (`RLIMIT_NOFILE`) |
+| `Memlock` | Max locked memory (`RLIMIT_MEMLOCK`) |
+| `As` | Max address space size (`RLIMIT_AS`) |
+| `Locks` | Max file locks (`RLIMIT_LOCKS`) |
+| `Sigpending` | Max pending signals (`RLIMIT_SIGPENDING`) |
+| `Msgqueue` | Max bytes in POSIX message queues (`RLIMIT_MSGQUEUE`) |
+| `Nice` | Max nice priority (`RLIMIT_NICE`) |
+| `Rtprio` | Max real-time priority (`RLIMIT_RTPRIO`) |
+| `Rttime` | Max real-time timeout (`RLIMIT_RTTIME`) |

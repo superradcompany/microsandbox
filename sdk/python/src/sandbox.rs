@@ -8,13 +8,12 @@ use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
-use crate::fs::PySandboxFsOps;
+use crate::fs::PySandboxFs;
 use crate::helpers::sandbox_builder_from_args;
-use crate::logs::read_logs_blocking;
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
-use crate::ssh::PySandboxSshOps;
+use crate::ssh::PySandboxSsh;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,49 +27,15 @@ pub struct PySandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
 
-/// Result of observing a sandbox in a terminal state.
+/// Result of observing a sandbox in a terminal non-running state.
 #[pyclass(name = "SandboxStopResult")]
 pub struct PySandboxStopResult {
-    inner: microsandbox::sandbox::SandboxStopResult,
-}
-
-impl PySandboxStopResult {
-    pub fn from_rust(inner: microsandbox::sandbox::SandboxStopResult) -> Self {
-        Self { inner }
-    }
-}
-
-#[pymethods]
-impl PySandboxStopResult {
-    #[getter]
-    fn name(&self) -> &str {
-        &self.inner.name
-    }
-
-    #[getter]
-    fn status(&self) -> String {
-        format!("{:?}", self.inner.status).to_lowercase()
-    }
-
-    #[getter]
-    fn exit_code(&self) -> Option<i32> {
-        self.inner.exit_code
-    }
-
-    #[getter]
-    fn signal(&self) -> Option<i32> {
-        self.inner.signal
-    }
-
-    #[getter]
-    fn observed_at(&self) -> f64 {
-        self.inner.observed_at.timestamp_millis() as f64
-    }
-
-    #[getter]
-    fn source(&self) -> Option<String> {
-        self.inner.source.clone()
-    }
+    name: String,
+    status: String,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    observed_at: f64,
+    source: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,6 +70,52 @@ impl PySandbox {
     }
 }
 
+impl PySandboxStopResult {
+    pub fn from_rust(inner: microsandbox::sandbox::SandboxStopResult) -> Self {
+        Self {
+            name: inner.name,
+            status: format!("{:?}", inner.status).to_lowercase(),
+            exit_code: inner.exit_code,
+            signal: inner.signal,
+            observed_at: inner.observed_at.timestamp_millis() as f64,
+            source: inner.source,
+        }
+    }
+}
+
+#[pymethods]
+impl PySandboxStopResult {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn status(&self) -> &str {
+        &self.status
+    }
+
+    #[getter]
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    #[getter]
+    fn signal(&self) -> Option<i32> {
+        self.signal
+    }
+
+    #[getter]
+    fn observed_at(&self) -> f64 {
+        self.observed_at
+    }
+
+    #[getter]
+    fn source(&self) -> Option<String> {
+        self.source.clone()
+    }
+}
+
 #[pymethods]
 impl PySandbox {
     //----------------------------------------------------------------------------------------------
@@ -128,11 +139,11 @@ impl PySandbox {
             .unwrap_or(false);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sb = builder
-                .detached(detached)
-                .create()
-                .await
-                .map_err(to_py_err)?;
+            let sb = if detached {
+                builder.create_detached().await.map_err(to_py_err)?
+            } else {
+                builder.create().await.map_err(to_py_err)?
+            };
             Ok(PySandbox::from_rust(sb))
         })
     }
@@ -181,10 +192,13 @@ impl PySandbox {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let _runtime_guard = runtime.enter();
 
-        let (progress, task) = builder
-            .detached(detached)
-            .create_with_pull_progress()
-            .map_err(to_py_err)?;
+        let (progress, task) = if detached {
+            builder
+                .create_detached_with_pull_progress()
+                .map_err(to_py_err)?
+        } else {
+            builder.create_with_pull_progress().map_err(to_py_err)?
+        };
 
         Ok(PyPullSession::new(progress, task))
     }
@@ -221,8 +235,7 @@ impl PySandbox {
         })
     }
 
-    /// List sandboxes filtered to those carrying all of the given `labels`
-    /// (AND-matched).
+    /// List sandboxes matching the given labels.
     #[staticmethod]
     #[pyo3(signature = (*, labels = None))]
     fn list_with<'py>(
@@ -230,11 +243,20 @@ impl PySandbox {
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let filter =
-                microsandbox::sandbox::SandboxFilter::new().labels(labels.unwrap_or_default());
-            let handles = microsandbox::sandbox::Sandbox::list_with(filter)
-                .await
-                .map_err(to_py_err)?;
+            let handles = match labels {
+                Some(labels) if !labels.is_empty() => {
+                    let filter = labels.into_iter().fold(
+                        microsandbox::sandbox::SandboxFilter::new(),
+                        |filter, (key, value)| filter.label(key, value),
+                    );
+                    microsandbox::sandbox::Sandbox::list_with(filter)
+                        .await
+                        .map_err(to_py_err)?
+                }
+                _ => microsandbox::sandbox::Sandbox::list()
+                    .await
+                    .map_err(to_py_err)?,
+            };
             let py_handles: Vec<PySandboxHandle> = handles
                 .into_iter()
                 .map(PySandboxHandle::from_rust)
@@ -280,15 +302,19 @@ impl PySandbox {
         })
     }
 
-    /// Get a filesystem handle. Extracts the AgentClient Arc — no lock per FS op.
+    /// Get a filesystem handle. Captures the backend Arc + name once — no
+    /// Sandbox mutex lock per FS op.
     #[getter]
-    fn fs(&self) -> PyResult<PySandboxFsOps> {
+    fn fs(&self) -> PyResult<PySandboxFs> {
         let guard = self
             .inner
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        Ok(PySandboxFsOps::from_client(sb.client_arc()))
+        Ok(PySandboxFs::from_backend(
+            sb.backend().clone(),
+            sb.name().to_string(),
+        ))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -456,8 +482,8 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Return the SSH namespace for this sandbox.
-    fn ssh(&self) -> PySandboxSshOps {
-        PySandboxSshOps::new(self.inner.clone())
+    fn ssh(&self) -> PySandboxSsh {
+        PySandboxSsh::new(self.inner.clone())
     }
 
     //----------------------------------------------------------------------------------------------
@@ -542,15 +568,14 @@ impl PySandbox {
         sources: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let opts = crate::logs::parse_log_options(tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let name = sandbox.name().to_string();
-            let entries = tokio::task::spawn_blocking(move || {
-                read_logs_blocking(&name, tail, since_ms, until_ms, sources)
-            })
-            .await
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))??;
-            Ok(entries)
+            let entries = sandbox.logs(&opts).await.map_err(to_py_err)?;
+            Ok(entries
+                .into_iter()
+                .map(crate::logs::convert_entry)
+                .collect::<Vec<_>>())
         })
     }
 
@@ -598,8 +623,8 @@ impl PySandbox {
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let name = sandbox.name().to_string();
-            crate::logs::open_log_stream(&name, opts).await
+            let stream = sandbox.log_stream(&opts).await.map_err(to_py_err)?;
+            Ok(crate::logs::PyLogStream::new(stream))
         })
     }
 
@@ -607,7 +632,7 @@ impl PySandbox {
     // Lifecycle
     //----------------------------------------------------------------------------------------------
 
-    /// Stop the sandbox gracefully and wait until it is observed stopped.
+    /// Stop the sandbox gracefully and wait until stopped.
     #[pyo3(signature = (timeout = None))]
     fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -625,7 +650,7 @@ impl PySandbox {
         })
     }
 
-    /// Request graceful shutdown without waiting for stopped-state observation.
+    /// Request graceful shutdown without waiting.
     fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -635,7 +660,17 @@ impl PySandbox {
         })
     }
 
-    /// Kill the sandbox and wait until it is observed stopped.
+    /// Stop and wait for exit, returning (code, success).
+    fn stop_and_wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let status = sandbox.stop_and_wait().await.map_err(to_py_err)?;
+            Ok((status.code().unwrap_or(-1), status.success()))
+        })
+    }
+
+    /// Kill the sandbox and wait until stopped.
     #[pyo3(signature = (timeout = None))]
     fn kill<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -653,7 +688,7 @@ impl PySandbox {
         })
     }
 
-    /// Request force termination without waiting for stopped-state observation.
+    /// Request force termination without waiting.
     fn request_kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -663,7 +698,17 @@ impl PySandbox {
         })
     }
 
-    /// Request drain without waiting for stopped-state observation.
+    /// Drain the sandbox (SIGUSR1).
+    fn drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.drain().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Request drain without waiting.
     fn request_drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -683,6 +728,16 @@ impl PySandbox {
         })
     }
 
+    /// Wait for the sandbox process to exit.
+    fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let status = sandbox.wait().await.map_err(to_py_err)?;
+            Ok((status.code().unwrap_or(-1), status.success()))
+        })
+    }
+
     /// Detach from the sandbox (it continues running).
     fn detach<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -690,6 +745,18 @@ impl PySandbox {
             let mut guard = inner.lock().await;
             if let Some(sb) = guard.take() {
                 sb.detach().await;
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove the persisted database record.
+    fn remove_persisted<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = inner.lock().await;
+            if let Some(sb) = guard.take() {
+                sb.remove_persisted().await.map_err(to_py_err)?;
             }
             Ok(())
         })
@@ -1277,16 +1344,6 @@ impl PyPullProgressIter {
     }
 }
 
-pub(crate) fn optional_duration(timeout: Option<f64>) -> PyResult<Option<std::time::Duration>> {
-    match timeout {
-        Some(timeout) if timeout < 0.0 => Err(pyo3::exceptions::PyValueError::new_err(
-            "timeout must be non-negative",
-        )),
-        Some(timeout) => Ok(Some(std::time::Duration::from_secs_f64(timeout))),
-        None => Ok(None),
-    }
-}
-
 /// Convert a Rust PullProgress event to a Python dict.
 fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEvent {
     use microsandbox::sandbox::PullProgress;
@@ -1403,6 +1460,18 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
             ..Default::default()
         },
     }
+}
+
+pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 {
+        return Err(PyValueError::new_err(
+            "timeout must be a non-negative finite number of seconds",
+        ));
+    }
+    Ok(Some(std::time::Duration::from_secs_f64(value)))
 }
 
 /// Pull progress event exposed to Python.

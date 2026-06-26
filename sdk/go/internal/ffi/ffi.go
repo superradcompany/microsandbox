@@ -891,7 +891,7 @@ func IsLoaded() bool {
 }
 
 // SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
-// resolver's tier 2 (see crates/microsandbox/lib/config/mod.rs:
+// resolver's tier 2 (see sdk/rust/lib/config/mod.rs:
 // resolve_msb_path). Set-once on the Rust side: subsequent calls are
 // ignored. The user's MSB_PATH env var still wins as tier 1.
 func SetSdkMsbPath(path string) {
@@ -1395,6 +1395,7 @@ type CreateOptions struct {
 	Env                  map[string]string    `json:"env,omitempty"`
 	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
+	Ephemeral            bool                 `json:"ephemeral,omitempty"`
 	Entrypoint           []string             `json:"entrypoint,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`
 	LogLevel             string               `json:"log_level,omitempty"`
@@ -2765,6 +2766,9 @@ type Metrics struct {
 	DiskWriteBytes          uint64        `json:"disk_write_bytes"`
 	NetRxBytes              uint64        `json:"net_rx_bytes"`
 	NetTxBytes              uint64        `json:"net_tx_bytes"`
+	UpperUsedBytes          *uint64       `json:"upper_used_bytes"`
+	UpperFreeBytes          *uint64       `json:"upper_free_bytes"`
+	UpperHostAllocatedBytes *uint64       `json:"upper_host_allocated_bytes"`
 	UptimeSecs              uint64        `json:"uptime_secs"`
 	Uptime                  time.Duration `json:"-"`
 }
@@ -2844,6 +2848,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -2863,6 +2870,9 @@ func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}
@@ -3437,6 +3447,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 		NetRxBytes              uint64  `json:"net_rx_bytes"`
 		NetTxBytes              uint64  `json:"net_tx_bytes"`
+		UpperUsedBytes          *uint64 `json:"upper_used_bytes"`
+		UpperFreeBytes          *uint64 `json:"upper_free_bytes"`
+		UpperHostAllocatedBytes *uint64 `json:"upper_host_allocated_bytes"`
 		UptimeSecs              uint64  `json:"uptime_secs"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -3453,6 +3466,9 @@ func SandboxHandleMetrics(ctx context.Context, name string) (*Metrics, error) {
 		DiskWriteBytes:          raw.DiskWriteBytes,
 		NetRxBytes:              raw.NetRxBytes,
 		NetTxBytes:              raw.NetTxBytes,
+		UpperUsedBytes:          raw.UpperUsedBytes,
+		UpperFreeBytes:          raw.UpperFreeBytes,
+		UpperHostAllocatedBytes: raw.UpperHostAllocatedBytes,
 		UptimeSecs:              raw.UptimeSecs,
 		Uptime:                  time.Duration(raw.UptimeSecs) * time.Second,
 	}, nil

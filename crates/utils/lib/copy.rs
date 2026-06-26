@@ -24,8 +24,22 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+#[cfg(windows)]
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
+#[cfg(windows)]
+use std::ptr;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::DeviceIoControl;
+#[cfg(windows)]
+use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -68,6 +82,11 @@ pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 /// when they already know the destination filesystem doesn't support
 /// reflinks, or for tests that want to exercise the fallback path.
 pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    sparse_copy_impl(src, dst)
+}
+
+#[cfg(unix)]
+fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
     let src_file = File::open(src)?;
     let len = src_file.metadata()?.len();
 
@@ -115,6 +134,38 @@ pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
     Ok(len)
 }
 
+#[cfg(windows)]
+fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
+    const BUF_SIZE: usize = 1024 * 1024;
+
+    let mut src_file = File::open(src)?;
+    let len = src_file.metadata()?.len();
+
+    let mut dst_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
+    dst_file.set_len(len)?;
+    mark_sparse(&dst_file)?;
+
+    let mut offset = 0u64;
+    let mut buf = vec![0u8; BUF_SIZE];
+    loop {
+        let n = src_file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        write_nonzero_runs(&mut dst_file, offset, &buf[..n])?;
+        offset += n as u64;
+    }
+
+    dst_file.sync_all()?;
+    Ok(len)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -126,15 +177,33 @@ pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 /// On Linux `ENOTSUP == EOPNOTSUPP`, so a single arm covers both;
 /// macOS / BSDs assign them distinct values and need both arms.
 fn is_reflink_unsupported(e: &io::Error) -> bool {
+    if matches!(e.kind(), io::ErrorKind::Unsupported) {
+        return true;
+    }
+
     let Some(code) = e.raw_os_error() else {
         return false;
     };
 
     #[cfg(target_os = "linux")]
     let aliases: &[i32] = &[libc::ENOTSUP, libc::EXDEV, libc::EINVAL];
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     let aliases: &[i32] = &[libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV, libc::EINVAL];
+    #[cfg(windows)]
+    let aliases: &[i32] = &[
+        1,  // ERROR_INVALID_FUNCTION
+        17, // ERROR_NOT_SAME_DEVICE
+        50, // ERROR_NOT_SUPPORTED
+        87, // ERROR_INVALID_PARAMETER
+    ];
 
+    #[cfg(windows)]
+    {
+        let win32_code = (code as u32 & 0xffff) as i32;
+        return aliases.contains(&code) || aliases.contains(&win32_code);
+    }
+
+    #[cfg(unix)]
     aliases.contains(&code)
 }
 
@@ -175,7 +244,7 @@ fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
     read_write_extent(src_fd, dst_fd, off, len)
 }
@@ -183,6 +252,7 @@ fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<(
 /// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` using
 /// `pread`/`pwrite`. Universal fallback for `copy_extent` on platforms
 /// or filesystems where `copy_file_range` doesn't apply.
+#[cfg(unix)]
 fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
     const BUF_SIZE: usize = 64 * 1024;
     let mut buf = [0u8; BUF_SIZE];
@@ -237,6 +307,51 @@ fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Re
     Ok(())
 }
 
+#[cfg(windows)]
+fn mark_sparse(file: &File) -> io::Result<()> {
+    let mut bytes_returned = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_SPARSE,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_nonzero_runs(dst: &mut File, base_offset: u64, bytes: &[u8]) -> io::Result<()> {
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor] == 0 {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor] != 0 {
+            cursor += 1;
+        }
+
+        dst.seek(SeekFrom::Start(base_offset + start as u64))?;
+        dst.write_all(&bytes[start..cursor])?;
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -244,12 +359,14 @@ fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     /// Build a sparse source file: total apparent size `len`, with
     /// 64 KiB of data written at each of the given offsets.
     fn make_sparse(path: &Path, len: u64, data_offsets: &[u64]) -> io::Result<()> {
-        let f = OpenOptions::new()
+        let mut f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -258,9 +375,8 @@ mod tests {
         f.set_len(len)?;
         for &off in data_offsets {
             let buf = vec![0xAB_u8; 64 * 1024];
-            let fd = f.as_raw_fd();
-            let n = unsafe { libc::pwrite(fd, buf.as_ptr() as *const _, buf.len(), off as i64) };
-            assert!(n > 0, "pwrite failed: {}", io::Error::last_os_error());
+            f.seek(SeekFrom::Start(off))?;
+            f.write_all(&buf)?;
         }
         f.sync_all()?;
         Ok(())
@@ -300,17 +416,10 @@ mod tests {
 
         // Each data extent's bytes round-trip.
         let mut buf = [0u8; 64 * 1024];
-        let dst_file = File::open(&dst).unwrap();
+        let mut dst_file = File::open(&dst).unwrap();
         for &off in &offsets {
-            let n = unsafe {
-                libc::pread(
-                    dst_file.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut _,
-                    buf.len(),
-                    off as i64,
-                )
-            };
-            assert_eq!(n as usize, buf.len());
+            dst_file.seek(SeekFrom::Start(off)).unwrap();
+            dst_file.read_exact(&mut buf).unwrap();
             assert!(buf.iter().all(|&b| b == 0xAB));
         }
 
@@ -320,30 +429,33 @@ mod tests {
         // produce a sparse source from `ftruncate + pwrite` — in that
         // case sparseness is unachievable and we just confirm the
         // destination didn't blow up beyond the source's footprint.
-        let src_bytes_on_disk = std::fs::metadata(&src).unwrap().blocks() * 512;
-        let dst_bytes_on_disk = dst_meta.blocks() * 512;
-        if src_bytes_on_disk < len / 2 {
-            // Source IS sparse. Destination must also be sparse —
-            // this is the load-bearing regression test for the whole
-            // module.
-            assert!(
-                dst_bytes_on_disk < len / 2,
-                "source is sparse ({src_bytes_on_disk} bytes on disk) but destination densified to {dst_bytes_on_disk} bytes for an apparent size of {len}",
-            );
-            assert!(
-                dst_bytes_on_disk <= src_bytes_on_disk * 4 + 1024 * 1024,
-                "destination allocated significantly more than source: src={src_bytes_on_disk} dst={dst_bytes_on_disk}",
-            );
-        } else {
-            eprintln!(
-                "filesystem did not sparsify the source (src_bytes_on_disk={src_bytes_on_disk}, apparent={len}); sparseness preservation not exercised in this run",
-            );
-            // Without source sparseness we can't exceed source's
-            // footprint by much — guard against gross regressions.
-            assert!(
-                dst_bytes_on_disk <= src_bytes_on_disk + 1024 * 1024,
-                "destination grew beyond source footprint: src={src_bytes_on_disk} dst={dst_bytes_on_disk}",
-            );
+        #[cfg(unix)]
+        {
+            let src_bytes_on_disk = std::fs::metadata(&src).unwrap().blocks() * 512;
+            let dst_bytes_on_disk = dst_meta.blocks() * 512;
+            if src_bytes_on_disk < len / 2 {
+                // Source IS sparse. Destination must also be sparse —
+                // this is the load-bearing regression test for the whole
+                // module.
+                assert!(
+                    dst_bytes_on_disk < len / 2,
+                    "source is sparse ({src_bytes_on_disk} bytes on disk) but destination densified to {dst_bytes_on_disk} bytes for an apparent size of {len}",
+                );
+                assert!(
+                    dst_bytes_on_disk <= src_bytes_on_disk * 4 + 1024 * 1024,
+                    "destination allocated significantly more than source: src={src_bytes_on_disk} dst={dst_bytes_on_disk}",
+                );
+            } else {
+                eprintln!(
+                    "filesystem did not sparsify the source (src_bytes_on_disk={src_bytes_on_disk}, apparent={len}); sparseness preservation not exercised in this run",
+                );
+                // Without source sparseness we can't exceed source's
+                // footprint by much — guard against gross regressions.
+                assert!(
+                    dst_bytes_on_disk <= src_bytes_on_disk + 1024 * 1024,
+                    "destination grew beyond source footprint: src={src_bytes_on_disk} dst={dst_bytes_on_disk}",
+                );
+            }
         }
     }
 

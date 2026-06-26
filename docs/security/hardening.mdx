@@ -1,0 +1,100 @@
+---
+title: "Hardening"
+description: "Dial the controls to match your threat level"
+icon: "user-shield"
+---
+
+The defaults are tuned for the common case: running untrusted code that needs the internet. When your threat model is sharper, such as multi-tenant, credential-handling, or fully offline, tighten the knobs below. Each one is independent, so apply the ones that fit.
+
+## Turn the network off
+
+If a workload doesn't need the network, remove it. Nothing to filter is the strongest filter.
+
+<CodeGroup>
+```bash CLI
+msb create python --name isolated --no-net
+```
+
+```rust Rust
+let sb = Sandbox::builder("isolated")
+    .image("python")
+    .network(|n| n.enabled(false))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("isolated")
+    .image("python")
+    .disableNetwork()
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create("isolated", image="python", network=Network.none())
+```
+</CodeGroup>
+
+## Deny egress by default
+
+When a workload needs only a handful of destinations, switch from allow-public to deny-by-default and allow exactly what's required. In any allow-by-default policy, remember to `deny@meta` so the cloud metadata service stays blocked.
+
+```bash
+msb create alpine --name restricted-worker \
+  --net-default-egress deny \
+  --net-rule "allow@public:tcp:443,allow@host:udp:53"
+```
+
+See [Networking overview](/networking/overview#custom-policies) for the full rule syntax and SDK equivalents.
+
+## Drop in-guest privileges
+
+Two independent steps, both worth taking for untrusted code:
+
+- Run the workload as a **non-root user**.
+- Apply the **restricted security profile**, which sets `no_new_privs`, drops the mount-admin capability, and forces `nosuid,nodev` on user mounts.
+
+```bash
+msb create python --name worker --user app --security restricted
+```
+
+The restricted profile is incompatible with workloads that need those capabilities, such as `sudo` or Docker-in-Docker. See [Isolation boundary](/security/isolation#in-guest-privilege) for the SDK forms.
+
+## Mount least privilege
+
+- Mount only the directories a workload actually needs.
+- Use **read-only** mounts wherever write isn't required. Read-only is enforced host-side, so the guest can't remount around it.
+- Avoid sharing a writable volume across sandboxes, since a shared volume is a deliberate [isolation hole](/security/filesystem#sharing-storage-between-sandboxes).
+- Prefer a recent Linux kernel for writable bind mounts, where `openat2` containment is strongest.
+
+## Pin and trust your images
+
+- Pin images **by digest**, not a moving tag, for reproducibility.
+- Pull from registries you control or trust, because content is digest-verified but [not signature-verified](/security/filesystem#image-supply-chain).
+
+## Handle credentials with secrets
+
+- Inject credentials with [secrets](/security/secrets) and narrow allow lists, so a value only materializes at the destinations that need it.
+- Keep [`trust_host_cas`](/security/network#trusting-host-cas) off unless you're behind a corporate MITM proxy.
+- For credentialed egress you want to inspect, enable [TLS interception](/networking/tls) and pin [DNS](/networking/dns).
+
+## Bound resources and lifetime
+
+- Set vCPU and memory caps appropriate to the workload.
+- Set an idle timeout or a maximum duration so abandoned sandboxes get reclaimed.
+
+## Choosing a posture
+
+| Use case | Network | In-guest privilege | Storage |
+|---|---|---|---|
+| Trusted internal tool | Default public egress | Root is fine | Mounts as needed |
+| Untrusted code / AI agent with internet | Default, or deny-by-default allowlist | Non-root + restricted | Read-only mounts |
+| Multi-tenant / per-user | Deny-by-default allowlist | Non-root + restricted | No shared writable volumes, one sandbox per tenant |
+| Credential-handling egress | Deny-by-default + TLS interception | Non-root + restricted | Minimal and read-only, with narrow secret allow lists |
+| Fully offline / compute-only | `--no-net` | Non-root + restricted | Read-only or none |
+
+## Where hardening stops
+
+These knobs shrink the blast radius and tighten what a workload can reach. The boundary they sit on top of is still the hypervisor. See the [security model overview](/security/overview) for what that boundary does and doesn't cover.

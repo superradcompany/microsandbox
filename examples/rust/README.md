@@ -26,6 +26,7 @@ cargo run -p fs-read-stream
 
 | Example | Command | Description |
 |---------|---------|-------------|
+| `cloud-backend` | `cargo run -p cloud-backend` | Cloud backend lifecycle and live logs |
 | `root-oci` | `cargo run -p root-oci` | OCI image rootfs |
 | `root-bind` | `cargo run -p root-bind` | Bind-mounted local directory |
 | `root-block` | `cargo run -p root-block` | qcow2 disk image |

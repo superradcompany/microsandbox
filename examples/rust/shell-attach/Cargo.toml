@@ -9,5 +9,5 @@ name = "shell-attach"
 path = "bin/main.rs"
 
 [dependencies]
-microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox = { path = "../../../sdk/rust" }
 tokio = { version = "1.52", features = ["full"] }

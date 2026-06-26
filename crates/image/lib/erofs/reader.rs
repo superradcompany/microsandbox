@@ -8,8 +8,6 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::{ffi::OsString, fs::File, io, path::PathBuf};
 
@@ -19,6 +17,7 @@ use super::format::{
     EROFS_XATTR_INDEX_SECURITY, EROFS_XATTR_INDEX_TRUSTED, EROFS_XATTR_INDEX_USER, S_IFBLK,
     S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, erofs_xattr_align,
 };
+use crate::path_bytes::{os_str_bytes, os_string_from_vec};
 use crate::tree::{InodeMetadata, Xattr};
 
 //--------------------------------------------------------------------------------------------------
@@ -366,7 +365,7 @@ impl ErofsReader {
         }
 
         self.visit_dir_entries::<io::Error, _>(dir_inode, &mut |reader, name, nid| {
-            if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            if os_str_bytes(&name) == b"." || os_str_bytes(&name) == b".." {
                 return Ok(());
             }
 
@@ -405,7 +404,7 @@ impl ErofsReader {
         }
 
         self.visit_dir_entries::<E, _>(dir_inode, &mut |reader, name, nid| {
-            if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            if os_str_bytes(&name) == b"." || os_str_bytes(&name) == b".." {
                 return Ok(());
             }
 
@@ -451,7 +450,7 @@ impl ErofsReader {
                 }
                 visit(
                     self,
-                    OsString::from_vec(name.to_vec()),
+                    os_string_from_vec(name.to_vec())?,
                     dirent_nid(&block, idx)?,
                 )?;
             }
@@ -804,9 +803,11 @@ impl Read for ErofsFileDataReader {
 
             let remaining = (len - self.segment_offset) as usize;
             let to_read = remaining.min(buf.len());
-            let read = self
-                .file
-                .read_at(&mut buf[..to_read], offset + self.segment_offset)?;
+            let read = read_at_file(
+                &self.file,
+                &mut buf[..to_read],
+                offset + self.segment_offset,
+            )?;
             self.segment_offset += read as u64;
             return Ok(read);
         }
@@ -822,7 +823,7 @@ impl Read for ErofsFileDataReader {
 fn read_exact_at(file: &File, offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
     let mut current_offset = offset;
     while !buf.is_empty() {
-        let read = file.read_at(buf, current_offset)?;
+        let read = read_at_file(file, buf, current_offset)?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -834,6 +835,20 @@ fn read_exact_at(file: &File, offset: u64, mut buf: &mut [u8]) -> io::Result<()>
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn read_at_file(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at_file(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_read(buf, offset)
 }
 
 fn dir_block_dirent_count(block: &[u8]) -> io::Result<usize> {

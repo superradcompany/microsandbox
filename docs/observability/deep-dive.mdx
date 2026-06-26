@@ -46,6 +46,9 @@ fully-qualified name is `microsandbox.<suffix>`.
 | `disk.bytes_written` | gauge | `By` | Cumulative bytes written. |
 | `network.bytes_received` | gauge | `By` | Cumulative bytes from runtime to guest. |
 | `network.bytes_sent` | gauge | `By` | Cumulative bytes from guest to runtime. |
+| `upper.used` | gauge | `By` | Guest-visible used bytes on the OCI upper filesystem. Emitted only when the protected bundled-kernel reporter is available and fresh. |
+| `upper.free` | gauge | `By` | Guest-visible bytes available to ordinary allocation on the OCI upper filesystem. Emitted only when the protected bundled-kernel reporter is available and fresh. |
+| `upper.host_allocated` | gauge | `By` | Host-allocated bytes for the writable upper image. Emitted only when the host can observe an OCI upper image. |
 | `uptime` | gauge | `s` | Sandbox uptime at sample time. |
 
 Cumulative byte fields are emitted as gauges carrying the absolute

@@ -24,6 +24,21 @@ export const napi = native;
 
 export interface NativeBindings {
   readonly setRuntimeMsbPath?: (path: string) => void;
+  readonly setRuntimeLibkrunfwPath?: (path: string) => void;
+  readonly setDefaultBackend?: (
+    kind: string,
+    url?: string,
+    apiKey?: string,
+    profile?: string,
+  ) => void;
+  readonly pushDefaultBackend?: (
+    kind: string,
+    url?: string,
+    apiKey?: string,
+    profile?: string,
+  ) => number;
+  readonly popDefaultBackend?: (token: number) => void;
+  readonly defaultBackendKind?: () => "local" | "cloud";
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;
@@ -131,11 +146,14 @@ export interface NapiSandboxBuilderSetters {
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
+  ephemeral(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
   workdir(path: string): this;
   shell(shell: string): this;
   security(profile: "default" | "restricted"): this;
+  /** @deprecated Use setRuntimeLibkrunfwPath(path) before creating local sandboxes. */
+  libkrunfwPath(path: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
@@ -145,7 +163,6 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initWith(cmd: string, configure: (b: any) => any): this;
   hostname(name: string): this;
-  libkrunfwPath(path: string): this;
   user(user: string): this;
   pullPolicy(policy: string): this;
   disableNetwork(): this;
@@ -327,14 +344,6 @@ export interface NapiSftpClient {
 export interface NapiSshServer {
   serveConnection(): Promise<void>;
   close(): Promise<void>;
-}
-
-export interface NapiSandboxInfo {
-  readonly name: string;
-  readonly status: string;
-  readonly configJson: string;
-  readonly createdAt: number | null | undefined;
-  readonly updatedAt: number | null | undefined;
 }
 
 export interface NapiVolumeStatic {
@@ -667,6 +676,9 @@ export interface NapiSandboxMetrics {
   readonly diskWriteBytes: number;
   readonly netRxBytes: number;
   readonly netTxBytes: number;
+  readonly upperUsedBytes?: number;
+  readonly upperFreeBytes?: number;
+  readonly upperHostAllocatedBytes?: number;
   readonly uptimeMs: number;
   readonly timestampMs: number;
 }
@@ -969,7 +981,10 @@ export interface NapiVolumeMount {
   readonly nodev: boolean;
   readonly host?: string;
   readonly name?: string;
+  readonly namedMode?: "existing" | "create" | "ensure-exists";
+  readonly namedKind?: "dir" | "disk";
   readonly sizeMib?: number;
+  readonly quotaMib?: number;
   readonly format?: string;
   readonly fstype?: string;
   readonly statVirtualization?: string;

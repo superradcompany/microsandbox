@@ -53,10 +53,11 @@ pub fn init_isolated_home() -> IsolatedHome {
         return IsolatedHome(None);
     }
 
-    let real_home = PathBuf::from(
-        std::env::var_os("HOME").expect("HOME must be set for integration-test setup"),
-    );
-    let real_msb_path = real_home.join(".microsandbox").join("bin").join("msb");
+    let real_home = real_home_dir();
+    let real_msb_path = real_home
+        .join(".microsandbox")
+        .join("bin")
+        .join(msb_binary_name());
     if !real_msb_path.exists() {
         panic!(
             "required msb binary missing for isolated home: {}",
@@ -64,18 +65,21 @@ pub fn init_isolated_home() -> IsolatedHome {
         );
     }
 
-    // Anchor the tempdir under `/tmp` explicitly. On macOS `TMPDIR` points at
-    // `/var/folders/<hash>/T/...` (~49 chars), which combined with
-    // `.microsandbox/sandboxes/<name>/<sock>` exceeds the 104-byte `SUN_LEN`
-    // limit for Unix domain sockets and breaks sandbox agent relay setup.
+    // Keep Unix temp roots short because agent sockets use filesystem paths
+    // there. Windows agent IPC uses named pipes, so the platform temp
+    // directory is fine and avoids relying on a POSIX `/tmp` path.
     let mut builder = tempfile::Builder::new();
     builder.prefix("msb-");
     if std::env::var_os(KEEP_HOME_ENV).is_some() {
         builder.disable_cleanup(true);
     }
-    let tempdir = builder
-        .tempdir_in("/tmp")
-        .expect("failed to create tempdir under /tmp");
+    let temp_root = isolated_home_temp_root();
+    let tempdir = builder.tempdir_in(&temp_root).unwrap_or_else(|e| {
+        panic!(
+            "failed to create isolated home under {}: {e}",
+            temp_root.display()
+        )
+    });
 
     // SAFETY: each #[msb_test] runs in its own process under cargo-nextest,
     // so mutating env only affects this test and its subprocesses. Must run
@@ -98,5 +102,34 @@ impl IsolatedHome {
     /// Returns the path to the isolated home, if isolation is active.
     pub fn path(&self) -> Option<&Path> {
         self.0.as_ref().map(TempDir::path)
+    }
+}
+
+fn real_home_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home);
+    }
+
+    #[cfg(windows)]
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(home);
+    }
+
+    panic!("HOME must be set for integration-test setup");
+}
+
+fn msb_binary_name() -> String {
+    format!("msb{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn isolated_home_temp_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp")
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
     }
 }

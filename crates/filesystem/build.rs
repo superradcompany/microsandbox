@@ -22,25 +22,25 @@ fn main() {
 }
 
 fn build_agentd(workspace_root: &Path, out_dir: &Path) {
+    let local = workspace_root.join("build").join(AGENTD_BINARY);
+    println!("cargo:rerun-if-changed={}", local.display());
+
     #[cfg(feature = "prebuilt")]
     {
         let dest = out_dir.join(AGENTD_BINARY);
+
+        // Local development recipes rebuild build/agentd before compiling msb.
+        // Prefer it over a cached OUT_DIR copy so the embedded PID 1 binary
+        // cannot silently lag behind the freshly built guest agent.
+        if local.is_file() {
+            copy_agentd(&local, &dest);
+            return;
+        }
+
         if dest.exists() {
             return;
         }
 
-        // In CI, prefer the locally-built agentd from workspace build/.
-        // Check both CI (standard) and GITHUB_ACTIONS (set inside maturin Docker containers
-        // where CI is not forwarded).
-        if std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some() {
-            let local = workspace_root.join("build").join(AGENTD_BINARY);
-            if local.is_file() {
-                std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");
-                return;
-            }
-        }
-
-        let _ = workspace_root;
         let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
         let url = agentd_download_url(PREBUILT_VERSION, &arch);
 
@@ -49,14 +49,11 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
 
     #[cfg(not(feature = "prebuilt"))]
     {
-        let source = workspace_root.join("build").join(AGENTD_BINARY);
-        println!("cargo:rerun-if-changed={}", source.display());
-
-        if !source.exists() {
+        if !local.exists() {
             panic!(
                 "{AGENTD_BINARY} binary not found at `{}`.\n\
                  Run `just build-deps` first.",
-                source.display()
+                local.display()
             );
         }
 
@@ -65,7 +62,7 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         // when msb embeds an older guest payload than the source implies.
         let agentd_src = workspace_root.join("crates/agentd");
         let protocol_src = workspace_root.join("crates/protocol");
-        if let Ok(bin_time) = std::fs::metadata(&source).and_then(|m| m.modified())
+        if let Ok(bin_time) = std::fs::metadata(&local).and_then(|m| m.modified())
             && newest_tree_mtime(&agentd_src)
                 .into_iter()
                 .chain(newest_tree_mtime(&protocol_src))
@@ -78,8 +75,12 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         }
 
         let dest = out_dir.join(AGENTD_BINARY);
-        std::fs::copy(&source, &dest).expect("failed to copy agentd to OUT_DIR");
+        copy_agentd(&local, &dest);
     }
+}
+
+fn copy_agentd(local: &Path, dest: &Path) {
+    std::fs::copy(local, dest).expect("failed to copy agentd to OUT_DIR");
 }
 
 #[cfg(not(feature = "prebuilt"))]

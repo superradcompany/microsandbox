@@ -8,6 +8,7 @@
 //! destination unreachable, etc.) is intentionally not relayed.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
 use std::sync::Arc;
 
@@ -47,6 +48,7 @@ const IPV6_HDR_LEN: usize = 40;
 ///
 /// Probed once at construction, per address family. Availability may differ
 /// between IPv4 and IPv6 on the same host.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 enum EchoBackend {
     /// The address family-specific ping socket probe succeeded.
@@ -288,6 +290,7 @@ impl IcmpRelay {
 //--------------------------------------------------------------------------------------------------
 
 /// Probe whether `SOCK_DGRAM + IPPROTO_ICMP` is available.
+#[cfg(unix)]
 fn probe_icmp_socket_v4() -> EchoBackend {
     // SAFETY: socket() with valid args; immediately closed on success.
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP) };
@@ -299,7 +302,14 @@ fn probe_icmp_socket_v4() -> EchoBackend {
     }
 }
 
+/// Probe whether ICMPv4 echo relay is available.
+#[cfg(windows)]
+fn probe_icmp_socket_v4() -> EchoBackend {
+    EchoBackend::Unavailable
+}
+
 /// Probe whether `SOCK_DGRAM + IPPROTO_ICMPV6` is available.
+#[cfg(unix)]
 fn probe_icmp_socket_v6() -> EchoBackend {
     // SAFETY: socket() with valid args; immediately closed on success.
     let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_ICMPV6) };
@@ -309,6 +319,12 @@ fn probe_icmp_socket_v6() -> EchoBackend {
     } else {
         EchoBackend::Unavailable
     }
+}
+
+/// Probe whether ICMPv6 echo relay is available.
+#[cfg(windows)]
+fn probe_icmp_socket_v6() -> EchoBackend {
+    EchoBackend::Unavailable
 }
 
 /// Open an unprivileged ICMPv4 socket connected to `dst`.
@@ -321,90 +337,115 @@ fn probe_icmp_socket_v6() -> EchoBackend {
 /// socket's ephemeral "port" assignment. The caller must restore the
 /// guest's original identifier on the reply.
 fn open_icmp_socket_v4(dst: Ipv4Addr) -> std::io::Result<tokio::net::UdpSocket> {
-    // SAFETY: socket() + fcntl() + connect() with valid args.
-    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    #[cfg(windows)]
+    {
+        let _ = dst;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "external ICMPv4 relay is not implemented on Windows",
+        ));
     }
 
-    // Set non-blocking + close-on-exec via fcntl (portable across macOS/Linux).
-    if let Err(e) = set_nonblock_cloexec(fd) {
-        unsafe { libc::close(fd) };
-        return Err(e);
+    #[cfg(unix)]
+    {
+        // SAFETY: socket() + fcntl() + connect() with valid args.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // Set non-blocking + close-on-exec via fcntl (portable across macOS/Linux).
+        if let Err(e) = set_nonblock_cloexec(fd) {
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(dst).to_be(),
+            },
+            sin_zero: [0; 8],
+            #[cfg(target_os = "macos")]
+            sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+        };
+
+        // SAFETY: connect() with valid sockaddr_in.
+        let ret = unsafe {
+            libc::connect(
+                fd,
+                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err);
+        }
+
+        // SAFETY: fd is a valid, connected, non-blocking socket.
+        let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+        tokio::net::UdpSocket::from_std(std_sock)
     }
-
-    let addr = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: 0,
-        sin_addr: libc::in_addr {
-            s_addr: u32::from(dst).to_be(),
-        },
-        sin_zero: [0; 8],
-        #[cfg(target_os = "macos")]
-        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-    };
-
-    // SAFETY: connect() with valid sockaddr_in.
-    let ret = unsafe {
-        libc::connect(
-            fd,
-            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    // SAFETY: fd is a valid, connected, non-blocking socket.
-    let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-    tokio::net::UdpSocket::from_std(std_sock)
 }
 
 /// Open an unprivileged ICMPv6 socket connected to `dst`.
 fn open_icmp_socket_v6(dst: Ipv6Addr) -> std::io::Result<tokio::net::UdpSocket> {
-    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_ICMPV6) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    #[cfg(windows)]
+    {
+        let _ = dst;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "external ICMPv6 relay is not implemented on Windows",
+        ));
     }
 
-    if let Err(e) = set_nonblock_cloexec(fd) {
-        unsafe { libc::close(fd) };
-        return Err(e);
+    #[cfg(unix)]
+    {
+        let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_ICMPV6) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        if let Err(e) = set_nonblock_cloexec(fd) {
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+
+        let addr = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as libc::sa_family_t,
+            sin6_port: 0,
+            sin6_flowinfo: 0,
+            sin6_addr: libc::in6_addr {
+                s6_addr: dst.octets(),
+            },
+            sin6_scope_id: 0,
+            #[cfg(target_os = "macos")]
+            sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+        };
+
+        let ret = unsafe {
+            libc::connect(
+                fd,
+                &addr as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err);
+        }
+
+        let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+        tokio::net::UdpSocket::from_std(std_sock)
     }
-
-    let addr = libc::sockaddr_in6 {
-        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-        sin6_port: 0,
-        sin6_flowinfo: 0,
-        sin6_addr: libc::in6_addr {
-            s6_addr: dst.octets(),
-        },
-        sin6_scope_id: 0,
-        #[cfg(target_os = "macos")]
-        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-    };
-
-    let ret = unsafe {
-        libc::connect(
-            fd,
-            &addr as *const libc::sockaddr_in6 as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-        )
-    };
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-    tokio::net::UdpSocket::from_std(std_sock)
 }
 
 /// Set `O_NONBLOCK` and `FD_CLOEXEC` on a file descriptor.
+#[cfg(unix)]
 fn set_nonblock_cloexec(fd: libc::c_int) -> std::io::Result<()> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);

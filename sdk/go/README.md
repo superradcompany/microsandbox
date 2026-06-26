@@ -21,7 +21,7 @@ The API documentation can be found on [pkg.go.dev](https://pkg.go.dev/github.com
 - **Port publishing** — Expose guest TCP services on host ports
 - **Rootfs patches** — Modify the filesystem before the VM boots
 - **Detached mode** — Sandboxes can outlive the Go process
-- **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
+- **Metrics** — CPU, memory, disk I/O, network I/O, and optional upper disk usage per sandbox
 
 ## Requirements
 
@@ -510,7 +510,7 @@ sb, err := h.Connect(ctx)
 | `Volume` | Named persistent volume — `Name()`, `Path()`, `FS()` |
 | `VolumeHandle` | Volume metadata from DB — `Name()`, `Path()`, `QuotaMiB()`, `UsedBytes()`, `Labels()`, `CreatedAt()`, `FS()` |
 | `VolumeFs` | Host-side file ops on a volume directory — no agent protocol |
-| `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
+| `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, optional upper disk usage, uptime) |
 | `SandboxConfig` / `NetworkConfig` / `TlsConfig` / `ExecConfig` / `VolumeConfig` | Configuration structs |
 | `SecretEntry`, `PolicyRule`, `PatchConfig`, `MountConfig` | Value types for secrets, network rules, rootfs patches, and volume mounts |
 | `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Helper namespaces — `Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, etc. |

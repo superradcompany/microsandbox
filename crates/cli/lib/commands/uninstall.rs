@@ -3,9 +3,8 @@
 use std::fs;
 
 use clap::Args;
-use microsandbox::config;
 
-use super::install::MARKER;
+use super::install::{alias_candidates, is_generated_alias};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -26,24 +25,30 @@ pub struct UninstallArgs {
 
 /// Execute the `msb uninstall` command.
 pub async fn run(args: UninstallArgs) -> anyhow::Result<()> {
-    let bin_dir = config::config().home().join("bin");
+    let backend = microsandbox::backend::default_backend();
+    let home = match backend.as_local() {
+        Some(local) => local.config().home(),
+        None => microsandbox_utils::resolve_home(),
+    };
+    let bin_dir = home.join("bin");
 
     let mut failed = false;
 
     for name in &args.names {
-        if name.contains('/') || name.contains("..") {
+        if name.contains('/') || name.contains('\\') || name.contains(':') || name.contains("..") {
             ui::error(&format!("invalid alias name '{name}'"));
             failed = true;
             continue;
         }
 
-        let path = bin_dir.join(name);
-
-        if !path.exists() {
+        let Some(path) = alias_candidates(&bin_dir, name)
+            .into_iter()
+            .find(|path| path.exists())
+        else {
             ui::error(&format!("alias '{name}' not found"));
             failed = true;
             continue;
-        }
+        };
 
         // Validate it's an msb-generated script (marker must be on line 2).
         let content = match fs::read_to_string(&path) {
@@ -54,8 +59,7 @@ pub async fn run(args: UninstallArgs) -> anyhow::Result<()> {
                 continue;
             }
         };
-        let is_msb_script = content.lines().nth(1) == Some(MARKER);
-        if !is_msb_script {
+        if !is_generated_alias(&content) {
             ui::error(&format!("'{name}' is not an msb-installed alias"));
             failed = true;
             continue;

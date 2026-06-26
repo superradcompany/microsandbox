@@ -355,12 +355,7 @@ enum LogFormat {
 fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
     match msb_home {
         Some(p) => Ok(p.to_path_buf()),
-        None => match std::env::var_os("MSB_HOME") {
-            Some(p) => Ok(PathBuf::from(p)),
-            None => Ok(dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("could not resolve $HOME for default --msb-home"))?
-                .join(".microsandbox")),
-        },
+        None => Ok(microsandbox_utils::resolve_home()),
     }
 }
 
@@ -441,7 +436,7 @@ mod tests {
     fn test_resolve_registry_name_follows_abi_version() {
         let home = std::path::Path::new("/tmp/msb-metrics-home");
 
-        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 2);
+        assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 3);
         assert_eq!(
             resolve_registry_name(Some(home)).unwrap(),
             microsandbox_utils::metrics_registry_shm_name(

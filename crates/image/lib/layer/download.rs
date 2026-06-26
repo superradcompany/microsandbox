@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     cache::{
         GlobalCache,
-        lock::{flock_exclusive_by_fd, flock_unlock, open_lock_file},
+        lock::{flock_unlock, lock_exclusive, open_lock_file},
     },
     digest::Digest,
     error::{ImageError, ImageResult},
@@ -86,13 +86,12 @@ impl Layer {
 
         // Acquire cross-process download lock (non-blocking on async executor).
         let lock_file = open_lock_file(&self.download_lock_path)?;
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = lock_file.as_raw_fd();
-            tokio::task::spawn_blocking(move || flock_exclusive_by_fd(fd))
-                .await
-                .map_err(|e| ImageError::Io(std::io::Error::other(e)))??;
-        }
+        let lock_file = tokio::task::spawn_blocking(move || {
+            lock_exclusive(&lock_file)?;
+            Ok::<_, ImageError>(lock_file)
+        })
+        .await
+        .map_err(|e| ImageError::Io(std::io::Error::other(e)))??;
         let _guard = scopeguard::guard(lock_file, |f| {
             let _ = flock_unlock(&f);
         });

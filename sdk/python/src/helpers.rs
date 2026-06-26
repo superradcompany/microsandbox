@@ -152,9 +152,9 @@ pub fn sandbox_builder_from_args(
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
     }
-    if let Some(libkrunfw_path) = extract_opt::<String>(kwargs, "libkrunfw_path")? {
-        builder = builder.libkrunfw_path(libkrunfw_path);
-    }
+    // `libkrunfw_path` is a process-level concern (one dylib per process
+    // address space), not a per-sandbox builder kwarg. Users set it once via
+    // `microsandbox.set_libkrunfw_path(...)` or the `MSB_LIBKRUNFW_PATH` env var.
     if let Some(user) = extract_opt::<String>(kwargs, "user")? {
         builder = builder.user(user);
     }
@@ -195,6 +195,9 @@ pub fn sandbox_builder_from_args(
             ));
         }
         builder = builder.idle_timeout(idle_timeout as u64);
+    }
+    if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
+        builder = builder.ephemeral(ephemeral);
     }
 
     // Environment variables.
@@ -430,6 +433,7 @@ fn apply_mount(
         .transpose()?;
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
         Ok(builder.volume(&guest_path, |v| {
             let mut m = v.bind(&bind_path);
             if readonly {
@@ -449,6 +453,9 @@ fn apply_mount(
             }
             if let Some(p) = host_perms {
                 m = m.host_permissions(p);
+            }
+            if let Some(quota_mib) = quota_mib {
+                m = m.quota(quota_mib);
             }
             m
         }))
@@ -1314,6 +1321,9 @@ fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
     if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
         std::path::PathBuf::from(s)
     } else {
-        microsandbox::config::config().snapshots_dir().join(s)
+        microsandbox::backend::default_backend()
+            .as_local()
+            .map(|local| local.snapshots_dir().join(s))
+            .unwrap_or_else(|| std::path::PathBuf::from(s))
     }
 }

@@ -164,6 +164,18 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Mark the sandbox as ephemeral (or persistent).
+    ///
+    /// Ephemeral sandboxes are removed by the host runtime after the VM
+    /// reaches a terminal status. Logs and captured output are removed with
+    /// the sandbox directory.
+    #[napi]
+    pub fn ephemeral(&mut self, ephemeral: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.ephemeral(ephemeral));
+        self
+    }
+
     /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
     #[napi(js_name = "metricsSampleIntervalMs")]
     pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {
@@ -271,8 +283,10 @@ impl JsSandboxBuilder {
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// `cmd` is either an absolute path inside the guest rootfs or
-    /// the literal `"auto"`. `args` is the supplemental argv;
-    /// `argv[0]` is implicitly `cmd`. For env vars, use `initWith`.
+    /// the literal `"auto"`. Auto honors known image ENTRYPOINT inits,
+    /// preserves attached init-entrypoint commands, then probes common
+    /// guest paths. `args` is the supplemental argv; `argv[0]` is
+    /// implicitly `cmd`. For env vars, use `initWith`.
     #[napi]
     pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> &Self {
         let prev = self.take_inner();
@@ -313,12 +327,19 @@ impl JsSandboxBuilder {
         self
     }
 
-    /// Override the libkrunfw shared library path for this sandbox.
+    /// Deprecated compatibility setter for older Node SDK callers.
+    ///
+    /// The libkrunfw path is a process-level concern (one dylib per process
+    /// address space), not a per-sandbox builder setting. Keep this chainable
+    /// alias so pre-backend-split code still compiles, but route it through the
+    /// same process-wide override as `microsandbox.setRuntimeLibkrunfwPath(...)`.
     #[napi(js_name = "libkrunfwPath")]
-    pub fn libkrunfw_path(&mut self, path: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.libkrunfw_path(PathBuf::from(path)));
-        self
+    pub fn libkrunfw_path(&mut self, path: String) -> Result<&Self> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        microsandbox::config::set_sdk_libkrunfw_path(path);
+        Ok(self)
     }
 
     /// Default running user.

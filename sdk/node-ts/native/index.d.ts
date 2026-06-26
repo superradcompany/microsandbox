@@ -392,17 +392,24 @@ export declare class MountBuilder {
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
+   * Guest-write quota in MiB (only valid with `.bind()`).
+   *
+   * Bounds how much the guest may add beyond the bind-mounted directory's
+   * existing contents. Without it, a protective default is applied.
+   */
+  quota(mib: number): this
+  /**
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * named volume mounts.
+   * directory-backed named volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
-   * Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
-   * mounts.
+   * Accepts `"private"` or `"mirror"`. Valid only for bind and
+   * directory-backed named volume mounts.
    */
   hostPermissions(policy: string): this
   /**
@@ -765,10 +772,7 @@ export declare class Sandbox {
   static get(name: string): Promise<JsSandboxHandle>
   /** List all sandboxes. */
   static list(): Promise<Array<JsSandboxHandle>>
-  /**
-   * List sandboxes filtered to those carrying all of the filter's labels
-   * (AND-matched).
-   */
+  /** List sandboxes matching a filter. */
   static listWith(filter: SandboxListFilter): Promise<Array<JsSandboxHandle>>
   /**
    * Remove a stopped sandbox from the database.
@@ -807,7 +811,7 @@ export declare class Sandbox {
   /** Execute a shell command with streaming I/O. */
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
-  fs(): SandboxFsOps
+  fs(): JsSandboxFs
   /** Connect a native in-process SSH client to this sandbox. */
   sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
   /** Prepare a reusable SSH server endpoint for this sandbox. */
@@ -829,24 +833,32 @@ export declare class Sandbox {
   attachWithBuilder(cmd: string, builder: AttachOptionsBuilder): Promise<number>
   /** Attach to the sandbox's default shell. */
   attachShell(): Promise<number>
-  /** Stop the sandbox gracefully and wait until stopped state is observed. */
+  /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
-  /** Request graceful shutdown without waiting for stopped-state observation. */
+  /** Stop and wait for exit, returning the exit status. */
+  stopAndWait(): Promise<ExitStatus>
+  /** Request graceful shutdown without waiting for observed exit. */
   requestStop(): Promise<void>
-  /** Stop the sandbox gracefully with an explicit timeout in milliseconds. */
+  /** Stop gracefully with an explicit timeout before escalating to SIGKILL. */
   stopWithTimeout(timeoutMs: number): Promise<void>
-  /** Force-kill the sandbox and wait until stopped state is observed. */
+  /** Kill the sandbox immediately and wait for observed exit. */
   kill(): Promise<void>
-  /** Request force termination without waiting for stopped-state observation. */
+  /** Request force termination without waiting for observed exit. */
   requestKill(): Promise<void>
-  /** Force-kill the sandbox with an explicit observation timeout in milliseconds. */
+  /** Force-kill the sandbox with an explicit observation timeout. */
   killWithTimeout(timeoutMs: number): Promise<void>
-  /** Request graceful drain without waiting for completion. */
+  /** Graceful drain (SIGUSR1 — for load balancing). */
+  drain(): Promise<void>
+  /** Request graceful drain without waiting for observed exit. */
   requestDrain(): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
+  /** Wait for the sandbox process to exit. */
+  wait(): Promise<ExitStatus>
   /** Detach from the sandbox — it will continue running after this handle is dropped. */
   detach(): Promise<void>
+  /** Remove the persisted database record after stopping. */
+  removePersisted(): Promise<void>
   /**
    * Read captured output from `exec.log` for this sandbox.
    *
@@ -906,6 +918,14 @@ export declare class SandboxBuilder {
   quietLogs(): this
   /** Create the sandbox in detached/background mode when enabled. */
   detached(detached: boolean): this
+  /**
+   * Mark the sandbox as ephemeral (or persistent).
+   *
+   * Ephemeral sandboxes are removed by the host runtime after the VM
+   * reaches a terminal status. Logs and captured output are removed with
+   * the sandbox directory.
+   */
+  ephemeral(ephemeral: boolean): this
   /** Override the metrics sampling interval in milliseconds; pass `0` to disable. */
   metricsSampleIntervalMs(ms: number): this
   /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */
@@ -944,8 +964,10 @@ export declare class SandboxBuilder {
    * Hand off PID 1 to a guest init binary after agentd's setup.
    *
    * `cmd` is either an absolute path inside the guest rootfs or
-   * the literal `"auto"`. `args` is the supplemental argv;
-   * `argv[0]` is implicitly `cmd`. For env vars, use `initWith`.
+   * the literal `"auto"`. Auto honors known image ENTRYPOINT inits,
+   * preserves attached init-entrypoint commands, then probes common
+   * guest paths. `args` is the supplemental argv; `argv[0]` is
+   * implicitly `cmd`. For env vars, use `initWith`.
    */
   init(cmd: string, args?: Array<string> | undefined | null): this
   /**
@@ -956,7 +978,14 @@ export declare class SandboxBuilder {
   initWith(cmd: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
   /** Override the guest hostname. */
   hostname(name: string): this
-  /** Override the libkrunfw shared library path for this sandbox. */
+  /**
+   * Deprecated compatibility setter for older Node SDK callers.
+   *
+   * The libkrunfw path is a process-level concern (one dylib per process
+   * address space), not a per-sandbox builder setting. Keep this chainable
+   * alias so pre-backend-split code still compiles, but route it through the
+   * same process-wide override as `microsandbox.setRuntimeLibkrunfwPath(...)`.
+   */
   libkrunfwPath(path: string): this
   /** Default running user. */
   user(user: string): this
@@ -1484,6 +1513,9 @@ export interface AttachOptions {
   rlimits: Array<JsRlimit>
 }
 
+/** Return the active default backend kind (`"local"` or `"cloud"`). */
+export declare function defaultBackendKind(): string
+
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
   rebindProtection: boolean
@@ -1583,6 +1615,12 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
+/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
+export declare function imageGc(): Promise<number>
+
+/** Garbage-collect orphaned layers. Returns the number reclaimed. */
+export declare function imageGcLayers(): Promise<number>
+
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1613,19 +1651,6 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
-
-/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
-export declare function imagePrune(): Promise<ImagePruneReportJs>
-
-/** Summary of artifacts removed by `imagePrune`. */
-export interface ImagePruneReportJs {
-  imageRefsRemoved: number
-  manifestsRemoved: number
-  layersRemoved: number
-  fsmetaRemoved: number
-  vmdkRemoved: number
-  bytesReclaimed?: number
-}
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a
@@ -1790,6 +1815,9 @@ export interface PatchReplaceOnly {
   replace?: boolean
 }
 
+/** Restore the backend saved by `pushDefaultBackend`. */
+export declare function popDefaultBackend(token: number): void
+
 /**
  * One progress event emitted during image pull and EROFS materialization.
  *
@@ -1818,6 +1846,14 @@ export interface PullProgressEvent {
   totalBytes?: number
   bytesRead?: number
 }
+
+/**
+ * Temporarily replace the process-wide default backend and return a scope token.
+ *
+ * The caller must pass the returned token to `popDefaultBackend`; concurrent
+ * JavaScript work in the same process can observe the temporary backend.
+ */
+export declare function pushDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): number
 
 /**
  * A raw protocol frame: correlation id, flags, and CBOR-encoded body bytes.
@@ -1881,6 +1917,9 @@ export interface SandboxMetrics {
   diskWriteBytes: number
   netRxBytes: number
   netTxBytes: number
+  upperUsedBytes?: number
+  upperFreeBytes?: number
+  upperHostAllocatedBytes?: number
   /** Uptime in milliseconds. */
   uptimeMs: number
   /** Timestamp as milliseconds since Unix epoch. */
@@ -1924,6 +1963,23 @@ export interface SecretInjection {
   queryParams: boolean
   body: boolean
 }
+
+/**
+ * Set the process-wide default backend.
+ *
+ * `kind="local"` selects the local backend. `kind="cloud"` requires either
+ * `url` + `api_key`, or `profile`.
+ */
+export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
+
+/**
+ * Set the `libkrunfw` shared library path resolved by the JS SDK.
+ *
+ * Process-level setter — one dylib per process address space, so this is the
+ * natural granularity. User env (`MSB_LIBKRUNFW_PATH`) still wins as tier 1.
+ * Mirrors `setRuntimeMsbPath` for libkrunfw.
+ */
+export declare function setRuntimeLibkrunfwPath(path: string): void
 
 /**
  * Set the `msb` binary path resolved by the JS SDK.
@@ -2081,7 +2137,10 @@ export interface VolumeMount {
   nodev: boolean
   host?: string
   name?: string
+  namedMode?: string
+  namedKind?: string
   sizeMib?: number
+  quotaMib?: number
   format?: string
   fstype?: string
   /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */

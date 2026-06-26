@@ -1,0 +1,104 @@
+---
+title: "Network defenses"
+description: "Egress filtering, SSRF, DNS rebinding, and cloud-metadata protection"
+icon: "network-wired"
+---
+
+All sandbox traffic flows through a host-side network stack. From inside the VM it looks like a normal network interface. On the host side, a user-space stack terminates every packet and checks it against policy before anything leaves. There is no host kernel routing or NAT in the path. The host process is the sandbox's entire view of the network.
+
+This is the network chapter of the security model: the threats the stack is built to stop and where each defense lives. For day-to-day configuration like policies, ports, DNS knobs, and TLS interception, see the [Networking guide](/networking/overview).
+
+## Default posture
+
+With no custom policy, a sandbox can reach the public internet and nothing inward:
+
+- **Egress is deny-by-default** with one allowance: the public internet, plus DNS through the gateway. Private ranges, loopback, link-local, cloud metadata, and your host are all denied.
+- **Ingress only reaches ports you publish**, and published ports bind to `127.0.0.1` on your host by default.
+
+Everything below is about the threats that posture is designed to withstand.
+
+## Private IPs and your local network
+
+The largest class of real damage comes from a workload reaching things *inside* your network: the host itself, a local database, another machine on the same subnet. The default policy denies egress to everything that isn't the public internet, which covers:
+
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7` (RFC 1918 + carrier-grade NAT + IPv6 ULA)
+- `127.0.0.0/8`, `::1` (loopback)
+- `169.254.0.0/16`, `fe80::/10` (link-local)
+- `169.254.169.254` (cloud metadata, which takes precedence over link-local)
+- the per-sandbox gateway, meaning your host (the `host` group)
+
+So `curl http://192.168.1.10` (a machine on your LAN) or `curl http://host.microsandbox.internal:5432` (a service on your host) is dropped at the gateway before it reaches the destination.
+
+<Warning>
+**`localhost` inside the guest is not your host.** `curl http://localhost:5432` from inside a sandbox does *not* reach a service on your machine. Inside the guest, `localhost` and `127.0.0.1` are the sandbox's own loopback, handled entirely by the guest kernel, so the request never reaches the host stack at all. To reach a service on your host, a workload would have to use `host.microsandbox.internal` (the `host` group), which the default policy denies. The `Loopback` group exists only to catch the unusual case of a guest crafting a raw packet addressed to `127.0.0.1` out its network interface, and the default policy denies that too.
+</Warning>
+
+<Frame>
+  <img className="block dark:hidden" src="/images/security/curl-destinations-light.svg" alt="From inside a sandbox, localhost stays in the guest while host.microsandbox.internal and LAN addresses are dropped at the gateway." />
+  <img className="hidden dark:block" src="/images/security/curl-destinations-dark.svg" alt="From inside a sandbox, localhost stays in the guest while host.microsandbox.internal and LAN addresses are dropped at the gateway." />
+</Frame>
+
+Override the default with allow-all egress only when a workload genuinely needs broad reach, or [turn networking off](/security/hardening#turn-the-network-off) when it needs none.
+
+## Cloud metadata endpoints
+
+On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service. It's a classic SSRF target because it hands temporary credentials to anything that can connect. The default policy blocks it. For custom policies that flip egress to allow-by-default, deny it explicitly:
+
+<CodeGroup>
+```bash CLI
+msb create python --name worker \
+    --net-default-egress allow \
+    --net-rule "deny@meta"
+```
+
+```rust Rust
+NetworkPolicy::builder()
+    .default_allow()
+    .rule(|r| r.egress().deny_meta())
+    .build()?
+```
+</CodeGroup>
+
+## DNS rebinding
+
+An attacker who controls a domain can make it resolve to a public IP during the allowlist check, then flip to a private IP on a later lookup. The guest ends up making a request that *looked* bound for `evil.example.com` but actually lands on `192.168.1.10`.
+
+Rebind protection catches this at the response level: when the DNS interceptor sees an answer resolving a name to a private, loopback, or link-local address, it rewrites the response to `NXDOMAIN` and the connection is never made. It's on by default. You can disable it when you genuinely need names to resolve to internal hosts, such as local development or split-horizon DNS. See [DNS](/networking/dns).
+
+## DNS-to-IP binding (TOCTOU)
+
+Even without rebinding, a time-of-check to time-of-use race exists: an allowed domain resolves to an allowed IP when policy is checked, then the guest looks it up again at connect time and reaches a different IP.
+
+Domain-based rules close this with a pin set of observed DNS answers. A connection matches a domain rule only if its destination IP was actually returned as an answer to a DNS query for that domain *from this sandbox*. A guest that hard-codes an IP it never resolved through the interceptor can't slip past a domain allowlist. The same pin set gates [secret injection](/security/secrets).
+
+## SNI spoofing
+
+A TLS client picks the SNI in its ClientHello, and it's plaintext and unsigned. Some servers don't reject a mismatched SNI and complete the handshake against their default certificate anyway. That gives a workload a way to claim an allowed name while actually connecting elsewhere.
+
+Domain rules require two things when SNI is present, and both must pass: the SNI matches the rule, and the destination IP is bound to that name in the DNS pin set. Real traffic clears both because the client resolves the name before connecting. A spoof fails because no lookup ever tied the claimed name to that IP. For intercepted HTTP, the decrypted request authority, meaning the HTTP/1 `Host` header or the HTTP/2 `:authority`, must also match the SNI, which closes domain-fronting.
+
+## The DNS bypass surface
+
+DNS-based defenses like block lists, rebind protection, and domain pinning only act on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Other transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from ordinary traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) rides inside the outer encrypted flow and never reaches the forwarder.
+
+Where DNS integrity matters, pair DoT interception with a policy that denies egress UDP/53, TCP/53, and TCP/853 to everything except the gateway, and close tunnels by restricting egress to an allowlist. See [DNS](/networking/dns) for the transport-by-transport breakdown.
+
+## Trusting host CAs
+
+TLS interception uses an auto-generated CA the guest trusts. A separate option, `trust_host_cas`, additionally ships your host's trusted root CAs into the guest so outbound TLS keeps working behind a corporate MITM proxy. It is **off by default** for a reason: anything in your host trust store becomes trusted inside every sandbox, so a CA an attacker managed to plant on your host would be trusted by your guests too. Leave it off unless you specifically need it. See [TLS interception](/networking/tls).
+
+## Out of scope
+
+The network stack does not try to defend against:
+
+- **Kernel exploits inside the guest.** The [microVM boundary](/security/isolation) is what contains a compromised guest.
+- **Raw packet crafting from privileged host processes.** Host-side privileged code is on the trusted side.
+- **Deep ICMP behavior.** Supported ICMP is limited to unprivileged echo, and traceroute-style flows aren't proxied.
+- **Host trust store integrity** once `trust_host_cas` is opted in, as covered above.
+
+## See also
+
+- [Networking overview](/networking/overview): policies, ports, reaching the host
+- [DNS](/networking/dns): interception and the controls that ride on it
+- [TLS interception](/networking/tls): plaintext visibility for per-host policy and secret injection
+- [Secret handling](/security/secrets): how the same DNS and SNI machinery gates credential injection

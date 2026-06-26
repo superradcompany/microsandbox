@@ -44,7 +44,7 @@ func TestWithShellRoundTripsThroughConfig(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-shell-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithShell("/bin/sh"),
 	)
@@ -75,7 +75,7 @@ func TestWithEntrypointVisibleInConfig(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-entrypoint-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithEntrypoint("/bin/sh", "-c", "echo hi"),
 	)
@@ -106,7 +106,7 @@ func TestWithInitAuto(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-init-auto-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithInit(microsandbox.Init.Auto()),
 	)
@@ -127,6 +127,13 @@ func TestWithInitAuto(t *testing.T) {
 	if !strings.Contains(h.ConfigJSON(), `"auto"`) {
 		t.Errorf("Init.Auto not visible in ConfigJSON: %s", h.ConfigJSON())
 	}
+	parsed, err := h.Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if parsed.Init == nil || parsed.Init.Cmd != "auto" {
+		t.Errorf("Init.Auto not visible in parsed Config: %+v", parsed.Init)
+	}
 }
 
 // TestWithLogLevelRoundTrip verifies that WithLogLevel surfaces in the
@@ -139,7 +146,7 @@ func TestWithLogLevelRoundTrip(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-log-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithLogLevel(microsandbox.LogLevelInfo),
 	)
@@ -170,7 +177,7 @@ func TestWithQuietLogsClearsLogLevel(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-quiet-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithQuietLogs(),
 	)
@@ -201,7 +208,7 @@ func TestWithMaxDurationAndIdleTimeoutCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-timeouts-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithMaxDuration(2*time.Hour),
 		microsandbox.WithIdleTimeout(30*time.Minute),
@@ -236,7 +243,7 @@ func TestWithScriptsRoundTrip(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-scripts-" + t.Name()
 
-	sb, err := microsandbox.CreateSandbox(ctx, name,
+	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithScripts(map[string]string{
 			"hello": "echo hello-from-script",
@@ -273,8 +280,8 @@ func TestWithPullPolicyRoundTrip(t *testing.T) {
 	} {
 		t.Run(string(p), func(t *testing.T) {
 			ctx := integrationCtx(t)
-			name := "go-sdk-pull-" + t.Name()
-			sb, err := microsandbox.CreateSandbox(ctx, name,
+			name := "go-sdk-pull-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+			sb, err := createSandbox(t, ctx, name,
 				microsandbox.WithImage(goIntegrationImage),
 				microsandbox.WithPullPolicy(p),
 			)

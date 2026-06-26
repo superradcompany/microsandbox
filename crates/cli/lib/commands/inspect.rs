@@ -73,7 +73,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
         let json = serde_json::json!({
             "name": handle.name(),
-            "status": format!("{:?}", handle.status()),
+            "status": format!("{:?}", handle.status_snapshot()),
             "config": config,
             "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
@@ -82,7 +82,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = format!("{:?}", handle.status());
+    let status = format!("{:?}", handle.status_snapshot());
 
     ui::detail_kv("Name", handle.name());
     ui::detail_kv("Status", &ui::format_status(&status));
@@ -96,7 +96,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
 
     // Parse and display config details.
     if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
-        let image = match &config.image {
+        let image = match &config.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => {
@@ -104,45 +104,48 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
-        if let Some(disk_size_mib) = config.image.oci_upper_size_mib() {
+        if let Some(disk_size_mib) = config.spec.image.oci_upper_size_mib() {
             ui::detail_kv("Disk", &format!("{disk_size_mib} MiB"));
         }
 
         ui::detail_header("Resources");
-        ui::detail_kv_indent("CPUs", &config.cpus.to_string());
-        ui::detail_kv_indent("Memory", &format!("{} MiB", config.memory_mib));
-        let security = match config.security_profile {
+        ui::detail_kv_indent("CPUs", &config.spec.resources.cpus.to_string());
+        ui::detail_kv_indent(
+            "Memory",
+            &format!("{} MiB", config.spec.resources.memory_mib),
+        );
+        let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
             SecurityProfile::Restricted => "restricted",
         };
         ui::detail_kv("Security", security);
 
-        if let Some(ref workdir) = config.workdir {
+        if let Some(ref workdir) = config.spec.runtime.workdir {
             ui::detail_kv("Workdir", workdir);
         }
-        if let Some(ref shell) = config.shell {
+        if let Some(ref shell) = config.spec.runtime.shell {
             ui::detail_kv("Shell", shell);
         }
 
-        if !config.env.is_empty() {
+        if !config.spec.env.is_empty() {
             ui::detail_header("Environment");
-            for (k, v) in &config.env {
-                println!("  {k}={v}");
+            for var in &config.spec.env {
+                println!("  {}={}", var.key, var.value);
             }
         }
 
-        if !config.labels.is_empty() {
+        if !config.spec.labels.is_empty() {
             ui::detail_header("Labels");
-            let mut labels: Vec<_> = config.labels.iter().collect();
+            let mut labels: Vec<_> = config.spec.labels.iter().collect();
             labels.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in labels {
                 println!("  {k}={v}");
             }
         }
 
-        if !config.mounts.is_empty() {
+        if !config.spec.mounts.is_empty() {
             ui::detail_header("Mounts");
-            for mount in &config.mounts {
+            for mount in &config.spec.mounts {
                 match mount {
                     VolumeMount::Bind {
                         host,
@@ -150,10 +153,17 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        quota_mib,
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
-                        println!("  {guest:<16}\u{2192} {}{flags}{suffix}", host.display());
+                        let quota = quota_mib
+                            .map(|mib| format!(" [quota={mib}MiB]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}",
+                            host.display()
+                        );
                     }
                     VolumeMount::Named {
                         name,

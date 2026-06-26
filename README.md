@@ -30,9 +30,11 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
+- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux and macOS.
+<!-- - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows. -->
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
-- <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times under 100 milliseconds.
+- <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times[^boot-time] under 100 milliseconds.
 - <img height="14" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
 - <img height="14" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Unexploitable secret keys that never enter the VM.
 - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
@@ -73,9 +75,15 @@
 > Or install the `msb` command globally:
 >
 > ```sh
-> curl -fsSL https://install.microsandbox.dev | sh
+> curl -fsSL https://install.microsandbox.dev | sh        # 🍎 macOS / 🐧 Linux
 > ```
 >
+<!--
+> ```powershell
+> irm https://install.microsandbox.dev/windows | iex      # 🪟 Windows
+> ```
+>
+-->
 > <details>
 > <summary><em>&nbsp;We also support other package managers  →</em></summary>
 >
@@ -85,6 +93,12 @@
 > brew install superradcompany/tap/microsandbox
 > ```
 >
+<!--
+> ```sh
+> winget install SuperRadCompany.Microsandbox
+> ```
+>
+-->
 > ```sh
 > npm i -g microsandbox
 > ```
@@ -109,7 +123,12 @@
 
 ##
 
-> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.<br />
+> **Requirements**:
+>
+> - <img height="14" src="https://api.iconify.design/simple-icons:apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
+> - <img height="14" src="https://api.iconify.design/simple-icons:linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
+<!-- > - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled. -->
+>
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />
@@ -257,20 +276,20 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > ```sh
 > # Create and start a named sandbox
-> msb create --name my-app python
+> msb create --name app python
 > ```
 >
 > ```sh
 > # Execute commands
-> msb exec my-app -- python -c "import this"
-> msb exec my-app -- curl https://example.com
+> msb exec app -- python -c "import this"
+> msb exec app -- curl https://example.com
 > ```
 >
 > ```sh
 > # Lifecycle
-> msb stop my-app
-> msb start my-app
-> msb rm my-app
+> msb stop app
+> msb start app
+> msb rm app
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
@@ -293,9 +312,9 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > ```sh
 > msb ls                         # List all sandboxes
-> msb ps my-app                  # Show sandbox status
-> msb inspect my-app             # Detailed sandbox info
-> msb metrics my-app             # Live CPU/memory/network stats
+> msb ps app                     # Show sandbox status
+> msb inspect app                # Detailed sandbox info
+> msb metrics app                # Live CPU/memory/network stats
 > ```
 
 > [!TIP]
@@ -362,3 +381,5 @@ Special thanks to all our contributors, testers, and community members who help 
 
 <br />
 <br />
+
+[^boot-time]: Boot time refers to guest boot on an M1 machine.

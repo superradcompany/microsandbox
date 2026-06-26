@@ -27,7 +27,7 @@ It keeps the familiar workflow of OCI images and command execution, while moving
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
 - **Multi-language SDKs.** Rust, TypeScript, Python, and Go expose the same core model.
 
-## Common workloads
+## Example use cases
 
 - **AI agents.** Give coding agents and tool-using assistants a dedicated machine for commands, files, package installs, and generated code.
 - **User code execution.** Run submitted scripts, notebooks, plugins, and extensions away from the host.
@@ -46,9 +46,9 @@ Instead of putting real credentials inside the VM, microsandbox injects placehol
 
 All sandbox traffic flows through a host-side network stack. You can allow public internet access, block private networks, publish ports, deny by default, pin DNS behavior, or inspect TLS traffic without relying on guest cooperation.
 
-### Filesystems are disposable or persistent by choice
+### Storage is private by default
 
-Use OCI images for disposable roots, bind mounts for host data, named volumes for persistent state, tmpfs for scratch space, and snapshots when you want to reuse prepared sandbox state.
+For the normal OCI image workflow, each sandbox gets its own writable root filesystem on top of the image. Writes there do not change the cached image. Data reaches the host or another sandbox only when you choose a sharing mechanism, such as a bind mount, named volume, disk image, or snapshot.
 
 ## Minimal example
 

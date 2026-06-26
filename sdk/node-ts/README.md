@@ -19,7 +19,7 @@ The `microsandbox` npm package provides native bindings to the [microsandbox](ht
 - **Port publishing** — Expose guest TCP/UDP services on host ports
 - **Rootfs patches** — Modify the filesystem before the VM boots
 - **Detached mode** — Sandboxes can outlive the Node.js process
-- **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
+- **Metrics** — CPU, memory, disk I/O, network I/O, and optional upper disk usage per sandbox
 
 ## Requirements
 
@@ -536,7 +536,7 @@ await setup()
 
 | Symbol | Description |
 |---|---|
-| `SandboxMetrics` | CPU%, memory, disk I/O, net I/O, uptime, timestamp. |
+| `SandboxMetrics` | CPU%, memory, disk I/O, net I/O, optional upper disk usage, uptime, timestamp. |
 | `MetricsStream` | `AsyncIterable<SandboxMetrics>` returned by `Sandbox.metricsStream(intervalMs)`. |
 | `allSandboxMetrics()` | Snapshot of metrics for every running sandbox. |
 | `Setup` / `setup()` | Builder for advanced installs (custom base dir, version, force). |

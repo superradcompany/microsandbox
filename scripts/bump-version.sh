@@ -14,11 +14,12 @@
 #
 # Updates:
 #   - Cargo.toml (workspace.package.version + path-dep `version = "X.Y.Z"`
-#     entries across crates/*/Cargo.toml and sdk/*/Cargo.toml)
+#     entries across crates/*/Cargo.toml, packages/*/rust/Cargo.toml, and sdk/*/Cargo.toml)
 #   - crates/agentd/Cargo.lock (the agentd sub-workspace ships its own
 #     lockfile that the root `cargo check` won't refresh — targeted sed
 #     against microsandbox-* entries)
-#   - agent-client/typescript/package.json
+#   - packages/agent-client/typescript/package.json
+#   - packages/microsandbox-types/typescript/package.json
 #   - sdk/node-ts/package.json (top-level + optionalDependencies versions)
 #   - sdk/node-ts/npm/*/package.json (per-platform npm sub-packages)
 #   - sdk/node-ts/native/index.cjs (napi-rs binding loader; pins the
@@ -34,7 +35,7 @@
 # reflected.
 #
 # Does NOT text-bump package-lock.json files. release-bump.yml regenerates
-# agent-client/typescript/package-lock.json during the release PR, and
+# packages/agent-client/typescript/package-lock.json and packages/microsandbox-types/typescript/package-lock.json during the release PR, and
 # release.yml's `refresh-lockfile` job re-resolves sdk/node-ts/package-lock.json
 # against the just-published platform packages and opens a follow-up PR.
 # (Text-bumping lockfiles would make them "look consistent" but lie about
@@ -92,7 +93,7 @@ while IFS= read -r f; do
     inplace "s/version = \"${OLD}\"/version = \"${NEW}\"/g" "$f"
     echo "  updated ${f}"
   fi
-done < <(find Cargo.toml crates sdk -name Cargo.toml 2>/dev/null)
+done < <(find Cargo.toml crates packages sdk -name Cargo.toml 2>/dev/null)
 
 # --- Rust: Cargo.lock files ----------------------------------------------
 # Bump the workspace-versioned crate entries in both the root workspace
@@ -110,7 +111,7 @@ while IFS= read -r toml; do
     name=$(awk -F'"' '/^name = "/{print $2; exit}' "$toml")
     [ -n "$name" ] && WORKSPACE_CRATES+=("$name")
   fi
-done < <(find crates sdk -name Cargo.toml 2>/dev/null)
+done < <(find crates packages sdk -name Cargo.toml 2>/dev/null)
 
 for f in Cargo.lock crates/agentd/Cargo.lock; do
   [ -f "$f" ] || continue
@@ -130,7 +131,8 @@ done
 # own `version` field is independent (0.1.0 for examples) and never
 # coincides with a microsandbox release version.
 for f in \
-  agent-client/typescript/package.json \
+  packages/agent-client/typescript/package.json \
+  packages/microsandbox-types/typescript/package.json \
   sdk/node-ts/package.json \
   sdk/node-ts/npm/*/package.json \
   examples/typescript/*/package.json; do
@@ -162,9 +164,10 @@ fi
 echo
 echo "next steps:"
 echo "  cargo check    # refresh Cargo.lock against the new manifests"
-echo "  (cd agent-client/typescript && npm install --package-lock-only --ignore-scripts)"
+echo "  (cd packages/agent-client/typescript && npm install --package-lock-only --ignore-scripts)"
+echo "  (cd packages/microsandbox-types/typescript && npm install --package-lock-only --ignore-scripts)"
 echo "  git diff       # review"
 echo
 echo "note: package-lock.json files are not text-bumped. Regenerate the"
-echo "      agent-client lockfile in the release PR; sdk/node-ts is refreshed"
+echo "      package lockfiles in the release PR; sdk/node-ts is refreshed"
 echo "      after publishing because its platform packages must exist on npm."

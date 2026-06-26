@@ -71,6 +71,7 @@ describe("Node.js SDK Pull Progress", () => {
 	const NAME_DETACHED = "sdk-pp-d";
 	const NAME_ERROR = "sdk-pp-e";
 	const NAME_DOUBLE = "sdk-pp-x";
+	const STARTUP_TEST_TIMEOUT_MS = 300_000;
 
 	afterAll(async () => {
 		for (const n of [NAME_ITER, NAME_RECV, NAME_DETACHED, NAME_ERROR, NAME_DOUBLE]) {
@@ -126,7 +127,7 @@ describe("Node.js SDK Pull Progress", () => {
 		const sb = await session.awaitSandbox();
 		expect(sb.name).toBe(NAME_ITER);
 		await sb.stop();
-	}, 180_000);
+	}, STARTUP_TEST_TIMEOUT_MS);
 
 	it("streams events via recv() without the async iterator", async () => {
 		const session = await Sandbox.builder(NAME_RECV)
@@ -150,7 +151,7 @@ describe("Node.js SDK Pull Progress", () => {
 
 		const sb = await session.awaitSandbox();
 		await sb.stop();
-	}, 120_000);
+	}, STARTUP_TEST_TIMEOUT_MS);
 
 	it("detached createWithPullProgress yields events and creates a detached sandbox", async () => {
 		const session = await Sandbox.builder(NAME_DETACHED)
@@ -172,7 +173,7 @@ describe("Node.js SDK Pull Progress", () => {
 		expect(sb.name).toBe(NAME_DETACHED);
 
 		await sb.stop();
-	}, 120_000);
+	}, STARTUP_TEST_TIMEOUT_MS);
 
 	it("result() rejects when the image cannot be pulled", async () => {
 		// pullPolicy:"never" with an image that is not in the local cache
@@ -205,7 +206,7 @@ describe("Node.js SDK Pull Progress", () => {
 		await expect(session.awaitSandbox()).rejects.toThrow(/already (called|consumed)/);
 
 		await sb.stop();
-	}, 120_000);
+	}, STARTUP_TEST_TIMEOUT_MS);
 });
 
 describe.skipIf(!msbPath())("listWith by labels", () => {
@@ -228,7 +229,7 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
       await build(jobName).label("owner", owner).label("tier", "job").create(),
       await build(otherName).label("owner", `${owner}-else`).create(),
     ];
-  }, 180_000);
+  }, 300_000);
 
   afterAll(async () => {
     for (const sb of created) await sb.stop().catch(() => undefined);
@@ -238,10 +239,15 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
   });
 
   it("filters by a single label (AND across sandboxes)", async () => {
-    const names = (await Sandbox.listWith({ labels: { owner } })).map((h) => h.name);
+    const handles = await Sandbox.listWith({ labels: { owner } });
+    const names = handles.map((h) => h.name);
     expect(names).toContain(webName);
     expect(names).toContain(jobName);
     expect(names).not.toContain(otherName);
+
+    const web = handles.find((h) => h.name === webName);
+    expect(web).toBeDefined();
+    await expect(web!.refresh()).resolves.toMatchObject({ name: webName });
   });
 
   it("AND-matches multiple labels", async () => {

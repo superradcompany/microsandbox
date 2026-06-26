@@ -29,6 +29,7 @@ lru = { workspace = true }
 microsandbox-protocol.workspace = true
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["net"] }
+msb_krun_utils.workspace = true
 parking_lot = { workspace = true }
 pem = "3"
 percent-encoding = "2"
@@ -67,6 +68,9 @@ tracing = { workspace = true }
 # create two incompatible CFString/CFArray/... types in the build.
 core-foundation = "0.9"
 system-configuration = "0.7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

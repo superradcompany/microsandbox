@@ -206,7 +206,8 @@ async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
 fn run_authorize(args: SshAuthorizeArgs) -> anyhow::Result<()> {
     let key_text = read_public_key_source(args)?;
     let (key_base64, line) = parse_public_key_line(&key_text)?;
-    let ssh_dir = microsandbox::config::config().ssh_dir();
+    let local_backend = microsandbox::LocalBackend::lazy();
+    let ssh_dir = local_backend.config().ssh_dir();
     create_secure_dir(&ssh_dir)?;
     let authorized_keys = ssh_dir.join("authorized_keys");
 
@@ -298,11 +299,11 @@ fn create_secure_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
+fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

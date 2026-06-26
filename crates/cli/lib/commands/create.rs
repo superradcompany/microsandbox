@@ -42,7 +42,9 @@ pub async fn run(
     let builder = Sandbox::builder(&name).image(args.image.as_str());
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
-    let (mut progress, task) = builder.detached(true).create_with_pull_progress()?;
+    let (mut progress, task) = builder
+        .detached(true)
+        .create_detached_with_pull_progress()?;
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&args.image)
     } else {
