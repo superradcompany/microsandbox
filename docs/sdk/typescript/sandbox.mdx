@@ -438,7 +438,7 @@ await sandbox.fs().writeFile("/tmp/hello.txt", "hi");
 kill(): Promise<void>
 ```
 
-Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown - use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sandbox-stop) for graceful shutdown that gives the workload a chance to flush.
+Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown — use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sandbox-stop) for graceful shutdown that gives the workload a chance to flush.
 
 <Accordion title="Example">
 
