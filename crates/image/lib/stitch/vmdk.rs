@@ -44,13 +44,13 @@ pub fn write_vmdk_descriptor(output: &Path, extents: &[&Path]) -> io::Result<()>
         let abs_path = std::fs::canonicalize(path)?;
         let abs_str = abs_path.to_string_lossy();
 
-        // Split into <= 2 GiB extent lines.
-        let mut offset: u64 = 0;
+        // Split into <= 2 GiB extent lines. libkrun interprets FLAT offsets as bytes.
+        let mut offset_bytes: u64 = 0;
         let mut remaining = sectors;
         while remaining > 0 {
             let chunk = remaining.min(MAX_EXTENT_SECTORS);
-            extent_lines.push(format!("RW {chunk} FLAT \"{abs_str}\" {offset}"));
-            offset += chunk;
+            extent_lines.push(format!("RW {chunk} FLAT \"{abs_str}\" {offset_bytes}"));
+            offset_bytes += chunk * 512;
             remaining -= chunk;
         }
 
@@ -122,6 +122,40 @@ mod tests {
         assert!(content.contains("RW 8 FLAT"));
         assert_eq!(content.matches("RW 8 FLAT").count(), 3);
         assert!(content.contains("ddb.virtualHWVersion = \"4\""));
+    }
+
+    #[test]
+    fn test_vmdk_split_offsets_are_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("large.bin");
+        std::fs::File::create(&p)
+            .unwrap()
+            .set_len(MAX_EXTENT_SECTORS * 512 + 4096)
+            .unwrap();
+
+        let vmdk_path = dir.path().join("test.vmdk");
+        write_vmdk_descriptor(&vmdk_path, &[p.as_path()]).unwrap();
+
+        let mut content = String::new();
+        std::fs::File::open(&vmdk_path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+
+        // `RW {sectors} FLAT "{path}" {offset}` — assert exact count, order,
+        // sector counts, and byte offsets so a regression cannot hide behind a
+        // loose substring match.
+        let rw_lines: Vec<&str> = content.lines().filter(|l| l.starts_with("RW ")).collect();
+        assert_eq!(rw_lines.len(), 2, "expected exactly two extent lines");
+
+        let parse = |line: &str| -> (u64, u64) {
+            let sectors: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+            let offset: u64 = line.rsplit('"').next().unwrap().trim().parse().unwrap();
+            (sectors, offset)
+        };
+
+        assert_eq!(parse(rw_lines[0]), (MAX_EXTENT_SECTORS, 0));
+        assert_eq!(parse(rw_lines[1]), (8, MAX_EXTENT_SECTORS * 512));
     }
 
     #[test]
