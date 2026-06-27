@@ -371,6 +371,7 @@ jobs:
             sdk/node-ts/dist/
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
