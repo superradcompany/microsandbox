@@ -4,7 +4,7 @@ description: Diagnose Windows Hypervisor Platform, doctor checks, and terminal s
 icon: "windows"
 ---
 
-Windows support is currently in preview. Windows 11 is the tested path, and local sandboxes require Windows Hypervisor Platform.
+Windows support is currently in preview. Windows 11 is the tested path, Windows 10 is unverified, and local sandboxes require Windows Hypervisor Platform.
 
 ## Quick checks
 
@@ -38,7 +38,13 @@ You can check the feature state with:
 Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
-If the feature is enabled but `msb doctor` still reports that the hypervisor is unavailable, confirm that virtualization is enabled in firmware/UEFI, then reboot once.
+Windows can report the feature as enabled while the hypervisor is still unavailable in the current boot session. If `msb doctor` still reports that the hypervisor is unavailable, reboot once and confirm that virtualization is enabled in firmware/UEFI.
+
+If the doctor reports missing runtime files, refresh them with:
+
+```powershell
+msb self update
+```
 
 ## Runtime path
 

@@ -26,7 +26,11 @@ The expected result is `arm64`. If the result is `x86_64`, the machine is an Int
 
 Unlike Linux and Windows, macOS does not require enabling a separate KVM or Windows Hypervisor Platform feature. Apple Silicon Macs include the hypervisor support that microsandbox uses.
 
-If sandbox startup fails on an Apple Silicon Mac, first run `msb doctor`, then try a fresh terminal session so your current `PATH` is visible.
+If sandbox startup fails on an Apple Silicon Mac, first run `msb doctor`, then try a fresh terminal session so your current `PATH` is visible. If the doctor reports missing runtime files, refresh them with:
+
+```bash
+msb self update
+```
 
 ## Runtime path
 
