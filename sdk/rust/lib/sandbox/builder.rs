@@ -137,8 +137,10 @@ impl SandboxBuilder {
     /// sandbox.
     ///
     /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt)
-    /// helper, mirroring [`memory`](Self::memory). Only valid for an OCI-image
-    /// rootfs; rejected for bind/disk rootfs and when booting from a snapshot.
+    /// helper, mirroring [`memory`](Self::memory). The writable overlay exists only
+    /// for an OCI-image rootfs, so a bind or disk-image rootfs has nothing to size:
+    /// the value is ignored with a logged warning rather than rejected. Set the OCI
+    /// image before calling this — calling it beforehand is still an error.
     pub fn disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
         let size_mib = size.into().as_u32();
         match &mut self.config.spec.image {
@@ -153,11 +155,13 @@ impl SandboxBuilder {
                 }
             }
             _ => {
-                if self.build_error.is_none() {
-                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "disk_size() is only valid for OCI images".into(),
-                    ));
-                }
+                // The writable overlay this sizes exists only for an OCI rootfs; a
+                // bind/disk-image rootfs has nothing to size. Warn and ignore rather
+                // than fail — the sandbox is still valid, the knob just does nothing.
+                tracing::warn!(
+                    "disk_size() ignored: a writable-overlay size applies only to an \
+                     OCI-image rootfs, not a bind or disk-image rootfs"
+                );
             }
         }
         self
@@ -1270,15 +1274,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_disk_size_rejects_bind_rootfs() {
-        let err = SandboxBuilder::new("test")
+    async fn test_builder_disk_size_ignored_for_bind_rootfs() {
+        // disk_size on a non-OCI rootfs is ignored with a logged warning, not
+        // rejected — the sandbox is still valid, the overlay size just doesn't apply.
+        let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .disk_size(8192u32)
             .build()
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.to_string().contains("only valid for OCI images"));
+        assert!(matches!(config.spec.image, super::RootfsSource::Bind(_)));
+        assert_eq!(config.spec.image.oci_upper_size_mib(), None);
     }
 
     #[tokio::test]
