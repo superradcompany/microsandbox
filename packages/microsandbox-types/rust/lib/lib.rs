@@ -14,16 +14,18 @@ mod validation;
 //--------------------------------------------------------------------------------------------------
 
 pub use cloud::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
 };
 pub use domain::{
-    DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB,
-    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, LogSource, MountOptions,
-    NamedVolumeCreate, NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol,
-    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, SandboxLogLevel,
-    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecurityProfile,
-    SnapshotDestination, SnapshotSpec, StatVirtualization, VolumeKind, VolumeMount, VolumeSpec,
+    CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS,
+    DEFAULT_SANDBOX_MEMORY_MIB, DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions,
+    InterceptCaConfig, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate,
+    NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PublishedPortSpec,
+    PullPolicy, Rlimit, RlimitResource, RootfsSource, SandboxLogLevel, SandboxPolicy,
+    SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretConfigError, SecretEntry,
+    SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination, SnapshotSpec,
+    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use validation::{

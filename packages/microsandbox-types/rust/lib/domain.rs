@@ -28,6 +28,8 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// Disk image format for virtio-blk root filesystems and volume mounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum DiskImageFormat {
     /// QEMU Copy-on-Write v2.
     Qcow2,
@@ -66,18 +68,17 @@ pub enum RootfsSource {
 /// OCI root filesystem source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
-
-    /// Writable overlay upper size in MiB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upper_size_mib: Option<u32>,
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
     #[default]
@@ -99,6 +100,8 @@ pub enum PullPolicy {
 /// Serializes/deserializes as the lowercase variant name (`"strict"`, `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum StatVirtualization {
     /// Fail-closed: probe the host backing path; require xattr support.
@@ -114,6 +117,8 @@ pub enum StatVirtualization {
 /// Serializes/deserializes as the lowercase variant name (`"private"`, `"mirror"`) to align with the CLI and NAPI spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum HostPermissions {
     /// Guest chmod stays in the metadata overlay only.
@@ -125,6 +130,8 @@ pub enum HostPermissions {
 /// Sandbox-level in-guest security profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Preserve normal guest-root semantics.
@@ -142,6 +149,8 @@ pub enum SecurityProfile {
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
@@ -164,6 +173,7 @@ pub struct MountOptions {
 /// Storage kind for a named volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum VolumeKind {
     /// Directory-backed named volume mounted through virtiofs.
     Directory,
@@ -175,6 +185,7 @@ pub enum VolumeKind {
 /// Configuration for creating a named volume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct VolumeSpec {
     /// Volume name.
     pub name: String,
@@ -195,6 +206,7 @@ pub struct VolumeSpec {
 /// Sandbox-time behavior for a named volume mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum NamedVolumeMode {
     /// Require the named volume to already exist.
     Existing,
@@ -209,6 +221,7 @@ pub enum NamedVolumeMode {
 /// Creation metadata for sandbox-time named volume provisioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct NamedVolumeCreate {
     /// Creation behavior for this named volume mount.
     pub mode: NamedVolumeMode,
@@ -232,12 +245,14 @@ pub struct NamedVolumeCreate {
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", ts(tag = "type"))]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
     Bind {
         /// Host path to bind mount.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -287,6 +302,7 @@ pub enum VolumeMount {
     DiskImage {
         /// Host path to the disk image file.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -302,6 +318,7 @@ pub enum VolumeMount {
 /// Rootfs patch applied before VM startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum Patch {
     /// Write text content to a file.
     Text {
@@ -331,6 +348,7 @@ pub enum Patch {
     CopyFile {
         /// Host path to copy from.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -344,6 +362,7 @@ pub enum Patch {
     CopyDir {
         /// Host directory to copy from.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -385,14 +404,456 @@ pub enum Patch {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Secret injection
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum supported secret placeholder length in bytes.
+pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
+
+/// Placeholder-based secret injection for a sandbox's TLS-intercepted egress.
+///
+/// The sandbox only ever sees each secret's `placeholder`; the local network
+/// engine substitutes the real `value` into outbound requests bound for an
+/// allowed host (and blocks/forwards per [`ViolationAction`] otherwise). Carried
+/// in [`NetworkSpec::secrets`](NetworkSpec).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct SecretsConfig {
+    /// List of secrets to inject.
+    #[serde(default, alias = "secrets")]
+    pub entries: Vec<SecretEntry>,
+
+    /// Default action when a placeholder leaks to a disallowed host.
+    #[serde(default)]
+    pub on_violation: ViolationAction,
+}
+
+/// A single secret entry.
+///
+/// `value` is the sensitive material — it never enters the sandbox and is
+/// redacted by the [`Debug`](fmt::Debug) impl.
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct SecretEntry {
+    /// Environment variable name exposed to the sandbox (holds the placeholder).
+    ///
+    /// Must be non-empty and must not contain `=` or NUL. microsandbox does
+    /// not require shell-identifier syntax because Linux environment entries
+    /// only require a `NAME=value` shape.
+    pub env_var: String,
+
+    /// The actual secret value (never enters the sandbox).
+    pub value: String,
+
+    /// Placeholder string the sandbox sees instead of the real value.
+    ///
+    /// Must be non-empty, no longer than [`MAX_SECRET_PLACEHOLDER_BYTES`], and
+    /// must not contain NUL, CR, or LF.
+    pub placeholder: String,
+
+    /// Hosts allowed to receive this secret.
+    #[serde(default)]
+    pub allowed_hosts: Vec<HostPattern>,
+
+    /// Where the secret can be injected.
+    #[serde(default)]
+    pub injection: SecretInjection,
+
+    /// Action on a violation for this secret (overrides the config default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_violation: Option<ViolationAction>,
+
+    /// Require verified TLS identity before substituting (default: true).
+    ///
+    /// When true, the secret is only substituted if the connection uses TLS
+    /// interception (not bypass) and the SNI matches an allowed host.
+    #[serde(default = "default_true")]
+    pub require_tls_identity: bool,
+}
+
+/// Host pattern for a secret allowlist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum HostPattern {
+    /// Exact hostname match.
+    #[serde(alias = "Exact")]
+    Exact(String),
+    /// Wildcard match (e.g., `*.openai.com`).
+    #[serde(alias = "Wildcard")]
+    Wildcard(String),
+    /// Any host (dangerous — secret can be exfiltrated).
+    #[serde(alias = "Any")]
+    Any,
+}
+
+/// Where in the HTTP request a secret can be injected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct SecretInjection {
+    /// Substitute in HTTP headers (default: true).
+    #[serde(default = "default_true")]
+    pub headers: bool,
+
+    /// Substitute in HTTP Basic Auth (default: true).
+    #[serde(default = "default_true")]
+    pub basic_auth: bool,
+
+    /// Substitute in URL query parameters (default: false).
+    #[serde(default)]
+    pub query_params: bool,
+
+    /// Substitute in request body (default: false).
+    ///
+    /// Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
+    /// larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
+    /// decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
+    /// through unchanged. HTTP/2 DATA-frame body substitution is not
+    /// supported; matching body placeholders are blocked.
+    #[serde(default)]
+    pub body: bool,
+}
+
+/// Action when a secret placeholder is detected going to a disallowed host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ViolationAction {
+    /// Block the request silently.
+    #[serde(alias = "Block")]
+    Block,
+    /// Block and log (default).
+    #[default]
+    #[serde(alias = "BlockAndLog", alias = "block_and_log")]
+    BlockAndLog,
+    /// Block and terminate the sandbox.
+    #[serde(alias = "BlockAndTerminate", alias = "block_and_terminate")]
+    BlockAndTerminate,
+    /// Forward the request with the placeholder unchanged for matching hosts.
+    #[serde(alias = "Passthrough")]
+    Passthrough(Vec<HostPattern>),
+}
+
+/// Invalid secret configuration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SecretConfigError {
+    /// The environment variable name is empty.
+    #[error("secret #{secret_index}: env_var must not be empty")]
+    EmptyEnvVar {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// The environment variable name contains `=`.
+    #[error("secret #{secret_index}: env_var must not contain `=`")]
+    EnvVarContainsEquals {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// The environment variable name contains NUL.
+    #[error("secret #{secret_index}: env_var must not contain NUL")]
+    EnvVarContainsNul {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// No allowed hosts were configured for a secret.
+    #[error("secret #{secret_index}: at least one allowed host is required")]
+    MissingAllowedHosts {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// The placeholder is empty.
+    #[error("secret #{secret_index}: placeholder must not be empty")]
+    EmptyPlaceholder {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// The placeholder exceeds the supported byte length.
+    #[error(
+        "secret #{secret_index}: placeholder must be at most {max_bytes} bytes, got {actual_bytes}"
+    )]
+    PlaceholderTooLong {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+        /// Actual placeholder length in bytes.
+        actual_bytes: usize,
+        /// Maximum supported placeholder length in bytes.
+        max_bytes: usize,
+    },
+
+    /// The placeholder contains NUL.
+    #[error("secret #{secret_index}: placeholder must not contain NUL")]
+    PlaceholderContainsNul {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// The placeholder contains a line break.
+    #[error("secret #{secret_index}: placeholder must not contain CR or LF")]
+    PlaceholderContainsLineBreak {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+}
+
+impl SecretsConfig {
+    /// Validate all configured secret entries.
+    pub fn validate(&self) -> Result<(), SecretConfigError> {
+        for (index, secret) in self.entries.iter().enumerate() {
+            secret.validate(index)?;
+        }
+        Ok(())
+    }
+}
+
+impl SecretEntry {
+    /// Validate this secret entry.
+    pub fn validate(&self, secret_index: usize) -> Result<(), SecretConfigError> {
+        validate_env_var(&self.env_var, secret_index)?;
+
+        if self.allowed_hosts.is_empty() {
+            return Err(SecretConfigError::MissingAllowedHosts { secret_index });
+        }
+
+        validate_placeholder(&self.placeholder, secret_index)
+    }
+}
+
+// The secret value must never reach a log line or an error message.
+impl fmt::Debug for SecretEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretEntry")
+            .field("env_var", &self.env_var)
+            .field("value", &"[REDACTED]")
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("injection", &self.injection)
+            .field("on_violation", &self.on_violation)
+            .field("require_tls_identity", &self.require_tls_identity)
+            .finish()
+    }
+}
+
+impl HostPattern {
+    /// Check if a hostname matches this pattern.
+    ///
+    /// Uses ASCII case-insensitive comparison to avoid `to_lowercase()`
+    /// allocations (DNS hostnames are ASCII per RFC 4343).
+    pub fn matches(&self, hostname: &str) -> bool {
+        match self {
+            HostPattern::Exact(h) => hostname.eq_ignore_ascii_case(h),
+            HostPattern::Wildcard(pattern) => {
+                if let Some(suffix) = pattern.strip_prefix("*.") {
+                    hostname.eq_ignore_ascii_case(suffix)
+                        || (hostname.len() > suffix.len() + 1
+                            && hostname.as_bytes()[hostname.len() - suffix.len() - 1] == b'.'
+                            && hostname[hostname.len() - suffix.len()..]
+                                .eq_ignore_ascii_case(suffix))
+                } else {
+                    hostname.eq_ignore_ascii_case(pattern)
+                }
+            }
+            HostPattern::Any => true,
+        }
+    }
+}
+
+impl Default for SecretInjection {
+    fn default() -> Self {
+        Self {
+            headers: true,
+            basic_auth: true,
+            query_params: false,
+            body: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+    if env_var.is_empty() {
+        return Err(SecretConfigError::EmptyEnvVar { secret_index });
+    }
+    if env_var.contains('=') {
+        return Err(SecretConfigError::EnvVarContainsEquals { secret_index });
+    }
+    if env_var.contains('\0') {
+        return Err(SecretConfigError::EnvVarContainsNul { secret_index });
+    }
+    Ok(())
+}
+
+fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+    if placeholder.is_empty() {
+        return Err(SecretConfigError::EmptyPlaceholder { secret_index });
+    }
+
+    let actual_bytes = placeholder.len();
+    if actual_bytes > MAX_SECRET_PLACEHOLDER_BYTES {
+        return Err(SecretConfigError::PlaceholderTooLong {
+            secret_index,
+            actual_bytes,
+            max_bytes: MAX_SECRET_PLACEHOLDER_BYTES,
+        });
+    }
+
+    if placeholder.contains('\0') {
+        return Err(SecretConfigError::PlaceholderContainsNul { secret_index });
+    }
+    if placeholder.contains('\r') || placeholder.contains('\n') {
+        return Err(SecretConfigError::PlaceholderContainsLineBreak { secret_index });
+    }
+
+    Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: TLS interception
+//--------------------------------------------------------------------------------------------------
+
+/// TLS interception configuration. Carried in [`NetworkSpec::tls`](NetworkSpec).
+///
+/// The local network engine terminates TCP at its in-process stack, so TLS MITM
+/// is handled by proxy tasks — these fields configure which ports/domains are
+/// intercepted and how the interception CA is sourced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct TlsConfig {
+    /// Whether TLS interception is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// TCP ports subject to TLS interception (default: `[443]`).
+    #[serde(default = "default_intercepted_ports")]
+    pub intercepted_ports: Vec<u16>,
+
+    /// Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards.
+    #[serde(default)]
+    pub bypass: Vec<String>,
+
+    /// Whether to verify the upstream server's TLS certificate.
+    #[serde(default = "default_true")]
+    pub verify_upstream: bool,
+
+    /// Drop UDP to intercepted ports when TLS interception is active, forcing
+    /// QUIC traffic to fall back to TCP/TLS.
+    #[serde(default = "default_true")]
+    pub block_quic_on_intercept: bool,
+
+    /// CA certificate PEM files to trust for upstream server verification.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<String>"))]
+    pub upstream_ca_cert: Vec<PathBuf>,
+
+    /// Interception CA configuration. The TLS proxy uses this CA to sign
+    /// per-domain certs it presents to the guest during interception.
+    #[serde(default, alias = "ca")]
+    pub intercept_ca: InterceptCaConfig,
+
+    /// Per-domain certificate cache configuration.
+    #[serde(default)]
+    pub cache: CertCacheConfig,
+}
+
+/// Certificate authority configuration for TLS interception.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct InterceptCaConfig {
+    /// Path to an existing CA certificate PEM file. If `None`, a CA is
+    /// auto-generated and persisted.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub cert_path: Option<PathBuf>,
+
+    /// Path to an existing CA private key PEM file. If `None`, a key is
+    /// auto-generated and persisted.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub key_path: Option<PathBuf>,
+}
+
+/// Per-domain certificate cache configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct CertCacheConfig {
+    /// Maximum number of cached certificates. Default: 1000.
+    #[serde(default = "default_cache_capacity")]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
+    pub capacity: usize,
+
+    /// Certificate validity duration in hours. Default: 24.
+    #[serde(default = "default_cert_validity_hours")]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
+    pub validity_hours: u64,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intercepted_ports: default_intercepted_ports(),
+            bypass: Vec::new(),
+            verify_upstream: true,
+            block_quic_on_intercept: true,
+            upstream_ca_cert: Vec::new(),
+            intercept_ca: InterceptCaConfig::default(),
+            cache: CertCacheConfig::default(),
+        }
+    }
+}
+
+impl Default for CertCacheConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_cache_capacity(),
+            validity_hours: default_cert_validity_hours(),
+        }
+    }
+}
+
+fn default_intercepted_ports() -> Vec<u16> {
+    vec![443]
+}
+
+fn default_cache_capacity() -> usize {
+    1000
+}
+
+fn default_cert_validity_hours() -> u64 {
+    24
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
 /// Complete network specification for a sandbox.
 ///
-/// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
+/// Common, backend-visible fields are typed directly, as are the secret-injection (`secrets`) and TLS-interception (`tls`) subdocuments. The remaining rich local-engine subdocuments such as policy, DNS, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct NetworkSpec {
     /// Whether networking is enabled for this sandbox.
@@ -413,13 +874,13 @@ pub struct NetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns: Option<Value>,
 
-    /// TLS interception subdocument.
+    /// TLS-interception subdocument (see [`TlsConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls: Option<Value>,
+    pub tls: Option<TlsConfig>,
 
-    /// Secret injection subdocument.
+    /// Placeholder-based secret-injection subdocument (see [`SecretsConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub secrets: Option<Value>,
+    pub secrets: Option<SecretsConfig>,
 
     /// Max concurrent guest connections.
     pub max_connections: Option<usize>,
@@ -431,6 +892,8 @@ pub struct NetworkSpec {
 /// A published port mapping between host and guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct PublishedPortSpec {
     /// Host-side port to bind.
     pub host_port: u16,
@@ -449,6 +912,8 @@ pub struct PublishedPortSpec {
 /// Transport protocol for a published port.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum PortProtocol {
     /// TCP.
     #[default]
@@ -467,9 +932,11 @@ pub enum PortProtocol {
 /// Fully-assembled handoff-init specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct HandoffInit {
     /// Init binary: absolute path inside the guest rootfs, or the literal `auto`.
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub cmd: PathBuf,
 
     /// Supplemental argv. `argv[0]` is implicitly `cmd`.
@@ -488,6 +955,8 @@ pub struct HandoffInit {
 /// Sandbox lifecycle policy.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SandboxPolicy {
     /// Whether the sandbox is ephemeral.
     ///
@@ -501,9 +970,14 @@ pub struct SandboxPolicy {
     pub ephemeral: bool,
 
     /// Hard cap on total sandbox lifetime in seconds. `None` = run forever.
+    // typeshare rejects bare 64-bit ints (JS-unsafe); `U53` is its big-int
+    // escape and the Go backend maps it to `uint64` — exact, since this crate's
+    // typeshare output targets Go only.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub max_duration_secs: Option<u64>,
 
     /// Idle timeout in seconds. `None` = no idle detection.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub idle_timeout_secs: Option<u64>,
 }
 
@@ -555,12 +1029,14 @@ pub struct SnapshotSpec {
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(default)]
 pub struct SandboxSpec {
     /// Unique sandbox name.
     pub name: String,
 
     /// Root filesystem source.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
     pub image: RootfsSource,
 
     /// CPU and memory resources.
@@ -603,6 +1079,8 @@ pub struct SandboxSpec {
 /// CPU and memory resources for a sandbox.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct SandboxResources {
     /// Number of virtual CPUs.
@@ -610,11 +1088,18 @@ pub struct SandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
+
+    /// Writable disk size in MiB. Realized as the OCI writable-overlay size for
+    /// an OCI rootfs (driver `WithOCIUpperSize`); ignored for non-OCI rootfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_size_mib: Option<u32>,
 }
 
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct SandboxRuntimeOptions {
     /// Working directory inside the guest.
@@ -624,6 +1109,12 @@ pub struct SandboxRuntimeOptions {
     pub shell: Option<String>,
 
     /// Named scripts available inside the guest.
+    // typeshare doesn't recognize `BTreeMap`; serialize as a map for codegen
+    // (identical JSON object shape) → Go `map[string]string`.
+    #[cfg_attr(
+        feature = "typeshare",
+        typeshare(serialized_as = "HashMap<String, String>")
+    )]
     pub scripts: BTreeMap<String, String>,
 
     /// Image entrypoint override.
@@ -642,6 +1133,7 @@ pub struct SandboxRuntimeOptions {
     pub log_level: Option<SandboxLogLevel>,
 
     /// Metrics sampling interval in milliseconds. `None` disables sampling.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub metrics_sample_interval_ms: Option<u64>,
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
@@ -651,6 +1143,8 @@ pub struct SandboxRuntimeOptions {
 /// Environment variable entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct EnvVar {
     /// Environment variable name.
     pub key: String,
@@ -662,6 +1156,8 @@ pub struct EnvVar {
 /// Runtime log verbosity for sandbox specs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxLogLevel {
     /// Emit only error logs.
@@ -687,6 +1183,8 @@ pub enum SandboxLogLevel {
 /// POSIX resource limit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
     Cpu,
@@ -725,14 +1223,18 @@ pub enum RlimitResource {
 /// A POSIX resource limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct Rlimit {
     /// Resource type.
     pub resource: RlimitResource,
 
     /// Soft limit (can be raised up to hard limit by the process).
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub soft: u64,
 
     /// Hard limit (ceiling, requires privileges to raise).
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub hard: u64,
 }
 
@@ -743,6 +1245,7 @@ pub struct Rlimit {
 /// Source tag on a captured log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LogSource {
     /// Captured from a session's stdout (pipe mode).
@@ -790,7 +1293,6 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            upper_size_mib: None,
         }
     }
 }
@@ -805,14 +1307,6 @@ impl RootfsSource {
     pub fn oci_reference(&self) -> Option<&str> {
         match self {
             Self::Oci(oci) => Some(&oci.reference),
-            _ => None,
-        }
-    }
-
-    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
-    pub fn oci_upper_size_mib(&self) -> Option<u32> {
-        match self {
-            Self::Oci(oci) => oci.upper_size_mib,
             _ => None,
         }
     }
@@ -1006,6 +1500,7 @@ impl Default for SandboxResources {
         Self {
             cpus: DEFAULT_SANDBOX_CPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            disk_size_mib: None,
         }
     }
 }
@@ -1501,5 +1996,208 @@ mod tests {
             assert_eq!(parsed, expected);
             assert_eq!(parsed.as_str(), input);
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    fn valid_secret() -> SecretEntry {
+        SecretEntry {
+            env_var: "API_KEY".into(),
+            value: "secret".into(),
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            injection: SecretInjection::default(),
+            on_violation: None,
+            require_tls_identity: true,
+        }
+    }
+
+    #[test]
+    fn exact_host_match() {
+        let p = HostPattern::Exact("api.openai.com".into());
+        assert!(p.matches("api.openai.com"));
+        assert!(p.matches("API.OpenAI.com"));
+        assert!(!p.matches("evil.com"));
+    }
+
+    #[test]
+    fn wildcard_host_match() {
+        let p = HostPattern::Wildcard("*.openai.com".into());
+        assert!(p.matches("api.openai.com"));
+        assert!(p.matches("openai.com"));
+        assert!(!p.matches("evil.com"));
+    }
+
+    #[test]
+    fn any_host_match() {
+        assert!(HostPattern::Any.matches("anything.com"));
+    }
+
+    #[test]
+    fn default_injection_scopes() {
+        let inj = SecretInjection::default();
+        assert!(inj.headers);
+        assert!(inj.basic_auth);
+        assert!(!inj.query_params);
+        assert!(!inj.body);
+    }
+
+    #[test]
+    fn default_require_tls_identity_when_deserialized() {
+        let entry: SecretEntry = serde_json::from_str(
+            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"exact":"h"}]}"#,
+        )
+        .unwrap();
+        assert!(entry.require_tls_identity);
+    }
+
+    #[test]
+    fn secret_validation_accepts_linux_environment_name_shape() {
+        let mut entry = valid_secret();
+        entry.env_var = "1TOKEN.with-dashes".into();
+        assert!(entry.validate(0).is_ok());
+    }
+
+    #[test]
+    fn secret_validation_rejects_invalid_env_var_names() {
+        let cases = [
+            ("", SecretConfigError::EmptyEnvVar { secret_index: 0 }),
+            (
+                "API=KEY",
+                SecretConfigError::EnvVarContainsEquals { secret_index: 0 },
+            ),
+            (
+                "API\0KEY",
+                SecretConfigError::EnvVarContainsNul { secret_index: 0 },
+            ),
+        ];
+        for (env_var, expected) in cases {
+            let mut entry = valid_secret();
+            entry.env_var = env_var.into();
+            assert_eq!(entry.validate(0), Err(expected));
+        }
+    }
+
+    #[test]
+    fn secret_validation_rejects_missing_allowed_hosts() {
+        let mut entry = valid_secret();
+        entry.allowed_hosts.clear();
+        assert_eq!(
+            entry.validate(0),
+            Err(SecretConfigError::MissingAllowedHosts { secret_index: 0 })
+        );
+    }
+
+    #[test]
+    fn secret_validation_rejects_invalid_placeholders() {
+        let too_long = "x".repeat(MAX_SECRET_PLACEHOLDER_BYTES + 1);
+        let cases = [
+            ("", SecretConfigError::EmptyPlaceholder { secret_index: 0 }),
+            (
+                too_long.as_str(),
+                SecretConfigError::PlaceholderTooLong {
+                    secret_index: 0,
+                    actual_bytes: MAX_SECRET_PLACEHOLDER_BYTES + 1,
+                    max_bytes: MAX_SECRET_PLACEHOLDER_BYTES,
+                },
+            ),
+            (
+                "abc\0def",
+                SecretConfigError::PlaceholderContainsNul { secret_index: 0 },
+            ),
+            (
+                "abc\rdef",
+                SecretConfigError::PlaceholderContainsLineBreak { secret_index: 0 },
+            ),
+            (
+                "abc\ndef",
+                SecretConfigError::PlaceholderContainsLineBreak { secret_index: 0 },
+            ),
+        ];
+        for (placeholder, expected) in cases {
+            let mut entry = valid_secret();
+            entry.placeholder = placeholder.into();
+            assert_eq!(entry.validate(0), Err(expected));
+        }
+    }
+
+    #[test]
+    fn violation_action_serializes_with_sdk_casing() {
+        let action = ViolationAction::Passthrough(vec![
+            HostPattern::Exact("api.anthropic.com".into()),
+            HostPattern::Wildcard("*.anthropic.com".into()),
+            HostPattern::Any,
+        ]);
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            r#"{"passthrough":[{"exact":"api.anthropic.com"},{"wildcard":"*.anthropic.com"},"any"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationAction::BlockAndLog).unwrap(),
+            r#""block-and-log""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationAction::BlockAndTerminate).unwrap(),
+            r#""block-and-terminate""#
+        );
+    }
+
+    #[test]
+    fn violation_action_accepts_legacy_pascal_case() {
+        let action: ViolationAction =
+            serde_json::from_str(r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#).unwrap();
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())])
+        );
+        assert_eq!(
+            serde_json::from_str::<ViolationAction>(r#""BlockAndTerminate""#).unwrap(),
+            ViolationAction::BlockAndTerminate
+        );
+    }
+
+    #[test]
+    fn secret_entry_debug_redacts_value() {
+        let mut entry = valid_secret();
+        entry.value = "uniq-sensitive-12345".into();
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("uniq-sensitive-12345"));
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_defaults() {
+        let t = TlsConfig::default();
+        assert!(!t.enabled);
+        assert_eq!(t.intercepted_ports, vec![443]);
+        assert!(t.verify_upstream);
+        assert!(t.block_quic_on_intercept);
+        assert_eq!(t.cache.capacity, 1000);
+        assert_eq!(t.cache.validity_hours, 24);
+    }
+
+    #[test]
+    fn tls_config_round_trips_and_accepts_ca_alias() {
+        // `ca` is an accepted alias for `intercept_ca`.
+        let cfg: TlsConfig = serde_json::from_str(
+            r#"{"enabled":true,"bypass":["*.internal"],"ca":{"cert_path":"/etc/ca.pem"}}"#,
+        )
+        .unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bypass, vec!["*.internal".to_string()]);
+        assert_eq!(
+            cfg.intercept_ca.cert_path.as_deref(),
+            Some(std::path::Path::new("/etc/ca.pem"))
+        );
+        let back: TlsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.bypass, cfg.bypass);
     }
 }

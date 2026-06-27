@@ -34,7 +34,7 @@ use microsandbox_types::{RootfsSource, SandboxResources, SandboxSpec};
 let spec = SandboxSpec {
     name: "worker".into(),
     image: RootfsSource::oci("python"),
-    resources: SandboxResources { cpus: 2, memory_mib: 1024 },
+    resources: SandboxResources { cpus: 2, memory_mib: 1024, disk_size_mib: None },
     ..Default::default()
 };
 ```

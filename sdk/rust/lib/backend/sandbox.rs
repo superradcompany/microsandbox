@@ -24,13 +24,10 @@ use crate::runtime::{ProcessHandle, SpawnMode};
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
 use crate::sandbox::metrics::SandboxMetrics;
-use crate::sandbox::{
-    OciRootfsSource, RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxStatus,
-};
+use crate::sandbox::{RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus, EnvVar, SandboxPolicy,
-    SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -1082,7 +1079,7 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
     }
 }
 
-/// Synthesize a [`SandboxConfig`] from a [`CloudSandbox`] response. Used when
+/// Synthesize a [`SandboxConfig`] from a [`CloudCreateSandboxResponse`] response. Used when
 /// the SDK didn't drive the create call (e.g. `start(name)` returns a
 /// `Sandbox` for a sandbox the cloud created earlier).
 ///
@@ -1091,48 +1088,12 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
 /// with no cloud counterpart are filled from [`SandboxConfig::default()`], so
 /// a caller inspecting `sb.config()` after `Sandbox::start(name)` can reason
 /// about which fields are "live" vs. "synthesized stub".
-fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
-    let spec = SandboxSpec {
-        name: cloud.config.name.clone(),
-        image: RootfsSource::Oci(OciRootfsSource {
-            reference: cloud.config.image.clone(),
-            upper_size_mib: None,
-        }),
-        resources: SandboxResources {
-            cpus: cloud.config.vcpus,
-            memory_mib: cloud.config.memory_mib,
-        },
-        runtime: SandboxRuntimeOptions {
-            workdir: cloud.config.workdir.clone(),
-            shell: cloud.config.shell.clone(),
-            scripts: cloud.config.scripts.clone().into_iter().collect(),
-            entrypoint: cloud.config.entrypoint.clone(),
-            hostname: cloud.config.hostname.clone(),
-            user: cloud.config.user.clone(),
-            log_level: cloud
-                .config
-                .log_level
-                .as_deref()
-                .and_then(|level| level.parse().ok()),
-            ..Default::default()
-        },
-        env: cloud
-            .config
-            .env
-            .clone()
-            .into_iter()
-            .map(|(key, value)| EnvVar::new(key, value))
-            .collect(),
-        lifecycle: SandboxPolicy {
-            ephemeral: cloud.config.ephemeral,
-            max_duration_secs: cloud.config.max_duration_secs,
-            idle_timeout_secs: cloud.config.idle_timeout_secs,
-        },
-        ..Default::default()
-    };
-
+fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfig {
+    // The cloud request body now embeds the shared `SandboxSpec` directly, so the
+    // local config is just that spec cloned through; the remaining `SandboxConfig`
+    // fields are local-only and stay defaulted.
     SandboxConfig {
-        spec,
+        spec: cloud.config.spec.clone(),
         ..Default::default()
     }
 }
@@ -1199,7 +1160,7 @@ pub(super) fn cloud_create_request_from_config(
         // resolvers, host-CA trust).
         let net = config.local_network_config()?;
         let has_custom_network = !net.ports.is_empty()
-            || !net.secrets.secrets.is_empty()
+            || !net.secrets.entries.is_empty()
             || !net.dns.nameservers.is_empty()
             || net.trust_host_cas;
         reject_cloud_deferred(
@@ -1209,18 +1170,10 @@ pub(super) fn cloud_create_request_from_config(
         )?;
     }
 
-    let SandboxSpec {
-        name,
-        image,
-        resources,
-        runtime,
-        env,
-        lifecycle,
-        ..
-    } = config.spec;
-
-    let image = match image {
-        RootfsSource::Oci(image) => image.reference,
+    // Cloud only supports OCI rootfs; reject the local-only rootfs kinds before
+    // handing the spec to the control plane. Borrow so the spec isn't moved.
+    match &config.spec.image {
+        RootfsSource::Oci(_) => {}
         RootfsSource::Bind(_) => {
             return Err(unsupported(
                 "image-from-host-dir",
@@ -1230,25 +1183,12 @@ pub(super) fn cloud_create_request_from_config(
         RootfsSource::DiskImage { .. } => {
             return Err(unsupported("disk-image rootfs", "never on cloud"));
         }
-    };
+    }
 
-    Ok(CloudCreateSandboxRequest {
-        name,
-        image,
-        vcpus: resources.cpus,
-        memory_mib: resources.memory_mib,
-        env: env.into_iter().map(Into::into).collect(),
-        ephemeral: lifecycle.ephemeral,
-        workdir: runtime.workdir,
-        shell: runtime.shell,
-        entrypoint: runtime.entrypoint,
-        hostname: runtime.hostname,
-        user: runtime.user,
-        log_level: runtime.log_level.map(|level| level.as_str().to_string()),
-        scripts: runtime.scripts.into_iter().collect(),
-        max_duration_secs: lifecycle.max_duration_secs,
-        idle_timeout_secs: lifecycle.idle_timeout_secs,
-    })
+    // The cloud request composes the shared spec verbatim plus cloud-only fields.
+    // The SDK has no local source for `slug`/`registry` today (registry auth is
+    // rejected above), so default them; the control plane assigns a slug.
+    Ok(CloudCreateSandboxRequest { spec: config.spec })
 }
 
 fn reject_cloud_deferred(
@@ -1297,7 +1237,7 @@ fn unsupported_metrics(feature: &'static str) -> MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::SandboxBuilder;
+    use crate::sandbox::{EnvVar, OciRootfsSource, SandboxBuilder, SandboxSpec};
 
     #[tokio::test]
     async fn cloud_create_request_maps_common_fields() {
@@ -1315,15 +1255,16 @@ mod tests {
 
         let req = cloud_create_request_from_config(config).unwrap();
 
-        assert_eq!(req.name, "agent-1");
-        assert_eq!(req.image, "python:3.12");
-        assert_eq!(req.vcpus, 2);
-        assert_eq!(req.memory_mib, 1024);
-        assert_eq!(req.env["A"], "B");
-        assert_eq!(req.workdir.as_deref(), Some("/app"));
-        assert_eq!(req.shell.as_deref(), Some("/bin/bash"));
+        // The request now embeds the shared spec verbatim, so assert on `spec`.
+        assert_eq!(req.spec.name, "agent-1");
+        assert!(matches!(req.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12"));
+        assert_eq!(req.spec.resources.cpus, 2);
+        assert_eq!(req.spec.resources.memory_mib, 1024);
+        assert_eq!(req.spec.env, vec![EnvVar::new("A", "B")]);
+        assert_eq!(req.spec.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(req.spec.runtime.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(
-            req.entrypoint,
+            req.spec.runtime.entrypoint,
             Some(vec!["python".to_string(), "-u".to_string()])
         );
     }
@@ -1441,30 +1382,39 @@ mod tests {
 
     #[test]
     fn sandbox_config_from_cloud_round_trips_d13_fields() {
-        let cloud = CloudSandbox {
+        // The cloud response now embeds the shared spec directly, so the
+        // conversion is a verbatim clone-through. Populate a full spec and
+        // assert every field survives.
+        let mut spec = SandboxSpec {
+            name: "agent-1".into(),
+            image: RootfsSource::Oci(OciRootfsSource {
+                reference: "python:3.12".into(),
+                upper_size_mib: None,
+            }),
+            env: vec![EnvVar::new("A", "B")],
+            ..Default::default()
+        };
+        spec.resources.cpus = 4;
+        spec.resources.memory_mib = 2048;
+        spec.runtime.workdir = Some("/app".into());
+        spec.runtime.shell = Some("/bin/bash".into());
+        spec.runtime.entrypoint = Some(vec!["python".into(), "-u".into()]);
+        spec.runtime.hostname = Some("worker".into());
+        spec.runtime.user = Some("appuser".into());
+        spec.runtime.log_level = Some(microsandbox_types::SandboxLogLevel::Debug);
+        spec.runtime
+            .scripts
+            .insert("setup".into(), "echo hi".into());
+        spec.lifecycle.max_duration_secs = Some(3600);
+        spec.lifecycle.idle_timeout_secs = Some(600);
+
+        let cloud = CloudCreateSandboxResponse {
             id: "00000000-0000-0000-0000-000000000002".into(),
             org_id: "00000000-0000-0000-0000-000000000001".into(),
             name: "agent-1".into(),
+            slug: "brave-otter".into(),
             status: CloudSandboxStatus::Running,
-            config: CloudCreateSandboxRequest {
-                name: "agent-1".into(),
-                image: "python:3.12".into(),
-                vcpus: 4,
-                memory_mib: 2048,
-                env: [("A".to_string(), "B".to_string())].into_iter().collect(),
-                ephemeral: true,
-                workdir: Some("/app".into()),
-                shell: Some("/bin/bash".into()),
-                entrypoint: Some(vec!["python".into(), "-u".into()]),
-                hostname: Some("worker".into()),
-                user: Some("appuser".into()),
-                log_level: Some("debug".into()),
-                scripts: [("setup".to_string(), "echo hi".to_string())]
-                    .into_iter()
-                    .collect(),
-                max_duration_secs: Some(3600),
-                idle_timeout_secs: Some(600),
-            },
+            config: CloudCreateSandboxRequest { spec },
             ephemeral: true,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1496,7 +1446,6 @@ mod tests {
         assert_eq!(
             config.spec.runtime.log_level,
             Some(microsandbox_types::SandboxLogLevel::Debug),
-            "log_level should round-trip via string mapping",
         );
         assert_eq!(
             config.spec.runtime.scripts.get("setup"),
@@ -1504,33 +1453,6 @@ mod tests {
         );
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
         assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(600));
-    }
-
-    #[test]
-    fn sandbox_config_from_cloud_drops_unknown_log_level() {
-        let cloud = CloudSandbox {
-            id: "00000000-0000-0000-0000-000000000002".into(),
-            org_id: "00000000-0000-0000-0000-000000000001".into(),
-            name: "agent-1".into(),
-            status: CloudSandboxStatus::Running,
-            config: CloudCreateSandboxRequest {
-                name: "agent-1".into(),
-                image: "python:3.12".into(),
-                log_level: Some("verbose".into()),
-                ..Default::default()
-            },
-            ephemeral: true,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            stopped_at: None,
-            last_error: None,
-        };
-
-        let config = sandbox_config_from_cloud(&cloud);
-        assert!(
-            config.spec.runtime.log_level.is_none(),
-            "unknown log_level should map to None"
-        );
     }
 
     #[test]

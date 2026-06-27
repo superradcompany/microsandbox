@@ -8,11 +8,7 @@ export type OciRootfsSource = {
 /**
  * OCI image reference (e.g. `python`).
  */
-reference: string,
-/**
- * Writable overlay upper size in MiB.
- */
-upper_size_mib?: number | null, };
+reference: string, };
 
 export type RootfsSource = { "Bind": string } | { "Oci": OciRootfsSource } | { "DiskImage": {
 /**
@@ -292,6 +288,142 @@ path: string,
  */
 content: string, } };
 
+export type HostPattern = { "exact": string } | { "wildcard": string } | "any";
+
+export type SecretInjection = {
+/**
+ * Substitute in HTTP headers (default: true).
+ */
+headers: boolean,
+/**
+ * Substitute in HTTP Basic Auth (default: true).
+ */
+basic_auth: boolean,
+/**
+ * Substitute in URL query parameters (default: false).
+ */
+query_params: boolean,
+/**
+ * Substitute in request body (default: false).
+ *
+ * Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
+ * larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
+ * decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
+ * through unchanged. HTTP/2 DATA-frame body substitution is not
+ * supported; matching body placeholders are blocked.
+ */
+body: boolean, };
+
+export type ViolationAction = "block" | "block-and-log" | "block-and-terminate" | { "passthrough": Array<HostPattern> };
+
+export type SecretEntry = {
+/**
+ * Environment variable name exposed to the sandbox (holds the placeholder).
+ *
+ * Must be non-empty and must not contain `=` or NUL. microsandbox does
+ * not require shell-identifier syntax because Linux environment entries
+ * only require a `NAME=value` shape.
+ */
+env_var: string,
+/**
+ * The actual secret value (never enters the sandbox).
+ */
+value: string,
+/**
+ * Placeholder string the sandbox sees instead of the real value.
+ *
+ * Must be non-empty, no longer than [`MAX_SECRET_PLACEHOLDER_BYTES`], and
+ * must not contain NUL, CR, or LF.
+ */
+placeholder: string,
+/**
+ * Hosts allowed to receive this secret.
+ */
+allowed_hosts: Array<HostPattern>,
+/**
+ * Where the secret can be injected.
+ */
+injection: SecretInjection,
+/**
+ * Action on a violation for this secret (overrides the config default).
+ */
+on_violation?: ViolationAction | null,
+/**
+ * Require verified TLS identity before substituting (default: true).
+ *
+ * When true, the secret is only substituted if the connection uses TLS
+ * interception (not bypass) and the SNI matches an allowed host.
+ */
+require_tls_identity: boolean, };
+
+export type SecretsConfig = {
+/**
+ * List of secrets to inject.
+ */
+entries: Array<SecretEntry>,
+/**
+ * Default action when a placeholder leaks to a disallowed host.
+ */
+on_violation: ViolationAction, };
+
+export type InterceptCaConfig = {
+/**
+ * Path to an existing CA certificate PEM file. If `None`, a CA is
+ * auto-generated and persisted.
+ */
+cert_path: string | null,
+/**
+ * Path to an existing CA private key PEM file. If `None`, a key is
+ * auto-generated and persisted.
+ */
+key_path: string | null, };
+
+export type CertCacheConfig = {
+/**
+ * Maximum number of cached certificates. Default: 1000.
+ */
+capacity: number,
+/**
+ * Certificate validity duration in hours. Default: 24.
+ */
+validity_hours: number, };
+
+export type TlsConfig = {
+/**
+ * Whether TLS interception is enabled.
+ */
+enabled: boolean,
+/**
+ * TCP ports subject to TLS interception (default: `[443]`).
+ */
+intercepted_ports: Array<number>,
+/**
+ * Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards.
+ */
+bypass: Array<string>,
+/**
+ * Whether to verify the upstream server's TLS certificate.
+ */
+verify_upstream: boolean,
+/**
+ * Drop UDP to intercepted ports when TLS interception is active, forcing
+ * QUIC traffic to fall back to TCP/TLS.
+ */
+block_quic_on_intercept: boolean,
+/**
+ * CA certificate PEM files to trust for upstream server verification.
+ */
+upstream_ca_cert: Array<string>,
+/**
+ * Interception CA configuration. The TLS proxy uses this CA to sign
+ * per-domain certs it presents to the guest during interception.
+ */
+intercept_ca: InterceptCaConfig,
+/**
+ * Per-domain certificate cache configuration.
+ */
+cache: CertCacheConfig, };
+
 export type NetworkSpec = {
 /**
  * Whether networking is enabled for this sandbox.
@@ -314,13 +446,13 @@ policy: JsonValue | null,
  */
 dns: JsonValue | null,
 /**
- * TLS interception subdocument.
+ * TLS-interception subdocument (see [`TlsConfig`]).
  */
-tls: JsonValue | null,
+tls: TlsConfig | null,
 /**
- * Secret injection subdocument.
+ * Placeholder-based secret-injection subdocument (see [`SecretsConfig`]).
  */
-secrets: JsonValue | null,
+secrets: SecretsConfig | null,
 /**
  * Max concurrent guest connections.
  */
@@ -475,7 +607,12 @@ cpus: number,
 /**
  * Guest memory in MiB.
  */
-memory_mib: number, };
+memory_mib: number,
+/**
+ * Writable disk size in MiB. Realized as the OCI writable-overlay size for
+ * an OCI rootfs (driver `WithOCIUpperSize`); ignored for non-OCI rootfs.
+ */
+disk_size_mib: number | null, };
 
 export type SandboxRuntimeOptions = {
 /**
@@ -551,67 +688,63 @@ export type LogSource = "stdout" | "stderr" | "output" | "system";
 
 export type CloudCreateSandboxRequest = {
 /**
- * User-facing sandbox name.
+ * Unique sandbox name.
  */
 name: string,
 /**
- * OCI image reference to run.
+ * Root filesystem source.
  */
-image: string,
+image: RootfsSource,
 /**
- * Virtual CPU count.
+ * CPU and memory resources.
  */
-vcpus: number,
+resources: SandboxResources,
 /**
- * Guest memory in MiB.
+ * Guest runtime options.
  */
-memory_mib: number,
+runtime: SandboxRuntimeOptions,
 /**
- * Environment variables injected into the sandbox.
+ * Environment variables visible to commands in the sandbox.
  */
-env: { [key in string]: string },
+env: Array<EnvVar>,
 /**
- * Whether the sandbox should be removed when its allocation terminates.
+ * User-defined labels attached to the sandbox.
  */
-ephemeral: boolean,
+labels: { [key in string]: string },
 /**
- * Working directory inside the guest.
+ * Sandbox-wide resource limits inherited by guest processes.
  */
-workdir?: string | null,
+rlimits: Array<Rlimit>,
 /**
- * Default shell inside the guest.
+ * Volume mounts.
  */
-shell?: string | null,
+mounts: Array<VolumeMount>,
 /**
- * OCI entrypoint override.
+ * Rootfs patches applied before VM start.
  */
-entrypoint?: Array<string> | null,
+patches: Array<Patch>,
 /**
- * Guest hostname override.
+ * Network specification.
  */
-hostname?: string | null,
+network: NetworkSpec,
 /**
- * Guest user identity.
+ * Hand off PID 1 to a guest init binary after agentd setup.
  */
-user?: string | null,
+init: HandoffInit | null,
 /**
- * Runtime log verbosity.
+ * Pull policy for OCI images.
  */
-log_level?: string | null,
+pull_policy: PullPolicy,
 /**
- * Named scripts mounted into the guest.
+ * In-guest security profile.
  */
-scripts?: { [key in string]: string },
+security_profile: SecurityProfile,
 /**
- * Hard sandbox lifetime cap in seconds.
+ * Sandbox lifecycle policy.
  */
-max_duration_secs?: number | null,
-/**
- * Idle timeout in seconds.
- */
-idle_timeout_secs?: number | null, };
+lifecycle: SandboxPolicy, };
 
-export type CloudSandbox = {
+export type CloudCreateSandboxResponse = {
 /**
  * Server-side UUID.
  */
@@ -621,9 +754,13 @@ id: string,
  */
 org_id: string,
 /**
- * User-facing sandbox name.
+ * User-facing, per-org sandbox name.
  */
 name: string,
+/**
+ * Canonical, resolved SSH username token.
+ */
+slug: string,
 /**
  * Current lifecycle status.
  */

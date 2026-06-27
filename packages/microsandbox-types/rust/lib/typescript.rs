@@ -3,13 +3,14 @@
 use ts_rs::TS;
 
 use crate::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
-    HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkSpec,
-    OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
-    RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,
-    VolumeKind, VolumeMount, VolumeSpec,
+    CertCacheConfig, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat,
+    EnvVar, HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, LogSource, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol,
+    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, SandboxLogLevel,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry,
+    SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination, SnapshotSpec,
+    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -57,6 +58,14 @@ pub fn declarations() -> Vec<String> {
         NamedVolumeCreate::decl(&cfg),
         VolumeMount::decl(&cfg),
         Patch::decl(&cfg),
+        HostPattern::decl(&cfg),
+        SecretInjection::decl(&cfg),
+        ViolationAction::decl(&cfg),
+        SecretEntry::decl(&cfg),
+        SecretsConfig::decl(&cfg),
+        InterceptCaConfig::decl(&cfg),
+        CertCacheConfig::decl(&cfg),
+        TlsConfig::decl(&cfg),
         NetworkSpec::decl(&cfg),
         PublishedPortSpec::decl(&cfg),
         PortProtocol::decl(&cfg),
@@ -73,9 +82,9 @@ pub fn declarations() -> Vec<String> {
         Rlimit::decl(&cfg),
         LogSource::decl(&cfg),
         CloudCreateSandboxRequest::decl(&cfg),
-        CloudSandbox::decl(&cfg),
+        CloudCreateSandboxResponse::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
-        CloudPaginated::<CloudSandbox>::decl(&cfg),
+        CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
         CloudErrorDetails::decl(&cfg),
@@ -134,7 +143,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 37);
+        assert_eq!(declarations.len(), 45);
         assert!(
             declarations
                 .iter()

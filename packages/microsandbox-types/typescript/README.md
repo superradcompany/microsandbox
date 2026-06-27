@@ -31,7 +31,7 @@ import type {
   CloudCreateSandboxRequest,
 } from "@microsandbox/types";
 
-const image: RootfsSource = { Oci: { reference: "python", upper_size_mib: null } };
+const image: RootfsSource = { Oci: { reference: "python" } };
 
 const req: CloudCreateSandboxRequest = {
   name: "worker",

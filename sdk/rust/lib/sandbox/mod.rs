@@ -417,11 +417,11 @@ impl Sandbox {
         }
     }
 
-    /// Build an outer `Sandbox` from a [`CloudSandbox`](crate::backend::CloudSandbox)
+    /// Build an outer `Sandbox` from a [`CloudCreateSandboxResponse`](crate::backend::CloudCreateSandboxResponse)
     /// HTTP response plus the originating [`SandboxConfig`].
     pub(crate) fn from_cloud(
         backend: Arc<dyn crate::backend::Backend>,
-        cloud: crate::backend::CloudSandbox,
+        cloud: crate::backend::CloudCreateSandboxResponse,
         config: SandboxConfig,
     ) -> Self {
         Self {
