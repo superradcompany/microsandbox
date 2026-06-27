@@ -94,6 +94,6 @@ For Docker-based workflows, pass `/dev/kvm` into the container. See [Docker on L
 
 ## Linux userland
 
-microsandbox ships against glibc. Use a glibc-based distribution such as Debian, Ubuntu, Fedora, or Arch for the local runtime.
+microsandbox currently ships against glibc for the local Linux runtime.
 
-musl-based distributions such as Alpine are not supported as the host environment for local microsandbox sandboxes.
+musl-based host distributions, such as Alpine, are not supported today. Support for musl-based Linux hosts may be added in the future.
