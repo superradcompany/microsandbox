@@ -154,7 +154,6 @@ mod tests {
             name: name.into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
-                disk_size_mib: None,
             }),
             ..Default::default()
         }

@@ -72,11 +72,6 @@ pub enum RootfsSource {
 pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
-
-    /// Writable disk size in MiB (the OCI writable overlay). The legacy wire name
-    /// `upper_size_mib` still deserializes via the serde alias.
-    #[serde(default, alias = "upper_size_mib", skip_serializing_if = "Option::is_none")]
-    pub disk_size_mib: Option<u32>,
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
@@ -1087,6 +1082,11 @@ pub struct SandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
+
+    /// Writable disk size in MiB. Realized as the OCI writable-overlay size for
+    /// an OCI rootfs (driver `WithOCIUpperSize`); ignored for non-OCI rootfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_size_mib: Option<u32>,
 }
 
 /// Guest runtime options for a sandbox.
@@ -1287,7 +1287,6 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            disk_size_mib: None,
         }
     }
 }
@@ -1302,14 +1301,6 @@ impl RootfsSource {
     pub fn oci_reference(&self) -> Option<&str> {
         match self {
             Self::Oci(oci) => Some(&oci.reference),
-            _ => None,
-        }
-    }
-
-    /// Return the configured OCI disk size in MiB if this is an OCI rootfs.
-    pub fn oci_disk_size_mib(&self) -> Option<u32> {
-        match self {
-            Self::Oci(oci) => oci.disk_size_mib,
             _ => None,
         }
     }
@@ -1503,6 +1494,7 @@ impl Default for SandboxResources {
         Self {
             cpus: DEFAULT_SANDBOX_CPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            disk_size_mib: None,
         }
     }
 }

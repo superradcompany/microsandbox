@@ -8,11 +8,7 @@ export type OciRootfsSource = {
 /**
  * OCI image reference (e.g. `python`).
  */
-reference: string,
-/**
- * Writable disk size in MiB (the OCI writable overlay).
- */
-disk_size_mib?: number | null, };
+reference: string, };
 
 export type RootfsSource = { "Bind": string } | { "Oci": OciRootfsSource } | { "DiskImage": {
 /**
@@ -603,7 +599,12 @@ cpus: number,
 /**
  * Guest memory in MiB.
  */
-memory_mib: number, };
+memory_mib: number,
+/**
+ * Writable disk size in MiB. Realized as the OCI writable-overlay size for
+ * an OCI rootfs (driver `WithOCIUpperSize`); ignored for non-OCI rootfs.
+ */
+disk_size_mib: number | null, };
 
 export type SandboxRuntimeOptions = {
 /**
