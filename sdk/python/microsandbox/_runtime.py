@@ -19,12 +19,18 @@ overrides aren't supported.
 
 from __future__ import annotations
 
+import os
 from importlib.resources import files
 from pathlib import Path
 
 _BUNDLED = files("microsandbox._bundled")
 
 
+def _msb_filename() -> str:
+    """Return the platform-specific bundled CLI filename."""
+    return "msb.exe" if os.name == "nt" else "msb"
+
+
 def msb_path() -> Path:
     """Return the absolute path to the bundled ``msb`` binary."""
-    return Path(str(_BUNDLED.joinpath("bin", "msb")))
+    return Path(str(_BUNDLED.joinpath("bin", _msb_filename())))

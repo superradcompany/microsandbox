@@ -5,9 +5,10 @@
 //
 // Layout produced:
 //   npm/<triple>/microsandbox.<triple>.node            (the napi binding)
-//   npm/<triple>/bin/msb                                (the msb CLI)
+//   npm/<triple>/bin/msb[.exe]                          (the msb CLI)
 //   npm/<triple>/lib/libkrunfw.<ABI>.dylib              (macOS only)
 //   npm/<triple>/lib/libkrunfw.so.<VERSION>             (Linux only)
+//   npm/<triple>/lib/libkrunfw.dll                      (Windows only)
 //
 // Refuses to run when the host triple doesn't match the requested target,
 // since we don't cross-compile here — CI orchestrates that matrix.
@@ -35,17 +36,29 @@ function detectHostTriple() {
   if (p === "darwin" && a === "arm64") return "darwin-arm64";
   if (p === "linux" && a === "x64") return "linux-x64-gnu";
   if (p === "linux" && a === "arm64") return "linux-arm64-gnu";
+  if (p === "win32" && a === "x64") return "win32-x64-msvc";
+  if (p === "win32" && a === "arm64") return "win32-arm64-msvc";
   throw new Error(`unsupported host: ${p}-${a}`);
 }
 
 const triple = process.argv[2] ?? detectHostTriple();
-if (!["darwin-arm64", "linux-x64-gnu", "linux-arm64-gnu"].includes(triple)) {
+const supportedTriples = [
+  "darwin-arm64",
+  "linux-x64-gnu",
+  "linux-arm64-gnu",
+  "win32-x64-msvc",
+  "win32-arm64-msvc",
+];
+if (!supportedTriples.includes(triple)) {
   console.error(`unknown triple: ${triple}`);
   process.exit(2);
 }
-if (triple !== detectHostTriple()) {
+const hostTriple = detectHostTriple();
+const isExplicitWindowsTarget =
+  process.argv[2] && process.platform === "win32" && triple.startsWith("win32-");
+if (triple !== hostTriple && !isExplicitWindowsTarget) {
   console.error(
-    `cannot prepare ${triple} on host ${detectHostTriple()} — cross-compile in CI instead.`,
+    `cannot prepare ${triple} on host ${hostTriple} — cross-compile in CI instead.`,
   );
   process.exit(2);
 }
@@ -70,10 +83,18 @@ console.log(`copied ${nodeFile}`);
 
 // 2. msb binary -----------------------------------------------------------
 // Prefer the just-built msb in build/msb (signed). Fall back to target/release.
-const msbCandidates = [
-  join(repoRoot, "build", "msb"),
-  join(repoRoot, "target", "release", "microsandbox"),
-];
+const isWindows = process.platform === "win32";
+const msbFile = isWindows ? "msb.exe" : "msb";
+const msbCandidates = isWindows
+  ? [
+      join(repoRoot, "build", "msb.exe"),
+      join(repoRoot, "target", "release", "msb.exe"),
+      join(repoRoot, "target", "release", "microsandbox.exe"),
+    ]
+  : [
+      join(repoRoot, "build", "msb"),
+      join(repoRoot, "target", "release", "microsandbox"),
+    ];
 const msbSrc = msbCandidates.find((p) => existsSync(p));
 if (!msbSrc) {
   console.error(
@@ -83,9 +104,11 @@ if (!msbSrc) {
   );
   process.exit(1);
 }
-const msbDst = join(binDir, "msb");
+const msbDst = join(binDir, msbFile);
 copyFileSync(msbSrc, msbDst);
-execFileSync("chmod", ["+x", msbDst]);
+if (!isWindows) {
+  execFileSync("chmod", ["+x", msbDst]);
+}
 console.log(`copied msb (${msbSrc})`);
 
 // On macOS, codesign the bundled binary with the hypervisor entitlement
@@ -120,7 +143,9 @@ mkdirSync(libDir, { recursive: true });
 const krunfwPattern =
   process.platform === "darwin"
     ? /^libkrunfw\..+\.dylib$/
-    : /^libkrunfw\.so\..+$/;
+    : process.platform === "win32"
+      ? /^libkrunfw\.dll$/
+      : /^libkrunfw\.so\..+$/;
 const krunfwEntry = existsSync(buildDir)
   ? readdirSync(buildDir).find((entry) => krunfwPattern.test(entry))
   : undefined;
@@ -142,5 +167,5 @@ function du(p) {
 }
 console.log(`\npopulated npm/${triple}:`);
 console.log(`  ${nodeFile}     ${du(join(pkgDir, nodeFile))} KiB`);
-console.log(`  bin/msb         ${du(msbDst)} KiB`);
+console.log(`  bin/${msbFile} ${du(msbDst)} KiB`);
 console.log(`  lib/${krunfwName}  ${du(krunfwDst)} KiB`);

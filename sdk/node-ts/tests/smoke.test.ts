@@ -5,6 +5,29 @@ import type { PullProgress } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
+async function waitForSandboxMetrics(sb: Sandbox) {
+  let lastError: unknown;
+
+  // The runtime publishes the live metrics slot asynchronously after boot
+  // readiness, so `create()` can return just before the first slot appears.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      return await sb.metrics();
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("no live metrics slot")
+      ) {
+        throw error;
+      }
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw lastError;
+}
+
 describe.skipIf(!msbPath())("end-to-end smoke", () => {
   let sb: Sandbox;
 
@@ -59,7 +82,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
   });
 
   it("snapshots metrics", async () => {
-    const m = await sb.metrics();
+    const m = await waitForSandboxMetrics(sb);
     expect(m.timestamp).toBeInstanceOf(Date);
     expect(typeof m.cpuPercent).toBe("number");
   });

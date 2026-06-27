@@ -27,7 +27,14 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::BootStart { .. } => "BootStart",
         MicrosandboxError::Json(_) => "Json",
         MicrosandboxError::Protocol(_) => "Protocol",
+        MicrosandboxError::AgentClient(microsandbox::AgentClientError::UnsupportedOperation {
+            ..
+        }) => "UnsupportedOperation",
+        MicrosandboxError::AgentClient(_) => "AgentClient",
+        #[cfg(unix)]
         MicrosandboxError::Nix(_) => "Nix",
+        #[cfg(windows)]
+        MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::ExecFailed(_) => "ExecFailed",
         MicrosandboxError::Terminal(_) => "Terminal",
@@ -48,10 +55,6 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::MetricsUnavailable(_) => "MetricsUnavailable",
         MicrosandboxError::MissedRotation { .. } => "MissedRotation",
         MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
-        MicrosandboxError::AgentClient(microsandbox::AgentClientError::UnsupportedOperation {
-            ..
-        }) => "UnsupportedOperation",
-        MicrosandboxError::AgentClient(_) => "AgentClient",
         MicrosandboxError::Unsupported { .. } => "Unsupported",
         MicrosandboxError::Custom(_) => "Custom",
     }

@@ -301,7 +301,8 @@ jobs:
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: |
-          npm ci
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
@@ -413,6 +414,9 @@ jobs:
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
             vs_host_arch: arm64
+            napi_target: aarch64-pc-windows-msvc
+            node_file: microsandbox.win32-arm64-msvc.node
+            npm_dir: win32-arm64-msvc
             msb_asset: msb-windows-aarch64.exe
             msb_metrics_asset: msb-metrics-windows-aarch64.exe
             libkrunfw_asset: libkrunfw-windows-aarch64.dll
@@ -423,6 +427,9 @@ jobs:
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64
+            napi_target: x86_64-pc-windows-msvc
+            node_file: microsandbox.win32-x64-msvc.node
+            npm_dir: win32-x64-msvc
             msb_asset: msb-windows-x86_64.exe
             msb_metrics_asset: msb-metrics-windows-x86_64.exe
             libkrunfw_asset: libkrunfw-windows-x86_64.dll
@@ -486,6 +493,68 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb-metrics.exe build\msb-metrics.exe -Force
 
+      # -- Node SDK --
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Build Node SDK
+        shell: pwsh
+        working-directory: sdk/node-ts
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build:native -- --target ${{ matrix.napi_target }}
+          npm run build:ts
+
+      - name: Prepare Node platform package
+        shell: pwsh
+        working-directory: sdk/node-ts
+        run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
+
+      - name: Upload Node SDK artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-sdk-${{ matrix.npm_dir }}
+          path: |
+            sdk/node-ts/native/${{ matrix.node_file }}
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/${{ matrix.node_file }}
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/bin/*
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
+
+      # -- Python SDK --
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Stage runtime bundle (Python SDK)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\bin | Out-Null
+          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\lib | Out-Null
+          Copy-Item build\msb.exe sdk\python\microsandbox\_bundled\bin\msb.exe -Force
+          Copy-Item build\libkrunfw.dll sdk\python\microsandbox\_bundled\lib\libkrunfw.dll -Force
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: sdk/python
+          command: build
+          args: --release --out dist --target ${{ matrix.rust_target }}
+
+      - name: Upload Python SDK wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-sdk-${{ matrix.target }}
+          path: sdk/python/dist/*.whl
+
       - name: Stage artifacts
         shell: pwsh
         run: |
@@ -495,6 +564,7 @@ jobs:
           Copy-Item build\msb-metrics.exe artifacts\${{ matrix.msb_metrics_asset }} -Force
           Copy-Item build\libkrunfw.dll artifacts\${{ matrix.libkrunfw_asset }} -Force
           Compress-Archive -Path build\msb.exe, build\libkrunfw.dll -DestinationPath artifacts\microsandbox-${{ matrix.target }}.zip -Force
+          tar.exe -czf artifacts\microsandbox-${{ matrix.target }}.tar.gz -C build msb.exe libkrunfw.dll
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -625,7 +695,7 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -644,14 +714,16 @@ jobs:
       - name: Place binaries and update generated files
         run: |
           # Copy prepared platform package payloads.
-          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
             mkdir -p "sdk/node-ts/npm/$dir/bin" "sdk/node-ts/npm/$dir/lib"
             cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
-            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/msb" "sdk/node-ts/npm/$dir/bin/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/"* "sdk/node-ts/npm/$dir/bin/"
             cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
             # GitHub Actions artifacts strip Unix exec bits; restore before publish
             # so the published tarball carries 0755 on the binary.
-            chmod +x "sdk/node-ts/npm/$dir/bin/msb"
+            if [ -f "sdk/node-ts/npm/$dir/bin/msb" ]; then
+              chmod +x "sdk/node-ts/npm/$dir/bin/msb"
+            fi
           done
 
           # Copy napi-generated bindings into the root package's native/ dir
@@ -664,7 +736,7 @@ jobs:
       - name: Build TypeScript output (root package dist/)
         working-directory: sdk/node-ts
         run: |
-          npm ci
+          npm install --omit=optional --package-lock=false
           npm run build:ts
 
       - name: Build and publish agent client package
@@ -689,7 +761,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
             echo "Publishing @superradcompany/microsandbox-$dir..."
             cd sdk/node-ts/npm/$dir
             npm publish --access public
@@ -698,6 +770,30 @@ jobs:
 
       - name: Wait for npm to index platform packages
         run: sleep 30
+
+      - name: Verify root package platform dependencies
+        working-directory: sdk/node-ts
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const optionalDependencies = pkg.optionalDependencies ?? {};
+          const required = [
+            "@superradcompany/microsandbox-darwin-arm64",
+            "@superradcompany/microsandbox-linux-arm64-gnu",
+            "@superradcompany/microsandbox-linux-x64-gnu",
+            "@superradcompany/microsandbox-win32-arm64-msvc",
+            "@superradcompany/microsandbox-win32-x64-msvc",
+          ];
+
+          const missing = required.filter((name) => optionalDependencies[name] !== pkg.version);
+
+          if (missing.length > 0) {
+            console.error(`Missing or mismatched platform optional dependencies: ${missing.join(", ")}`);
+            process.exit(1);
+          }
+          NODE
 
       - name: Publish root package
         env:
@@ -815,7 +911,7 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     permissions:
       id-token: write

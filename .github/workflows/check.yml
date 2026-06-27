@@ -264,7 +264,10 @@ jobs:
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
-        run: npm ci && npm run build
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build
 
       # -- Checks (Python SDK) --
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -368,6 +371,7 @@ jobs:
             sdk/node-ts/dist/
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
@@ -585,7 +589,9 @@ jobs:
 
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
-        run: npm ci --ignore-scripts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false --ignore-scripts
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
