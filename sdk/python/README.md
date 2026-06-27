@@ -437,7 +437,7 @@ if not is_installed():
 | `Network.none()` / `.public_only()` / `.allow_all()` | Network presets |
 | `Secret.env()` | Secret entry with host allowlist |
 | `Patch.text()` / `.mkdir()` / `.copy_file()` / `.append()` / ... | Pre-boot filesystem modifications |
-| `Image.oci(..., upper_size_mib=...)` / `.bind()` / `.disk()` | Explicit rootfs source configuration |
+| `Image.oci(...)` / `.bind()` / `.disk()` | Explicit rootfs source configuration |
 | `Rlimit.nofile()` / `.cpu()` / `.as_()` / ... | POSIX resource limits |
 
 ### Enums (Python `StrEnum`)

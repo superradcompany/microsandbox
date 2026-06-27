@@ -984,6 +984,26 @@ Fully disable networking. No network interface is created.
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">diskSize()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+diskSize(sizeMib: number): this
+```
+
+Set the writable disk size (the OCI `upper.ext4` overlay) in MiB. Only valid for an OCI-image rootfs.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sizeMib</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Writable disk size in MiB.</div>
+  </div>
+</div>
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">entrypoint()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
@@ -1175,7 +1195,7 @@ Set the root filesystem source. Accepts OCI image names (`"alpine"`), local dire
 imageWith(configure: (b: ImageBuilder) => ImageBuilder): this
 ```
 
-Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
+Configure an explicit rootfs source. Use this for disk images when the filesystem type can't be auto-detected. The writable disk size is set at the sandbox level via [`diskSize()`](#disksize).
 
 <p className="msb-label">Parameters</p>
 
@@ -1190,7 +1210,7 @@ Configure an explicit rootfs source. Use this for OCI-only settings such as the 
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
-  .imageWith((i) => i.oci("python:3.12").upperSize(8192))
+  .imageWith((i) => i.disk("./ubuntu.qcow2").fstype("ext4"))
   .create();
 ```
 

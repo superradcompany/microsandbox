@@ -546,7 +546,7 @@ sb, err := h.Connect(ctx)
 | Option | Description |
 |--------|-------------|
 | `WithImage(image)` | OCI image to run (e.g. `"python:3.12"`) |
-| `WithOCIUpperSize(mib)` | Writable overlay upper size for OCI images |
+| `WithDiskSize(mib)` | Writable overlay upper size for OCI images |
 | `WithImageDisk(path, fstype)` | Disk-image rootfs with optional filesystem hint |
 | `WithMemory(mib)` | Memory limit in MiB |
 | `WithCPUs(n)` | CPU core limit |

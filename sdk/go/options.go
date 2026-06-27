@@ -16,8 +16,8 @@ type SandboxConfig struct {
 	Image           string
 	ImageFstype     string
 	ImageBind       string
-	OCIUpperSizeMiB uint32
-	ociUpperSizeSet bool
+	DiskSizeMiB     uint32
+	diskSizeSet     bool
 	Snapshot        string
 	MemoryMiB       uint32
 	CPUs            uint8
@@ -62,7 +62,7 @@ type persistedSandboxConfig struct {
 	Name            string               `json:"name"`
 	Image           json.RawMessage      `json:"image"`
 	ImageFstype     string               `json:"image_fstype"`
-	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
+	DiskSizeMiB     uint32               `json:"oci_upper_size_mib"`
 	MemoryMiB       uint32               `json:"memory_mib"`
 	CPUs            uint8                `json:"cpus"`
 	Workdir         string               `json:"workdir"`
@@ -109,8 +109,8 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 	if raw.ImageFstype != "" {
 		imageFstype = raw.ImageFstype
 	}
-	if raw.OCIUpperSizeMiB != 0 {
-		upperSizeMiB = raw.OCIUpperSizeMiB
+	if raw.DiskSizeMiB != 0 {
+		upperSizeMiB = raw.DiskSizeMiB
 		upperSizeSet = true
 	}
 
@@ -118,8 +118,8 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Name:            raw.Name,
 		Image:           image,
 		ImageFstype:     imageFstype,
-		OCIUpperSizeMiB: upperSizeMiB,
-		ociUpperSizeSet: upperSizeSet,
+		DiskSizeMiB:     upperSizeMiB,
+		diskSizeSet:     upperSizeSet,
 		MemoryMiB:       raw.MemoryMiB,
 		CPUs:            raw.CPUs,
 		Workdir:         raw.Workdir,
@@ -247,12 +247,12 @@ func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// WithOCIUpperSize sets the writable overlay upper size for an OCI image, in MiB.
+// WithDiskSize sets the writable disk size for an OCI image, in MiB.
 // It is valid only with WithImage when the image resolves to an OCI reference.
-func WithOCIUpperSize(mebibytes uint32) SandboxOption {
+func WithDiskSize(mebibytes uint32) SandboxOption {
 	return func(o *SandboxConfig) {
-		o.OCIUpperSizeMiB = mebibytes
-		o.ociUpperSizeSet = true
+		o.DiskSizeMiB = mebibytes
+		o.diskSizeSet = true
 	}
 }
 

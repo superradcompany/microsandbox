@@ -37,9 +37,12 @@ pub enum ImageSource {
 /// Used with [`crate::sandbox::SandboxBuilder::image_with`]:
 ///
 /// ```ignore
-/// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+/// .image_with(|i| i.oci("python:3.12"))
 /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
+///
+/// The writable disk size is set at the sandbox level via
+/// [`crate::sandbox::SandboxBuilder::disk_size`].
 #[derive(Default)]
 pub struct ImageBuilder {
     source: Option<RootfsSource>,
@@ -686,30 +689,10 @@ impl ImageBuilder {
     /// Use an OCI image reference as the root filesystem.
     ///
     /// ```ignore
-    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// .image_with(|i| i.oci("python:3.12"))
     /// ```
     pub fn oci(mut self, reference: impl Into<String>) -> Self {
         self.source = Some(RootfsSource::oci(reference));
-        self
-    }
-
-    /// Set the writable overlay upper size for an OCI rootfs.
-    ///
-    /// This is valid only after [`oci`](Self::oci).
-    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
-        let size_mib = size.into().as_u32();
-        match &mut self.source {
-            Some(RootfsSource::Oci(oci)) => {
-                oci.upper_size_mib = Some(size_mib);
-            }
-            _ => {
-                if self.error.is_none() {
-                    self.error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "upper_size() requires oci() to be called first".into(),
-                    ));
-                }
-            }
-        }
         self
     }
 
@@ -1490,31 +1473,6 @@ mod tests {
             }
             _ => panic!("expected Oci"),
         }
-    }
-
-    #[test]
-    fn test_image_builder_oci_with_upper_size() {
-        let rootfs = ImageBuilder::new()
-            .oci("python:3.12")
-            .upper_size(8192u32)
-            .build()
-            .unwrap();
-
-        match rootfs {
-            RootfsSource::Oci(oci) => {
-                assert_eq!(oci.reference, "python:3.12");
-                assert_eq!(oci.upper_size_mib, Some(8192));
-            }
-            _ => panic!("expected Oci"),
-        }
-    }
-
-    #[test]
-    fn test_image_builder_upper_size_requires_oci() {
-        let result = ImageBuilder::new().upper_size(8192u32).build();
-        let err = result.unwrap_err();
-
-        assert!(err.to_string().contains("upper_size() requires oci()"));
     }
 
     #[test]

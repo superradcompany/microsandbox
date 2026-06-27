@@ -15,25 +15,25 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
-func TestWithOCIUpperSize(t *testing.T) {
+func TestWithDiskSize(t *testing.T) {
 	o := SandboxConfig{}
-	WithOCIUpperSize(8192)(&o)
-	if o.OCIUpperSizeMiB != 8192 {
-		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
+	WithDiskSize(8192)(&o)
+	if o.DiskSizeMiB != 8192 {
+		t.Errorf("DiskSizeMiB = %d, want 8192", o.DiskSizeMiB)
 	}
-	if !o.ociUpperSizeSet {
-		t.Error("ociUpperSizeSet = false, want true")
+	if !o.diskSizeSet {
+		t.Error("diskSizeSet = false, want true")
 	}
 }
 
-func TestWithOCIUpperSizeZeroIsExplicit(t *testing.T) {
+func TestWithDiskSizeZeroIsExplicit(t *testing.T) {
 	o := SandboxConfig{}
-	WithOCIUpperSize(0)(&o)
-	if o.OCIUpperSizeMiB != 0 {
-		t.Errorf("OCIUpperSizeMiB = %d, want 0", o.OCIUpperSizeMiB)
+	WithDiskSize(0)(&o)
+	if o.DiskSizeMiB != 0 {
+		t.Errorf("DiskSizeMiB = %d, want 0", o.DiskSizeMiB)
 	}
-	if !o.ociUpperSizeSet {
-		t.Error("ociUpperSizeSet = false, want true")
+	if !o.diskSizeSet {
+		t.Error("diskSizeSet = false, want true")
 	}
 }
 
