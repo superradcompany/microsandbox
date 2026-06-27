@@ -1526,7 +1526,7 @@ fn clear_cloexec(fd: i32) -> MicrosandboxResult<()> {
 }
 
 /// Return agent relay socket paths in preferred connection order.
-pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
+pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> Vec<PathBuf> {
     let (run_dir, sandboxes_dir) = crate::backend::default_backend()
         .as_local()
         .map(|local| (local.config().run_dir(), local.config().sandboxes_dir()))
@@ -1543,7 +1543,7 @@ pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> [PathBuf; 2] {
 pub(crate) fn sandbox_agent_socket_path_candidates_for(
     local: &LocalBackend,
     name: &str,
-) -> [PathBuf; 2] {
+) -> Vec<PathBuf> {
     sandbox_agent_socket_path_candidates_with_roots(
         &local.config().run_dir(),
         &local.config().sandboxes_dir(),
@@ -1555,11 +1555,26 @@ fn sandbox_agent_socket_path_candidates_with_roots(
     run_dir: &Path,
     sandboxes_dir: &Path,
     name: &str,
-) -> [PathBuf; 2] {
-    [
-        sandbox_agent_socket_path(run_dir, name),
+) -> Vec<PathBuf> {
+    let primary = sandbox_agent_socket_path(run_dir, name);
+
+    // On Unix a long sandbox name or a deep MSB_HOME can overflow the AF_UNIX
+    // `sun_path` limit, so keep the legacy
+    // `<sandboxes>/<name>/runtime/agent.sock` path as a fallback. Windows named
+    // pipes have no such length limit and never shipped a pre-hash naming
+    // scheme, so the primary pipe is the only candidate.
+    #[cfg(unix)]
+    let candidates = vec![
+        primary,
         legacy_sandbox_agent_socket_path(sandboxes_dir, name),
-    ]
+    ];
+    #[cfg(not(unix))]
+    let candidates = {
+        let _ = sandboxes_dir;
+        vec![primary]
+    };
+
+    candidates
 }
 
 /// Pick the first explicit-backend socket path usable on this platform.
@@ -1577,8 +1592,9 @@ pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResul
     resolve_sandbox_agent_socket_path_from_candidates(candidates)
 }
 
+#[cfg(unix)]
 fn resolve_sandbox_agent_socket_path_from_candidates(
-    candidates: [PathBuf; 2],
+    candidates: Vec<PathBuf>,
 ) -> MicrosandboxResult<PathBuf> {
     for path in &candidates {
         if sandbox_agent_socket_path_fits(path) {
@@ -1597,6 +1613,19 @@ fn resolve_sandbox_agent_socket_path_from_candidates(
          MSB_HOME or paths.sandboxes to a shorter directory",
         unix_socket_path_capacity()
     )))
+}
+
+#[cfg(not(unix))]
+fn resolve_sandbox_agent_socket_path_from_candidates(
+    candidates: Vec<PathBuf>,
+) -> MicrosandboxResult<PathBuf> {
+    // Named pipes have no `sun_path`-style length limit, so the primary
+    // candidate is always usable.
+    candidates.into_iter().next().ok_or_else(|| {
+        crate::MicrosandboxError::InvalidConfig(
+            "no agent relay socket candidates were derived".to_string(),
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -1623,27 +1652,19 @@ fn agent_socket_hash(name: &str) -> String {
     hash
 }
 
+// The legacy `<sandboxes>/<name>/runtime/agent.sock` fallback only exists for
+// backward compatibility with the pre-hash Unix layout; Windows never shipped a
+// different agent-pipe scheme, so this is Unix-only.
 #[cfg(unix)]
 fn legacy_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
     sandboxes_dir.join(name).join("runtime").join("agent.sock")
 }
 
-#[cfg(windows)]
-fn legacy_sandbox_agent_socket_path(_sandboxes_dir: &Path, name: &str) -> PathBuf {
-    PathBuf::from(format!(
-        r"\\.\pipe\msb-agent-legacy-{}",
-        agent_socket_hash(name)
-    ))
-}
-
+// Agent socket path length only constrains AF_UNIX `sun_path` on Unix; Windows
+// named pipes have no equivalent limit, so these helpers are Unix-only.
 #[cfg(unix)]
 fn sandbox_agent_socket_path_fits(path: &Path) -> bool {
     sandbox_agent_socket_path_len(path) < unix_socket_path_capacity()
-}
-
-#[cfg(not(unix))]
-fn sandbox_agent_socket_path_fits(_path: &Path) -> bool {
-    true
 }
 
 #[cfg(unix)]
@@ -1651,20 +1672,10 @@ fn sandbox_agent_socket_path_len(path: &Path) -> usize {
     path.as_os_str().as_bytes().len()
 }
 
-#[cfg(not(unix))]
-fn sandbox_agent_socket_path_len(_path: &Path) -> usize {
-    0
-}
-
 #[cfg(unix)]
 fn unix_socket_path_capacity() -> usize {
     let storage = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
     storage.sun_path.len()
-}
-
-#[cfg(not(unix))]
-fn unix_socket_path_capacity() -> usize {
-    usize::MAX
 }
 
 async fn terminate_startup_process(
@@ -2913,14 +2924,15 @@ mod tests {
         let home = temp.path().join("msb-home");
         let backend = LocalBackend::builder().home(&home).build().await.unwrap();
 
-        let [hashed, legacy] =
+        let candidates =
             super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
 
         #[cfg(unix)]
         {
-            assert!(hashed.starts_with(backend.config().run_dir().join("agent")));
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates[0].starts_with(backend.config().run_dir().join("agent")));
             assert_eq!(
-                legacy,
+                candidates[1],
                 backend
                     .config()
                     .sandboxes_dir()
@@ -2931,21 +2943,18 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            assert!(hashed.to_string_lossy().starts_with(r"\\.\pipe\msb-agent-"));
+            assert_eq!(candidates.len(), 1);
             assert!(
-                legacy
+                candidates[0]
                     .to_string_lossy()
-                    .starts_with(r"\\.\pipe\msb-agent-legacy-")
+                    .starts_with(r"\\.\pipe\msb-agent-")
             );
         }
     }
 
     #[tokio::test]
     async fn test_agent_socket_resolution_uses_explicit_local_backend_paths() {
-        let temp = tempfile::Builder::new()
-            .prefix("msb")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
         let home = temp.path().join("msb-home");
         let backend = LocalBackend::builder().home(&home).build().await.unwrap();
 
