@@ -1,3 +1,5 @@
+[![Listed on TakoAPI](https://img.shields.io/badge/Listed%20on-TakoAPI-7c3aed)](https://takoapi.com/agents/superradcompany-microsandbox)
+
 <div align="center">
     <a href="./#gh-dark-mode-only" target="_blank" align="center">
         <img width="35%" src="./assets/microsandbox-gh-banner-dark.png" alt="microsandbox-banner-xl-dark">
