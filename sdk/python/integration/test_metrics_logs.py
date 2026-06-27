@@ -23,7 +23,10 @@ async def wait_for_metrics(sandbox):
             last_error = error
             await asyncio.sleep(0.1)
 
-    raise last_error
+    if last_error is not None:
+        raise last_error
+
+    raise MicrosandboxError("timed out waiting for sandbox metrics")
 
 
 @pytest.mark.asyncio
