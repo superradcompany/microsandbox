@@ -1,0 +1,83 @@
+---
+title: "Week of June 26, 2026"
+description: "Windows host support, guest-write quotas for virtiofs mounts, host-directory bind rootfs across all SDKs, non-PTY bidirectional `exec --stream`, upper disk usage metrics, an `msb doctor` command, runtime-owned ephemeral cleanup, and a round of SDK and runtime fixes."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.5.8](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.8) · [v0.5.10](https://github.com/superradcompany/microsandbox/releases/tag/v0.5.10) · [v0.6.0](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.0)
+</Tip>
+
+## New features
+
+**Windows host support**
+
+Microsandbox now runs as a first-class local host on Windows on top of the libkrun and libkrunfw Windows ports. The `msb` CLI, installer, runtime, networking, filesystem, image, and SDK packages all build and run natively, including a Windows-specific passthrough filesystem backend, interactive SSH attach, and a release installer flow. Pieces that still depend on Unix-only behavior surface as explicit unsupported errors instead of silently misbehaving, and Windows SDK packages are now published alongside the macOS and Linux artifacts.
+
+```bash
+msb run --name devbox -p 8080:8080 python:3.12
+```
+
+See the [quickstart](/getting-started/quickstart).
+
+**Guest-write quotas for virtiofs mounts**
+
+`PassthroughFs` now caps how much a guest can write to a virtiofs mount, so a sandbox can no longer fill the host disk through `/.msb` or a bind mount. The runtime directory is held to a 16 MiB control-channel cap, bind mounts default to a 4 GiB guest-write quota that can be overridden per mount, and named directory volumes now enforce their existing `quota_mib` setting. Enforcement charges only new file growth, never pre-existing content, and guest `df` reports the budget rather than the host's full disk.
+
+```bash
+msb run alpine \
+  --mount-dir ./workspace:/work:rw,quota=1G
+```
+
+See the [volumes guide](/sandboxes/volumes).
+
+**Host-directory bind rootfs across all SDKs**
+
+`RootfsSource::Bind` is now a first-class SDK option in Rust, Go, TypeScript, and Python, so a sandbox can boot directly off a host directory with no OCI pull and no overlay. The Python SDK already exposed `ImageSource.bind`; this brings the other languages to parity with `ImageBuilder.bind(host)` in Rust and TypeScript, and `WithBindRootfs(path)` in Go.
+
+```python
+from microsandbox import PythonSandbox, Image
+
+async with PythonSandbox.create(
+    name="dev",
+    image=Image.bind("/srv/rootfs/python-base"),
+) as sb:
+    await sb.run("print('hello from bind rootfs')")
+```
+
+See the [Python images reference](/sdk/python/images).
+
+**Non-PTY bidirectional `msb exec --stream`**
+
+`msb exec` gains a `--stream` flag that streams stdin and stdout bidirectionally with no PTY and no buffering. The default `exec` path still reads stdin to EOF and buffers output until the command exits, and `-t/--tty` still allocates a PTY with echo and CRLF translation; `--stream` is the option for driving a long-lived guest process turn by turn, such as a JSON-lines protocol where each request depends on the previous response.
+
+```bash
+msb exec worker --stream -- node repl.js
+```
+
+See the [sandbox commands reference](/cli/sandbox-commands).
+
+**OCI upper disk usage metrics**
+
+Sandboxes booted from an OCI image now publish live metrics for the writable upper layer: `upper_used_bytes`, `upper_free_bytes`, and `upper_host_allocated_bytes`. The fields flow through `msb metrics --format json`, the Rust, TypeScript, Python, and Go SDKs, and `msb-metrics` OTel gauges (`microsandbox.upper.used`, `microsandbox.upper.free`, `microsandbox.upper.host_allocated`), so capacity dashboards can track the writable overlay without parsing the live ext4 image.
+
+See the [`msb-metrics` deep dive](/observability/deep-dive).
+
+**Other features**
+
+- **`msb doctor` host readiness check.** A new top-level `msb doctor` command runs the host readiness check from the CLI's main help, alongside the existing `msb self doctor` and `msb self check` forms. On Windows hosts the doctor also offers a fix flow for the Windows Hypervisor Platform feature. See the [CLI overview](/cli/overview).
+- **Runtime-owned ephemeral sandbox cleanup.** Unnamed `msb run` sandboxes, including detached runs, are now marked ephemeral and cleaned up by the host runtime after the VM exits, with a coordinated sweep for stale rows and missed cleanup at runtime startup. Named runs and `msb create` sandboxes stay persistent. The Rust SDK exposes the same control through `Sandbox::builder(...).ephemeral(true)`. See the [sandbox lifecycle guide](/sandboxes/lifecycle).
+- **Per-secret CONNECT proxy substitution.** Secret substitution now works when the guest reaches an upstream through an HTTP CONNECT proxy (`HTTPS_PROXY=http://proxy:port`). The proxy uses the CONNECT authority and ClientHello SNI cross-check it already performs to skip the DNS-cache pin that the tunneled path could not satisfy, so placeholders are substituted inside the inner TLS stream as expected. See the [TLS networking guide](/networking/tls).
+- **Loopback default for published ports, with explicit warning on host exposure.** Published ports still default to loopback bindings, but wildcard and concrete non-loopback binds now emit a warning at run time because they can be reachable beyond `localhost` and may trigger a Windows Defender Firewall prompt. See the [sandbox commands reference](/cli/sandbox-commands).
+- **Slimmer `msb sandbox` argv.** The sandbox launcher no longer puts the full network config and environment on argv, where they showed up in `ps` and host logs and risked leaking guest secrets through `/proc/<pid>/cmdline`. Operator-readable labels (name, sandbox id, vcpus, memory, log level) stay on argv; everything bulky or secret-bearing now travels through an inherited config fd.
+
+## Bug fixes
+
+- Named volumes created with `kind=disk` are now mounted as a virtio-blk block device again, so overlayfs and Docker-in-VM workloads no longer fail with `EINVAL`. The disk kind is also recovered from the volume store, so the fix survives a sandbox restart.
+- Live sandbox lifecycle methods are restored across the Rust, TypeScript, Python, and Go SDKs, so callers can stop, kill, drain, and wait on the sandbox handle they already have. Node `Sandbox.list()` and `Sandbox.listWith()` again return usable sandbox handles instead of inert listings.
+- Named volume semantics are restored after the local and cloud backend split: disk-backed named volumes attach as block devices, directory-backed named volumes stay on virtiofs, lifecycle locks are held through create, and Go, Node, and Python bindings line up with the restored behavior.
+- `msb stop` and attach sessions against a runtime that has already exited as a zombie no longer hang. Zombie PIDs are treated as dead in the SDK and runtime startup maintenance, stale `Draining` runtimes reconcile to `Stopped`, and a closed relay receiver exits the attach session instead of silently swallowing stdin.
+- Detached `msb run -- CMD` no longer drops the command. The command is persisted as runtime-owned startup intent, executed by the host runtime after agentd is ready, and the VM shuts down when the workload exits. Known image init entrypoints under `--init auto` also receive the image entrypoint tail plus the effective command, environment, and workdir.
+- The agent heartbeat watchdog no longer kills healthy sandboxes after a few minutes when the heartbeat goes briefly stale. The monitor is idle-detection only; genuine boot failures are still reclaimed through the relay `wait_ready` timeout, and the guest writes its heartbeat from a dedicated OS thread so a saturated agent runtime cannot starve idle detection.
+- Setting `disk_size` on a bind or disk-image rootfs is now a logged warning instead of a hard build error. The field only sizes the OCI writable overlay, so it is ignored for non-OCI rootfs sources without failing the build.
+- `Draining` sandboxes without any active runs are now treated as terminal during reconciliation, so `stop` callers stop polling forever when the runtime has already exited. The smoltcp TX backend also drops frames when its ring is full instead of waiting on readiness that can never signal queue capacity.
