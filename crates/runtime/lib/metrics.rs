@@ -6,11 +6,19 @@
 //! per-sample path; lifecycle rows still flow through `DbWriteConnection`.
 
 use std::num::NonZero;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{GetLastError, NO_ERROR},
+    Storage::FileSystem::GetCompressedFileSizeW,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -180,8 +188,34 @@ fn write_sample(
 
 fn upper_host_allocated_bytes(path: Option<&Path>) -> Option<u64> {
     let path = path?;
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(metadata.blocks().saturating_mul(512))
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(metadata.blocks().saturating_mul(512))
+    }
+    #[cfg(windows)]
+    {
+        windows_allocated_file_bytes(path).ok()
+    }
+}
+
+#[cfg(windows)]
+fn windows_allocated_file_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut high = 0_u32;
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let low = unsafe { GetCompressedFileSizeW(path_wide.as_ptr(), &mut high) };
+    if low == u32::MAX {
+        let error = unsafe { GetLastError() };
+        if error != NO_ERROR {
+            return Err(std::io::Error::from_raw_os_error(error as i32));
+        }
+    }
+
+    Ok((u64::from(high) << 32) | u64::from(low))
 }
 
 fn upper_filesystem_metrics(
@@ -250,6 +284,7 @@ fn cpu_percent_from_vcpu_time(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::ffi::CString;
 
     use super::*;
@@ -264,10 +299,16 @@ mod tests {
     }
 
     fn cleanup_shm(name: &str) {
-        let cname = CString::new(name).unwrap();
-        unsafe {
-            libc::shm_unlink(cname.as_ptr());
+        #[cfg(unix)]
+        {
+            let cname = CString::new(name).unwrap();
+            unsafe {
+                libc::shm_unlink(cname.as_ptr());
+            }
         }
+
+        #[cfg(not(unix))]
+        let _ = name;
     }
 
     #[test]
@@ -289,6 +330,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn upper_host_allocated_bytes_uses_allocated_blocks() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), vec![1_u8; 8192]).unwrap();
@@ -302,18 +344,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn upper_host_allocated_bytes_uses_windows_allocation_size() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![1_u8; 8192]).unwrap();
+
+        assert!(upper_host_allocated_bytes(Some(file.path())).is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
     fn upper_host_allocated_bytes_returns_none_without_path() {
         assert_eq!(upper_host_allocated_bytes(None), None);
     }
 
     #[test]
-    fn write_sample_publishes_upper_filesystem_metrics_from_krun() {
-        let name = unique_shm_name("upper");
+    fn write_sample_leaves_upper_filesystem_metrics_empty_when_unavailable() {
+        let name = unique_shm_name("upper-empty");
         let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
         let reserved = registry
             .reserve(ReserveSlot {
                 sandbox_id: 7,
-                name: "upper",
+                name: "upper-empty",
                 memory_limit_bytes: 512 * 1024 * 1024,
             })
             .unwrap();
@@ -322,6 +373,37 @@ mod tests {
                 slot: reserved.slot,
                 generation: reserved.generation,
                 run_id: 9,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let krun = msb_krun::VmMetrics::default();
+
+        assert!(write_sample(&writer, None, &krun, None, None, Duration::from_secs(3)).is_ok());
+
+        let snapshot = registry.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].upper_used_bytes, None);
+        assert_eq!(snapshot[0].upper_free_bytes, None);
+        cleanup_shm(&name);
+    }
+
+    #[test]
+    fn write_sample_publishes_upper_filesystem_metrics_from_krun() {
+        let name = unique_shm_name("upper");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 8,
+                name: "upper",
+                memory_limit_bytes: 512 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 10,
                 pid: std::process::id() as i32,
                 started_at: chrono::Utc::now(),
             })

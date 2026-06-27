@@ -49,6 +49,8 @@ pub(crate) struct TlsProxyContext {
     pub(crate) upstream_stream: Option<TcpStream>,
     /// Hostname from a CONNECT authority that must match the ClientHello SNI.
     pub(crate) expected_sni: Option<String>,
+    /// `true` when the connection arrived via HTTP CONNECT; skips the DNS-cache pin check.
+    pub(crate) via_connect: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -81,6 +83,7 @@ pub fn spawn_tls_proxy(
             proxy_connect,
             upstream_stream: None,
             expected_sni: None,
+            via_connect: false,
         };
 
         if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp, Vec::new()).await {
@@ -105,6 +108,7 @@ pub(crate) async fn tls_proxy_task(
         proxy_connect,
         upstream_stream,
         expected_sni,
+        via_connect,
     } = context;
 
     // Buffer initial data to extract SNI from ClientHello. Timeout prevents a
@@ -170,6 +174,7 @@ pub(crate) async fn tls_proxy_task(
             guest_dst,
             connect_dst,
             &sni_name,
+            via_connect,
             initial_buf,
             from_smoltcp,
             to_smoltcp,
@@ -233,6 +238,7 @@ pub(crate) async fn intercept_relay(
     guest_dst: SocketAddr,
     connect_dst: SocketAddr,
     sni_name: &str,
+    via_connect: bool,
     initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
@@ -241,9 +247,12 @@ pub(crate) async fn intercept_relay(
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
 ) -> io::Result<()> {
-    let mut secrets_handler =
+    let mut secrets_handler = if via_connect {
+        SecretsHandler::new_tls_intercepted_via_connect(&tls_state.secrets, sni_name)
+    } else {
         SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared)
-            .with_guest_dst(guest_dst);
+    }
+    .with_guest_dst(guest_dst);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state

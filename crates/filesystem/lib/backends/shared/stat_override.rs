@@ -1,4 +1,4 @@
-//! Stat virtualization via the `user.containers.override_stat` extended attribute.
+//! Stat virtualization via the `user.msb.override_stat` extended attribute.
 //!
 //! The host process runs unprivileged and cannot `chown`, create device nodes,
 //! or set xattrs on symlinks (Linux). All ownership/permissions/type information
@@ -32,8 +32,11 @@ use super::platform;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Xattr key for the override stat, as a null-terminated C string.
-pub(crate) const OVERRIDE_XATTR_KEY: &CStr = c"user.containers.override_stat";
+/// Xattr key for the microsandbox override stat, as a null-terminated C string.
+pub(crate) const OVERRIDE_XATTR_KEY: &CStr = c"user.msb.override_stat";
+
+/// Xattr key used to probe whether the host mount supports microsandbox xattrs.
+const PROBE_XATTR_KEY: &CStr = c"user.msb._probe";
 
 /// Current version of the binary override format.
 const OVERRIDE_VERSION: u8 = 1;
@@ -413,7 +416,6 @@ pub(crate) fn get_override(
 ///
 /// Returns `Ok(true)` if xattrs work, `Ok(false)` if not supported.
 pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
-    let probe_key = c"user.containers._probe";
     let probe_val: [u8; 1] = [1];
 
     #[cfg(target_os = "linux")]
@@ -423,7 +425,7 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
         let ret = unsafe {
             libc::setxattr(
                 path,
-                probe_key.as_ptr(),
+                PROBE_XATTR_KEY.as_ptr(),
                 probe_val.as_ptr() as *const libc::c_void,
                 1,
                 0,
@@ -439,7 +441,7 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
         }
         // Clean up the probe xattr.
         unsafe {
-            libc::removexattr(path, probe_key.as_ptr());
+            libc::removexattr(path, PROBE_XATTR_KEY.as_ptr());
         }
     }
 
@@ -448,7 +450,7 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
         let ret = unsafe {
             libc::fsetxattr(
                 dirfd,
-                probe_key.as_ptr(),
+                PROBE_XATTR_KEY.as_ptr(),
                 probe_val.as_ptr() as *const libc::c_void,
                 1,
                 0,
@@ -465,7 +467,7 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
         }
         // Clean up the probe xattr.
         unsafe {
-            libc::fremovexattr(dirfd, probe_key.as_ptr(), 0);
+            libc::fremovexattr(dirfd, PROBE_XATTR_KEY.as_ptr(), 0);
         }
     }
 
@@ -478,7 +480,13 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::handle_unsupported_xattr;
+    use super::{OVERRIDE_XATTR_KEY, PROBE_XATTR_KEY, handle_unsupported_xattr};
+
+    #[test]
+    fn test_xattr_keys_use_msb_namespace() {
+        assert_eq!(OVERRIDE_XATTR_KEY.to_bytes(), b"user.msb.override_stat");
+        assert_eq!(PROBE_XATTR_KEY.to_bytes(), b"user.msb._probe");
+    }
 
     #[test]
     fn test_unsupported_xattr_is_eio_in_strict_mode() {

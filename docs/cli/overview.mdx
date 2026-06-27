@@ -9,15 +9,27 @@ The `msb` CLI lets you create, manage, and interact with sandboxes from the term
 
 ## Install
 
-```bash
+<CodeGroup>
+```bash CLI (Linux & macOS)
 curl -fsSL https://install.microsandbox.dev | sh
 ```
 
-The installer writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it.
+```powershell CLI (Windows)
+irm https://install.microsandbox.dev/windows | iex
+```
+</CodeGroup>
+
+On Linux and macOS, the installer writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On Windows, use PowerShell; Windows support is currently in preview, and Windows 11 is the tested path.
 
 <Note>
-  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
+  microsandbox requires glibc-based Linux with KVM enabled, macOS with Apple Silicon (M-series chip), or Windows 11 with Windows Hypervisor Platform enabled. Local sandboxes use hardware virtualization. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for platform-specific notes.
 </Note>
+
+Check your local setup with:
+
+```bash
+msb doctor
+```
 
 ## Quick reference
 
@@ -68,6 +80,8 @@ msb install ubuntu       # Install as 'ubuntu' command
 msb uninstall ubuntu     # Remove installed command
 
 # Self-management
+msb doctor               # Alias for 'msb self doctor'
+msb self doctor          # Check runtime files and supported host prerequisites
 msb self update          # Update msb to latest
 msb self uninstall       # Remove msb
 ```

@@ -2,9 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from microsandbox import Sandbox, all_sandbox_metrics
+from microsandbox import MicrosandboxError, Sandbox, all_sandbox_metrics
+
+
+async def wait_for_metrics(sandbox):
+    last_error = None
+
+    # The runtime publishes the live metrics slot asynchronously after boot
+    # readiness, so the first metrics snapshot may race slot creation.
+    for _ in range(20):
+        try:
+            return await sandbox.metrics()
+        except MicrosandboxError as error:
+            if "no live metrics slot" not in str(error):
+                raise
+            last_error = error
+            await asyncio.sleep(0.1)
+
+    if last_error is not None:
+        raise last_error
+
+    raise MicrosandboxError("timed out waiting for sandbox metrics")
 
 
 @pytest.mark.asyncio
@@ -14,7 +36,7 @@ async def test_metrics_snapshot_stream_and_all_sandbox_metrics(sandbox_factory):
 
     await sandbox.shell("true")
 
-    metrics = await sandbox.metrics()
+    metrics = await wait_for_metrics(sandbox)
     assert isinstance(metrics.cpu_percent, float)
     assert metrics.memory_limit_bytes > 0
     assert metrics.uptime_ms >= 0

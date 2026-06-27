@@ -8,7 +8,9 @@ use futures::StreamExt;
 use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION};
+#[cfg(unix)]
+use microsandbox_utils::LIBKRUNFW_ABI;
+use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, PREBUILT_VERSION};
 
 use super::verify::verify_installation;
 
@@ -60,6 +62,7 @@ impl Setup {
 
     /// Download and extract the microsandbox bundle tarball.
     async fn install_bundle(&self, bin_dir: &Path, lib_dir: &Path) -> MicrosandboxResult<()> {
+        let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
         let libkrunfw_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
         let version = self.version.as_deref().unwrap_or(PREBUILT_VERSION);
 
@@ -67,7 +70,7 @@ impl Setup {
         // version matches the target version.
         if !self.force
             && lib_dir.join(&libkrunfw_name).exists()
-            && installed_msb_version(&bin_dir.join(MSB_BINARY))
+            && installed_msb_version(&bin_dir.join(&msb_name))
                 .await
                 .as_deref()
                 == Some(version)
@@ -76,7 +79,7 @@ impl Setup {
             return Ok(());
         }
 
-        if install_ci_local_bundle(bin_dir, lib_dir, &libkrunfw_name).await? {
+        if install_ci_local_bundle(bin_dir, lib_dir, &msb_name, &libkrunfw_name).await? {
             tracing::debug!("setup: installed runtime dependencies from local CI build/");
             return Ok(());
         }
@@ -152,6 +155,7 @@ fn default_base_dir() -> Option<PathBuf> {
     Some(microsandbox_utils::resolve_home())
 }
 
+#[cfg(unix)]
 fn libkrunfw_symlinks(filename: &str) -> Vec<(String, String)> {
     if cfg!(target_os = "macos") {
         vec![("libkrunfw.dylib".to_string(), filename.to_string())]
@@ -227,6 +231,7 @@ async fn installed_msb_version(path: &Path) -> Option<String> {
 async fn install_ci_local_bundle(
     bin_dir: &Path,
     lib_dir: &Path,
+    msb_name: &str,
     libkrunfw_name: &str,
 ) -> MicrosandboxResult<bool> {
     if std::env::var_os("CI").is_none() && std::env::var_os("GITHUB_ACTIONS").is_none() {
@@ -237,20 +242,20 @@ async fn install_ci_local_bundle(
         return Ok(false);
     };
 
-    let msb_src = build_dir.join(MSB_BINARY);
+    let msb_src = build_dir.join(msb_name);
     let lib_src = build_dir.join(libkrunfw_name);
     if !msb_src.is_file() || !lib_src.is_file() {
         return Ok(false);
     }
 
-    tokio::fs::copy(&msb_src, bin_dir.join(MSB_BINARY)).await?;
+    tokio::fs::copy(&msb_src, bin_dir.join(msb_name)).await?;
     tokio::fs::copy(&lib_src, lib_dir.join(libkrunfw_name)).await?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(
-            bin_dir.join(MSB_BINARY),
+            bin_dir.join(msb_name),
             std::fs::Permissions::from_mode(0o755),
         )
         .await?;

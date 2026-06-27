@@ -4,6 +4,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(windows)]
+mod bootstrap_fs;
 mod clock;
 mod error;
 

@@ -267,7 +267,7 @@ pub(crate) fn do_statfs(fs: &PassthroughFs, _ctx: Context, inode: u64) -> io::Re
     // A quota'd mount reports its budget so guest `df` reflects the cap rather
     // than the host filesystem's (much larger) real figures.
     if let Some(q) = &fs.quota {
-        return Ok(super::quota::quota_statvfs(
+        return Ok(super::super::quota::quota_statvfs(
             q.baseline(),
             q.limit(),
             q.used(),

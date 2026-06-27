@@ -37,6 +37,10 @@ use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, sea_query::Expr,
 };
 use tokio::sync::Mutex;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
 use microsandbox_image::{
     Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4,
@@ -67,6 +71,9 @@ pub(crate) const RESERVED_LABEL_PREFIXES: [&str; 3] = ["sandbox.", "microsandbox
 
 /// Maximum time to wait for the sandbox process to expose the agent relay.
 const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Maximum time to wait when connecting to the agent for lifecycle shutdown.
+const AGENT_SHUTDOWN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation
@@ -857,8 +864,8 @@ pub(crate) async fn remove_local(
 /// Tries the configured agent relay socket candidates, connects, sends
 /// `MessageType::Shutdown`, and lets agentd run an in-guest `sync()` +
 /// `reboot(RB_POWER_OFF)` so ext4 unmounts cleanly (no journal replay on next
-/// boot). Falls back to SIGTERM via PID if the socket is unreachable (agentd
-/// wedged, sandbox just transitioning, etc.).
+/// boot). Falls back to platform process termination via PID if the agent
+/// endpoint is unreachable (agentd wedged, sandbox just transitioning, etc.).
 ///
 /// No-op when the sandbox isn't in Running/Draining.
 pub(crate) async fn stop_local(
@@ -877,35 +884,30 @@ pub(crate) async fn stop_local(
         return Ok(());
     }
 
-    // Try the clean-shutdown path: connect to the agent relay UDS and send
-    // `core.shutdown`. agentd runs `sync()` + `reboot(RB_POWER_OFF)` so
-    // block-root filesystems unmount cleanly.
-    match fs::local::connect_agent_with_timeout(
-        local_backend,
-        name,
-        std::time::Duration::from_secs(5),
-    )
-    .await
-    {
-        Ok(client) => {
-            client.send(0, MessageType::Shutdown, &()).await?;
-            Ok(())
-        }
+    if model.status == SandboxStatus::Running {
+        update_sandbox_status(
+            local_backend.db().await?.write(),
+            model.id,
+            SandboxStatus::Draining,
+        )
+        .await?;
+    }
+
+    match request_agent_shutdown(local_backend, name).await {
+        Ok(()) => Ok(()),
         Err(e) => {
-            // Graceful degradation: agent UDS unreachable (socket missing,
-            // ECONNREFUSED, handshake timeout). Fall back to SIGTERM via PID
-            // so we still attempt a stop — at the cost of skipping the
-            // in-guest sync(). The reaper updates DB status on PID exit.
+            // Graceful degradation: agent endpoint unreachable (socket/pipe
+            // missing, ECONNREFUSED, handshake timeout) or shutdown delivery
+            // failed. Fall back to direct process termination so we still
+            // attempt a stop, at the cost of skipping the in-guest sync().
+            // The reaper updates DB status on PID exit.
             tracing::warn!(
                 sandbox = %name,
                 error = %e,
-                "stop_local: agent UDS unreachable; falling back to SIGTERM",
+                "stop_local: agent endpoint unreachable; falling back to process termination",
             );
             if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
-                nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                )?;
+                terminate_pid_gracefully(pid)?;
             }
             Ok(())
         }
@@ -935,10 +937,7 @@ pub(crate) async fn kill_local(
 
     let mut pids = Vec::new();
     if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGKILL,
-        )?;
+        kill_pid(pid)?;
         pids.push(pid);
     }
 
@@ -965,12 +964,11 @@ pub(crate) async fn kill_local(
     Ok(())
 }
 
-/// Local lifecycle: drain a running sandbox by name (SIGUSR1 to the
-/// libkrun process).
+/// Local lifecycle: drain a running sandbox by name.
 ///
-/// The agent protocol has no `Drain` message type — drain is purely
-/// signal-based. The libkrun signal handler catches SIGUSR1, writes to the
-/// exit event fd, exit observers run, and the process terminates.
+/// Unix keeps the legacy SIGUSR1 drain path. Windows uses the existing
+/// `core.shutdown` agent message so the guest can sync and power off without
+/// pretending a direct process termination is graceful.
 pub(crate) async fn drain_local(
     backend: Arc<dyn crate::backend::Backend>,
     name: &str,
@@ -982,13 +980,49 @@ pub(crate) async fn drain_local(
                 feature: "drain_local".into(),
                 available_when: "with a LocalBackend".into(),
             })?;
-    let (_, pid) = get_local_handle_state(local_backend, name).await?;
-    if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGUSR1,
-        )?;
+    let (model, pid) = get_local_handle_state(local_backend, name).await?;
+    if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
+        return Ok(());
     }
+
+    if model.status == SandboxStatus::Running {
+        update_sandbox_status(
+            local_backend.db().await?.write(),
+            model.id,
+            SandboxStatus::Draining,
+        )
+        .await?;
+    }
+
+    #[cfg(windows)]
+    {
+        if pid.is_some_and(pid_is_alive) {
+            request_agent_shutdown(local_backend, name).await.map_err(|err| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "windows drain requires the agent shutdown path, but the agent endpoint is unavailable: {err}"
+                ))
+            })?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
+            drain_pid(pid)?;
+        }
+        Ok(())
+    }
+}
+
+async fn request_agent_shutdown(
+    local_backend: &crate::backend::LocalBackend,
+    name: &str,
+) -> MicrosandboxResult<()> {
+    let client =
+        fs::local::connect_agent_with_timeout(local_backend, name, AGENT_SHUTDOWN_CONNECT_TIMEOUT)
+            .await?;
+    client.send(0, MessageType::Shutdown, &()).await?;
     Ok(())
 }
 
@@ -1198,10 +1232,10 @@ impl Sandbox {
     /// Request graceful shutdown and return once the request is sent.
     ///
     /// Routes through the backend trait. On local this connects to the agent
-    /// UDS and sends `core.shutdown` (agentd runs `sync()` +
+    /// endpoint and sends `core.shutdown` (agentd runs `sync()` +
     /// `reboot(RB_POWER_OFF)` for a clean ext4 unmount), falling back to
-    /// SIGTERM via PID if the socket is unreachable. On cloud this issues
-    /// `POST /v1/sandboxes/by-name/:name/stop`.
+    /// platform process termination via PID if the endpoint is unreachable. On
+    /// cloud this issues `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
@@ -1275,6 +1309,8 @@ impl Sandbox {
             .await
     }
 
+    /// Trigger a graceful drain. Unix local uses SIGUSR1; Windows local uses
+    /// the agent shutdown path. Cloud sandboxes currently return `Unsupported`.
     /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
     pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
         self.request_kill().await?;
@@ -1290,8 +1326,8 @@ impl Sandbox {
         }
     }
 
-    /// Trigger a graceful drain (SIGUSR1 to the libkrun PID on local).
-    /// Cloud sandboxes currently return `Unsupported`.
+    /// Trigger a graceful drain. Unix local uses SIGUSR1; Windows local uses
+    /// the agent shutdown path. Cloud sandboxes currently return `Unsupported`.
     pub async fn drain(&self) -> MicrosandboxResult<()> {
         self.request_drain().await
     }
@@ -1817,6 +1853,7 @@ fn select_tty_term(term: Option<&str>) -> String {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
     let mut buf = [0u8; 1024];
     let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -1839,6 +1876,7 @@ pub(crate) fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<st
     Ok(std::path::PathBuf::from(path))
 }
 
+#[cfg(unix)]
 pub(crate) fn open_nonblocking_terminal_input(
     path: &std::path::Path,
 ) -> std::io::Result<std::fs::File> {
@@ -1856,6 +1894,7 @@ pub(crate) fn open_nonblocking_terminal_input(
     Ok(file)
 }
 
+#[cfg(unix)]
 pub(crate) fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n < 0 {
@@ -1866,13 +1905,23 @@ pub(crate) fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::R
 }
 
 fn stop_result_from_exit_status(name: &str, status: ExitStatus) -> SandboxStopResult {
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
 
     SandboxStopResult {
         name: name.to_string(),
         status: SandboxStatus::Stopped,
         exit_code: status.code(),
-        signal: status.signal(),
+        signal: {
+            #[cfg(unix)]
+            {
+                status.signal()
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        },
         observed_at: chrono::Utc::now(),
         source: Some("owned process wait".to_string()),
     }
@@ -1942,7 +1991,15 @@ pub(super) async fn reconcile_sandbox_runtime_state(
         return Ok(sandbox);
     }
 
-    mark_sandbox_runtime_stale(pools.write(), sandbox.id, Some(run.id)).await?;
+    let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
+    mark_sandbox_runtime_stale(
+        pools.write(),
+        sandbox.id,
+        Some(run.id),
+        terminal_status,
+        reason,
+    )
+    .await?;
 
     sandbox_entity::Entity::find_by_id(sandbox.id)
         .one(pools.read())
@@ -1996,10 +2053,30 @@ fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
         .filter(|pid| pid_is_alive(*pid))
 }
 
+fn stale_runtime_terminal_state(
+    status: SandboxStatus,
+) -> (SandboxStatus, run_entity::TerminationReason) {
+    match status {
+        // Draining means a stop/drain request was already accepted. If the
+        // owning runtime is now gone, the lifecycle reached its requested
+        // terminal state even when the original observer could not reap it.
+        SandboxStatus::Draining => (
+            SandboxStatus::Stopped,
+            run_entity::TerminationReason::ShutdownRequested,
+        ),
+        _ => (
+            SandboxStatus::Crashed,
+            run_entity::TerminationReason::InternalError,
+        ),
+    }
+}
+
 async fn mark_sandbox_runtime_stale(
     db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
+    terminal_status: SandboxStatus,
+    reason: run_entity::TerminationReason,
 ) -> MicrosandboxResult<()> {
     db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
@@ -2010,23 +2087,17 @@ async fn mark_sandbox_runtime_stale(
                     run_entity::Column::Status,
                     Expr::value(run_entity::RunStatus::Terminated),
                 )
-                .col_expr(
-                    run_entity::Column::TerminationReason,
-                    Expr::value(run_entity::TerminationReason::InternalError),
-                )
+                .col_expr(run_entity::Column::TerminationReason, Expr::value(reason))
                 .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
                 .filter(run_entity::Column::Id.eq(run_id))
                 .exec(&txn)
                 .await?;
         }
 
-        // Only mark Crashed if the sandbox is still Running or Draining. This
-        // prevents a concurrent start() from having its Running status overwritten.
+        // Only reconcile an active row. This prevents a concurrent start()
+        // from having its newly-terminal or newly-running status overwritten.
         sandbox_entity::Entity::update_many()
-            .col_expr(
-                sandbox_entity::Column::Status,
-                Expr::value(SandboxStatus::Crashed),
-            )
+            .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
             .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .filter(
@@ -2042,17 +2113,10 @@ async fn mark_sandbox_runtime_stale(
 }
 
 pub(super) fn pid_is_alive(pid: i32) -> bool {
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(code) if code == libc::EPERM
-    )
+    microsandbox_utils::process::pid_is_alive(pid)
 }
 
+#[cfg(unix)]
 fn pid_is_dead_or_reaped(pid: i32) -> bool {
     let mut status = 0;
     let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
@@ -2061,6 +2125,68 @@ fn pid_is_dead_or_reaped(pid: i32) -> bool {
     }
 
     !pid_is_alive(pid)
+}
+
+#[cfg(windows)]
+fn pid_is_dead_or_reaped(pid: i32) -> bool {
+    !pid_is_alive(pid)
+}
+
+#[cfg(unix)]
+fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
+    terminate_pid(pid)
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: i32) -> MicrosandboxResult<()> {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: i32) -> MicrosandboxResult<()> {
+    terminate_pid(pid)
+}
+
+#[cfg(unix)]
+fn drain_pid(pid: i32) -> MicrosandboxResult<()> {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGUSR1,
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: i32) -> MicrosandboxResult<()> {
+    let pid = u32::try_from(pid)
+        .map_err(|_| crate::MicrosandboxError::Runtime(format!("invalid Windows pid: {pid}")))?;
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let result = unsafe { TerminateProcess(handle, 1) };
+    let close_result = unsafe { CloseHandle(handle) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if close_result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 fn image_pull_policy(policy: PullPolicy) -> microsandbox_image::PullPolicy {
@@ -2345,10 +2471,7 @@ async fn stop_sandbox_for_replacement(
         // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
         if !grace.is_zero() {
             for pid in &pids {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(*pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
+                let _ = terminate_pid_gracefully(*pid);
             }
             wait_for_pids_to_exit(&pids, grace).await;
         }
@@ -2362,10 +2485,7 @@ async fn stop_sandbox_for_replacement(
         // zombie reaps on its own (tokio's SIGCHLD driver when we own
         // it, or the foreign parent's wait machinery otherwise).
         for pid in pids.iter().copied().filter(|p| pid_is_alive(*p)) {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            let _ = kill_pid(pid);
         }
     }
 
@@ -2605,11 +2725,14 @@ fn build_overlay_upper_tree(tree: Option<tree::FileTree>) -> tree::FileTree {
 mod tests {
     use std::{
         fs,
-        os::fd::{AsRawFd, FromRawFd, OwnedFd},
         path::PathBuf,
-        process::Command,
         sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
+    };
+    #[cfg(unix)]
+    use std::{
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        process::Command,
     };
 
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
@@ -2620,7 +2743,9 @@ mod tests {
         sandbox::OciRootfsSource,
     };
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+    #[cfg(unix)]
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use sea_orm::{EntityTrait, Set};
     use tempfile::tempdir;
 
     use super::{
@@ -2770,6 +2895,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_shared_tty_fd_flags_are_shared_across_dups() {
         let pty = nix::pty::openpty(None, None).unwrap();
         let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
@@ -2796,6 +2922,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_open_nonblocking_terminal_input_keeps_existing_tty_fds_blocking() {
         let pty = nix::pty::openpty(None, None).unwrap();
         let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
@@ -3203,6 +3330,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_sandbox_runtime_state_marks_dead_draining_stopped() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let config = test_config("draining-stale");
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        super::update_sandbox_status(pools.write(), sandbox_id, SandboxStatus::Draining)
+            .await
+            .unwrap();
+
+        let run = run_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(dead_pid())),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        };
+        let run_id = run_entity::Entity::insert(run)
+            .exec(pools.write())
+            .await
+            .unwrap()
+            .last_insert_id;
+
+        let sandbox = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        let reconciled = reconcile_sandbox_runtime_state(&pools, sandbox)
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status, SandboxStatus::Stopped);
+
+        let run = run_entity::Entity::find_by_id(run_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, run_entity::RunStatus::Terminated);
+        assert_eq!(
+            run.termination_reason,
+            Some(run_entity::TerminationReason::ShutdownRequested)
+        );
+        assert!(run.terminated_at.is_some());
+    }
+
+    #[tokio::test]
     async fn test_prepare_create_target_force_replaces_stale_running_sandbox_state() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3242,6 +3416,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_prepare_create_target_force_replaces_running_sandbox() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3328,6 +3503,7 @@ mod tests {
     /// live, stopped, crashed, and starting (no run record) sandboxes are
     /// left untouched.
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_reap_marks_only_dead_running_and_draining_sandboxes() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3368,7 +3544,7 @@ mod tests {
         .await
         .unwrap();
 
-        // --- Sandbox C: Draining + dead PID → should become Crashed ---
+        // --- Sandbox C: Draining + dead PID → should become Stopped ---
         let cfg_c = test_config("draining-dead");
         let id_c = insert_sandbox_record(pools.write(), &cfg_c).await.unwrap();
         super::update_sandbox_status(pools.write(), id_c, SandboxStatus::Draining)
@@ -3423,7 +3599,7 @@ mod tests {
 
         assert_eq!(load(id_a).await.status, SandboxStatus::Crashed);
         assert_eq!(load(id_b).await.status, SandboxStatus::Running);
-        assert_eq!(load(id_c).await.status, SandboxStatus::Crashed);
+        assert_eq!(load(id_c).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_d).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_e).await.status, SandboxStatus::Running);
 

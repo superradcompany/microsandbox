@@ -4,7 +4,8 @@
 //! During connection, the relay assigns a non-overlapping correlation ID range
 //! and sends the cached `core.ready` payload so the client can begin issuing
 //! commands immediately. Unix domain sockets are available with the `uds`
-//! feature; the `stream` feature drives the client over any
+//! feature on Unix hosts, Windows named pipes are available with the
+//! `named-pipe` feature on Windows hosts, and the `stream` feature drives the client over any
 //! `AsyncRead + AsyncWrite` byte stream (e.g. a caller-owned, pre-authenticated
 //! transport adapted to bytes).
 //!
@@ -22,7 +23,7 @@
 use std::collections::HashMap;
 #[cfg(feature = "stream")]
 use std::future::Future;
-#[cfg(feature = "uds")]
+#[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
 use std::path::Path;
 #[cfg(feature = "stream")]
 use std::pin::Pin;
@@ -42,8 +43,10 @@ use microsandbox_protocol::{
 use serde::Serialize;
 #[cfg(feature = "stream")]
 use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(feature = "uds")]
+#[cfg(all(feature = "uds", unix))]
 use tokio::net::UnixStream;
+#[cfg(all(feature = "named-pipe", windows))]
+use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 #[cfg(feature = "stream")]
@@ -58,6 +61,9 @@ use super::error::{AgentClientError, AgentClientResult};
 /// Default handshake timeout used by [`AgentClient::connect`].
 #[cfg(feature = "stream")]
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(all(feature = "named-pipe", windows))]
+const WINDOWS_PIPE_CONNECT_RETRY: Duration = Duration::from_millis(10);
 
 #[cfg(feature = "stream")]
 const WRITER_QUEUE_CAPACITY: usize = 1024;
@@ -160,16 +166,17 @@ impl AgentProtocol {
 }
 
 impl AgentClient {
-    /// Connect to a Unix domain socket agent relay using the default 10s
-    /// handshake timeout.
-    #[cfg(feature = "uds")]
+    /// Connect to a local agent relay using the default 10s handshake timeout.
+    ///
+    /// Uses a Unix domain socket on Unix when the `uds` feature is enabled, and
+    /// a Windows named pipe on Windows when the `named-pipe` feature is enabled.
+    #[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         Self::connect_with_timeout(sock_path, DEFAULT_HANDSHAKE_TIMEOUT).await
     }
 
-    /// Connect to a Unix domain socket agent relay using an explicit
-    /// handshake timeout.
-    #[cfg(feature = "uds")]
+    /// Connect to a local agent relay using an explicit handshake timeout.
+    #[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
     pub async fn connect_with_timeout(
         sock_path: impl AsRef<Path>,
         timeout: Duration,
@@ -183,19 +190,13 @@ impl AgentClient {
     /// `deadline` bounds both handshake reads. Without it, an accepted
     /// connection that stalls (e.g. a sandbox alive but wedged before
     /// writing the handshake bytes) would block this call indefinitely.
-    #[cfg(feature = "uds")]
+    #[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
     pub async fn connect_with_deadline(
         sock_path: impl AsRef<Path>,
         deadline: Instant,
     ) -> AgentClientResult<Self> {
         let sock_path = sock_path.as_ref();
-        let stream =
-            UnixStream::connect(sock_path)
-                .await
-                .map_err(|source| AgentClientError::Connect {
-                    path: sock_path.to_path_buf(),
-                    source,
-                })?;
+        let stream = connect_local_stream(sock_path, deadline).await?;
         Self::connect_stream_with_deadline(stream, deadline).await
     }
 
@@ -520,6 +521,49 @@ impl AgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(all(feature = "uds", unix))]
+async fn connect_local_stream(
+    sock_path: &Path,
+    _deadline: Instant,
+) -> AgentClientResult<UnixStream> {
+    UnixStream::connect(sock_path)
+        .await
+        .map_err(|source| AgentClientError::Connect {
+            path: sock_path.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(all(feature = "named-pipe", windows))]
+async fn connect_local_stream(
+    pipe_path: &Path,
+    deadline: Instant,
+) -> AgentClientResult<tokio::net::windows::named_pipe::NamedPipeClient> {
+    loop {
+        match ClientOptions::new().open(pipe_path) {
+            Ok(stream) => return Ok(stream),
+            Err(source)
+                if is_retryable_named_pipe_connect_error(&source) && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(WINDOWS_PIPE_CONNECT_RETRY).await;
+            }
+            Err(source) => {
+                return Err(AgentClientError::Connect {
+                    path: pipe_path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "named-pipe", windows))]
+fn is_retryable_named_pipe_connect_error(error: &std::io::Error) -> bool {
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+}
+
 #[cfg(feature = "stream")]
 async fn perform_handshake<R>(
     reader: &mut R,
@@ -808,22 +852,22 @@ fn encode_message_body<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use microsandbox_protocol::core::Ready;
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use microsandbox_protocol::exec::ExecRequest;
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use microsandbox_protocol::message::PROTOCOL_VERSION;
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use tokio::io::AsyncWriteExt;
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use tokio::net::UnixListener;
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     use tokio::sync::oneshot;
 
     use super::*;
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     #[tokio::test]
     async fn connect_decodes_ready_payload() {
         let temp = tempfile::tempdir().unwrap();
@@ -864,7 +908,53 @@ mod tests {
         assert_eq!(raw_msg.t, MessageType::Ready);
     }
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "named-pipe", windows))]
+    #[tokio::test]
+    async fn connect_decodes_ready_payload_from_named_pipe() {
+        use microsandbox_protocol::core::Ready;
+        use microsandbox_protocol::message::PROTOCOL_VERSION;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
+        let pipe_path = unique_named_pipe("ready");
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .pipe_mode(PipeMode::Byte)
+            .create(&pipe_path)
+            .unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+            agent_version: "named-pipe-test".to_string(),
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            let mut server = server;
+            server.connect().await.unwrap();
+            server.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server.write_all(&8u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server, &ready_msg).await.unwrap();
+        });
+
+        let client = AgentClient::connect_with_deadline(
+            std::path::Path::new(&pipe_path),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.protocol(), AgentProtocol::Current);
+        assert_eq!(client.negotiated_version(), PROTOCOL_VERSION);
+        assert_eq!(client.agent_version(), "named-pipe-test");
+        let decoded = client.ready().unwrap();
+        assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
+        assert_eq!(decoded.init_time_ns, ready.init_time_ns);
+        assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
+    }
+
+    #[cfg(all(feature = "uds", unix))]
     #[tokio::test]
     async fn connect_negotiates_down_to_older_guest_generation() {
         let temp = tempfile::tempdir().unwrap();
@@ -905,14 +995,14 @@ mod tests {
         assert!(!client.supports(MessageType::FsRequest));
     }
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     #[tokio::test]
     async fn connect_accepts_legacy_relay_handshake() {
         assert_accepts_legacy_relay_handshake(0).await;
         assert_accepts_legacy_relay_handshake(268_435_455).await;
     }
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     #[tokio::test]
     async fn legacy_relay_requests_use_v1_and_legacy_id_range() {
         let temp = tempfile::tempdir().unwrap();
@@ -1005,7 +1095,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     #[tokio::test]
     async fn connect_preserves_current_peer_protocol_version() {
         let temp = tempfile::tempdir().unwrap();
@@ -1042,7 +1132,7 @@ mod tests {
         assert!(!client.supports(MessageType::TcpConnect));
     }
 
-    #[cfg(feature = "uds")]
+    #[cfg(all(feature = "uds", unix))]
     async fn assert_accepts_legacy_relay_handshake(id_offset: u32) {
         let temp = tempfile::tempdir().unwrap();
         let sock_path = temp.path().join("agent.sock");
@@ -1072,6 +1162,18 @@ mod tests {
         assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
         assert_eq!(decoded.init_time_ns, ready.init_time_ns);
         assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
+    }
+
+    #[cfg(all(feature = "named-pipe", windows))]
+    fn unique_named_pipe(name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!(
+            r"\\.\pipe\msb-agent-client-{name}-{}-{nanos}",
+            std::process::id()
+        )
     }
 
     #[cfg(feature = "stream")]

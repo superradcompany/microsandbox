@@ -13,17 +13,36 @@ mod error;
 // Constants: Host↔Guest Shutdown Timings
 //--------------------------------------------------------------------------------------------------
 
+const HANDOFF_POWEROFF_TIMEOUT_SECS: u64 = 5;
+const SHUTDOWN_FLUSH_MARGIN_SECS: u64 = 3;
+const NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS: u64 = 2;
+
 /// Maximum time agentd spends in its handoff-mode poweroff sequence.
 ///
 /// In init-handoff sandboxes (systemd, openrc, …) agentd's shutdown
 /// handler signals the new PID 1 with `SIGRTMIN+4`, sleeps for this
 /// duration to give the init a chance to act, then falls back to
-/// `SIGTERM`. The host's [`SHUTDOWN_FLUSH_TIMEOUT`] must exceed this
-/// so the host's fallback exit doesn't cut the sequence short.
-pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// `SIGTERM`. The host's handoff shutdown fallback must exceed this
+/// so it doesn't cut the sequence short.
+pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(HANDOFF_POWEROFF_TIMEOUT_SECS);
 
-/// How long the host waits after forwarding `core.shutdown` to agentd
-/// before triggering its own VMM exit fallback.
+/// Additional host-side margin after agentd's handoff poweroff grace.
+///
+/// This gives the guest init time to react to agentd's fallback signal before
+/// the host gives up and tears down the VMM process.
+pub const SHUTDOWN_FLUSH_MARGIN: std::time::Duration =
+    std::time::Duration::from_secs(SHUTDOWN_FLUSH_MARGIN_SECS);
+
+/// Host fallback window for normal sandboxes where agentd remains PID 1.
+///
+/// agentd can synchronously `sync()`, remount the root read-only, and request
+/// kernel poweroff directly in this mode, so normal development sandboxes
+/// should not pay the longer handoff-init grace.
+pub const NORMAL_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS);
+
+/// Host fallback window for sandboxes that hand PID 1 to another init.
 ///
 /// agentd uses this window to `sync()` block-backed root filesystems
 /// and power off the kernel cleanly (or run its handoff sequence —
@@ -31,17 +50,25 @@ pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// exits well inside the window and the host fallback is a no-op;
 /// the fallback only fires when the guest is wedged.
 ///
-/// Must exceed [`HANDOFF_POWEROFF_TIMEOUT`] plus margin for the
+/// Equals [`HANDOFF_POWEROFF_TIMEOUT`] plus [`SHUTDOWN_FLUSH_MARGIN`] for the
 /// init's own signal handling — enforced at compile time below.
-pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+pub const HANDOFF_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(HANDOFF_POWEROFF_TIMEOUT_SECS + SHUTDOWN_FLUSH_MARGIN_SECS);
+
+/// Legacy name for the handoff-init shutdown fallback window.
+///
+/// New runtime code should choose between [`NORMAL_SHUTDOWN_FLUSH_TIMEOUT`]
+/// and [`HANDOFF_SHUTDOWN_FLUSH_TIMEOUT`] based on whether a sandbox uses
+/// handoff init.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = HANDOFF_SHUTDOWN_FLUSH_TIMEOUT;
 
 // Compile-time invariant: the host must wait at least as long as
 // agentd's longest internal grace, otherwise the host fallback will
 // cut agentd's handoff sequence short and we'll silently strand
 // init-handoff sandboxes.
 const _: () = assert!(
-    SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
-    "SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
+    HANDOFF_SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
+    "HANDOFF_SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
 );
 
 //--------------------------------------------------------------------------------------------------

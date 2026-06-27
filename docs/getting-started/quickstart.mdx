@@ -5,7 +5,7 @@ icon: "bolt"
 ---
 
 <Note>
-  microsandbox requires **Linux with KVM** enabled, or **macOS with Apple Silicon** (M-series chip). Both use hardware virtualization.
+  microsandbox requires **glibc-based Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows 11 with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization.
 </Note>
 
 <Tip>
@@ -37,13 +37,23 @@ icon: "bolt"
     go get github.com/superradcompany/microsandbox/sdk/go
     ```
 
-    ```bash CLI
+    ```bash CLI (Linux & macOS)
     curl -fsSL https://install.microsandbox.dev | sh
+    ```
+
+    ```powershell CLI (Windows)
+    irm https://install.microsandbox.dev/windows | iex
     ```
 
     </CodeGroup>
 
-    The CLI installer creates command links in `~/.local/bin/` and does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it.
+    microsandbox uses hardware virtualization: Linux needs KVM, macOS needs Apple Silicon, and Windows needs Windows Hypervisor Platform. Check your local setup with:
+
+    ```bash
+    msb doctor
+    ```
+
+    For platform-specific setup notes, see [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows).
   </Step>
 
   <Step title="Run code in a sandbox">
@@ -143,6 +153,9 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
 ## Next steps
 
 - [Understand sandbox configuration](/sandboxes/overview): resources, images, volumes, and lifecycle
+- [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions
+- [Troubleshoot macOS setup](/troubleshooting/macos): Apple Silicon and local runtime checks
+- [Troubleshoot Windows setup](/troubleshooting/windows): WHP, `msb doctor`, and Windows 11 notes
 - [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
 - [Control network access](/networking/overview): policies, DNS interception, and secret protection
 - [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

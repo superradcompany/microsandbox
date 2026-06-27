@@ -567,6 +567,7 @@ async fn handle_connect_tunnel(
             network_policy,
             proxy_connect,
             upstream_stream: Some(proxy_stream),
+            via_connect: expected_sni.is_some(),
             expected_sni,
         },
         from_smoltcp,

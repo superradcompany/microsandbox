@@ -399,6 +399,13 @@ async fn apply_one(
             }
             #[cfg(unix)]
             tokio::fs::symlink(target, &link_path).await?;
+            #[cfg(windows)]
+            {
+                let _ = target;
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "symlink patches are not supported for Windows host bind roots".into(),
+                ));
+            }
         }
         Patch::Mkdir { path, mode } => {
             let dest = resolve_guest_path(target_dir, path)?;
@@ -626,10 +633,10 @@ async fn copy_dir_into_tree(
     Ok(())
 }
 
-async fn source_mode(path: &Path, is_dir: bool) -> MicrosandboxResult<u16> {
+async fn source_mode(_path: &Path, is_dir: bool) -> MicrosandboxResult<u16> {
     #[cfg(unix)]
     {
-        let metadata = fs::symlink_metadata(path).await?;
+        let metadata = fs::symlink_metadata(_path).await?;
         let mode = metadata.permissions().mode() as u16 & 0o7777;
         if mode == 0 {
             Ok(if is_dir { 0o755 } else { 0o644 })
@@ -973,6 +980,14 @@ async fn set_permissions(path: &Path, mode: u32) -> MicrosandboxResult<()> {
     let perms = std::fs::Permissions::from_mode(mode);
     fs::set_permissions(path, perms).await?;
     Ok(())
+}
+
+/// Set Unix file permissions.
+#[cfg(windows)]
+async fn set_permissions(_path: &Path, _mode: u32) -> MicrosandboxResult<()> {
+    Err(crate::MicrosandboxError::InvalidConfig(
+        "POSIX patch modes are not supported for Windows host bind roots".into(),
+    ))
 }
 
 /// Recursively copy a directory.

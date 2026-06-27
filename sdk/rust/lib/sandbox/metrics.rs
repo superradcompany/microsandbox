@@ -218,13 +218,15 @@ fn open_registry(local: &LocalBackend) -> MicrosandboxResult<Option<MetricsRegis
     let name = local.config().metrics_registry_shm_name();
     match MetricsRegistry::open(&name) {
         Ok(reg) => Ok(Some(reg)),
-        Err(microsandbox_metrics::MetricsError::Io(ref e))
-            if e.raw_os_error() == Some(libc::ENOENT) =>
-        {
+        Err(microsandbox_metrics::MetricsError::Io(ref e)) if is_missing_registry_io_error(e) => {
             Ok(None)
         }
         Err(err) => Err(metrics_error(err)),
     }
+}
+
+fn is_missing_registry_io_error(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ENOENT)
 }
 
 fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetrics {
@@ -256,4 +258,30 @@ fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
 
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
     u64::from(config.spec.resources.memory_mib) * 1024 * 1024
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_registry_io_error;
+
+    #[test]
+    fn missing_registry_accepts_error_kind_not_found() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing mapping");
+
+        assert!(is_missing_registry_io_error(&err));
+    }
+
+    #[test]
+    fn missing_registry_accepts_unix_enoent() {
+        let err = std::io::Error::from_raw_os_error(libc::ENOENT);
+
+        assert!(is_missing_registry_io_error(&err));
+    }
+
+    #[test]
+    fn missing_registry_rejects_other_io_errors() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+
+        assert!(!is_missing_registry_io_error(&err));
+    }
 }

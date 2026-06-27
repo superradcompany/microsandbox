@@ -1,10 +1,8 @@
 //! Container image archive import/export.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -18,6 +16,7 @@ use crate::{
     CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageConfig, ImageError,
     ImageResult, Platform, Reference, Registry,
     erofs::{ErofsEntryKind, ErofsReader},
+    path_bytes::{os_str_bytes, os_string_from_vec, path_bytes},
     tar::Compression,
 };
 
@@ -1290,8 +1289,8 @@ fn append_whiteout<W: Write>(
     };
     let mut path = entry.path.clone();
     let mut whiteout_name = b".wh.".to_vec();
-    whiteout_name.extend_from_slice(file_name.as_bytes());
-    path.set_file_name(OsString::from_vec(whiteout_name));
+    whiteout_name.extend_from_slice(os_str_bytes(file_name));
+    path.set_file_name(os_string_from_vec(whiteout_name).map_err(ImageError::Io)?);
     append_empty_file(builder, &path, entry)
 }
 
@@ -1508,7 +1507,7 @@ fn apply_header_metadata(header: &mut tar::Header, entry: &crate::erofs::ErofsTr
 
 fn normalized_archive_path(entry: &tar::Entry<'_, File>) -> ImageResult<String> {
     let path = entry.path().map_err(ImageError::Io)?;
-    let bytes = path.as_os_str().as_bytes();
+    let bytes = path_bytes(path.as_ref());
     let normalized = if let Some(stripped) = bytes.strip_prefix(b"./") {
         stripped
     } else {

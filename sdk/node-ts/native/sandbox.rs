@@ -781,11 +781,19 @@ pub fn sandbox_stop_result_to_js(
 }
 
 pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    let code = status.code().unwrap_or_else(|| {
-        // If no code, the process was killed by a signal.
-        status.signal().map(|s| 128 + s).unwrap_or(-1)
-    });
+    #[cfg(unix)]
+    let code = {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.code().unwrap_or_else(|| {
+            // If no code exists on Unix, the process was killed by a signal.
+            status.signal().map(|s| 128 + s).unwrap_or(-1)
+        })
+    };
+
+    #[cfg(not(unix))]
+    let code = status.code().unwrap_or(-1);
+
     ExitStatus {
         code,
         success: status.success(),

@@ -74,6 +74,15 @@
               "images/overview",
               "images/disk-images"
             ]
+          },
+          {
+            "group": "Troubleshooting",
+            "icon": "screwdriver-wrench",
+            "pages": [
+              "troubleshooting/linux",
+              "troubleshooting/macos",
+              "troubleshooting/windows"
+            ]
           }
         ]
       },

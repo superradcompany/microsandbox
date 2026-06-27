@@ -19,6 +19,10 @@ const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
 const REAL_SECRET: &str = "real-secret-connect";
 const PLACEHOLDER: &str = "MSB_API_KEY";
 
+/// Distinct from the proxy (`host.microsandbox.internal`) so proxy IP and target IP
+/// are separate DNS cache entries, matching the corporate proxy topology.
+const FAKE_TARGET_HOST: &str = "target.msb-test.internal";
+
 // Types
 
 /// Minimal HTTP CONNECT proxy that splices one tunnelled connection.
@@ -189,8 +193,10 @@ async fn handle_connect(client: TcpStream, target_port: u16) -> io::Result<()> {
         }
     }
 
-    // host.microsandbox.internal only resolves inside the VM; rewrite to loopback.
-    let connect_addr = if target.starts_with("host.microsandbox.internal:") {
+    // These hostnames only resolve inside the VM; rewrite to loopback.
+    let connect_addr = if target.starts_with("host.microsandbox.internal:")
+        || target.starts_with(FAKE_TARGET_HOST)
+    {
         format!("127.0.0.1:{target_port}")
     } else {
         target
@@ -599,5 +605,166 @@ echo "status=$?"
         "CONNECT proxy must not receive a raw placeholder or real secret in outer headers; got: {proxy_auth:?}"
     );
 
+    teardown(sb, name).await;
+}
+
+/// Corporate proxy topology where the target is never DNS-resolved by the guest.
+/// curl sends `CONNECT target:PORT` raw; the DNS cache has no entry for the target.
+#[msb_test]
+async fn https_connect_proxy_substitutes_secret_when_target_not_in_dns_cache() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut target = TargetHttps::start().await.expect("target fixture");
+    let target_port = target.port();
+    let mut proxy = ConnectProxy::start(target_port)
+        .await
+        .expect("proxy fixture");
+    let proxy_port = proxy.port();
+    let name = "http-connect-secret-no-dns-cache";
+
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_host(FAKE_TARGET_HOST)
+        })
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all()).tls(|t| {
+                t.intercepted_ports(vec![target_port])
+                    .verify_upstream(false)
+            })
+        })
+        .create()
+        .await
+        .expect("create sandbox");
+
+    // Inject the fake target into /etc/hosts so the OS can reach it,
+    // but do NOT resolve it via DNS first; the DNS cache stays empty.
+    let out = sb
+        .shell(format!(
+            r#"GATEWAY_IP=$(awk '/^nameserver/{{print $2; exit}}' /etc/resolv.conf)
+echo "$GATEWAY_IP {FAKE_TARGET_HOST}" >> /etc/hosts
+curl -k --http1.1 -m 30 -sS -o /dev/null \
+  -w 'code=%{{http_code}}' \
+  -H "Authorization: Bearer $API_KEY" \
+  --proxytunnel \
+  --proxy http://host.microsandbox.internal:{proxy_port} \
+  https://{FAKE_TARGET_HOST}:{target_port}/api"#
+        ))
+        .await
+        .expect("curl through connect proxy");
+
+    let stdout = out.stdout().unwrap_or_default();
+    if !stdout.contains("code=200") {
+        let proxy_status = tokio::time::timeout(std::time::Duration::from_secs(3), proxy.join())
+            .await
+            .map_err(|_| "proxy timed out".to_string())
+            .and_then(|res| res.map_err(|err| err.to_string()));
+        let target_auth =
+            tokio::time::timeout(std::time::Duration::from_secs(3), target.received_auth())
+                .await
+                .map_err(|_| "target timed out".to_string())
+                .and_then(|res| res.map_err(|err| err.to_string()));
+        panic!(
+            "expected 200, got: {stdout} (stderr: {}), proxy={proxy_status:?}, target={target_auth:?}",
+            out.stderr().unwrap_or_default()
+        );
+    }
+
+    let auth = target.received_auth().await.expect("target auth");
+    assert_eq!(
+        auth,
+        format!("Bearer {REAL_SECRET}"),
+        "secret must be substituted even when the target was never in the DNS cache; got: {auth:?}"
+    );
+
+    let _ = proxy.join().await;
+    teardown(sb, name).await;
+}
+
+/// Same corporate proxy topology, but the guest DNS-resolves the target before
+/// the proxied request. Cache is seeded with target → gateway IP, which differs
+/// from the proxy IP.
+#[msb_test]
+async fn https_connect_proxy_substitutes_secret_after_prior_dns_lookup() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut target = TargetHttps::start().await.expect("target fixture");
+    let target_port = target.port();
+    let mut proxy = ConnectProxy::start(target_port)
+        .await
+        .expect("proxy fixture");
+    let proxy_port = proxy.port();
+    let name = "http-connect-secret-dns-pre-resolved";
+
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_host(FAKE_TARGET_HOST)
+        })
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all()).tls(|t| {
+                t.intercepted_ports(vec![target_port])
+                    .verify_upstream(false)
+            })
+        })
+        .create()
+        .await
+        .expect("create sandbox");
+
+    // Inject the fake target into /etc/hosts then resolve it via
+    // nslookup so the sandbox DNS cache is seeded with
+    // FAKE_TARGET_HOST → gateway IP before the proxied request.
+    let out = sb
+        .shell(format!(
+            r#"GATEWAY_IP=$(awk '/^nameserver/{{print $2; exit}}' /etc/resolv.conf)
+echo "$GATEWAY_IP {FAKE_TARGET_HOST}" >> /etc/hosts
+nslookup {FAKE_TARGET_HOST} >/dev/null 2>&1
+curl -k --http1.1 -m 30 -sS -o /dev/null \
+  -w 'code=%{{http_code}}' \
+  -H "Authorization: Bearer $API_KEY" \
+  --proxytunnel \
+  --proxy http://host.microsandbox.internal:{proxy_port} \
+  https://{FAKE_TARGET_HOST}:{target_port}/api"#
+        ))
+        .await
+        .expect("curl after dns pre-resolve");
+
+    let stdout = out.stdout().unwrap_or_default();
+    if !stdout.contains("code=200") {
+        let proxy_status = tokio::time::timeout(std::time::Duration::from_secs(3), proxy.join())
+            .await
+            .map_err(|_| "proxy timed out".to_string())
+            .and_then(|res| res.map_err(|err| err.to_string()));
+        let target_auth =
+            tokio::time::timeout(std::time::Duration::from_secs(3), target.received_auth())
+                .await
+                .map_err(|_| "target timed out".to_string())
+                .and_then(|res| res.map_err(|err| err.to_string()));
+        panic!(
+            "expected 200, got: {stdout} (stderr: {}), proxy={proxy_status:?}, target={target_auth:?}",
+            out.stderr().unwrap_or_default()
+        );
+    }
+
+    let auth = target.received_auth().await.expect("target auth");
+    assert_eq!(
+        auth,
+        format!("Bearer {REAL_SECRET}"),
+        "secret must be substituted when target was DNS-resolved before the proxied request; got: {auth:?}"
+    );
+
+    let _ = proxy.join().await;
     teardown(sb, name).await;
 }

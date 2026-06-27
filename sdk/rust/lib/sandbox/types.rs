@@ -458,29 +458,9 @@ impl MountBuilder {
                 // `tag:host[:opts]`. Embedded separators in the host
                 // path would collide with that grammar and could
                 // silently inject policy options. Reject at the SDK
-                // boundary so callers get a clear error rather than a
-                // confusing parse failure later.
-                if let Some(s) = host.to_str() {
-                    if s.contains(',') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ',': {s}"
-                        )));
-                    }
-                    if s.contains(':') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ':': {s}"
-                        )));
-                    }
-                    if s.contains(';') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ';': {s}"
-                        )));
-                    }
-                } else {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "bind host path must be valid UTF-8".into(),
-                    ));
-                }
+                // boundary so callers get a clear error. Windows drive
+                // prefixes are the one allowed colon shape.
+                validate_host_path_wire_safe(&host, "bind host path")?;
                 VolumeMount::Bind {
                     host,
                     guest: self.guest,
@@ -803,6 +783,20 @@ impl ImageBuilder {
         self
     }
 
+    /// Use a host directory directly as the root filesystem (bind rootfs).
+    ///
+    /// The directory's contents become the guest root filesystem as-is — no
+    /// OCI pull and no overlay. Mutually exclusive with [`oci`](Self::oci) and
+    /// [`disk`](Self::disk).
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.bind("/srv/rootfs"))
+    /// ```
+    pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
+        self.source = Some(RootfsSource::Bind(host.into()));
+        self
+    }
+
     /// Consume the builder and return the resolved [`RootfsSource`].
     pub fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
         if let Some(e) = self.error {
@@ -810,7 +804,7 @@ impl ImageBuilder {
         }
         self.source.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "ImageBuilder: no image source set (call .oci() or .disk())".into(),
+                "ImageBuilder: no image source set (call .oci(), .disk(), or .bind())".into(),
             )
         })
     }
@@ -912,12 +906,28 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
         )));
     };
 
-    if path.contains(',') || path.contains(':') || path.contains(';') {
+    if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
         )));
     }
     Ok(())
+}
+
+fn has_forbidden_host_path_colon(path: &str) -> bool {
+    path.char_indices().any(|(index, c)| {
+        c == ':' && {
+            #[cfg(windows)]
+            {
+                !microsandbox_utils::is_windows_drive_separator_at(path, index)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = index;
+                true
+            }
+        }
+    })
 }
 
 fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {
@@ -1245,6 +1255,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn test_validate_volume_mounts_accepts_windows_drive_host_paths() {
+        let mounts = vec![
+            VolumeMount::Bind {
+                host: PathBuf::from(r"C:\Users\Stephen\data"),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+                quota_mib: None,
+            },
+            VolumeMount::DiskImage {
+                host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
+                guest: "/disk".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        validate_volume_mounts(&mounts).unwrap();
+    }
+
+    #[test]
     fn test_validate_volume_mounts_rejects_direct_empty_fstype() {
         let mount = VolumeMount::DiskImage {
             host: PathBuf::from("/host/data.raw"),
@@ -1539,6 +1573,17 @@ mod tests {
             .fstype("key=value")
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_builder_bind() {
+        let rootfs = ImageBuilder::new().bind("/srv/rootfs").build().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/srv/rootfs"))
+            }
+            _ => panic!("expected Bind"),
+        }
     }
 }
 

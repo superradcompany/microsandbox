@@ -355,12 +355,7 @@ enum LogFormat {
 fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
     match msb_home {
         Some(p) => Ok(p.to_path_buf()),
-        None => match std::env::var_os("MSB_HOME") {
-            Some(p) => Ok(PathBuf::from(p)),
-            None => Ok(dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("could not resolve $HOME for default --msb-home"))?
-                .join(".microsandbox")),
-        },
+        None => Ok(microsandbox_utils::resolve_home()),
     }
 }
 
