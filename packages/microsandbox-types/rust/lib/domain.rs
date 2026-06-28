@@ -13,7 +13,7 @@ use serde_json::Value;
 //--------------------------------------------------------------------------------------------------
 
 /// Default number of virtual CPUs in a sandbox specification.
-pub const DEFAULT_SANDBOX_CPUS: u8 = 1;
+pub const DEFAULT_SANDBOX_VCPUS: u8 = 1;
 
 /// Default guest memory in MiB in a sandbox specification.
 pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
@@ -1078,7 +1078,7 @@ pub struct SandboxSpec {
 #[serde(default)]
 pub struct SandboxResources {
     /// Number of virtual CPUs.
-    pub cpus: u8,
+    pub vcpus: u8,
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
@@ -1492,7 +1492,7 @@ impl Default for RootfsSource {
 impl Default for SandboxResources {
     fn default() -> Self {
         Self {
-            cpus: DEFAULT_SANDBOX_CPUS,
+            vcpus: DEFAULT_SANDBOX_VCPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             disk_size_mib: None,
         }
@@ -1961,7 +1961,7 @@ mod tests {
     fn sandbox_spec_default_uses_static_resource_defaults() {
         let spec = SandboxSpec::default();
 
-        assert_eq!(spec.resources.cpus, DEFAULT_SANDBOX_CPUS);
+        assert_eq!(spec.resources.vcpus, DEFAULT_SANDBOX_VCPUS);
         assert_eq!(spec.resources.memory_mib, DEFAULT_SANDBOX_MEMORY_MIB);
         assert_eq!(
             spec.runtime.metrics_sample_interval_ms,

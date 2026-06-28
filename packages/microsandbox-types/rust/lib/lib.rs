@@ -18,7 +18,7 @@ pub use cloud::{
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
 };
 pub use domain::{
-    CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS,
+    CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_VCPUS,
     DEFAULT_SANDBOX_MEMORY_MIB, DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions,
     InterceptCaConfig, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate,
     NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PublishedPortSpec,

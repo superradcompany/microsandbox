@@ -595,7 +595,7 @@ export type SandboxResources = {
 /**
  * Number of virtual CPUs.
  */
-cpus: number,
+vcpus: number,
 /**
  * Guest memory in MiB.
  */
