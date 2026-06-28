@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
+use console::style;
 use microsandbox_cli::{
     commands::{
         copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
@@ -181,9 +182,7 @@ struct CommandHelpLine {
 }
 
 /// ANSI styling state for custom top-level help.
-struct HelpStyles {
-    enabled: bool,
-}
+struct HelpStyles {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -192,44 +191,26 @@ struct HelpStyles {
 impl HelpStyles {
     /// Detect whether custom help should include ANSI styling.
     fn detect() -> Self {
-        Self {
-            enabled: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
-        }
+        Self {}
     }
 
     /// Style a help heading like clap's configured header style.
     fn header(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
-        format!("\x1b[1;33m{value}\x1b[0m")
+        style(value).yellow().bold().to_string()
     }
 
     /// Style a command or flag literal like clap's configured literal style.
     fn literal(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
-        format!("\x1b[1;34m{value}\x1b[0m")
+        style(value).blue().bold().to_string()
     }
 
     /// Add light styling to the default clap help fragments we preserve.
     fn style_default_help_fragment(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
         value.replacen("Usage:", &self.header("Usage:"), 1)
     }
 
     /// Style alias annotations in the same literal color as command names.
     fn style_aliases(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
         let Some((help, aliases)) = value.split_once(" [aliases: ") else {
             return value.to_string();
         };
@@ -295,7 +276,7 @@ fn main() {
             // Honor TTY detection + NO_COLOR; we set `ansi` explicitly
             // since with_ansi(true) overrides tracing-subscriber's
             // built-in detection.
-            let ansi = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
             match run_async_command_anyhow(command, log_level) {
                 Ok(()) => 0,
