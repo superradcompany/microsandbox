@@ -47,7 +47,7 @@ h4:has(.msb-hn) { margin-top: 5rem !important; }
   padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
 }
 .msb-param-key code { font-size: 13px; }
-.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; }
+.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; margin-left: 6px; }
 .msb-param-desc { font-size: 14px; opacity: .85; }
 
 /* back-references on types (returned by / used by) */
