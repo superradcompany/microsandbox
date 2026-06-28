@@ -10,19 +10,19 @@ Use this crate when you already have an agent relay endpoint and want direct pro
 
 ```toml
 [dependencies]
-microsandbox-agent-client = "0.6.0"
-microsandbox-protocol = "0.6.0"
+microsandbox-agent-client = "0.6.1"
+microsandbox-protocol = "0.6.1"
 ```
 
 The crate is transport-agnostic by default. Enable exactly the transport adapter you need:
 
 ```toml
 # Local microsandbox relay sockets.
-microsandbox-agent-client = { version = "0.6.0", features = ["uds"] }
+microsandbox-agent-client = { version = "0.6.1", features = ["uds"] }
 
 # Any caller-owned byte-stream transport (e.g. a pre-authenticated WebSocket
 # adapted to bytes).
-microsandbox-agent-client = { version = "0.6.0", features = ["stream"] }
+microsandbox-agent-client = { version = "0.6.1", features = ["stream"] }
 ```
 
 The high-level `microsandbox` SDK enables `uds` explicitly because local sandboxes are reached through Unix domain sockets.
@@ -99,7 +99,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 Enable the `stream` feature:
 
 ```toml
-microsandbox-agent-client = { version = "0.6.0", features = ["stream"] }
+microsandbox-agent-client = { version = "0.6.1", features = ["stream"] }
 ```
 
 Drive the client over any `AsyncRead + AsyncWrite` — the caller owns the dial and any authentication, then hands over the connected stream:
