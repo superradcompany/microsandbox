@@ -3,17 +3,16 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
- * Content width — on wide screens Mintlify pins the prose to a fixed, narrow
- * column, leaving a large dead zone between the sidebar and the content. Widen
- * the prose to 80% of the content area on large screens. This only raises
- * max-width (which the theme already centers) — no margin or overflow changes,
- * so it can't collapse the flex layout. The floor keeps the readable width on
- * mid-size screens (never narrows). #content-area is the region between the
- * sidebar and the table of contents.
+ * Content width — Mintlify caps #content-area at max-w-xl (36rem), centered
+ * with mx-auto, so on wide screens the content is a narrow column with large
+ * dead zones on either side. The region between the sidebar and the TOC is
+ * `calc(100% - 28rem)`; widen the content to 80% of that (mx-auto then leaves
+ * a 10% gutter on each side). Only applied on xl+ where that width applies, so
+ * mid-size screens are untouched. Overriding max-width keeps the existing
+ * centering — no margin/overflow changes, so the flex layout can't collapse.
  * -------------------------------------------------------------------------- */
-@media (min-width: 1536px) {
-  #content-area #content { max-width: none !important; }
-  #content-area .mdx-content { max-width: max(56rem, 80%) !important; }
+@media (min-width: 1280px) {
+  #content-area { max-width: calc((100% - 28rem) * 0.8) !important; }
 }
 
 /*
