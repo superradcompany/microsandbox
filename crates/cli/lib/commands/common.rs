@@ -1872,7 +1872,7 @@ fn parse_pull_policy(s: &str) -> anyhow::Result<microsandbox::sandbox::PullPolic
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Functions: Command resolution
 //--------------------------------------------------------------------------------------------------
 
 /// Parse a log level string.
@@ -1886,6 +1886,11 @@ fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
         "trace" => Ok(LogLevel::Trace),
         _ => anyhow::bail!("invalid log level: {s} (expected: error, warn, info, debug, trace)"),
     }
+}
+
+/// Return whether this invocation should use the terminal-attached PTY path.
+pub(crate) fn use_interactive_tty(stdin_is_terminal: bool, no_tty: bool) -> bool {
+    stdin_is_terminal && !no_tty
 }
 
 /// Resolve the command to run following OCI semantics.

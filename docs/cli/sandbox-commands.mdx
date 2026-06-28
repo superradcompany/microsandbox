@@ -48,6 +48,7 @@ Common flags:
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
 | `-d`, `--detach` | Boot in the background. Run work later with `msb exec` |
+| `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
 | `--net-rule` | Add a network policy rule |
@@ -166,6 +167,7 @@ msb exec devbox -- ls -la /app
 | Flag | Description |
 |------|-------------|
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
+| `--no-tty` | Disable PTY allocation and run non-interactively |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Override working directory |
 | `-u`, `--user` | Run the command as the specified guest user |
@@ -174,7 +176,7 @@ msb exec devbox -- ls -la /app
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
-  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
 </Tip>
 
 ## msb copy
