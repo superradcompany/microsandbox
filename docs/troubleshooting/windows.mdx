@@ -11,7 +11,7 @@ Windows 10 or later is supported in preview. Local sandboxes require Windows Hyp
 Install microsandbox with:
 
 ```powershell
-irm https://github.com/superradcompany/microsandbox/releases/latest/download/install.ps1 | iex
+irm https://install.microsandbox.dev/windows | iex
 ```
 
 The installer downloads the matching `microsandbox-windows-aarch64.zip` or `microsandbox-windows-x86_64.zip` release bundle, verifies it against `checksums.sha256`, installs into `%USERPROFILE%\.microsandbox` unless `MSB_HOME` is set, adds the install `bin` directory to the current user's PATH when needed, and runs `msb doctor`. If the doctor check reports that Windows Hypervisor Platform is missing, the installer offers to run `msb doctor --fix`, which opens an elevated PowerShell prompt.

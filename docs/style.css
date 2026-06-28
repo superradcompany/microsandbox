@@ -5,7 +5,7 @@ body {
 /* Keep SDK reference pages readable on large screens while still giving tables and code room. */
 @media (min-width: 1280px) {
   #content-area {
-    max-width: 80rem !important;
+    max-width: 72rem !important;
     width: calc(100% - 20rem) !important;
   }
 }
