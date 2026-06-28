@@ -43,10 +43,7 @@ _ = frame.Body
 
 ## Constants
 
----
-
 #### <span className="msb-hn">FlagTerminal</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```go
 const FlagTerminal uint8 = 0b0000_0001
@@ -54,10 +51,7 @@ const FlagTerminal uint8 = 0b0000_0001
 
 Frame flag: this is the last message for the given correlation id. When a frame on an open stream carries this bit, no further frames will arrive for that id. Also available as `FLAG_TERMINAL`, the cross-SDK constant spelling.
 
----
-
 #### <span className="msb-hn">FlagSessionStart</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```go
 const FlagSessionStart uint8 = 0b0000_0010
@@ -65,10 +59,7 @@ const FlagSessionStart uint8 = 0b0000_0010
 
 Frame flag: this is the first message of a new session. Set it on the opening frame of a request/response RPC or a streaming session. Also available as `FLAG_SESSION_START`.
 
----
-
 #### <span className="msb-hn">FlagShutdown</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```go
 const FlagShutdown uint8 = 0b0000_0100
@@ -78,10 +69,7 @@ Frame flag: this message requests sandbox shutdown. Also available as `FLAG_SHUT
 
 ## Functions
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentSandbox()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
@@ -127,10 +115,7 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentPath()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error)
@@ -181,10 +166,7 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">AgentSocketPath()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func AgentSocketPath(name string) (string, error)
@@ -228,10 +210,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
 
 ## AgentClient methods
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Request()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*RawFrame, error)
@@ -285,10 +264,7 @@ Send one frame and await a single response frame. Use for request/response RPCs 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Stream(ctx context.Context, flags uint8, body []byte) (*AgentStream, error)
@@ -348,10 +324,7 @@ Open a streaming session. The returned [`AgentStream`](#agentstream) carries the
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Send()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Send(ctx context.Context, id uint32, flags uint8, body []byte) error
@@ -399,10 +372,7 @@ Send a follow-up frame on an existing correlation id (for example stdin, a signa
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">ReadyBytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) ReadyBytes() ([]byte, error)
@@ -439,10 +409,7 @@ Return the cached handshake `core.ready` frame body as CBOR bytes. Captured duri
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) Close() error
@@ -467,10 +434,7 @@ Release the client handle. Idempotent: calling it more than once is safe.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">CloseCtx()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *AgentClient) CloseCtx(ctx context.Context) error
@@ -508,10 +472,7 @@ Release the client handle with a caller-controlled context. Like [`Close()`](#c-
 
 ## AgentStream methods
 
----
-
 #### <span className="msb-recv">s.</span><span className="msb-hn">Next()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *AgentStream) Next(ctx context.Context) (*RawFrame, error)
@@ -557,10 +518,7 @@ Pull the next frame from the stream. Returns `nil, nil` at EOF, so loop until th
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *AgentStream) ID() uint32
@@ -588,10 +546,7 @@ Return the protocol correlation id for this stream. Pass it to [`AgentClient.Sen
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">s.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *AgentStream) Close(ctx context.Context) error
@@ -629,7 +584,6 @@ Release the stream handle.
 
 ### AgentClient
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#m-connectagentsandbox">ConnectAgentSandbox()</a> · <a href="#m-connectagentpath">ConnectAgentPath()</a></p>
 
@@ -646,7 +600,6 @@ Low-level client for talking to `agentd` through the sandbox relay socket. All b
 
 ### AgentStream
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-stream">Stream()</a></p>
 
@@ -660,7 +613,6 @@ An open raw agent streaming session. Drive it by calling [`Next()`](#s-next) unt
 
 ### RawFrame
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-request">Request()</a> · yielded by <a href="#s-next">Next()</a></p>
 

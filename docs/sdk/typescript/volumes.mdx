@@ -23,10 +23,7 @@ await Volume.remove("my-data");                 // 4. delete
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
 static builder(name: string): VolumeBuilder
@@ -62,10 +59,7 @@ Begin building a named volume. Directory-backed volumes are the default. Call `.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static get(name: string): Promise<VolumeHandle>
@@ -100,10 +94,7 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static list(): Promise<VolumeHandle[]>
@@ -130,10 +121,7 @@ List all named volumes. Handles returned here are **read-only**: calling `.fs()`
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static remove(name: string): Promise<void>
@@ -158,14 +146,9 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
----
-
 ## Instance methods
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get name(): string
@@ -182,10 +165,7 @@ The volume's name.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get path(): string
@@ -202,10 +182,7 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```typescript
 fs(): VolumeFs
@@ -232,16 +209,11 @@ Get a host-side filesystem handle for this volume's directory. Reads and writes 
   </div>
 </div>
 
----
-
 ## VolumeBuilder
 
 Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#disk) plus [`size()`](#size) for a disk-backed volume. Every setter returns the builder, so calls chain.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 directory(): this
@@ -249,10 +221,7 @@ directory(): this
 
 Create a directory-backed volume. This is the default, so calling it is only needed for clarity.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 disk(): this
@@ -271,10 +240,7 @@ const dockerData = await Volume.builder("docker-data")
 
 Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 size(mib: number): this
@@ -291,10 +257,7 @@ Set the disk capacity in MiB. Required after [`disk()`](#disk).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 quota(mib: number): this
@@ -311,10 +274,7 @@ Record a quota in MiB as metadata for directory-backed volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 label(key: string, value: string): this
@@ -335,10 +295,7 @@ Add a metadata label. Can be called multiple times.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 build(): { name: string; kind: string; quotaMib?: number | null; capacityMib?: number | null; labels: Record<string, string> }
@@ -355,10 +312,7 @@ Materialize the volume configuration without creating the volume on disk. To cre
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 create(): Promise<Volume>
@@ -383,16 +337,11 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
----
-
 ## VolumeFs methods
 
 Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 read(path: string): Promise<Uint8Array>
@@ -426,10 +375,7 @@ Read a file's full contents as bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readToString(path: string): Promise<string>
@@ -463,10 +409,7 @@ Read a file's full contents as a UTF-8 string.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readStream(path: string): Promise<VolumeFsReadStream>
@@ -503,10 +446,7 @@ Open a streaming reader for a file, for chunked reads of large files without loa
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
@@ -535,10 +475,7 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 writeStream(path: string): Promise<VolumeFsWriteSink>
@@ -574,10 +511,7 @@ Open a streaming writer for a file, for chunked writes of large files.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 list(path: string): Promise<FsEntry[]>
@@ -613,10 +547,7 @@ List the entries in a directory. Pass `""` for the volume root.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 mkdir(path: string): Promise<void>
@@ -641,10 +572,7 @@ Create a directory, including any missing parents.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">removeDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 removeDir(path: string): Promise<void>
@@ -669,10 +597,7 @@ Recursively remove a directory and its contents.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 remove(path: string): Promise<void>
@@ -697,10 +622,7 @@ Remove a single file.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 copy(from: string, to: string): Promise<void>
@@ -729,10 +651,7 @@ Copy a file or directory from one path to another.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 rename(from: string, to: string): Promise<void>
@@ -761,10 +680,7 @@ Move or rename a file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 stat(path: string): Promise<FsMetadata>
@@ -799,10 +715,7 @@ Get metadata for a file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 exists(path: string): Promise<boolean>
@@ -838,13 +751,10 @@ Check whether a path exists.
   </div>
 </div>
 
----
-
 ## Types
 
 ### VolumeHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
@@ -866,7 +776,6 @@ A handle to an existing named volume, carrying its metadata. Handles from [`Volu
 
 ### VolumeFs
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
 
@@ -890,7 +799,6 @@ Host-side filesystem operations on a volume's directory. The methods mirror [`Sa
 
 ### VolumeFsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
 
@@ -905,7 +813,6 @@ A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` an
 
 ### VolumeFsWriteSink
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
 

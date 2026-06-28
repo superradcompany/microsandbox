@@ -28,10 +28,7 @@ await sandbox.stop();
 
 ## Run and collect
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
@@ -71,10 +68,7 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execWith()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 execWith(
@@ -120,10 +114,7 @@ Run a command with per-execution overrides. Configure working directory, environ
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 shell(script: string): Promise<ExecOutput>
@@ -158,10 +149,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attachShell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 attachShell(): Promise<number>
@@ -186,14 +174,9 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
----
-
 ## Stream and attach
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
@@ -235,10 +218,7 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStreamWith()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 execStreamWith(
@@ -283,10 +263,7 @@ Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shellStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 shellStream(script: string): Promise<ExecHandle>
@@ -323,10 +300,7 @@ Run a shell command with streaming output.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 attach(cmd: string, args?: Iterable<string>): Promise<number>
@@ -364,10 +338,7 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attachWith()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 attachWith(
@@ -412,13 +383,10 @@ Interactive PTY attach with options for arguments, environment variables, workin
   </div>
 </div>
 
----
-
 ## Types
 
 ### ExecOutput
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
@@ -436,7 +404,6 @@ The result of a completed command execution: collected output plus exit status.
 
 ### ExecHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-execstream">execStream()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a> · <a href="#sandbox-shellstream">shellStream()</a></p>
 
@@ -455,7 +422,6 @@ A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>`
 
 ### ExecSink
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.takeStdin()</a></p>
 
@@ -469,7 +435,6 @@ Writer for sending data to a running process's stdin. Implements `AsyncDisposabl
 
 ### ExecEvent
 
-<div className="msb-tags"><span className="msb-tag is-type">union</span></div>
 
 <p className="msb-backref">Emitted by <a href="#exechandle">ExecHandle</a></p>
 
@@ -492,7 +457,6 @@ type ExecEvent =
 
 ### ExitStatus
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.wait()</a> · <a href="#execoutput">ExecOutput.status</a></p>
 
@@ -505,7 +469,6 @@ The exit result of a process.
 
 ### ExecOptionsBuilder
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Used by <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a></p>
 
@@ -529,7 +492,6 @@ Fluent builder passed to the callback in `execWith(cmd, b => ...)` and `execStre
 
 ### AttachOptionsBuilder
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Used by <a href="#sandbox-attachwith">attachWith()</a></p>
 
@@ -549,7 +511,6 @@ Fluent builder passed to the callback in `attachWith(cmd, b => ...)`. Every sett
 
 ### Stdin
 
-<div className="msb-tags"><span className="msb-tag is-type">const</span></div>
 
 <p className="msb-backref">Produces <a href="#stdinmode">StdinMode</a></p>
 
@@ -563,7 +524,6 @@ Helper factory for constructing a [`StdinMode`](#stdinmode). Equivalent to the `
 
 ### StdinMode
 
-<div className="msb-tags"><span className="msb-tag is-type">union</span></div>
 
 <p className="msb-backref">Produced by <a href="#stdin">Stdin</a></p>
 
@@ -584,7 +544,6 @@ type StdinMode =
 
 ### Rlimit
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Set via <a href="#execoptionsbuilder">ExecOptionsBuilder.rlimit()</a> · <a href="#attachoptionsbuilder">AttachOptionsBuilder.rlimit()</a></p>
 
@@ -598,7 +557,6 @@ A POSIX resource limit applied to the process.
 
 ### RlimitResource
 
-<div className="msb-tags"><span className="msb-tag is-type">union</span></div>
 
 <p className="msb-backref">Used by <a href="#rlimit">Rlimit.resource</a> · <a href="#execoptionsbuilder">rlimit()</a> · <a href="#attachoptionsbuilder">rlimit()</a></p>
 

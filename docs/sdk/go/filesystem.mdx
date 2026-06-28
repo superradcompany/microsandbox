@@ -28,10 +28,7 @@ fmt.Println(content)
 
 The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#fs). Every method takes a `context.Context` first and returns an `error` (wrapped, inspectable with `m.IsKind`).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error)
@@ -73,10 +70,7 @@ Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error)
@@ -114,10 +108,7 @@ Read a file and return its contents as a string. The bytes are reinterpreted as 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error
@@ -150,10 +141,7 @@ Write bytes to a file, creating it if it does not exist and truncating it if it 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error
@@ -186,10 +174,7 @@ Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">List()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error)
@@ -233,10 +218,7 @@ List the entries in a directory inside the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
@@ -278,10 +260,7 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error
@@ -310,10 +289,7 @@ Create a directory and any missing parents inside the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error
@@ -342,10 +318,7 @@ Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">RemoveDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
@@ -374,10 +347,7 @@ Remove a directory recursively.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
@@ -410,10 +380,7 @@ Copy a file within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
@@ -446,10 +413,7 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error)
@@ -493,10 +457,7 @@ Report whether a file or directory exists at the given path.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyFromHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
@@ -529,10 +490,7 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyToHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error
@@ -565,10 +523,7 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
@@ -624,10 +579,7 @@ Open a streaming reader for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
@@ -675,13 +627,10 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
----
-
 ## Types
 
 ### FsEntry
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">List()</a></p>
 
@@ -696,7 +645,6 @@ A single directory listing entry.
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Used by <a href="#fsentry">FsEntry.Kind</a></p>
 
@@ -711,7 +659,6 @@ Classifies a directory listing entry. Defined as `type FsEntryKind string`.
 
 ### FsStat
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">Stat()</a></p>
 
@@ -727,7 +674,6 @@ Detailed file metadata.
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-readstream">ReadStream()</a></p>
 
@@ -744,7 +690,6 @@ On a write error or partial write, `WriteTo` and `CopyTo` return the partial byt
 
 ### FsWriteStream
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
 

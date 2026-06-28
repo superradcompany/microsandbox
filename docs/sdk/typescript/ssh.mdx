@@ -25,10 +25,7 @@ await client.close();                                // 4. close the client
 
 The SSH namespace for a sandbox, returned by [`sb.ssh()`](#sb-ssh). It opens in-process SSH clients and prepares server endpoints against the running sandbox.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```typescript
 ssh(): SandboxSshOps
@@ -54,10 +51,7 @@ Return the SSH namespace for this sandbox. The returned object exposes [`openCli
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">openClient()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 openClient(opts?: SshClientOptions): Promise<SshClient>
@@ -91,10 +85,7 @@ Open a native in-process SSH client connected to the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepareServer()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 prepareServer(opts?: SshServerOptions): Promise<SshServer>
@@ -133,10 +124,7 @@ Prepare a reusable SSH server endpoint backed by the sandbox.
 
 A native in-process SSH client session, returned by [`openClient()`](#ssh-openclient). Run commands, attach an interactive shell, or open an SFTP session over the same connection. Close it with [`close()`](#client-close) when done.
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 exec(command: string, opts?: SshExecOptions): Promise<SshOutput>
@@ -175,10 +163,7 @@ Run an SSH exec request and collect stdout, stderr, and the exit status.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 attach(opts?: SshAttachOptions): Promise<number>
@@ -213,10 +198,7 @@ Attach the local terminal to an interactive SSH shell. Resolves with the shell's
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 sftp(): Promise<SftpClient>
@@ -243,10 +225,7 @@ Open an SFTP session over this SSH connection for file transfer and remote files
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 close(): Promise<void>
@@ -266,10 +245,7 @@ Close the native SSH client session.
 
 An SFTP session over an [`SshClient`](#sshclient) connection, returned by [`sftp()`](#client-sftp). Read and write files, manage directories, and resolve symlinks on the remote sandbox. Close it with [`close()`](#sftp-close) when done.
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 read(path: string): Promise<Buffer>
@@ -304,10 +280,7 @@ Read a remote file into memory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 write(path: string, data: Buffer): Promise<void>
@@ -336,10 +309,7 @@ Create or truncate a remote file and write the given bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 mkdir(path: string): Promise<void>
@@ -364,10 +334,7 @@ Create a remote directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">removeFile()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 removeFile(path: string): Promise<void>
@@ -392,10 +359,7 @@ Remove a remote file.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">removeDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 removeDir(path: string): Promise<void>
@@ -420,10 +384,7 @@ Remove an empty remote directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 rename(oldPath: string, newPath: string): Promise<void>
@@ -452,10 +413,7 @@ Rename or move a remote file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">realPath()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 realPath(path: string): Promise<string>
@@ -490,10 +448,7 @@ Resolve a remote path to its canonical, absolute form.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">readLink()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readLink(path: string): Promise<string>
@@ -528,10 +483,7 @@ Read the target of a remote symlink.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">symlink()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 symlink(target: string, linkPath: string): Promise<void>
@@ -560,10 +512,7 @@ Create a remote symlink at `linkPath` pointing to `target`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 close(): Promise<void>
@@ -583,10 +532,7 @@ Close the SFTP session.
 
 A prepared SSH server endpoint, returned by [`prepareServer()`](#ssh-prepareserver). Serves SSH transports over standard streams and is released with [`close()`](#server-close).
 
----
-
 #### <span className="msb-recv">server.</span><span className="msb-hn">serveConnection()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 serveConnection(): Promise<void>
@@ -604,10 +550,7 @@ await server.close();
 
 Serve one SSH transport over stdin/stdout. Resolves when the connection ends.
 
----
-
 #### <span className="msb-recv">server.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 close(): Promise<void>
@@ -625,11 +568,8 @@ Release the prepared server endpoint.
 
 ## Types
 
----
-
 ### SshOutput
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-exec">exec()</a></p>
 
@@ -641,11 +581,8 @@ Captured result of an SSH exec request.
 | stdout | `Buffer` | Captured stdout bytes |
 | stderr | `Buffer` | Captured stderr bytes |
 
----
-
 ### SshClientOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#ssh-openclient">openClient()</a></p>
 
@@ -657,11 +594,8 @@ Options for opening an SSH client. All fields are optional.
 | term | `string` | Terminal name for interactive sessions |
 | sftp | `boolean` | Enable or disable SFTP on the internal server |
 
----
-
 ### SshExecOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#client-exec">exec()</a></p>
 
@@ -671,11 +605,8 @@ Options for an SSH exec request. All fields are optional.
 |----------|------|-------------|
 | tty | `boolean` | Request a PTY for the exec channel |
 
----
-
 ### SshAttachOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#client-attach">attach()</a></p>
 
@@ -686,11 +617,8 @@ Options for attaching an interactive SSH shell. All fields are optional.
 | term | `string` | Terminal name for the shell |
 | detachKeys | `string` | Detach key sequence |
 
----
-
 ### SshServerOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#ssh-prepareserver">prepareServer()</a></p>
 

@@ -31,10 +31,7 @@ await sandbox.stop()
 
 ## Run and collect
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exec(
@@ -119,10 +116,7 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def shell(
@@ -171,14 +165,9 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
----
-
 ## Stream
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exec_stream(
@@ -238,10 +227,7 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def shell_stream(
@@ -294,14 +280,9 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
   </div>
 </div>
 
----
-
 ## Attach
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach(
@@ -363,10 +344,7 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach_shell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach_shell() -> int
@@ -391,13 +369,10 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
----
-
 ## Types
 
 ### ExecOutput
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
@@ -414,7 +389,6 @@ The result of a completed command execution: collected output plus exit status. 
 
 ### ExecHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
@@ -432,7 +406,6 @@ A handle to a running streaming execution. It is an async iterator, so `async fo
 
 ### ExecSink
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
 
@@ -445,7 +418,6 @@ Writer for sending data to a running process's stdin. Obtained from [`ExecHandle
 
 ### ExecEvent
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Emitted by <a href="#exechandle">ExecHandle</a></p>
 
@@ -460,7 +432,6 @@ Native event object emitted by [`recv()`](#exechandle) and by iterating an [`Exe
 
 ### ExitStatus
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#exechandle">ExecHandle.wait()</a></p>
 
@@ -473,7 +444,6 @@ Frozen dataclass describing a process exit result. [`ExecHandle.wait()`](#execha
 
 ### Stdin
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
@@ -487,7 +457,6 @@ Frozen dataclass with factory methods for configuring process stdin. Pass the re
 
 ### Rlimit
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
@@ -513,7 +482,6 @@ Frozen dataclass describing a POSIX resource limit. Construct one directly or vi
 
 ### RlimitResource
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#rlimit">Rlimit.resource</a></p>
 

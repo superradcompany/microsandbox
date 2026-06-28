@@ -28,10 +28,7 @@ await client.close()                                # 4. close
 
 ## Constructors
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect_sandbox()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @classmethod
@@ -70,10 +67,7 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @classmethod
@@ -113,10 +107,7 @@ Connect to an agent relay socket by path. Use this when you already know the soc
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socket_path()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -151,14 +142,9 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
----
-
 ## Instance methods
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def request(self, flags: int, body: bytes) -> RawFrame
@@ -197,10 +183,7 @@ Send one raw frame and wait for one response frame.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def stream(self, flags: int, body: bytes) -> AgentStream
@@ -243,10 +226,7 @@ Open a raw streaming session. The returned [`AgentStream`](#agentstream) carries
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">send()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def send(self, id: int, flags: int, body: bytes) -> None
@@ -280,10 +260,7 @@ Send a follow-up frame on an existing correlation id. Use the `id` from the [`Ag
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">ready_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def ready_bytes(self) -> bytes
@@ -308,10 +285,7 @@ Return the cached handshake `core.ready` frame body as CBOR bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def close(self) -> None
@@ -327,13 +301,10 @@ await client.close()
 
 Close the client. Calling it more than once is safe.
 
----
-
 ## Types
 
 ### RawFrame
 
-<div className="msb-tags"><span className="msb-tag is-type">TypedDict</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-request">request()</a> · yielded by <a href="#agentstream">AgentStream</a></p>
 
@@ -354,7 +325,6 @@ class RawFrame(TypedDict):
 
 ### AgentStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
 

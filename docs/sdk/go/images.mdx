@@ -31,10 +31,7 @@ fmt.Println(report.LayersRemoved, "layers removed")
 
 ## Functions
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Get(ctx context.Context, reference string) (*ImageHandle, error)
@@ -80,10 +77,7 @@ Fetch one cached image by reference. Returns `ErrImageNotFound` when no image wi
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">List()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) List(ctx context.Context) ([]*ImageHandle, error)
@@ -127,10 +121,7 @@ Return every cached image, ordered by creation time (newest first).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Inspect()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Inspect(ctx context.Context, reference string) (*ImageDetail, error)
@@ -176,10 +167,7 @@ Return the full detail for a cached image: the [`ImageHandle`](#imagehandle) plu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Remove(ctx context.Context, reference string, force bool) error
@@ -223,10 +211,7 @@ Delete a cached image. When `force` is false, sandboxes that still reference the
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Prune()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error)
@@ -268,16 +253,11 @@ Remove cached image data that is not used by any sandbox. Returns a report tally
   </div>
 </div>
 
----
-
 ## Methods
 
 Instance methods on [`*ImageHandle`](#imagehandle), the metadata reference returned by [`Image.Get`](#image-get) and [`Image.List`](#image-list). The accessors are pure reads of cached metadata; only `Remove` and `Inspect` take a context and reach the runtime.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Reference()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) Reference() string
@@ -294,10 +274,7 @@ The image reference, e.g. `"docker.io/library/python:3.12"`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">ManifestDigest()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) ManifestDigest() string
@@ -314,10 +291,7 @@ The content-addressable manifest digest, or empty when unknown.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Architecture()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) Architecture() string
@@ -334,10 +308,7 @@ The architecture resolved during the pull, or empty.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">OS()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) OS() string
@@ -354,10 +325,7 @@ The operating system resolved during the pull, or empty.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">LayerCount()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) LayerCount() uint
@@ -374,10 +342,7 @@ The number of layers in the image.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">SizeBytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) SizeBytes() *int64
@@ -394,10 +359,7 @@ The total image size in bytes, or `nil` when unknown.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) CreatedAt() time.Time
@@ -414,10 +376,7 @@ When this image was first pulled. Returns the zero `time.Time` when unknown.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">LastUsedAt()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) LastUsedAt() time.Time
@@ -434,10 +393,7 @@ When this image was last referenced. Returns the zero `time.Time` when unknown.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) Remove(ctx context.Context, force bool) error
@@ -481,10 +437,7 @@ Delete this image. Equivalent to [`Image.Remove(ctx, h.Reference(), force)`](#im
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Inspect()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ImageHandle) Inspect(ctx context.Context) (*ImageDetail, error)
@@ -530,13 +483,10 @@ Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Refe
   </div>
 </div>
 
----
-
 ## Types
 
 ### ImageHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-get">Image.Get()</a> · <a href="#image-list">Image.List()</a></p>
 
@@ -557,7 +507,6 @@ A lightweight metadata reference to a cached OCI image. Fields are unexported; r
 
 ### ImageDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-inspect">Image.Inspect()</a> · <a href="#h-inspect">Inspect()</a></p>
 
@@ -579,7 +528,6 @@ type ImageDetail struct {
 
 ### ImageConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.Config</a></p>
 
@@ -598,7 +546,6 @@ The parsed OCI config block.
 
 ### ImageLayer
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.Layers</a></p>
 
@@ -615,7 +562,6 @@ One layer of an image manifest.
 
 ### ImagePruneReport
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-prune">Image.Prune()</a></p>
 

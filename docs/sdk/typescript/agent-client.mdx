@@ -29,10 +29,7 @@ await client.close();                                          // 4. close
 
 ## Constants
 
----
-
 #### <span className="msb-hn">FLAG_TERMINAL</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```typescript
 const FLAG_TERMINAL = 0b0000_0001
@@ -40,10 +37,7 @@ const FLAG_TERMINAL = 0b0000_0001
 
 Frame flag: this is the last message for the given correlation id. When a frame on an open stream carries this bit, no further frames will arrive for that id.
 
----
-
 #### <span className="msb-hn">FLAG_SESSION_START</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```typescript
 const FLAG_SESSION_START = 0b0000_0010
@@ -51,10 +45,7 @@ const FLAG_SESSION_START = 0b0000_0010
 
 Frame flag: this is the first message of a new session. Set it on the opening frame of a request/response RPC or a streaming session.
 
----
-
 #### <span className="msb-hn">FLAG_SHUTDOWN</span>
-<div className="msb-tags"><span className="msb-tag is-static">const</span></div>
 
 ```typescript
 const FLAG_SHUTDOWN = 0b0000_0100
@@ -64,10 +55,7 @@ Frame flag: this message requests sandbox shutdown.
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connectSandbox()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static connectSandbox(name: string, opts?: AgentConnectOptions): Promise<AgentClient>
@@ -105,10 +93,7 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static connect(path: string, opts?: AgentConnectOptions): Promise<AgentClient>
@@ -147,10 +132,7 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socketPath()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
 static socketPath(name: string): string
@@ -186,10 +168,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
 
 ## Instance methods
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 request(flags: number, body: Buffer): Promise<RawFrame>
@@ -232,10 +211,7 @@ Send one frame and await a single response frame. Use for request/response RPCs 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 stream(flags: number, body: Buffer): Promise<AgentStream>
@@ -278,10 +254,7 @@ Open a streaming session. The returned [`AgentStream`](#agentstream) carries the
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">send()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 send(id: number, flags: number, body: Buffer): Promise<void>
@@ -314,10 +287,7 @@ Send a follow-up frame on an existing correlation id (for example stdin, a signa
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">readyBytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```typescript
 readyBytes(): Buffer
@@ -344,10 +314,7 @@ Return the cached handshake `core.ready` frame body as CBOR bytes. Captured duri
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 close(): Promise<void>
@@ -367,7 +334,6 @@ Close the connection. Idempotent: calling it more than once is safe.
 
 ### AgentClient
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `cbor-x`, and build typed convenience methods on top of this class. Construct it with one of the static connect methods.
 
@@ -384,7 +350,6 @@ Low-level client for talking to `agentd` through the sandbox relay socket. All b
 
 ### AgentStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
 
@@ -400,7 +365,6 @@ An open raw agent stream. Implements `AsyncIterableIterator<RawFrame>`, so it ca
 
 ### RawFrame
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-request">request()</a> · iterated from <a href="#agentstream">AgentStream</a></p>
 
@@ -414,7 +378,6 @@ A raw protocol frame. The `body` is the CBOR-encoded `Message` body (`v`, `t`, `
 
 ### AgentConnectOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#agentclient-connectsandbox">connectSandbox()</a> · <a href="#agentclient-connect">connect()</a></p>
 

@@ -39,10 +39,7 @@ sb, err = m.CreateSandbox(ctx, "ci-runner",
 
 ## Functions
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithNetwork()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func WithNetwork(net *NetworkConfig) SandboxOption
@@ -79,10 +76,7 @@ Set the network configuration for the sandbox. Pass a preset from the [`NetworkP
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPorts()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func WithPorts(ports map[uint16]uint16) SandboxOption
@@ -119,10 +113,7 @@ Make TCP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPortsUDP()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption
@@ -159,10 +150,7 @@ Make UDP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPortBindings()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func WithPortBindings(bindings ...PortBinding) SandboxOption
@@ -202,16 +190,11 @@ Make services running in the sandbox reachable on explicit host addresses and po
   </div>
 </div>
 
----
-
 ## NetworkPolicy
 
 Factory namespace returning common preset [`*NetworkConfig`](#networkconfig) values. Access through the package-level `NetworkPolicy` value, for example `m.NetworkPolicy.PublicOnly()`.
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">PublicOnly()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (networkPolicyFactory) PublicOnly() *NetworkConfig
@@ -236,10 +219,7 @@ Allow only public internet traffic; RFC-1918 private ranges are blocked. This is
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">None()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (networkPolicyFactory) None() *NetworkConfig
@@ -264,10 +244,7 @@ Block all network access. No network interface is created; the guest is fully of
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">AllowAll()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (networkPolicyFactory) AllowAll() *NetworkConfig
@@ -292,10 +269,7 @@ Permit all network traffic, including private addresses and the host machine.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">NonLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
 
 ```go
 func (networkPolicyFactory) NonLocal() *NetworkConfig
@@ -319,8 +293,6 @@ Allow public internet plus private/LAN egress; block loopback, link-local, and m
     <div className="msb-param-desc">Preset config with <code>Policy: "non-local"</code>.</div>
   </div>
 </div>
-
----
 
 ## Custom rules
 
@@ -351,7 +323,6 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
 
 ### NetworkConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#m-withnetwork">WithNetwork()</a> · returned by <a href="#networkpolicy">NetworkPolicy</a></p>
 
@@ -378,7 +349,6 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 ### PolicyRule
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Rules</a></p>
 
@@ -396,7 +366,6 @@ A single firewall rule. Ingress rules carrying ICMP protocols are rejected at sa
 
 ### DNSConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.DNS</a></p>
 
@@ -410,7 +379,6 @@ In-VM DNS proxy configuration.
 
 ### TLSConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.TLS</a></p>
 
@@ -440,7 +408,6 @@ sb, err := m.CreateSandbox(ctx, "inspect",
 
 ### PortBinding
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#m-withportbindings">WithPortBindings()</a> · <a href="#networkconfig">NetworkConfig.PortBindings</a></p>
 
@@ -455,7 +422,6 @@ A host-to-guest port mapping with an explicit host bind address. `Protocol` defa
 
 ### PortProtocol
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#portbinding">PortBinding.Protocol</a></p>
 
@@ -468,7 +434,6 @@ Identifies the protocol for an exposed sandbox service.
 
 ### PolicyAction
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Action</a> · <a href="#networkconfig">NetworkConfig.DefaultEgress</a></p>
 
@@ -481,7 +446,6 @@ The action half of a [`PolicyRule`](#policyrule).
 
 ### PolicyDirection
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Direction</a></p>
 
@@ -495,7 +459,6 @@ The direction half of a [`PolicyRule`](#policyrule). The Go SDK follows the Pyth
 
 ### PolicyProtocol
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Protocol</a> · <a href="#policyrule">PolicyRule.Protocols</a></p>
 
@@ -510,7 +473,6 @@ The protocol half of a [`PolicyRule`](#policyrule).
 
 ### NetworkPolicyPreset
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Policy</a></p>
 
@@ -525,7 +487,6 @@ Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer the [`
 
 ### Destination groups
 
-<div className="msb-tags"><span className="msb-tag is-type">reference</span></div>
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
 

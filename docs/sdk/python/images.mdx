@@ -30,10 +30,7 @@ print(f"reclaimed {report.bytes_reclaimed} bytes")
 
 These static methods return an [`ImageSource`](#imagesource) you can pass as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A plain string also works (`image="python:3.12"`); use the factory when you need OCI-only options like the writable upper size, or to be explicit about a bind or disk source.
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -75,10 +72,7 @@ Create an OCI image rootfs source. Use `upper_size_mib` to size the writable ove
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">bind()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -113,10 +107,7 @@ Create a rootfs source that binds a host directory as the guest root filesystem.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -162,10 +153,7 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
 
 These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -201,10 +189,7 @@ Fetch one cached image by reference. Raises [`ImageNotFoundError`](#errors) when
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -231,10 +216,7 @@ Return every cached image.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">inspect()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -272,10 +254,7 @@ Return handle metadata plus the parsed OCI config and per-layer detail.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -305,10 +284,7 @@ Delete a cached image. When `force` is `False`, an image still referenced by one
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Image.</span><span className="msb-hn">prune()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -339,7 +315,6 @@ Remove cached image data that is not used by any sandbox or indexed snapshot. Th
 
 ### ImageSource
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-oci">oci()</a> · <a href="#image-bind">bind()</a> · <a href="#image-disk">disk()</a></p>
 
@@ -356,7 +331,6 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 
 ### ImageHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
 
@@ -377,7 +351,6 @@ A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-g
 
 ### ImageDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a> · <a href="#imagehandle">ImageHandle.inspect()</a></p>
 
@@ -391,7 +364,6 @@ Full detail for a cached image: the core handle, the parsed OCI config block, an
 
 ### ImageConfigDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.config</a></p>
 
@@ -410,7 +382,6 @@ OCI image config fields extracted from the local cache.
 
 ### ImageLayerDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.layers</a></p>
 
@@ -427,7 +398,6 @@ Metadata for a single image layer.
 
 ### ImagePruneReport
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
 
@@ -444,7 +414,6 @@ Summary of cached image data removed by [`Image.prune()`](#image-prune).
 
 ### DiskImageFormat
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#imagesource">ImageSource._format</a></p>
 

@@ -35,10 +35,7 @@ let restored = Sandbox::builder("api-restored")
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```rust
 fn builder(source_sandbox: impl Into<String>) -> SnapshotBuilder
@@ -75,10 +72,7 @@ Start configuring a new snapshot of `source_sandbox`. The builder lets you set t
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
@@ -114,10 +108,7 @@ Create a snapshot artifact from a stopped sandbox. Writes `manifest.json` and th
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn open(path_or_name: impl AsRef<str>) -> MicrosandboxResult<Snapshot>
@@ -152,10 +143,7 @@ Open an existing artifact by path or bare name. Bare names (no path separator, n
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle>
@@ -190,10 +178,7 @@ Look up a lightweight [`SnapshotHandle`](#snapshothandle) in the local index by 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list() -> MicrosandboxResult<Vec<SnapshotHandle>>
@@ -220,10 +205,7 @@ List indexed snapshots from the local DB cache, newest first. External-path arti
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">list_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>>
@@ -258,10 +240,7 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
@@ -290,10 +269,7 @@ Remove a snapshot artifact (by digest, name, or path) and its index row. Refuses
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">reindex()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn reindex(dir: impl AsRef<Path>) -> MicrosandboxResult<usize>
@@ -328,10 +304,7 @@ Rebuild the local index from the artifacts in `dir`. Upserts an index row for ev
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">export()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn export(name_or_path: &str, out: &Path, opts: ExportOpts) -> MicrosandboxResult<()>
@@ -371,10 +344,7 @@ Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. The head
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">import()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn import(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<SnapshotHandle>
@@ -415,16 +385,11 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into
   </div>
 </div>
 
----
-
 ## Instance methods
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">digest()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn digest(&self) -> &str
@@ -441,10 +406,7 @@ Canonical content digest of this snapshot's manifest (`sha256:hex`). This is the
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn path(&self) -> &Path
@@ -461,10 +423,7 @@ Path to the artifact directory holding the canonical `manifest.json` and the cap
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">manifest()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn manifest(&self) -> &Manifest
@@ -491,10 +450,7 @@ The parsed [`Manifest`](#manifest): schema, format, fstype, image reference, par
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">size_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn size_bytes(&self) -> u64
@@ -511,10 +467,7 @@ Apparent size of the captured upper layer in bytes (the ext4 virtual size; spars
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport>
@@ -545,16 +498,11 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
   </div>
 </div>
 
----
-
 ## SnapshotHandle methods
 
 Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) (an index row). Returned by [`Snapshot::get()`](#snapshotget), [`Snapshot::list()`](#snapshotlist), and [`Snapshot::import()`](#snapshotimport).
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">digest()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn digest(&self) -> &str
@@ -562,10 +510,7 @@ fn digest(&self) -> &str
 
 Manifest digest (`sha256:hex`), the canonical identity.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn name(&self) -> Option<&str>
@@ -573,10 +518,7 @@ fn name(&self) -> Option<&str>
 
 Name alias, or `None` for digest-only entries.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">parent_digest()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn parent_digest(&self) -> Option<&str>
@@ -584,10 +526,7 @@ fn parent_digest(&self) -> Option<&str>
 
 The parent snapshot's digest, or `None` for a root. Always `None` today; populated once chained snapshots land.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">image_ref()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn image_ref(&self) -> &str
@@ -595,10 +534,7 @@ fn image_ref(&self) -> &str
 
 Image reference the snapshot was taken from.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">format()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn format(&self) -> SnapshotFormat
@@ -615,10 +551,7 @@ On-disk format of the upper layer.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">size_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn size_bytes(&self) -> Option<u64>
@@ -626,10 +559,7 @@ fn size_bytes(&self) -> Option<u64>
 
 Apparent size of the upper file at index time, if recorded.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn created_at(&self) -> chrono::NaiveDateTime
@@ -637,10 +567,7 @@ fn created_at(&self) -> chrono::NaiveDateTime
 
 Snapshot creation time, parsed from the manifest.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn path(&self) -> &Path
@@ -648,10 +575,7 @@ fn path(&self) -> &Path
 
 Local artifact directory path.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn open(&self) -> MicrosandboxResult<Snapshot>
@@ -678,10 +602,7 @@ Open the underlying artifact metadata, upgrading this lightweight handle to a fu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(&self, force: bool) -> MicrosandboxResult<()>
@@ -707,16 +628,11 @@ Remove this snapshot. Delegates to [`Snapshot::remove(self.digest(), force)`](#s
   </div>
 </div>
 
----
-
 ## Sandbox entry points
 
 Snapshot-related methods that live on the sandbox builder and handle. See [Sandbox](/sdk/rust/sandbox) for the full sandbox API.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">from_snapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn from_snapshot(self, path_or_name: impl Into<String>) -> Self
@@ -744,10 +660,7 @@ let sb = Sandbox::builder("api-restored")
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">snapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
@@ -783,10 +696,7 @@ let snap = h.snapshot("baseline").await?;
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">snapshot_to()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn snapshot_to(&self, path: impl AsRef<Path>) -> MicrosandboxResult<Snapshot>
@@ -822,8 +732,6 @@ let snap = h.snapshot_to("/data/snapshots/baseline").await?;
   </div>
 </div>
 
----
-
 ## SnapshotBuilder
 
 Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Snapshot::builder(source_sandbox)`](#snapshotbuilder). A destination is required ([`name`](#name) or [`path`](#path)); the other setters are optional. Every setter returns `Self`, so calls chain.
@@ -838,10 +746,7 @@ let snap = Snapshot::builder("api")
     .await?;
 ```
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">destination()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn destination(self, dest: SnapshotDestination) -> Self
@@ -858,10 +763,7 @@ Set the artifact destination explicitly. The [`name`](#name) and [`path`](#path)
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn name(self, name: impl Into<String>) -> Self
@@ -878,10 +780,7 @@ Convenience: use a bare name resolved under the default snapshots directory. Set
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">path()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn path(self, path: impl Into<PathBuf>) -> Self
@@ -898,10 +797,7 @@ Convenience: write the artifact to an explicit path. Sets the destination to [`S
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -922,10 +818,7 @@ Add a user label. Can be called multiple times. Labels are sorted by key in the 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">force()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn force(self) -> Self
@@ -933,10 +826,7 @@ fn force(self) -> Self
 
 Overwrite an existing artifact at the destination. Without this, creation fails with `SnapshotAlreadyExists` if the destination directory exists.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">record_integrity()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn record_integrity(self) -> Self
@@ -944,10 +834,7 @@ fn record_integrity(self) -> Self
 
 Compute and record an upper-layer content-integrity hash during creation. Recorded integrity is what [`verify()`](#snap-verify) checks and what import/export rely on when crossing a trust boundary.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
@@ -964,10 +851,7 @@ Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapsho
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn create(self) -> MicrosandboxResult<Snapshot>
@@ -984,13 +868,10 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
   </div>
 </div>
 
----
-
 ## Types
 
 ### SnapshotHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotimport">Snapshot::import()</a></p>
 
@@ -1011,7 +892,6 @@ A lightweight handle backed by a local index row. Use [`open()`](#h-open) to rea
 
 ### SnapshotConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#build">build()</a></p>
 
@@ -1027,7 +907,6 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 
 ### SnapshotDestination
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#destination">destination()</a> · <a href="#snapshotconfig">SnapshotConfig.destination</a></p>
 
@@ -1040,7 +919,6 @@ Where to place a new snapshot artifact. The builder's [`name()`](#name) and [`pa
 
 ### SnapshotFormat
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#h-format">format()</a> · <a href="#manifest">Manifest.format</a></p>
 
@@ -1053,7 +931,6 @@ On-disk format of the captured upper layer. Today only `Raw` is produced; the va
 
 ### ExportOpts
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#snapshotexport">Snapshot::export()</a></p>
 
@@ -1067,7 +944,6 @@ Options for [`Snapshot::export()`](#snapshotexport). Implements `Default`; `Expo
 
 ### SnapshotVerifyReport
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#snap-verify">verify()</a></p>
 
@@ -1081,7 +957,6 @@ Result of explicit snapshot verification.
 
 ### UpperVerifyStatus
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#snapshotverifyreport">SnapshotVerifyReport.upper</a></p>
 
@@ -1094,7 +969,6 @@ Upper-layer content verification result.
 
 ### Manifest
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#snap-manifest">manifest()</a></p>
 
@@ -1114,7 +988,6 @@ The snapshot artifact manifest, the source of truth for an artifact. Re-exported
 
 ### ImageRef
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#manifest">Manifest.image</a></p>
 
@@ -1127,7 +1000,6 @@ Reference to the OCI image the snapshot was taken from. Re-exported as `microsan
 
 ### UpperLayer
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#manifest">Manifest.upper</a></p>
 
@@ -1141,7 +1013,6 @@ Captured upper-layer file metadata. Re-exported as `microsandbox::snapshot::Uppe
 
 ### UpperIntegrity
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#upperlayer">UpperLayer.integrity</a></p>
 

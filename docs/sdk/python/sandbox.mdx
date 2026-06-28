@@ -20,10 +20,7 @@ async with await Sandbox.create("api", image="python", memory=1024) as sb:
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -67,10 +64,7 @@ The returned `Sandbox` is an async context manager. Use `async with` to guarante
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create_with_progress()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -113,10 +107,7 @@ Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">start()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -155,10 +146,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -194,10 +182,7 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -224,10 +209,7 @@ List all sandboxes (running, stopped, and crashed).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list_with()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -262,10 +244,7 @@ List sandboxes filtered by label. Only sandboxes whose labels match every suppli
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -291,14 +270,9 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
   </div>
 </div>
 
----
-
 ## Instance properties
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def name(self) -> str
@@ -323,10 +297,7 @@ The sandbox name. This is an async method; call `await sb.name()`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
-<div className="msb-tags"><span className="msb-tag is-instance">property</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @property
@@ -344,10 +315,7 @@ Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
-<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
 
 ```python
 @property
@@ -373,16 +341,11 @@ Get a filesystem handle for reading and writing files inside the running sandbox
   </div>
 </div>
 
----
-
 ## Instance methods
 
 Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach(
@@ -445,10 +408,7 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach_shell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach_shell(self) -> int
@@ -473,10 +433,7 @@ Attach your terminal to the sandbox's default shell for an interactive session.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def metrics(self) -> SandboxMetrics
@@ -502,10 +459,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -541,10 +495,7 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def logs(
@@ -614,10 +565,7 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def log_stream(
@@ -676,10 +624,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def stop(self, timeout: float | None = None) -> None
@@ -704,10 +649,7 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def request_stop(self) -> None
@@ -723,10 +665,7 @@ await sb.request_stop()
 
 Request graceful shutdown and return once the request is sent, without waiting for stopped state. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs to observe the terminal state.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def kill(self, timeout: float | None = None) -> None
@@ -751,10 +690,7 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def request_kill(self) -> None
@@ -770,10 +706,7 @@ await sb.request_kill()
 
 Request force termination and return once the signal is sent, without waiting for stopped state.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def request_drain(self) -> None
@@ -789,10 +722,7 @@ await sb.request_drain()
 
 Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_stopped()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def wait_until_stopped(self) -> SandboxStopResult
@@ -818,10 +748,7 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def detach(self) -> None
@@ -838,16 +765,11 @@ await sb.detach()  # keeps running in the background
 
 Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
 
----
-
 ## Patch
 
 Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -891,10 +813,7 @@ Write UTF-8 text content at `path`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">append()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -916,10 +835,7 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -941,10 +857,7 @@ Create a directory at `path`. Idempotent: a no-op if the directory already exist
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -962,10 +875,7 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -995,10 +905,7 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -1024,10 +931,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">symlink()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">factory</span><span className="msb-tag is-static">static</span></div>
 
 ```python
 @staticmethod
@@ -1053,13 +957,10 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
----
-
 ## Types
 
 ### SandboxConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">kwargs</span></div>
 
 <p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
 
@@ -1096,7 +997,6 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 ### InitConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(init=...)</a></p>
 
@@ -1136,7 +1036,6 @@ sb = await Sandbox.create(
 
 ### SecurityProfile
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(security=...)</a></p>
 
@@ -1149,7 +1048,6 @@ Sandbox-wide in-guest security profile. A `StrEnum`, so the string values are ac
 
 ### SandboxHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
 
@@ -1181,7 +1079,6 @@ A lightweight handle to an existing sandbox (running or stopped). Provides statu
 
 ### SandboxStopResult
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-wait_until_stopped">wait_until_stopped()</a></p>
 
@@ -1198,7 +1095,6 @@ Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_un
 
 ### SandboxStatus
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
 
@@ -1214,7 +1110,6 @@ The string status values a sandbox can report. A `StrEnum`, exposed as plain str
 
 ### SandboxMetrics
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
@@ -1240,7 +1135,6 @@ Point-in-time resource usage snapshot.
 
 ### MetricsStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
@@ -1252,7 +1146,6 @@ Async stream for receiving periodic metrics snapshots.
 
 ### LogEntry
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
 
@@ -1269,7 +1162,6 @@ A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a 
 
 ### LogStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
 
@@ -1281,7 +1173,6 @@ Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb
 
 ### LogSource
 
-<div className="msb-tags"><span className="msb-tag is-type">literal</span></div>
 
 <p className="msb-backref">Used by <a href="#logentry">LogEntry.source</a> · <a href="#sb-logs">logs(sources=...)</a></p>
 
@@ -1297,7 +1188,6 @@ The string values the `source` field on a [`LogEntry`](#logentry) can take, also
 
 ### LogLevel
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(log_level=...)</a></p>
 
@@ -1313,7 +1203,6 @@ Sandbox process log verbosity. A `StrEnum`, so the string values are accepted di
 
 ### PullPolicy
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(pull_policy=...)</a></p>
 
@@ -1327,7 +1216,6 @@ Controls when the SDK fetches an OCI image from the registry. A `StrEnum`, so th
 
 ### RegistryAuth
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(registry_auth=...)</a></p>
 
@@ -1340,7 +1228,6 @@ Credentials for authenticating to a private container registry. Frozen dataclass
 
 ### PatchConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Returned by <a href="#patch-text">Patch.* factory methods</a> · used by <a href="#sandboxconfig">create(patches=...)</a></p>
 
@@ -1360,7 +1247,6 @@ A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally
 
 ### PullSession
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
 
@@ -1381,7 +1267,6 @@ async with session:
 
 ### PullEvent
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Iterated from <a href="#pullsession">PullSession.progress</a></p>
 

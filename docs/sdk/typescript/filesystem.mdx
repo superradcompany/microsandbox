@@ -23,10 +23,7 @@ for (const entry of await fs.list("/tmp")) {               // list
 
 Filesystem handle for a running sandbox, obtained via [`sandbox.fs()`](/sdk/typescript/sandbox#sandboxfs). Every method is async and returns a `Promise`. Paths are absolute inside the guest.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 read(path: string): Promise<Uint8Array>
@@ -61,10 +58,7 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readToString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readToString(path: string): Promise<string>
@@ -99,10 +93,7 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
@@ -131,10 +122,7 @@ Write content to a file, creating it if it doesn't exist and overwriting if it d
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readStream(path: string): Promise<FsReadStream>
@@ -170,10 +158,7 @@ Open a streaming reader for a file. Data is transferred in chunks. Use this for 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">writeStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 writeStream(path: string): Promise<FsWriteSink>
@@ -208,10 +193,7 @@ Open a streaming writer for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 list(path: string): Promise<FsEntry[]>
@@ -247,10 +229,7 @@ List the entries in a directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 mkdir(path: string): Promise<void>
@@ -275,10 +254,7 @@ Create a directory. Parent directories must already exist.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">removeDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 removeDir(path: string): Promise<void>
@@ -303,10 +279,7 @@ Remove a directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 remove(path: string): Promise<void>
@@ -331,10 +304,7 @@ Remove a file.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 stat(path: string): Promise<FsMetadata>
@@ -369,10 +339,7 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 exists(path: string): Promise<boolean>
@@ -408,10 +375,7 @@ Check whether a path exists inside the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 copy(from: string, to: string): Promise<void>
@@ -440,10 +404,7 @@ Copy a file within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 rename(from: string, to: string): Promise<void>
@@ -472,10 +433,7 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copyFromHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 copyFromHost(hostPath: string, guestPath: string): Promise<void>
@@ -504,10 +462,7 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copyToHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 copyToHost(guestPath: string, hostPath: string): Promise<void>
@@ -536,13 +491,10 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
----
-
 ## Types
 
 ### FsEntry
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">list()</a></p>
 
@@ -558,7 +510,6 @@ Metadata for a single directory entry.
 
 ### FsMetadata
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">stat()</a></p>
 
@@ -575,7 +526,6 @@ Detailed file metadata.
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Used by <a href="#fsentry">FsEntry.kind</a> · <a href="#fsmetadata">FsMetadata.kind</a></p>
 
@@ -592,7 +542,6 @@ type FsEntryKind = "file" | "directory" | "symlink" | "other";
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-readstream">readStream()</a></p>
 
@@ -607,7 +556,6 @@ Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>
 
 ### FsWriteSink
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-writestream">writeStream()</a></p>
 

@@ -31,10 +31,7 @@ fmt.Printf("%s (exit %d)\n", out.Stdout, out.Status)
 
 ## Methods
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">SSH()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) SSH() *SandboxSSHOps
@@ -60,10 +57,7 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">OpenClient()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (ssh *SandboxSSHOps) OpenClient(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error)
@@ -112,10 +106,7 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
@@ -163,10 +154,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Exec(ctx context.Context, command string, opts ...SSHExecOption) (*SSHOutput, error)
@@ -219,10 +207,7 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Attach(ctx context.Context, opts ...SSHAttachOption) (int, error)
@@ -271,10 +256,7 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">SFTP()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) SFTP(ctx context.Context) (*SFTPClient, error)
@@ -320,10 +302,7 @@ Open an SFTP session over this SSH connection. Returns a high-level SFTP client 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Close(ctx context.Context) error
@@ -357,10 +336,7 @@ Close this SSH client session. The handle is consumed; do not use it after closi
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">srv.</span><span className="msb-hn">ServeConnection()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (srv *SSHServer) ServeConnection(ctx context.Context) error
@@ -402,10 +378,7 @@ Serve one SSH transport over this process's stdin and stdout. Returns when the c
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">srv.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (srv *SSHServer) Close(ctx context.Context) error
@@ -439,10 +412,7 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (o SSHOutput) Success() bool
@@ -471,13 +441,10 @@ Report whether the command exited with status `0`.
   </div>
 </div>
 
----
-
 ## Types
 
 ### SandboxSSHOps
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-ssh">SSH()</a></p>
 
@@ -490,7 +457,6 @@ SSH operations namespace for a sandbox. Obtained via [`sb.SSH()`](#sb-ssh). Hold
 
 ### SSHClient
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#ssh-openclient">OpenClient()</a></p>
 
@@ -505,7 +471,6 @@ A native in-process SSH client session. Obtained via [`OpenClient()`](#ssh-openc
 
 ### SFTPClient
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-sftp">SFTP()</a></p>
 
@@ -526,7 +491,6 @@ A high-level SFTP client session over an SSH connection. Obtained via [`SFTP()`]
 
 ### SSHServer
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 
@@ -539,7 +503,6 @@ A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#
 
 ### SSHOutput
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-exec">Exec()</a></p>
 
@@ -554,7 +517,6 @@ The output from an SSH exec request.
 
 ### SSHClientOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#ssh-openclient">OpenClient()</a></p>
 
@@ -568,7 +530,6 @@ Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, 
 
 ### SSHExecOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#c-exec">Exec()</a></p>
 
@@ -580,7 +541,6 @@ Functional option for [`Exec()`](#c-exec).
 
 ### SSHAttachOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#c-attach">Attach()</a></p>
 
@@ -593,7 +553,6 @@ Functional option for [`Attach()`](#c-attach). The default terminal comes from `
 
 ### SSHServerOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 

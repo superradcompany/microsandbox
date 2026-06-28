@@ -25,10 +25,7 @@ sb2 = await Sandbox.create("worker", snapshot="after-pip-install")
 
 ## Take a snapshot
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SandboxHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def snapshot(self, name: str) -> Snapshot
@@ -64,10 +61,7 @@ Snapshot this sandbox under a bare name in the default snapshots directory (`~/.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot_to()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SandboxHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def snapshot_to(self, path: str | os.PathLike) -> Snapshot
@@ -102,10 +96,7 @@ Snapshot this sandbox to an explicit filesystem path. The sandbox must be stoppe
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -173,14 +164,9 @@ Create a snapshot from a stopped or crashed sandbox. Exactly one of `name=` (res
   </div>
 </div>
 
----
-
 ## Boot from a snapshot
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -223,14 +209,9 @@ Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer o
   </div>
 </div>
 
----
-
 ## Manage artifacts
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -266,10 +247,7 @@ Open an existing artifact by bare name (resolved under the default snapshots dir
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -305,10 +283,7 @@ Look up a handle in the local index by name, digest, or path.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -335,10 +310,7 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -374,10 +346,7 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -407,10 +376,7 @@ Remove a snapshot artifact and its index row. Refuses if the snapshot has indexe
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -446,10 +412,7 @@ Walk `dir` (default: configured snapshots dir) and rebuild the local index. Retu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">export()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -502,14 +465,9 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
   </div>
 </div>
 
----
-
 ## Move artifacts
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">import_()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -553,14 +511,9 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, v
   </div>
 </div>
 
----
-
 ## Inspect
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">Snapshot</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def verify(self) -> dict[str, Any]
@@ -600,10 +553,7 @@ The report shape:
 }
 ```
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SnapshotHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def open(self) -> Snapshot
@@ -630,10 +580,7 @@ Load the full [`Snapshot`](#snapshot) metadata for this handle. Metadata-validat
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SnapshotHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove(self, *, force: bool = False) -> None
@@ -659,13 +606,10 @@ Remove this snapshot artifact and its index row. Refuses if the snapshot has ind
   </div>
 </div>
 
----
-
 ## Types
 
 ### Snapshot
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#handle-snapshot_to">snapshot_to()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
 
@@ -688,7 +632,6 @@ A fully-parsed snapshot artifact. Properties are read-only attributes (not async
 
 ### SnapshotHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-import_">Snapshot.import_()</a></p>
 

@@ -26,10 +26,7 @@ fmt.Print(out.Stdout())
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error)
@@ -78,10 +75,7 @@ Run a command in the sandbox and return its collected output. Blocks until the c
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Shell()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error)
@@ -127,10 +121,7 @@ Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ExecStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error)
@@ -182,10 +173,7 @@ Start a streaming exec session and return an [`*ExecHandle`](#exechandle). The h
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ShellStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error)
@@ -248,10 +236,7 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
 
 A live streaming exec session returned by [`ExecStream`](#sb-execstream) and [`ShellStream`](#sb-shellstream). Not safe for concurrent use from multiple goroutines.
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) ID() (string, error)
@@ -268,10 +253,7 @@ Return the unique identifier for this exec session, assigned by the guest agent.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">TakeStdin()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) TakeStdin() *ExecSink
@@ -298,10 +280,7 @@ Return the stdin sink for this exec session. Single-take: returns `nil` if the s
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Recv()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error)
@@ -352,10 +331,7 @@ Block until the next event arrives or the stream ends. Returns an event with `Ki
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Collect()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error)
@@ -393,10 +369,7 @@ Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#ex
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Wait()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Wait(ctx context.Context) (int, error)
@@ -422,10 +395,7 @@ Block until the process exits and return its exit code. Unlike [`Collect`](#h-co
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Kill()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Kill(ctx context.Context) error
@@ -442,10 +412,7 @@ Send SIGKILL to the running process.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Signal()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Signal(ctx context.Context, signal int) error
@@ -478,10 +445,7 @@ Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (h *ExecHandle) Close() error
@@ -501,10 +465,7 @@ Release the Rust-side exec handle. Does not kill the running process; call [`Sig
 
 The collected result of a completed command execution, returned by [`Exec`](#sb-exec), [`Shell`](#sb-shell), and [`Collect`](#h-collect).
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">Stdout()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) Stdout() string
@@ -521,10 +482,7 @@ Captured standard output as a string.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">StdoutBytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) StdoutBytes() []byte
@@ -541,10 +499,7 @@ Captured standard output as raw bytes. Use when the output may not be valid UTF-
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">Stderr()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) Stderr() string
@@ -561,10 +516,7 @@ Captured standard error as a string.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">StderrBytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) StderrBytes() []byte
@@ -581,10 +533,7 @@ Captured standard error as raw bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">ExitCode()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) ExitCode() int
@@ -601,10 +550,7 @@ The process's exit code, or `-1` if the guest did not report one (e.g. the proce
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">out.</span><span className="msb-hn">Success()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (e *ExecOutput) Success() bool
@@ -625,10 +571,7 @@ Reports whether the command exited with code `0`.
 
 A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeStdin`](#h-takestdin). Implements `io.WriteCloser`. `Write` and `Close` use `context.Background()` under the hood; for caller-controlled cancellation use [`WriteCtx`](#sink-writectx), or tear the session down via [`ExecHandle.Kill`](#h-kill) / [`Close`](#h-close).
 
----
-
 #### <span className="msb-recv">sink.</span><span className="msb-hn">Write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (sk *ExecSink) Write(p []byte) (int, error)
@@ -673,10 +616,7 @@ Send data to the process stdin. Implements `io.Writer`. Uses `context.Background
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sink.</span><span className="msb-hn">WriteCtx()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (sk *ExecSink) WriteCtx(ctx context.Context, p []byte) (int, error)
@@ -706,10 +646,7 @@ Like [`Write`](#sink-write), but with a caller-controlled context, so a stuck st
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sink.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (sk *ExecSink) Close() error
@@ -727,11 +664,8 @@ Close the stdin pipe, sending EOF to the process. Implements `io.Closer`.
 
 ## Types
 
----
-
 ### ExecOutput
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
 
@@ -746,11 +680,8 @@ The collected result of a command execution. A non-zero `ExitCode` is not treate
 | [`ExitCode()`](#out-exitcode) | `int` | Exit code, or `-1` if the guest did not report one |
 | [`Success()`](#out-success) | `bool` | `true` if `ExitCode()` is `0` |
 
----
-
 ### ExecHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
 
@@ -767,11 +698,8 @@ A live streaming exec session. Must be closed with [`Close`](#h-close) when done
 | [`Signal(ctx, signal)`](#h-signal) | `error` | Send a Unix signal |
 | [`Close()`](#h-close) | `error` | Release the Rust-side handle |
 
----
-
 ### ExecSink
 
-<div className="msb-tags"><span className="msb-tag is-type">type alias</span></div>
 
 <p className="msb-backref">Returned by <a href="#h-takestdin">h.TakeStdin()</a></p>
 
@@ -787,11 +715,8 @@ A write-only pipe to a running process's stdin. Implements `io.WriteCloser`.
 | [`WriteCtx(ctx, p)`](#sink-writectx) | `(int, error)` | Write with explicit context |
 | [`Close()`](#sink-close) | `error` | Send EOF and finalize |
 
----
-
 ### ExecEvent
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#h-recv">h.Recv()</a></p>
 
@@ -805,11 +730,8 @@ One event from a streaming exec session. [`Kind`](#execeventkind) identifies whi
 | `ExitCode` | `int` | Process exit code, set on `ExecEventExited` |
 | `Failure` | [`*ExecFailure`](#execfailure) | Failure detail, set on `ExecEventFailed` and `ExecEventStdinError` |
 
----
-
 ### ExecEventKind
 
-<div className="msb-tags"><span className="msb-tag is-type">type alias</span></div>
 
 <p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
 
@@ -829,11 +751,8 @@ Identifies what an [`ExecEvent`](#execevent) carries.
 | `ExecEventStdinError` | A stdin write failed; `Failure` is valid. Non-terminal: the process may still exit normally |
 | `ExecEventDone` | All events have been consumed |
 
----
-
 ### ExecFailure
 
-<div className="msb-tags"><span className="msb-tag is-type">type alias</span></div>
 
 <p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
 
@@ -851,11 +770,8 @@ Structured detail about a failed-to-start exec, populated on `ExecEventFailed` a
 | `Message` | `string` | Human-readable failure message |
 | `Path` | `string` | Offending path, if applicable |
 
----
-
 ### ExecConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Populated by <a href="#execoption">ExecOption</a></p>
 
@@ -869,11 +785,8 @@ Configures a single [`Exec`](#sb-exec) or [`ExecStream`](#sb-execstream) call. M
 | `User` | `string` | Guest user (UID or name) |
 | `Env` | `map[string]string` | Per-command environment variables |
 
----
-
 ### ExecOption
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Accepted by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
 
@@ -883,10 +796,7 @@ type ExecOption func(*ExecConfig)
 
 A functional option that mutates an [`ExecConfig`](#execconfig). Construct them with the `WithExec*` functions below.
 
----
-
 #### <span className="msb-hn">WithExecCwd()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func WithExecCwd(path string) ExecOption
@@ -903,10 +813,7 @@ Set the working directory for a single command.
   </div>
 </div>
 
----
-
 #### <span className="msb-hn">WithExecTimeout()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func WithExecTimeout(d time.Duration) ExecOption
@@ -935,10 +842,7 @@ Set a per-command timeout. When exceeded, the guest terminates the process and t
   </div>
 </div>
 
----
-
 #### <span className="msb-hn">WithExecStdinPipe()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func WithExecStdinPipe() ExecOption
@@ -946,10 +850,7 @@ func WithExecStdinPipe() ExecOption
 
 Enable a stdin pipe for the exec session, allowing data to be written via [`ExecHandle.TakeStdin`](#h-takestdin).
 
----
-
 #### <span className="msb-hn">WithExecUser()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func WithExecUser(user string) ExecOption
@@ -966,10 +867,7 @@ Run the command as the given guest user (UID or name).
   </div>
 </div>
 
----
-
 #### <span className="msb-hn">WithExecEnv()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
 func WithExecEnv(env map[string]string) ExecOption

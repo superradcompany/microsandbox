@@ -20,10 +20,7 @@ async with await Sandbox.create("api", image="python") as sb:
 
 ## Sandbox
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def ssh() -> SandboxSshOps
@@ -52,10 +49,7 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). SSH is only supported on local sandboxes.
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def open_client(
@@ -103,10 +97,7 @@ Connect a native in-process SSH client to this sandbox. Generates an ephemeral c
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def prepare_server(
@@ -167,10 +158,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 
 A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exec(command: str, *, tty: bool = False) -> SshOutput
@@ -209,10 +197,7 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def attach(
@@ -255,10 +240,7 @@ Attach the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def sftp() -> SftpClient
@@ -285,10 +267,7 @@ Open an SFTP client session over this SSH connection. Requests the `sftp` subsys
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def close() -> None
@@ -308,10 +287,7 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server()`](#ssh-prepare_server).
 
----
-
 #### <span className="msb-recv">server.</span><span className="msb-hn">serve_connection()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def serve_connection() -> None
@@ -328,10 +304,7 @@ await server.serve_connection()
 
 Serve one SSH transport over this process's stdin/stdout. Runs the SSH handshake and session loop to completion, returning when the connection closes. Use this to bridge an SSH connection over the parent process's standard streams.
 
----
-
 #### <span className="msb-recv">server.</span><span className="msb-hn">close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```python
 def close() -> None
@@ -350,7 +323,6 @@ Release this prepared server endpoint. This method is synchronous.
 ## Types
 
 ### SandboxSshOps
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
 
@@ -362,7 +334,6 @@ SSH namespace for a sandbox.
 | [`prepare_server()`](#ssh-prepare_server) | [`SshServer`](#sshserver) | *(async)* Prepare a server endpoint. |
 
 ### SshClient
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#ssh-open_client">ssh.open_client()</a></p>
 
@@ -376,7 +347,6 @@ Native in-process SSH client session.
 | [`close()`](#client-close) | `None` | *(async)* Close the session. |
 
 ### SshServer
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#ssh-prepare_server">ssh.prepare_server()</a></p>
 
@@ -388,7 +358,6 @@ Reusable SSH server endpoint for a sandbox.
 | [`close()`](#server-close) | `None` | Release the prepared endpoint. |
 
 ### SftpClient
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
 
@@ -408,7 +377,6 @@ High-level SFTP client session over an SSH connection. All methods are async.
 | close() | `None` | Close the SFTP session. |
 
 ### SshOutput
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#client-exec">client.exec()</a></p>
 

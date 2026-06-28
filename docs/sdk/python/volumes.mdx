@@ -29,10 +29,7 @@ print(handle.used_bytes)
 
 Static methods on `Volume` that manage named persistent volumes. Volumes live independently of any sandbox, stored by default under `~/.microsandbox/volumes/<name>/`.
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def create(
@@ -90,10 +87,7 @@ Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def get(name: str) -> VolumeHandle
@@ -128,10 +122,7 @@ Get a lightweight handle to an existing named volume, with its metadata and a ho
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def list() -> list[VolumeHandle]
@@ -157,10 +148,7 @@ List all named volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove(name: str) -> None
@@ -185,16 +173,11 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
----
-
 ## Mount factories
 
 Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). Pass the result as a value in the `volumes` dict when creating a sandbox, keyed by the guest mount point.
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">bind()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 def bind(
@@ -255,10 +238,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 def named(
@@ -322,10 +302,7 @@ Mount an existing named volume. The volume must already exist; create it first w
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">tmpfs()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 def tmpfs(
@@ -386,10 +363,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```python
 def disk(
@@ -460,16 +434,11 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
   </div>
 </div>
 
----
-
 ## Instance properties
 
 Read-only properties on a [`Volume`](#volume-create) returned by [`Volume.create()`](#volume-create).
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
 
 ```python
 name: str
@@ -477,10 +446,7 @@ name: str
 
 Volume name.
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-<div className="msb-tags"><span className="msb-tag is-instance">property</span></div>
 
 ```python
 path: str
@@ -488,16 +454,11 @@ path: str
 
 Host path to the volume's directory.
 
----
-
 ## VolumeFs methods
 
 Host-side filesystem operations on a named volume, obtained via the `fs` property on a [`VolumeHandle`](#volumehandle). These run directly on the host filesystem; no running sandbox is required. All paths are relative to the volume root.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read(path: str) -> bytes
@@ -532,10 +493,7 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read_text(path: str) -> str
@@ -561,10 +519,7 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def write(path: str, data: bytes) -> None
@@ -594,10 +549,7 @@ Write content to a file, creating it if it doesn't exist and overwriting if it d
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def list(path: str) -> list[FsEntry]
@@ -623,10 +575,7 @@ List the entries in a directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def mkdir(path: str) -> None
@@ -643,10 +592,7 @@ Create a directory and all parent directories.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_file()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove_file(path: str) -> None
@@ -663,10 +609,7 @@ Remove a file.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exists(path: str) -> bool
@@ -692,13 +635,10 @@ Check whether a path exists within the volume.
   </div>
 </div>
 
----
-
 ## Types
 
 ### VolumeHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a>, <a href="#volume-list">Volume.list()</a></p>
 
@@ -720,7 +660,6 @@ A lightweight handle to a named volume, with its database metadata and a host-si
 
 ### VolumeFs
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
 
@@ -738,7 +677,6 @@ Host-side filesystem operations on a named volume. No running sandbox is require
 
 ### MountConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-bind">Volume.bind()</a>, <a href="#volume-named">Volume.named()</a>, <a href="#volume-tmpfs">Volume.tmpfs()</a>, <a href="#volume-disk">Volume.disk()</a></p>
 
@@ -765,7 +703,6 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 
 ### MountKind
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#mountconfig">MountConfig</a></p>
 
@@ -780,7 +717,6 @@ String enum (`StrEnum`) for the type of mount.
 
 ### DiskImageFormat
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#volume-disk">Volume.disk()</a>, <a href="#mountconfig">MountConfig</a></p>
 

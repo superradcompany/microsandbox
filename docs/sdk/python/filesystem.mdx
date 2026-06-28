@@ -24,10 +24,7 @@ The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk
 
 ## Methods
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read(path: str) -> bytes
@@ -62,10 +59,7 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read_text(path: str) -> str
@@ -99,10 +93,7 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read_stream(path: str) -> FsReadStream
@@ -138,10 +129,7 @@ Open a streaming reader for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def write(path: str, data: bytes) -> None
@@ -170,10 +158,7 @@ Write content to a file, creating it if it doesn't exist and overwriting it if i
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def write_stream(path: str) -> FsWriteSink
@@ -209,10 +194,7 @@ Open a streaming writer for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def list(path: str) -> list[FsEntry]
@@ -247,10 +229,7 @@ List the entries in a directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def mkdir(path: str) -> None
@@ -275,10 +254,7 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def stat(path: str) -> FsMetadata
@@ -313,10 +289,7 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exists(path: str) -> bool
@@ -351,10 +324,7 @@ Check whether a path exists inside the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove_dir(path: str) -> None
@@ -379,10 +349,7 @@ Remove a directory and its contents recursively.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy(src: str, dst: str) -> None
@@ -411,10 +378,7 @@ Copy a file within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def rename(src: str, dst: str) -> None
@@ -443,10 +407,7 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove(path: str) -> None
@@ -471,10 +432,7 @@ Remove a file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy_from_host(host_path: str, guest_path: str) -> None
@@ -503,10 +461,7 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy_to_host(guest_path: str, host_path: str) -> None
@@ -535,13 +490,10 @@ Copy a file from the sandbox out to the host machine.
   </div>
 </div>
 
----
-
 ## Types
 
 ### FsEntry
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">list()</a></p>
 
@@ -557,7 +509,6 @@ Metadata for a single directory entry, returned by [`list()`](#fs-list).
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Describes <a href="#fsentry">FsEntry.kind</a> · <a href="#fsmetadata">FsMetadata.kind</a></p>
 
@@ -572,7 +523,6 @@ String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnu
 
 ### FsMetadata
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">stat()</a></p>
 
@@ -589,7 +539,6 @@ Detailed file metadata, returned by [`stat()`](#fs-stat).
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
 
@@ -602,7 +551,6 @@ Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-re
 
 ### FsWriteSink
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
 
