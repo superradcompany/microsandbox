@@ -58,7 +58,7 @@ Common flags:
 
 Use `msb run --help` for the full flag list.
 
-Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
+Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private or public network access only when you intentionally bind beyond loopback.
 
 ### Network rule syntax
 
@@ -400,7 +400,13 @@ msb self uninstall --yes      # Skip confirmation
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
 
-Before a downgrade rolls back schema, `msb` checks the target release, reads that release's schema baseline, refuses targets below 0.6.0, refuses irreversible migration paths, and blocks the rollback while matching running sandboxes are active. When rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless `--no-backup` is passed. If rollback metadata marks the image cache affected, `msb` purges the cache after schema rollback unless `--keep-cache` is passed. The target binary is always installed fresh and checked with `msb --version` before command links are refreshed.
+Before a downgrade rolls back schema, `msb`:
+
+- Checks the target release and reads that release's schema baseline.
+- Refuses targets below 0.6.0 and refuses irreversible migration paths.
+- Blocks the rollback while matching running sandboxes are active.
+
+When rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless you pass `--no-backup`. If rollback metadata marks the image cache as affected, `msb` purges the cache after schema rollback unless you pass `--keep-cache`. `msb` always installs the target binary fresh and verifies it with `msb --version` before refreshing command links.
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
