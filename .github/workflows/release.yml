@@ -691,6 +691,52 @@ jobs:
             -f "client_payload[version]=$VERSION"
 
   # ---------------------------------------------------------------------------
+  # Submit the new version to the Windows Package Manager (winget-pkgs)
+  #
+  # winget-releaser runs Komac, which copies the previous version's manifests
+  # from microsoft/winget-pkgs, bumps the version, and rewrites the installer
+  # URLs and SHA256 hashes from this release's Windows .zip assets, then opens a
+  # PR against microsoft/winget-pkgs from a fork.
+  #
+  # One-time preconditions:
+  #   - At least one version of SuperRadCompany.Microsandbox must already exist
+  #     in winget-pkgs. The first release is submitted by hand from the staged
+  #     manifests under packaging/winget/ (see packaging/winget/README.md);
+  #     Komac errors out if the package is not yet present.
+  #   - WINGET_TOKEN: a classic PAT with `public_repo` scope whose owner has a
+  #     fork of microsoft/winget-pkgs. Set the WINGET_FORK_USER repository
+  #     variable if that fork lives under a different account than this repo's
+  #     owner.
+  #
+  # The submit step is a no-op when WINGET_TOKEN is unset, so releases never
+  # fail for forks that have not configured winget publishing. Prerelease tags
+  # (rc/alpha/beta/dev) are skipped to match the assemble job's --prerelease
+  # detection.
+  # ---------------------------------------------------------------------------
+  update-winget:
+    name: Update winget package
+    needs: assemble
+    runs-on: ubuntu-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Submit to winget-pkgs
+        if: >-
+          env.WINGET_TOKEN != ''
+          && !contains(github.ref_name, '-rc')
+          && !contains(github.ref_name, '-alpha')
+          && !contains(github.ref_name, '-beta')
+          && !contains(github.ref_name, '-dev')
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: SuperRadCompany.Microsandbox
+          installers-regex: 'microsandbox-windows-.+\.zip$'
+          release-tag: ${{ github.ref_name }}
+          release-notes-url: https://github.com/superradcompany/microsandbox/releases/tag/${{ github.ref_name }}
+          fork-user: ${{ vars.WINGET_FORK_USER || github.repository_owner }}
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  # ---------------------------------------------------------------------------
   # Publish Node SDK to npm
   # ---------------------------------------------------------------------------
   npm-publish:

@@ -406,9 +406,24 @@ async fn reconcile_stale_active(
         .one(db)
         .await?;
 
-    // No active run yet: the sandbox is still starting (its runtime has not
-    // inserted a run row). Skip to avoid racing create/start.
+    // No active run yet while Running means the sandbox is still starting
+    // (its runtime has not inserted a run row). Draining with no active run
+    // means the stop request already reached a terminal run state, so repair
+    // the sandbox status instead of leaving future stop callers polling.
     let Some(run) = run else {
+        if sandbox.status == sandbox_entity::SandboxStatus::Draining {
+            let now = chrono::Utc::now().naive_utc();
+            let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
+            let result = sandbox_entity::Entity::update_many()
+                .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
+                .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+                .filter(sandbox_entity::Column::Id.eq(sandbox.id))
+                .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Draining))
+                .exec(db)
+                .await?;
+            return Ok(result.rows_affected > 0);
+        }
+
         return Ok(false);
     };
 
@@ -729,6 +744,15 @@ mod tests {
         )
         .await;
 
+        // Draining without an active run should also settle as Stopped.
+        let draining_no_run = insert_sandbox(
+            &db,
+            "draining-no-run",
+            sandbox_entity::SandboxStatus::Draining,
+            false,
+        )
+        .await;
+
         // Ephemeral Stopped sandbox should be removed in phase 2.
         let eph = insert_sandbox(&db, "eph", sandbox_entity::SandboxStatus::Stopped, true).await;
         std::fs::create_dir_all(dir.path().join("eph")).unwrap();
@@ -738,7 +762,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(report.reconciled, 2);
+        assert_eq!(report.reconciled, 3);
         assert_eq!(report.removed, 1);
         assert_eq!(report.errors, 0);
         assert_eq!(
@@ -747,6 +771,10 @@ mod tests {
         );
         assert_eq!(
             status_of(&db, draining).await,
+            Some(sandbox_entity::SandboxStatus::Stopped)
+        );
+        assert_eq!(
+            status_of(&db, draining_no_run).await,
             Some(sandbox_entity::SandboxStatus::Stopped)
         );
         assert!(status_of(&db, eph).await.is_none());
