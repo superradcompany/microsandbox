@@ -207,6 +207,37 @@ pub fn verify_windows_host_prerequisites() -> Result<(), WindowsHostSetupError> 
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions: Doctor
+//--------------------------------------------------------------------------------------------------
+
+/// Diagnose Windows host virtualization prerequisites for `msb doctor`.
+pub(super) fn host_section() -> (super::host::Section, Vec<super::host::Problem>) {
+    use super::host::{Check, Problem, Section};
+
+    let arch = std::env::consts::ARCH;
+    let mut checks = vec![Check::info("Platform", &format!("Windows {arch}"))];
+    let mut problems = Vec::new();
+
+    match verify_windows_host_prerequisites() {
+        Ok(()) => checks.push(Check::pass("Hypervisor", "Windows Hypervisor Platform")),
+        Err(err) => {
+            checks.push(Check::fail("Hypervisor", "unavailable"));
+            let mut hints = vec![err.cause()];
+            hints.extend(err.hints().iter().map(|hint| (*hint).to_string()));
+            problems.push(Problem::new(err.title(), hints));
+        }
+    }
+
+    (
+        Section {
+            title: "Host".to_string(),
+            checks,
+        },
+        problems,
+    )
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 

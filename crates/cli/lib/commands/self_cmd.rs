@@ -1,10 +1,11 @@
 //! `msb self` subcommands for managing the msb installation itself.
 
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(windows)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
@@ -65,6 +66,10 @@ pub struct DoctorArgs {
     /// Attempt supported host virtualization setup fixes.
     #[arg(long)]
     pub fix: bool,
+
+    /// Apply fixes without prompting for confirmation.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -141,55 +146,211 @@ pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
 }
 
 /// Check local runtime files and host virtualization prerequisites.
+///
+/// Renders each check in the spinner-completion style shared with `msb start`
+/// and `msb pull` (`✓ <label> <detail>`), followed by a styled error block per
+/// problem. With `--fix`, applies the safe auto-runnable remediation for each
+/// problem (after a `[y/N]` prompt) and re-checks. Exits non-zero when the host
+/// still cannot run local sandboxes.
 pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
-    if microsandbox::setup::is_installed() {
-        done("Runtime dependencies are installed.");
-    } else {
-        anyhow::bail!("microsandbox runtime is not installed; run `msb self update`");
+    let diagnosis = diagnose_host();
+    render_diagnosis(&diagnosis);
+
+    if diagnosis.is_healthy() {
+        done("Host setup is ready.");
+        return Ok(());
     }
 
-    #[cfg(windows)]
-    {
-        check_windows_host_prerequisites(args.fix)?;
-    }
+    let mut applied_any = false;
+    let mut relogin_pending = false;
+    for problem in &diagnosis.problems {
+        render_problem(problem, !args.fix);
 
-    #[cfg(not(windows))]
-    {
-        if args.fix {
-            ui::warn("No automatic host setup fixes are available for this platform yet.");
+        if args.fix
+            && let Some(fix) = &problem.fix
+            && apply_fix(fix, args.yes)?
+        {
+            applied_any = true;
+            relogin_pending |= fix.requires_relogin;
         }
     }
 
-    done("Host setup is ready.");
-    Ok(())
+    // Windows applies its fix through an elevated, UAC-gated PowerShell flow
+    // rather than a `sudo` command, so it's handled out of band.
+    #[cfg(windows)]
+    if args.fix {
+        return attempt_windows_fix();
+    }
+
+    if applied_any {
+        let recheck = diagnose_host();
+        render_diagnosis(&recheck);
+
+        if recheck.is_healthy() {
+            done("Host setup is ready.");
+            return Ok(());
+        }
+
+        for problem in &recheck.problems {
+            render_problem(problem, false);
+        }
+        if relogin_pending {
+            ui::warn_with_lines(
+                "some fixes apply fully only after you log out and back in",
+                &[ui::ErrorLine::Hint(
+                    "start a new shell (or re-login) to pick up group changes",
+                )],
+            );
+        }
+    } else if args.fix {
+        ui::warn("no automatic fixes are available for the problems above.");
+    }
+
+    std::process::exit(1);
 }
 
-#[cfg(windows)]
-fn check_windows_host_prerequisites(fix: bool) -> anyhow::Result<()> {
-    match microsandbox::setup::verify_windows_host_prerequisites() {
-        Ok(()) => {
-            done("Windows Hypervisor Platform is available.");
-            Ok(())
-        }
-        Err(err) if fix => {
-            ui::warn(&format!(
-                "Windows Hypervisor Platform is unavailable: {}",
-                err.cause()
-            ));
-            enable_windows_hypervisor_platform()?;
+/// Run the diagnosis behind a `Checking host` spinner.
+///
+/// The individual checks are near-instant, so they render as already-resolved
+/// completion lines; this single spinner covers the whole pass (and is visible
+/// on slower hosts, e.g. the Windows hypervisor probe).
+fn diagnose_host() -> microsandbox::setup::Diagnosis {
+    let spinner = ui::Spinner::start("Checking", "host");
+    let diagnosis = microsandbox::setup::diagnose();
+    spinner.finish_clear();
+    diagnosis
+}
 
-            match microsandbox::setup::verify_windows_host_prerequisites() {
-                Ok(()) => {
-                    done("Windows Hypervisor Platform is available.");
-                    Ok(())
-                }
-                Err(err) => {
-                    ui::warn("Windows may require a reboot before WHP is available.");
-                    Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into())
-                }
+/// Render the checks as a flat log: all `info <label>: <value>` facts first,
+/// then the `✓`/`✗ <label> <detail>` rows — matching the CLI's convention of
+/// leading with `info` metadata before the result rows.
+fn render_diagnosis(diagnosis: &microsandbox::setup::Diagnosis) {
+    use microsandbox::setup::CheckState;
+
+    let checks: Vec<&microsandbox::setup::Check> =
+        diagnosis.sections.iter().flat_map(|s| &s.checks).collect();
+    let (mut facts, rows): (Vec<_>, Vec<_>) = checks
+        .into_iter()
+        .partition(|check| matches!(check.state, CheckState::Info));
+
+    // Lead the metadata block with host identity (Platform) ahead of the
+    // install location; falls back to model order if that label changes.
+    facts.sort_by_key(|check| check.label != "Platform");
+
+    for check in facts.into_iter().chain(rows) {
+        render_check(check);
+    }
+}
+
+/// Render one check. Pass/fail use the `✓`/`✗ <label> <detail>` completion
+/// format; informational facts render as an `info <label>: <value>` line.
+fn render_check(check: &microsandbox::setup::Check) {
+    use microsandbox::setup::CheckState;
+    match check.state {
+        CheckState::Pass => ui::success(&check.label, &check.value),
+        CheckState::Fail => ui::failure(&check.label, &check.value),
+        CheckState::Warn => {
+            eprintln!(
+                "   {} {:<12} {}",
+                style("!").yellow(),
+                check.label,
+                check.value
+            );
+        }
+        CheckState::Info => info(&format!("{}: {}", check.label, check.value)),
+    }
+}
+
+/// Render a single problem as a styled `error:` block with `→` lines.
+///
+/// When the problem carries a [`Fix`](microsandbox::setup::Fix), its commands
+/// are listed; `offer_fix_flag` adds a pointer to `msb doctor --fix` (shown
+/// when we're not already in fix mode).
+fn render_problem(problem: &microsandbox::setup::Problem, offer_fix_flag: bool) {
+    let mut lines: Vec<String> = problem.hints.clone();
+
+    if let Some(fix) = &problem.fix {
+        lines.push(format!("fix: {}", fix.description));
+        for command in &fix.commands {
+            lines.push(format!("  {}", command.display()));
+        }
+        if offer_fix_flag {
+            lines.push("apply automatically: msb doctor --fix".to_string());
+        }
+    }
+
+    let error_lines: Vec<ui::ErrorLine<'_>> =
+        lines.iter().map(|line| ui::ErrorLine::Hint(line)).collect();
+    ui::error_with_lines(&problem.headline, &error_lines);
+}
+
+/// Apply a fix's commands after an optional confirmation prompt.
+///
+/// Returns whether the fix was attempted (i.e. the user agreed). Individual
+/// command failures are reported but don't abort the remaining commands — the
+/// re-check determines the real outcome.
+fn apply_fix(fix: &microsandbox::setup::Fix, assume_yes: bool) -> anyhow::Result<bool> {
+    if !assume_yes && !confirm(&format!("Apply fix — {}? [y/N] ", fix.description))? {
+        info("Skipped.");
+        return Ok(false);
+    }
+
+    // Pre-authenticate sudo up front so its password prompt doesn't collide
+    // with the per-command spinner below. After this, the cached credential
+    // lets the fix commands run without prompting.
+    if fix.commands.iter().any(|command| command.program == "sudo") {
+        let _ = Command::new("sudo").arg("-v").status();
+    }
+
+    for command in &fix.commands {
+        let spinner = ui::Spinner::start("Applying", &command.display());
+        match Command::new(&command.program).args(&command.args).status() {
+            Ok(status) if status.success() => spinner.finish_success("Applied"),
+            Ok(status) => {
+                spinner.finish_fail("Failed");
+                ui::warn(&format!("`{}` exited with {status}", command.display()));
+            }
+            Err(e) => {
+                spinner.finish_fail("Failed");
+                ui::warn(&format!("could not run `{}`: {e}", command.display()));
             }
         }
-        Err(err) => Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into()),
+    }
+
+    // The fix was attempted; the re-check determines the real outcome.
+    Ok(true)
+}
+
+/// Prompt for a yes/no confirmation on stderr. Errors on a non-interactive
+/// terminal so `--fix` never silently mutates the host without `--yes`.
+fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("non-interactive terminal; pass --yes to apply fixes");
+    }
+
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+/// Attempt the elevated Windows Hypervisor Platform enable, then re-verify.
+#[cfg(windows)]
+fn attempt_windows_fix() -> anyhow::Result<()> {
+    eprintln!();
+    enable_windows_hypervisor_platform()?;
+
+    match microsandbox::setup::verify_windows_host_prerequisites() {
+        Ok(()) => {
+            done("Windows Hypervisor Platform is now available.");
+            Ok(())
+        }
+        Err(err) => {
+            ui::warn("Windows may require a reboot before WHP is available.");
+            Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into())
+        }
     }
 }
 

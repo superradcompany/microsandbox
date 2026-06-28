@@ -124,6 +124,18 @@ impl Spinner {
         }
     }
 
+    /// Finish with failure. Shows `✗ <label> <target>` in the same completion
+    /// format as [`finish_success`](Self::finish_success), in red.
+    pub fn finish_fail(self, label: &str) {
+        if let Some(pb) = self.pb {
+            pb.finish_and_clear();
+        }
+
+        if !self.quiet {
+            eprintln!("   {} {:<12} {}", style("✗").red(), label, self.target);
+        }
+    }
+
     /// Finish and clear entirely — no output remains on screen.
     ///
     /// Used on both success and failure paths: errors are presented by
@@ -329,12 +341,33 @@ pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());
 }
 
+/// Print a warning message with `→`-prefixed context lines.
+///
+/// Mirrors [`error_with_lines`] but with a yellow `warn:` label. As there, the
+/// message and body text render uncolored; only the `→` bullet is dim.
+pub fn warn_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
+    eprintln!("{} {msg}", style("warn:").yellow().bold());
+    for line in lines {
+        let text = match line {
+            ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
+        };
+        eprintln!("  {} {}", style("→").dim(), text);
+    }
+}
+
 /// Print a one-shot success action to stderr.
 ///
 /// Follows the same format as spinner completions:
 /// `   ✓ {verb:<12} {target}`
 pub fn success(verb: &str, target: &str) {
     eprintln!("   {} {:<12} {}", style("✓").green(), verb, target);
+}
+
+/// Print a one-shot failure action to stderr, mirroring [`success`].
+///
+/// Same `   ✗ {label:<12} {detail}` shape as a spinner failure completion.
+pub fn failure(label: &str, detail: &str) {
+    eprintln!("   {} {:<12} {}", style("✗").red(), label, detail);
 }
 
 /// Format a sandbox status with appropriate color.
