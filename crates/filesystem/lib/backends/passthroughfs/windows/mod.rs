@@ -576,12 +576,17 @@ fn mode_from_metadata(metadata: &std::fs::Metadata) -> u32 {
         0
     };
 
+    // NTFS has no Unix execute bit, so synthesize a default mode for files
+    // that have no virtual override yet. Default to executable (matching
+    // libkrun's own Windows fs passthrough and WSL DrvFs's no-metadata
+    // behavior) so binaries on a bind mount or bind rootfs can run: without
+    // this, every host file is exposed as 0o666 and the guest cannot exec
+    // anything before it has a chance to chmod it. Precise per-file modes
+    // still come from the virtual stat store once the guest sets them.
     let perms = if metadata.file_attributes() & FILE_ATTRIBUTE_READONLY != 0 {
         0o555
-    } else if metadata.file_type().is_dir() {
-        0o777
     } else {
-        0o666
+        0o777
     };
     type_bits | perms
 }

@@ -410,6 +410,46 @@ fn seeded_virtual_permissions_are_visible_after_backend_start() {
 }
 
 #[test]
+fn host_files_without_override_are_executable() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("program"), b"\x7fELFbinary").unwrap();
+
+    let fs = fs_for(&temp.path);
+    let entry = fs.lookup(context(), ROOT_INODE, c"program").unwrap();
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+
+    // NTFS has no Unix exec bit, but a freshly bound host file must still be
+    // runnable (e.g. binaries in a bind rootfs) before the guest chmods it.
+    assert_eq!(st.st_mode & S_IFMT, S_IFREG);
+    assert_eq!(st.st_mode & 0o7777, 0o777);
+    assert_ne!(
+        st.st_mode & 0o111,
+        0,
+        "host file should be executable by default"
+    );
+
+    // Root must pass an X_OK access check against the synthesized mode.
+    check_access(context(), &st, LINUX_ACCESS_X_OK).unwrap();
+}
+
+#[test]
+fn readonly_host_files_without_override_are_read_execute_only() {
+    let temp = TempDir::new();
+    let file = temp.path.join("locked");
+    std::fs::write(&file, b"data").unwrap();
+    let mut perms = std::fs::metadata(&file).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&file, perms).unwrap();
+
+    let fs = fs_for(&temp.path);
+    let entry = fs.lookup(context(), ROOT_INODE, c"locked").unwrap();
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+
+    assert_eq!(st.st_mode & S_IFMT, S_IFREG);
+    assert_eq!(st.st_mode & 0o7777, 0o555);
+}
+
+#[test]
 fn strict_uses_ads_and_does_not_create_sidecar() {
     let temp = TempDir::new();
     let fs = fs_for(&temp.path);
