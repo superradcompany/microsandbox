@@ -14,6 +14,7 @@ The API documentation can be found on [pkg.go.dev](https://pkg.go.dev/github.com
 - **Command execution** — Run commands with collected or streaming output
 - **Guest filesystem access** — Read, write, list, copy files inside a running sandbox
 - **Named volumes** — Persistent storage across sandbox restarts, with quotas
+- **Virtual mounts** — Serve a guest directory from your own `vfs.PathFs` code ([docs](https://docs.microsandbox.dev/sdk/go/virtual-filesystem))
 - **Network policies** — Public-only (default), allow-all, or fully airgapped
 - **DNS filtering** — Block specific domains or domain suffixes
 - **TLS interception** — Transparent HTTPS inspection and secret substitution
@@ -486,7 +487,7 @@ sb, err := h.Connect(ctx)
 | `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |
 | `ListSandboxes(ctx)` | Rich metadata for all known sandboxes (newest first) |
 | `SDKVersion()` / `RuntimeVersion()` | SDK and loaded-runtime versions |
-| `RemoveSandbox(ctx, name)` | Remove a stopped sandbox by name |
+| `RemoveSandbox(ctx, name)` | Remove a stopped sandbox by name (name-addressed; re-fetch after `.replace()`) |
 | `AllSandboxMetrics(ctx)` | Point-in-time metrics for all running sandboxes |
 | `CreateVolume(ctx, name, ...opts)` | Create a named persistent volume |
 | `GetVolume(ctx, name)` | Fetch volume metadata; returns `*VolumeHandle` |
@@ -499,7 +500,7 @@ sb, err := h.Connect(ctx)
 | Type | Description |
 |------|-------------|
 | `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
-| `SandboxHandle` | Lightweight metadata reference; obtain via `GetSandbox`. Methods: `Connect`, `Start`, `StartDetached`, `Stop`, `Kill`, `Remove` |
+| `SandboxHandle` | Lightweight metadata reference; obtain via `GetSandbox`. Call `Refresh` after same-name replace. Methods: `Connect`, `Start`, `StartDetached`, `Stop`, `Kill`, `Remove`, `Metrics`, `Snapshot`, `SnapshotTo`, `Logs`, `LogStream` |
 | `ExecOutput` | Captured stdout/stderr with exit status; inspect via `Stdout()`, `Stderr()`, `ExitCode()`, `Success()` |
 | `ExecHandle` | Streaming exec handle — `Recv`, `Collect`, `Wait`, `Kill`, `Signal`, `ID`, `TakeStdin` |
 | `ExecEvent` | Stream event with `Kind`, `PID`, `Data`, `ExitCode` fields |
@@ -586,6 +587,7 @@ sb, err := h.Connect(ctx)
 | `ErrSandboxNotFound` | No sandbox with that name |
 | `ErrSandboxAlreadyExists` | Name is taken; pass `WithReplace()` or drop the live handle first |
 | `ErrSandboxStillRunning` | Cannot remove a running sandbox |
+| `ErrSandboxHandleStale` | Handle refers to a replaced/removed sandbox generation; call `GetSandbox`/`Refresh` |
 | `ErrVolumeNotFound` | No volume with that name |
 | `ErrVolumeAlreadyExists` | Volume name already in use |
 | `ErrExecTimeout` | Command exceeded `WithExecTimeout` |
@@ -605,6 +607,10 @@ sb, err := h.Connect(ctx)
 Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.
 
 Use `microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound)` to test.
+
+**Stale handles.** Each `SandboxHandle` captures the sandbox database row id (`db_id`) when created. After a same-name replace (`.WithReplace()`), an old handle returns `ErrSandboxHandleStale` from handle methods — call `Refresh` or `GetSandbox` again. Snapshot fields such as `Status()`, `ConfigJSON()`, and timestamps reflect handle creation time until refreshed. Top-level name functions (`StartSandbox`, `RemoveSandbox`, `StopSandboxByName`, …) always target the current record by name and do not perform this check.
+
+**Native library.** Rebuild or reinstall the Go SDK native library when upgrading the SDK so `GetSandbox`/`ListSandboxes` return `db_id`. An outdated `libmicrosandbox` omits `db_id` and stale-handle detection may not work.
 
 ## Runnable Examples
 

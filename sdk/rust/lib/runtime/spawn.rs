@@ -40,7 +40,9 @@ use microsandbox_protocol::{
     ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
 };
 use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
-use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
+use microsandbox_runtime::vm::{
+    MetricsSlotHandoff, StartupCommand, VIRTUAL_MOUNT_FD_BASE, VirtualMount,
+};
 use microsandbox_types::SandboxLogLevel;
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -234,6 +236,13 @@ pub async fn spawn_sandbox(
         microsandbox_runtime::vm::CONFIG_FD.to_string(),
     ));
 
+    // Re-validate virtual-mount sockets immediately before spawn so a fd closed
+    // after `build()` fails with a clear error instead of a pre_exec dup failure.
+    #[cfg(unix)]
+    for vmount in &config.virtual_mounts {
+        crate::sandbox::validate_virtual_mount_child_fd(vmount.child_fd)?;
+    }
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(visible);
@@ -248,17 +257,39 @@ pub async fn spawn_sandbox(
             .as_ref()
             .map(|pipe| pipe.read_fd.as_raw_fd());
         let startup_write_fd = startup_pipe.as_ref().map(|pipe| pipe.write_fd.as_raw_fd());
+        // (child_fd, target) pairs to place each virtual mount's socket at its
+        // inherited fd; the same index→fd mapping is used in `sandbox_cli_args`.
+        let mut virtual_mount_fd_dups: Vec<(i32, i32)> = config
+            .virtual_mounts
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.child_fd, VIRTUAL_MOUNT_FD_BASE + i as i32))
+            .collect();
+        let virtual_mount_scratch_base = VIRTUAL_MOUNT_FD_BASE + virtual_mount_fd_dups.len() as i32;
         unsafe {
             cmd.pre_exec(move || {
                 if startup_write_fd.is_some() {
                     detach_from_launcher_session()?;
                 }
+                // Relocate every virtual-mount source fd to a scratch fd above
+                // the reserved/target range *first*. A source may currently sit
+                // on a reserved slot (CONFIG_FD/PARENT_WATCH_FD/STARTUP_FD) or
+                // on another mount's target; moving them all out of the way
+                // before the fixed-slot dup2s below means those dup2s cannot
+                // clobber a source another mount still needs.
+                relocate_virtual_mount_sources_to_scratch(
+                    &mut virtual_mount_fd_dups,
+                    virtual_mount_scratch_base,
+                )?;
                 dup_inherited_fd(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD)?;
                 if let Some(fd) = parent_watch_fd {
                     dup_inherited_fd(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)?;
                 }
                 if let Some(fd) = startup_write_fd {
                     dup_inherited_fd(fd, microsandbox_runtime::vm::STARTUP_FD)?;
+                }
+                for &(scratch_fd, target) in virtual_mount_fd_dups.iter() {
+                    dup_inherited_fd(scratch_fd, target)?;
                 }
                 Ok(())
             });
@@ -281,6 +312,7 @@ pub async fn spawn_sandbox(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
+            close_parent_virtual_mount_fds(config);
             release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(err.into());
         }
@@ -289,6 +321,7 @@ pub async fn spawn_sandbox(
     let _pid = match child.id() {
         Some(pid) => pid,
         None => {
+            close_parent_virtual_mount_fds(config);
             release_metrics_reservation(config, metrics_reservation.as_ref());
             return Err(crate::MicrosandboxError::Runtime(
                 "sandbox process exited immediately".into(),
@@ -296,6 +329,7 @@ pub async fn spawn_sandbox(
         }
     };
     tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
+    close_parent_virtual_mount_fds(config);
 
     // Read the startup JSON from the dedicated startup pipe in detached
     // mode, otherwise stdout.
@@ -471,6 +505,74 @@ fn dup_inherited_fd(src: i32, dst: i32) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Plan source→target fd pairs for virtual-mount inheritance in `pre_exec`.
+///
+/// Each mount's runtime-side socket is dup'd onto `virtual_mount_fd_base + index`. Sources
+/// are relocated to scratch fds at or above `scratch_base` before the fixed-slot
+/// dup2s run so a source sitting on another mount's target cannot be clobbered.
+#[cfg(test)]
+fn virtual_mount_fd_inherit_plan(
+    child_fds: &[i32],
+    virtual_mount_fd_base: i32,
+) -> (Vec<(i32, i32)>, i32) {
+    let dups: Vec<(i32, i32)> = child_fds
+        .iter()
+        .enumerate()
+        .map(|(i, &fd)| (fd, virtual_mount_fd_base + i as i32))
+        .collect();
+    let scratch_base = virtual_mount_fd_base + dups.len() as i32;
+    (dups, scratch_base)
+}
+
+/// Move every virtual-mount source fd to a scratch slot above the target range.
+fn relocate_virtual_mount_sources_to_scratch(
+    dups: &mut [(i32, i32)],
+    scratch_base: i32,
+) -> std::io::Result<()> {
+    for entry in dups.iter_mut() {
+        let scratch = unsafe { libc::fcntl(entry.0, libc::F_DUPFD, scratch_base) };
+        if scratch < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::close(entry.0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        entry.0 = scratch;
+    }
+    Ok(())
+}
+
+/// Relocate virtual-mount sources, then dup each onto its inherited target slot.
+#[cfg(test)]
+fn install_vfs_inherited_fds(dups: &mut [(i32, i32)], scratch_base: i32) -> std::io::Result<()> {
+    relocate_virtual_mount_sources_to_scratch(dups, scratch_base)?;
+    for &(scratch_fd, target) in dups.iter() {
+        dup_inherited_fd(scratch_fd, target)?;
+    }
+    Ok(())
+}
+
+/// Close the parent process's copies of virtual-mount socket fds after spawn.
+///
+/// The child inherits relocated dup's on fixed virtual-mount fd slots
+/// ([`VIRTUAL_MOUNT_FD_BASE`] + index) in `pre_exec`; the
+/// original fds in the spawning process are no longer needed and would leak if
+/// the caller forgot to close them (Rust `virtual_mount_fd` integrations).
+///
+/// When [`SandboxConfig::runtime_virtual_mount_servers`] is set, the in-process provider
+/// bundle closes its own child ends via [`VirtualMountServers::close_children_after_spawn`]
+/// and this function must not `close(2)` the same descriptors again.
+fn close_parent_virtual_mount_fds(config: &crate::sandbox::SandboxConfig) {
+    if config.runtime_virtual_mount_servers.is_some() {
+        return;
+    }
+    for vmount in &config.virtual_mounts {
+        if vmount.child_fd >= 0 {
+            let _ = unsafe { libc::close(vmount.child_fd) };
+        }
+    }
 }
 
 fn detach_from_launcher_session() -> std::io::Result<()> {
@@ -1043,11 +1145,15 @@ fn encode_handoff_json<T: Serialize>(value: &T) -> String {
 /// Output is at most 20 bytes — the kernel's virtio-blk serial length limit.
 /// Layout: `<slug[..11]>_<8-hex>`. The slug-part is a debugging hint; the
 /// 8-hex suffix is what actually disambiguates.
-fn guest_mount_tag(guest_path: &str) -> String {
+/// Derive the stable virtio tag / block id for a guest mount path.
+///
+/// Layout: `<slug[..11]>_<8-hex>`. The 8-hex suffix is a truncated SHA-256
+/// digest; collisions between unrelated paths are unlikely but possible.
+pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
     use std::fmt::Write as _;
 
-    const SLUG_MAX: usize = 11;
-    const HASH_HEX_LEN: usize = 8;
+    const SLUG_MAX: usize = 7;
+    const HASH_HEX_LEN: usize = 12;
 
     let slug: String = guest_path
         .replace('/', "_")
@@ -1283,6 +1389,23 @@ fn sandbox_cli_args(
         }
     }
 
+    // Programmable virtual-filesystem mounts. The runtime-side socket of the
+    // Nth mount is inherited at `VIRTUAL_MOUNT_FD_BASE + N` (the dups are set up in
+    // `spawn_sandbox`); the guest mounts the same tag via `MSB_DIR_MOUNTS`.
+    for (i, vmount) in config.virtual_mounts.iter().enumerate() {
+        let tag = guest_mount_tag(&vmount.guest_path);
+        launch.virtual_mounts.push(VirtualMount {
+            tag,
+            fd: VIRTUAL_MOUNT_FD_BASE + i as i32,
+            fs_config: vmount.fs_config.clone(),
+        });
+        push_dir_mounts_spec(
+            &mut dir_mounts_val,
+            &vmount.guest_path,
+            MountOptions::default(),
+        );
+    }
+
     if !tmpfs_val.is_empty() {
         launch.env.push(format!("{}={tmpfs_val}", ENV_TMPFS));
     }
@@ -1445,6 +1568,7 @@ mod tests {
     use tempfile::tempdir;
 
     use microsandbox_runtime::launch::LaunchConfig;
+    use microsandbox_runtime::vm::VIRTUAL_MOUNT_FD_BASE;
 
     use super::sandbox_cli_args;
     use crate::{
@@ -1452,7 +1576,7 @@ mod tests {
         backend::LocalBackend,
         sandbox::{
             DiskImageFormat, OciRootfsSource, Rlimit, RlimitResource, RootfsSource, SandboxBuilder,
-            SandboxConfig,
+            SandboxConfig, VirtualMountSpec,
         },
     };
 
@@ -2461,5 +2585,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("must not contain '='"));
+    }
+
+    #[test]
+    fn virtual_mount_fd_inherit_plan_assigns_sequential_targets() {
+        let (dups, scratch) =
+            super::virtual_mount_fd_inherit_plan(&[3, 7, 11], VIRTUAL_MOUNT_FD_BASE);
+        assert_eq!(
+            dups,
+            vec![
+                (3, VIRTUAL_MOUNT_FD_BASE),
+                (7, VIRTUAL_MOUNT_FD_BASE + 1),
+                (11, VIRTUAL_MOUNT_FD_BASE + 2)
+            ]
+        );
+        assert_eq!(scratch, VIRTUAL_MOUNT_FD_BASE + 3);
+    }
+
+    #[test]
+    fn install_vfs_inherited_fds_places_connected_socket_at_target() {
+        use std::io::{Read, Write};
+        use std::mem::forget;
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        fn unused_fd(min: i32) -> i32 {
+            let fd = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD, min) };
+            assert!(fd >= min, "fcntl(F_DUPFD) failed: {fd}");
+            fd
+        }
+
+        let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let child_fd = child.as_raw_fd();
+        forget(child);
+
+        let target = unused_fd(200);
+        let mut dups = vec![(child_fd, target)];
+        let scratch_base = target + dups.len() as i32;
+        super::install_vfs_inherited_fds(&mut dups, scratch_base).unwrap();
+
+        parent.write_all(b"ping").unwrap();
+        let mut target_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(target) };
+        let mut buf = [0u8; 4];
+        target_stream.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+    }
+
+    #[test]
+    fn install_vfs_inherited_fds_survives_source_on_target_slot() {
+        use std::io::{Read, Write};
+        use std::mem::forget;
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        fn unused_fd(min: i32) -> i32 {
+            let fd = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD, min) };
+            assert!(fd >= min, "fcntl(F_DUPFD) failed: {fd}");
+            fd
+        }
+
+        let (mut parent1, child1) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut parent2, child2) = std::os::unix::net::UnixStream::pair().unwrap();
+        let target1 = unused_fd(200);
+        let target2 = unused_fd(target1 + 1);
+        let source1 = child1.as_raw_fd();
+        let source2_on_target = unsafe {
+            libc::dup2(child2.as_raw_fd(), target2);
+            target2
+        };
+        forget(child1);
+        forget(child2);
+
+        let mut dups = vec![(source1, target1), (source2_on_target, target2)];
+        let scratch_base = target2 + dups.len() as i32;
+        super::install_vfs_inherited_fds(&mut dups, scratch_base).unwrap();
+
+        parent1.write_all(b"one").unwrap();
+        parent2.write_all(b"two").unwrap();
+
+        let mut got1 = unsafe { std::os::unix::net::UnixStream::from_raw_fd(target1) };
+        let mut got2 = unsafe { std::os::unix::net::UnixStream::from_raw_fd(target2) };
+        let mut buf1 = [0u8; 3];
+        let mut buf2 = [0u8; 3];
+        got1.read_exact(&mut buf1).unwrap();
+        got2.read_exact(&mut buf2).unwrap();
+        assert_eq!(&buf1, b"one");
+        assert_eq!(&buf2, b"two");
+    }
+
+    #[test]
+    fn close_parent_virtual_mount_fds_closes_fd_only_mounts() {
+        use std::mem::forget;
+        use std::os::fd::AsRawFd;
+
+        let (_parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = child.as_raw_fd();
+        forget(child);
+
+        let mut config = SandboxConfig::default();
+        config.virtual_mounts.push(VirtualMountSpec {
+            guest_path: "/inbox".into(),
+            child_fd: fd,
+            fs_config: None,
+        });
+
+        super::close_parent_virtual_mount_fds(&config);
+
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
     }
 }

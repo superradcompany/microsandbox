@@ -82,6 +82,86 @@ async fn replace_with_live_handle_does_not_hang() {
     cleanup(name).await;
 }
 
+/// A metadata handle captured before `.replace()` must not stop the
+/// replacement sandbox generation.
+#[msb_test]
+async fn stale_handle_rejects_stop_after_replace() {
+    let name = "stale-handle-stop";
+    cleanup(name).await;
+
+    let sb1 = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(256)
+        .replace()
+        .create()
+        .await
+        .expect("first create");
+    let stale = Sandbox::get(name).await.expect("get handle before replace");
+
+    drop(sb1);
+    let sb2 = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(256)
+        .replace()
+        .create()
+        .await
+        .expect("replace create");
+
+    let err = stale
+        .stop()
+        .await
+        .expect_err("stale handle must not stop replacement");
+    assert!(
+        matches!(err, MicrosandboxError::SandboxHandleStale(_)),
+        "got: {err}"
+    );
+
+    drop(sb2);
+    cleanup(name).await;
+}
+
+/// A metadata handle captured before `.replace()` must not kill the
+/// replacement sandbox generation.
+#[msb_test]
+async fn stale_handle_rejects_kill_after_replace() {
+    let name = "stale-handle-kill";
+    cleanup(name).await;
+
+    let sb1 = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(256)
+        .replace()
+        .create()
+        .await
+        .expect("first create");
+    let stale = Sandbox::get(name).await.expect("get handle before replace");
+
+    drop(sb1);
+    let sb2 = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(256)
+        .replace()
+        .create()
+        .await
+        .expect("replace create");
+
+    let err = stale
+        .kill()
+        .await
+        .expect_err("stale handle must not kill replacement");
+    assert!(
+        matches!(err, MicrosandboxError::SandboxHandleStale(_)),
+        "got: {err}"
+    );
+
+    drop(sb2);
+    cleanup(name).await;
+}
+
 /// Without `.replace()`, a second create with the same name while sb1
 /// is alive errors immediately with `SandboxAlreadyExists` instead of
 /// blocking or surfacing a generic `Custom` error.

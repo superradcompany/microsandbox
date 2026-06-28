@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -37,6 +38,10 @@ const (
 	// ErrSandboxStillRunning indicates a sandbox cannot be removed while
 	// it is still running.
 	ErrSandboxStillRunning
+
+	// ErrSandboxHandleStale indicates this handle refers to a sandbox
+	// generation that was replaced or removed. Refresh before lifecycle ops.
+	ErrSandboxHandleStale
 
 	// ErrVolumeNotFound indicates the requested volume does not exist.
 	ErrVolumeNotFound
@@ -160,6 +165,8 @@ func (k ErrorKind) String() string {
 		return "SandboxAlreadyExists"
 	case ErrSandboxStillRunning:
 		return "SandboxStillRunning"
+	case ErrSandboxHandleStale:
+		return "SandboxHandleStale"
 	case ErrVolumeNotFound:
 		return "VolumeNotFound"
 	case ErrVolumeAlreadyExists:
@@ -273,9 +280,17 @@ func wrapFFI(err error) error {
 	if err == nil {
 		return nil
 	}
+	var sdkErr *Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr
+	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
-		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
+		kind := kindFromFFI(fe.Kind)
+		if kind == ErrInvalidConfig && strings.Contains(fe.Message, "was replaced or removed since this handle") {
+			kind = ErrSandboxHandleStale
+		}
+		return &Error{Kind: kind, Message: fe.Message}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrCancelled, Message: err.Error(), Cause: err}
@@ -291,6 +306,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSandboxAlreadyExists
 	case ffi.KindSandboxStillRunning:
 		return ErrSandboxStillRunning
+	case ffi.KindSandboxHandleStale:
+		return ErrSandboxHandleStale
 	case ffi.KindVolumeNotFound:
 		return ErrVolumeNotFound
 	case ffi.KindVolumeAlreadyExists:

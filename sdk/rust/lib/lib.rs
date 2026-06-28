@@ -54,7 +54,7 @@ pub use sandbox::ssh::{
 };
 pub use sandbox::{
     ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig,
-    validate_sandbox_name,
+    VirtualFsMountConfig, validate_sandbox_name,
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,

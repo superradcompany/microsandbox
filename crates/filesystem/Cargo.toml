@@ -11,12 +11,19 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+ciborium.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 msb_krun.workspace = true
 scopeguard.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true
 
 [features]
 default = ["prebuilt"]

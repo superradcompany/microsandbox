@@ -143,6 +143,9 @@ pub(crate) struct DirHandle {
 
     /// Merged entry snapshot, built on first readdir call.
     pub snapshot: Mutex<Option<DirSnapshot>>,
+
+    /// Cached FUSE entries for this handle (one names-buffer allocation).
+    pub fuse_cache: Mutex<crate::backends::shared::dir_snapshot::FuseDirCache>,
 }
 
 /// A point-in-time snapshot of a directory's entries.

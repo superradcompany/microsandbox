@@ -60,6 +60,10 @@ pub struct LaunchConfig {
     /// Additional virtio-fs mounts as `tag:host_path[:opts]`.
     pub mounts: Vec<String>,
 
+    /// Programmable virtual-filesystem mounts served over inherited sockets.
+    #[serde(default)]
+    pub virtual_mounts: Vec<crate::vm::VirtualMount>,
+
     /// Disk-image volume mounts as `id:host_path:format[:ro]`.
     pub disks: Vec<String>,
 

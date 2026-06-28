@@ -107,7 +107,7 @@ async fn detach_disarms_parent_watchdog_for_attached_sandbox() {
         .await
         .expect("create sandbox");
 
-    sandbox.detach().await;
+    sandbox.detach().await.expect("detach");
 
     sleep(Duration::from_secs(2)).await;
 

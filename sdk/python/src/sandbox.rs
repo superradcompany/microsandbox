@@ -693,7 +693,7 @@ impl PySandbox {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(sb) = guard.take() {
-                sb.detach().await;
+                sb.detach().await.map_err(to_py_err)?;
             }
             Ok(())
         })

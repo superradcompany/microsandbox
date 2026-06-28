@@ -3,6 +3,7 @@
 #[cfg(feature = "net")]
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
@@ -35,6 +36,34 @@ pub struct SandboxBuilder {
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
+    /// In-process provider servers started by [`virtual_mount_with_provider`].
+    virtual_mount_servers: PendingVirtualMountServers,
+}
+
+/// Owns not-yet-committed provider servers; shuts them down if the builder is
+/// dropped before [`SandboxBuilder::build`] moves them into the config.
+struct PendingVirtualMountServers(Vec<Arc<super::virtual_mount::VirtualMountServer>>);
+
+impl PendingVirtualMountServers {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn push(&mut self, server: Arc<super::virtual_mount::VirtualMountServer>) {
+        self.0.push(server);
+    }
+
+    fn take_servers(&mut self) -> Vec<Arc<super::virtual_mount::VirtualMountServer>> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for PendingVirtualMountServers {
+    fn drop(&mut self) {
+        for server in self.0.drain(..) {
+            server.shutdown();
+        }
+    }
 }
 
 /// Sub-builder for registry connection settings.
@@ -83,6 +112,7 @@ impl SandboxBuilder {
             detached: false,
             build_error: None,
             pending_snapshot: None,
+            virtual_mount_servers: PendingVirtualMountServers::new(),
         }
     }
 
@@ -763,6 +793,116 @@ impl SandboxBuilder {
         self
     }
 
+    /// Mount a programmable virtual filesystem at `guest_path`, served over an
+    /// already-connected socket whose runtime-side end is `child_fd`.
+    ///
+    /// # Warning
+    ///
+    /// This is a low-level escape hatch for custom integrations. For most
+    /// programmatic mounts, prefer [`virtual_mount_with_provider`](Self::virtual_mount_with_provider)
+    /// or the Go SDK with `WithVirtualMount`. For custom socket wiring, run [`microsandbox_filesystem::rpc::serve`]
+    /// (or `serve_unix`) on the parent end of the socketpair and keep that
+    /// server running for the VM's lifetime. Also keep at least one
+    /// [`super::Sandbox`] handle (or a [`super::SandboxHandle::connect`] session) open in
+    /// this process so in-process reconnects stay allowed — dropping every
+    /// handle invalidates further [`super::SandboxHandle::connect`] calls even if the
+    /// VM is still running. [`super::Sandbox::start`] is rejected once
+    /// `had_virtual_mounts` is persisted after a successful create.
+    ///
+    /// If any provider serve loop exits unexpectedly, the SDK requests sandbox
+    /// stop so the guest does not keep running against a dead mount. With
+    /// multiple virtual mounts, one provider failure stops the entire sandbox.
+    ///
+    /// `child_fd` must stay open until create returns; the runtime dups it
+    /// into the spawned sandbox process.
+    pub fn virtual_mount_fd(
+        self,
+        guest_path: impl Into<String>,
+        child_fd: std::os::fd::RawFd,
+    ) -> Self {
+        self.virtual_mount_fd_with(guest_path, child_fd, None)
+    }
+
+    /// Like [`virtual_mount_fd`](Self::virtual_mount_fd) with optional FUSE cache knobs.
+    pub fn virtual_mount_fd_with(
+        mut self,
+        guest_path: impl Into<String>,
+        child_fd: std::os::fd::RawFd,
+        fs_config: Option<microsandbox_filesystem::VirtualFsMountConfig>,
+    ) -> Self {
+        self.config.virtual_mounts.push(super::VirtualMountSpec {
+            guest_path: guest_path.into(),
+            child_fd,
+            fs_config,
+        });
+        self
+    }
+
+    /// Mount a programmable virtual filesystem at `guest_path`, spawning an
+    /// in-process [`microsandbox_filesystem::rpc::serve`] loop on a socketpair.
+    ///
+    /// This is the ergonomic Rust counterpart to the Go SDK's `WithVirtualMount`.
+    /// The provider must be `Send + Sync`. Virtual mounts cannot be used with
+    /// [`detached`](Self::detached).
+    pub fn virtual_mount_with_provider<P>(
+        mut self,
+        guest_path: impl Into<String>,
+        provider: P,
+    ) -> Self
+    where
+        P: microsandbox_filesystem::PathFs + 'static,
+    {
+        match super::virtual_mount::VirtualMountServer::spawn(provider) {
+            Ok((server, child_fd)) => {
+                self.config.virtual_mounts.push(super::VirtualMountSpec {
+                    guest_path: guest_path.into(),
+                    child_fd,
+                    fs_config: None,
+                });
+                self.virtual_mount_servers.push(Arc::new(server));
+            }
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(format!(
+                        "virtual mount: {err}"
+                    )));
+                }
+            }
+        }
+        self
+    }
+
+    /// Like [`virtual_mount_with_provider`](Self::virtual_mount_with_provider) with
+    /// optional FUSE cache knobs.
+    pub fn virtual_mount_with_provider_and_config<P>(
+        mut self,
+        guest_path: impl Into<String>,
+        provider: P,
+        fs_config: Option<microsandbox_filesystem::VirtualFsMountConfig>,
+    ) -> Self
+    where
+        P: microsandbox_filesystem::PathFs + 'static,
+    {
+        match super::virtual_mount::VirtualMountServer::spawn(provider) {
+            Ok((server, child_fd)) => {
+                self.config.virtual_mounts.push(super::VirtualMountSpec {
+                    guest_path: guest_path.into(),
+                    child_fd,
+                    fs_config,
+                });
+                self.virtual_mount_servers.push(Arc::new(server));
+            }
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(format!(
+                        "virtual mount: {err}"
+                    )));
+                }
+            }
+        }
+        self
+    }
+
     /// Apply rootfs patches using a builder closure.
     ///
     /// Patches are applied before VM start. OCI roots bake patches into
@@ -832,6 +972,14 @@ impl SandboxBuilder {
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.resolve_pending().await?;
         self.validate()?;
+        let servers = self.virtual_mount_servers.take_servers();
+        if !servers.is_empty() {
+            let bundle = Arc::new(super::virtual_mount::VirtualMountServers::new());
+            for server in servers {
+                bundle.push(server);
+            }
+            self.config.runtime_virtual_mount_servers.set(bundle);
+        }
         Ok(self.config)
     }
 
@@ -1015,6 +1163,8 @@ impl SandboxBuilder {
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
 
+        super::types::validate_virtual_mount_config(&self.config, self.detached)?;
+
         if let Some(spec) = &self.config.spec.init {
             super::init::validate(spec)?;
         }
@@ -1064,12 +1214,18 @@ impl SandboxBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl From<SandboxConfig> for SandboxBuilder {
-    fn from(config: SandboxConfig) -> Self {
+    fn from(mut config: SandboxConfig) -> Self {
+        // Live provider sockets cannot travel in a config snapshot; callers must
+        // re-register mounts with `virtual_mount_with_provider`. Keep
+        // `had_virtual_mounts` so `validate` rejects rebuild without providers.
+        config.virtual_mounts.clear();
+        config.runtime_virtual_mount_servers.take();
         Self {
             config,
             detached: false,
             build_error: None,
             pending_snapshot: None,
+            virtual_mount_servers: PendingVirtualMountServers::new(),
         }
     }
 }
@@ -1091,6 +1247,8 @@ mod tests {
     use microsandbox_types::SandboxLogLevel;
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(unix)]
+    use std::os::fd::FromRawFd;
     use tempfile::Builder as TempDirBuilder;
 
     #[tokio::test]
@@ -1709,5 +1867,268 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("alphanumeric"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    fn test_virtual_mount_socket_pair() -> (std::os::fd::RawFd, std::os::fd::OwnedFd) {
+        let mut fds = [0i32; 2];
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(ret, 0, "socketpair: {}", std::io::Error::last_os_error());
+        (fds[1], unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) })
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_virtual_mount_with_detached() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .detached(true)
+            .virtual_mount_fd("/inbox", child_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("virtual mounts cannot be used with detached"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_non_socket_virtual_mount_fd() {
+        let mut fds = [0i32; 2];
+        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(ret, 0, "pipe: {}", std::io::Error::last_os_error());
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd("/inbox", fds[0])
+            .build()
+            .await
+            .unwrap_err();
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        assert!(err.to_string().contains("not a Unix socket"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_duplicate_virtual_mount_guest_paths() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let (other_fd, _other_parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd("/inbox", child_fd)
+            .virtual_mount_fd("/inbox", other_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("overlaps with"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_virtual_mount_at_msb_runtime() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd("/.msb/scripts", child_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("/.msb"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_nested_virtual_mount_paths() {
+        let (inbox_fd, _inbox_parent) = test_virtual_mount_socket_pair();
+        let (nested_fd, _nested_parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd("/data", inbox_fd)
+            .virtual_mount_fd("/data/inbox", nested_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("overlaps with"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_duplicate_virtual_mount_child_fds() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd("/inbox", child_fd)
+            .virtual_mount_fd("/outbox", child_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("same child fd"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_nested_virtual_mount_over_volume() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .volume("/data", |m| m.bind("/host/data"))
+            .virtual_mount_fd("/data/inbox", child_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with an existing volume mount"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_virtual_mount_overlapping_volume() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .volume("/data", |m| m.bind("/host/data"))
+            .virtual_mount_fd("/data", child_fd)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with an existing volume mount"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_invalid_virtual_mount_call_timeout() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd_with(
+                "/inbox",
+                child_fd,
+                Some(microsandbox_filesystem::VirtualFsMountConfig {
+                    call_timeout_secs: Some(86_401),
+                    ..Default::default()
+                }),
+            )
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("call_timeout_secs"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_invalid_virtual_mount_cache_policy() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd_with(
+                "/inbox",
+                child_fd,
+                Some(microsandbox_filesystem::VirtualFsMountConfig {
+                    cache_policy: Some("Never".into()),
+                    ..Default::default()
+                }),
+            )
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid virtual mount cache_policy"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_invalid_virtual_mount_entry_timeout() {
+        let (child_fd, _parent) = test_virtual_mount_socket_pair();
+        let err = SandboxBuilder::new("demo")
+            .image("alpine")
+            .virtual_mount_fd_with(
+                "/inbox",
+                child_fd,
+                Some(microsandbox_filesystem::VirtualFsMountConfig {
+                    entry_timeout_secs: Some(86_401),
+                    ..Default::default()
+                }),
+            )
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("entry_timeout_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn pending_virtual_mount_servers_shutdown_on_drop_without_build() {
+        use std::path::Path;
+
+        use microsandbox_filesystem::PathFs;
+
+        struct StubProvider;
+
+        impl PathFs for StubProvider {
+            fn getattr(&self, path: &Path) -> std::io::Result<microsandbox_filesystem::VAttr> {
+                if path == Path::new("/") {
+                    Ok(microsandbox_filesystem::VAttr::dir(0o755))
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn readdir(
+                &self,
+                path: &Path,
+            ) -> std::io::Result<Vec<microsandbox_filesystem::VDirEntry>> {
+                if path == Path::new("/") {
+                    Ok(Vec::new())
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn read(&self, _path: &Path, _offset: u64, _size: u32) -> std::io::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let builder = SandboxBuilder::new("virtual-mount-drop")
+            .virtual_mount_with_provider("/data", StubProvider);
+        drop(builder);
+    }
+
+    #[test]
+    fn from_sandbox_config_preserves_had_virtual_mounts_flag() {
+        use crate::sandbox::SandboxConfig;
+
+        let mut config = SandboxConfig::default();
+        config
+            .virtual_mounts
+            .push(crate::sandbox::VirtualMountSpec {
+                guest_path: "/data".into(),
+                child_fd: 99,
+                fs_config: None,
+            });
+        config.had_virtual_mounts = true;
+        let builder = SandboxBuilder::from(config);
+        assert!(builder.config.virtual_mounts.is_empty());
+        assert!(builder.config.had_virtual_mounts);
+    }
+
+    #[tokio::test]
+    async fn builder_validate_rejects_had_virtual_mounts_without_provider() {
+        let mut config = SandboxBuilder::new("demo")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+        config.had_virtual_mounts = true;
+        let err = SandboxBuilder::from(config).build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("used virtual mounts previously"),
+            "got: {err}"
+        );
     }
 }

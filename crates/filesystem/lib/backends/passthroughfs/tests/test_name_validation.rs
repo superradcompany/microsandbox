@@ -15,6 +15,14 @@ fn test_lookup_dotdot() {
 }
 
 #[test]
+fn test_lookup_dot() {
+    let sb = TestSandbox::new();
+    let result = sb.fs.lookup(sb.ctx(), ROOT_INODE, &TestSandbox::cstr("."));
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().inode, ROOT_INODE);
+}
+
+#[test]
 fn test_lookup_slash() {
     let sb = TestSandbox::new();
     let result = sb.lookup_root("a/b");

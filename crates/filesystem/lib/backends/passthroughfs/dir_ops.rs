@@ -15,7 +15,7 @@ use super::{DirSnapshot, PassthroughDirEntry, PassthroughDirHandle, PassthroughF
 use crate::{
     Context, DirEntry, Entry, OpenOptions,
     backends::shared::{
-        dir_snapshot::{self, SnapshotEntry},
+        dir_snapshot::{FuseDirCache, SnapshotEntry},
         init_binary, platform,
     },
 };
@@ -38,6 +38,7 @@ pub(crate) fn do_opendir(
     let data = Arc::new(PassthroughDirHandle {
         file: RwLock::new(file),
         snapshot: std::sync::Mutex::new(None),
+        fuse_cache: std::sync::Mutex::new(FuseDirCache::new()),
     });
 
     fs.dir_handles.write().unwrap().insert(handle, data);
@@ -50,7 +51,7 @@ pub(crate) fn do_readdir(
     _ctx: Context,
     inode: u64,
     handle: u64,
-    _size: u32,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
     let handles = fs.dir_handles.read().unwrap();
@@ -65,10 +66,10 @@ pub(crate) fn do_readdir(
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
-    Ok(dir_snapshot::serve_snapshot_entries(
-        &snapshot.entries,
-        offset,
-    ))
+    data.fuse_cache
+        .lock()
+        .unwrap()
+        .serve(&snapshot.entries, offset, size)
 }
 
 /// Read directory entries with attributes (readdirplus).
@@ -121,8 +122,21 @@ pub(crate) fn do_releasedir(
     _flags: u32,
     handle: u64,
 ) -> io::Result<()> {
-    fs.dir_handles.write().unwrap().remove(&handle);
+    if let Some(data) = fs.dir_handles.write().unwrap().remove(&handle) {
+        data.fuse_cache.lock().unwrap().clear_on_release();
+    }
     Ok(())
+}
+
+/// Drop cached FUSE encodings for every open directory handle after a mutation.
+///
+/// Directory snapshots stay frozen until `releasedir`; only the FUSE byte cache
+/// is dropped so pagination is rebuilt from the frozen listing.
+#[allow(dead_code)]
+pub(crate) fn invalidate_all_dir_snapshots(fs: &PassthroughFs) {
+    for data in fs.dir_handles.read().unwrap().values() {
+        data.fuse_cache.lock().unwrap().invalidate();
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

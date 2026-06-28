@@ -431,6 +431,7 @@ where
 mod error_kind {
     pub const SANDBOX_NOT_FOUND: &str = "sandbox_not_found";
     pub const SANDBOX_STILL_RUNNING: &str = "sandbox_still_running";
+    pub const SANDBOX_HANDLE_STALE: &str = "sandbox_handle_stale";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -493,6 +494,7 @@ impl From<MicrosandboxError> for FfiError {
         let kind = match &e {
             MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
             MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
+            MicrosandboxError::SandboxHandleStale(_) => error_kind::SANDBOX_HANDLE_STALE,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
@@ -958,6 +960,29 @@ struct SandboxCreateOpts {
     /// Volume mounts: guest_path → MountSpec.
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
+    /// Programmable virtual-filesystem mounts. Each `fd` is a runtime-side
+    /// socket created by the Go caller (the peer end runs `vfs.Serve`); the
+    /// runtime inherits it and serves a `VirtualFs` at `guest_path`.
+    #[serde(default)]
+    virtual_mounts: Vec<VirtualMountOpts>,
+}
+
+/// One programmable virtual-filesystem mount from the create options.
+#[derive(serde::Deserialize)]
+struct VirtualMountOpts {
+    guest_path: String,
+    fd: i32,
+    #[serde(default)]
+    fs_config: Option<VirtualFsMountOpts>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct VirtualFsMountOpts {
+    entry_timeout_secs: Option<u64>,
+    attr_timeout_secs: Option<u64>,
+    cache_policy: Option<String>,
+    writeback: Option<bool>,
+    call_timeout_secs: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1851,6 +1876,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
             for (guest_path, mount) in &opts.volumes {
                 builder = apply_volume(builder, guest_path, mount)?;
             }
+            // Programmable virtual-filesystem mounts (Go-created socket fds).
+            for vm in &opts.virtual_mounts {
+                let fs_config = vm
+                    .fs_config
+                    .as_ref()
+                    .map(|c| microsandbox::VirtualFsMountConfig {
+                        entry_timeout_secs: c.entry_timeout_secs,
+                        attr_timeout_secs: c.attr_timeout_secs,
+                        cache_policy: c.cache_policy.clone(),
+                        writeback: c.writeback,
+                        call_timeout_secs: c.call_timeout_secs,
+                    });
+                builder = builder.virtual_mount_fd_with(vm.guest_path.clone(), vm.fd, fs_config);
+            }
 
             let sandbox = if opts.detached {
                 builder.create_detached().await?
@@ -1868,7 +1907,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
 //
 // Returns the persisted DB record for a sandbox without connecting. If you want a
 // live `Sandbox`, call `msb_sandbox_connect(name)` instead.
-// Output: {"name","status","config_json","created_at_unix","updated_at_unix","pid"}
+// Output: {"name","status","config_json","db_id","created_at_unix","updated_at_unix","pid"}
 // ---------------------------------------------------------------------------
 
 fn sandbox_status_str(s: microsandbox::sandbox::SandboxStatus) -> &'static str {
@@ -1916,6 +1955,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
                 "name": h.name(),
                 "status": sandbox_status_str(h.status_snapshot()),
                 "config_json": h.config_json(),
+                "db_id": sandbox_handle_db_id(&h),
                 "created_at_unix": h.created_at().map(|t| t.timestamp()),
                 "updated_at_unix": h.updated_at().map(|t| t.timestamp()),
             })
@@ -2151,7 +2191,7 @@ pub unsafe extern "C" fn msb_sandbox_detach(
                     "detach while another sandbox operation is in flight on the same handle",
                 )
             })?;
-            sb.detach().await;
+            sb.detach().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -2401,6 +2441,10 @@ pub unsafe extern "C" fn msb_sandbox_list(
 
 /// Serialise a `SandboxHandle` into the public JSON shape, matching what
 /// `msb_sandbox_lookup` returns for a single handle.
+fn sandbox_handle_db_id(h: &microsandbox::sandbox::SandboxHandle) -> Option<i32> {
+    h.local().map(|local| local.db_id)
+}
+
 fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
     let name_json = serde_json::to_string(h.name()).unwrap_or_else(|_| "\"\"".into());
     let cfg_json = serde_json::to_string(h.config_json()).unwrap_or_else(|_| "\"\"".into());
@@ -2412,11 +2456,15 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         Some(dt) => format!("{}", dt.timestamp()),
         None => "null".to_string(),
     };
+    let db_id = sandbox_handle_db_id(h)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated}}}"#,
+        r#"{{"name":{name},"status":"{status}","config_json":{config},"db_id":{db_id},"created_at_unix":{created},"updated_at_unix":{updated}}}"#,
         name = name_json,
         status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,
+        db_id = db_id,
     )
 }
 

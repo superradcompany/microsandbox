@@ -17,6 +17,7 @@ mod patch;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 mod types;
+mod virtual_mount;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -104,12 +105,13 @@ pub use crate::db::entity::sandbox::SandboxStatus;
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
-pub use config::SandboxConfig;
+pub use config::{SandboxConfig, VirtualMountSpec};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsSetAttrs, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
+pub use microsandbox_filesystem::VirtualFsMountConfig;
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
@@ -134,6 +136,11 @@ pub use types::{
     MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootfsSource,
     SecurityProfile, StatVirtualization, VolumeMount,
 };
+pub use virtual_mount::{VirtualMountServer, VirtualMountServers};
+
+#[cfg(unix)]
+pub(crate) use types::validate_virtual_mount_child_fd;
+pub(crate) use types::validate_virtual_mount_config;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -168,6 +175,10 @@ pub struct Sandbox {
     inner: Arc<crate::backend::SandboxInner>,
     name: String,
     config: SandboxConfig,
+    /// Keeps an in-process virtual-mount session alive for Connect/create handles.
+    virtual_mount_session: Option<Arc<virtual_mount::VirtualMountSession>>,
+    /// In-process virtual-mount provider servers (parent socket ends).
+    virtual_mount_servers: Option<Arc<virtual_mount::VirtualMountServers>>,
 }
 
 /// Result of observing a sandbox in a terminal non-running state.
@@ -392,12 +403,16 @@ impl Sandbox {
         backend: Arc<dyn crate::backend::Backend>,
         local: crate::backend::SandboxLocalState,
         config: SandboxConfig,
+        virtual_mount_session: Option<Arc<virtual_mount::VirtualMountSession>>,
+        virtual_mount_servers: Option<Arc<virtual_mount::VirtualMountServers>>,
     ) -> Self {
         Self {
             backend,
             inner: Arc::new(crate::backend::SandboxInner::Local(local)),
             name: config.spec.name.clone(),
             config,
+            virtual_mount_session,
+            virtual_mount_servers,
         }
     }
 
@@ -419,6 +434,8 @@ impl Sandbox {
             )),
             name: cloud.name,
             config,
+            virtual_mount_session: None,
+            virtual_mount_servers: None,
         }
     }
 }
@@ -462,12 +479,16 @@ pub(crate) async fn create_local(
     config.apply_runtime_defaults();
     validate_sandbox_name_for_runtime(&config.spec.name)?;
     validate_hostname(config.spec.runtime.hostname.as_deref())?;
-    validate_rootfs_source(&config.spec.image)?;
     validate_env(&config.spec.env)?;
     validate_labels(&config.spec.labels)?;
     if let Some(init) = &config.spec.init {
         init::validate(init)?;
     }
+    types::validate_virtual_mount_config(
+        &config,
+        matches!(mode, crate::runtime::SpawnMode::Detached),
+    )?;
+    validate_rootfs_source(&config.spec.image)?;
 
     // Initialize the database before any expensive image pull so we can
     // fail fast on conflicting persisted sandbox state.
@@ -602,38 +623,299 @@ pub(crate) async fn create_local(
 
     // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
     // as stopped so it doesn't appear as a phantom "Running" entry.
-    let (local_state, returned_config) =
+    let had_virtual_mounts = !config.virtual_mounts.is_empty();
+    if config.replace_existing || had_virtual_mounts {
+        virtual_mount::teardown_servers(&config.spec.name);
+    }
+    let virtual_mount_servers_for_cleanup = config.runtime_virtual_mount_servers.clone_inner();
+    let (local_state, mut returned_config) =
         match create_inner_local(local_backend, config, sandbox_id, mode).await {
             Ok(pair) => pair,
             Err(e) => {
-                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                if let Some(servers) = virtual_mount_servers_for_cleanup {
+                    servers.shutdown_all();
+                }
+                if let Err(cleanup_err) = finalize_create_spawn_failure(write_db, sandbox_id).await
+                {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{e}; {cleanup_err}"
+                    )));
+                }
                 return Err(e);
             }
         };
-    let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
+    let virtual_mount_session = if had_virtual_mounts {
+        Some(virtual_mount::install_session(&returned_config.spec.name))
+    } else {
+        None
+    };
+    let sandbox_name = returned_config.spec.name.clone();
+    let virtual_mount_servers = returned_config.runtime_virtual_mount_servers.take();
+    let mut sandbox = Sandbox::from_local(
+        backend.clone(),
+        local_state,
+        returned_config,
+        virtual_mount_session.clone(),
+        virtual_mount_servers.clone(),
+    );
+    if let Some(servers) = &sandbox.virtual_mount_servers {
+        servers.close_children_after_spawn();
+        // Start exit watches immediately so a provider crash during post-spawn
+        // validation still requests sandbox stop. Registry registration and the
+        // deferred teardown waiter stay deferred until create succeeds.
+        servers.spawn_provider_exit_watches(
+            sandbox_name.clone(),
+            backend.clone(),
+            virtual_mount_session.clone(),
+        );
+    }
 
     if let (Some(_reference), Some(manifest_digest)) = (
         pinned_reference.as_deref(),
         pinned_manifest_digest.as_deref(),
     ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
     {
-        let _ = sandbox.stop().await;
-        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-        return Err(err);
+        return Err(create_abort_error(
+            err,
+            abort_sandbox_after_failed_create(
+                &sandbox,
+                virtual_mount_session.as_ref(),
+                write_db,
+                sandbox_id,
+            )
+            .await,
+        ));
     }
 
-    // Validate that the configured workdir exists inside the guest.
-    if let Some(ref workdir) = sandbox.config.spec.runtime.workdir
-        && !sandbox.fs().exists(workdir).await.unwrap_or(false)
+    if let Err(err) = validate_guest_workdir_after_create(&sandbox).await {
+        return Err(create_abort_error(
+            err,
+            abort_sandbox_after_failed_create(
+                &sandbox,
+                virtual_mount_session.as_ref(),
+                write_db,
+                sandbox_id,
+            )
+            .await,
+        ));
+    }
+
+    if had_virtual_mounts
+        && let Err(err) =
+            persist_had_virtual_mounts(write_db, sandbox_id, &mut sandbox.config).await
     {
-        let _ = sandbox.stop().await;
-        let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "workdir does not exist in guest: {workdir}"
-        )));
+        return Err(create_abort_error(
+            err,
+            abort_sandbox_after_failed_create(
+                &sandbox,
+                virtual_mount_session.as_ref(),
+                write_db,
+                sandbox_id,
+            )
+            .await,
+        ));
+    }
+
+    if let Some(servers) = &sandbox.virtual_mount_servers {
+        if !servers.all_providers_serving() {
+            return Err(create_abort_error(
+                crate::MicrosandboxError::Runtime(
+                    "virtual mount provider exited before create completed".into(),
+                ),
+                abort_sandbox_after_failed_create(
+                    &sandbox,
+                    virtual_mount_session.as_ref(),
+                    write_db,
+                    sandbox_id,
+                )
+                .await,
+            ));
+        }
+        servers.schedule_teardown_when_stopped(sandbox_name.clone(), backend.clone());
+        virtual_mount::register_servers(&sandbox_name, Arc::clone(servers));
     }
 
     Ok(sandbox)
+}
+
+/// Ensure the configured guest workdir exists after spawn.
+///
+/// Propagates agent/relay errors instead of treating them as a missing path.
+async fn validate_guest_workdir_after_create(sandbox: &Sandbox) -> MicrosandboxResult<()> {
+    let workdir = sandbox.config.spec.runtime.workdir.as_deref();
+    let exists = match workdir {
+        Some(path) => Some(sandbox.fs().exists(path).await),
+        None => None,
+    };
+    check_guest_workdir_exists(workdir, exists)
+}
+
+/// Shared workdir validation logic (testable without a live sandbox).
+pub(crate) fn check_guest_workdir_exists(
+    workdir: Option<&str>,
+    exists: Option<MicrosandboxResult<bool>>,
+) -> MicrosandboxResult<()> {
+    let Some(workdir) = workdir else {
+        return Ok(());
+    };
+    match exists {
+        None => Ok(()),
+        Some(Ok(true)) => Ok(()),
+        Some(Ok(false)) => Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "workdir does not exist in guest: {workdir}"
+        ))),
+        Some(Err(err)) => Err(err),
+    }
+}
+
+/// Shut down in-process virtual-mount providers during a failed create. Exit
+/// watches may already be running; registry registration and the deferred
+/// teardown waiter are only installed after create succeeds.
+pub(crate) fn shutdown_virtual_mount_providers_on_abort(
+    name: &str,
+    virtual_mount_servers: Option<&Arc<virtual_mount::VirtualMountServers>>,
+    virtual_mount_session: Option<&Arc<virtual_mount::VirtualMountSession>>,
+) {
+    if let Some(servers) = virtual_mount_servers {
+        servers.shutdown_all();
+    }
+    if virtual_mount_session.is_some() {
+        virtual_mount::clear_live_slot(name);
+    }
+}
+
+/// Stop a sandbox and tear down virtual-mount providers after a post-spawn
+/// create failure (workdir validation, OCI pin persistence, etc.).
+///
+/// Marks the sandbox stopped only after a successful stop so the DB cannot
+/// show `Stopped` while the VM is still running.
+async fn abort_sandbox_after_failed_create(
+    sandbox: &Sandbox,
+    virtual_mount_session: Option<&Arc<virtual_mount::VirtualMountSession>>,
+    write_db: &DbWriteConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<()> {
+    shutdown_virtual_mount_providers_on_abort(
+        &sandbox.name,
+        sandbox.virtual_mount_servers.as_ref(),
+        virtual_mount_session,
+    );
+    let mut stop_result = sandbox.stop().await;
+    if stop_result.is_err() {
+        tracing::warn!(
+            sandbox = %sandbox.name,
+            error = %stop_result.as_ref().unwrap_err(),
+            "graceful stop failed during aborted create, escalating to kill"
+        );
+        stop_result = sandbox.kill().await;
+    }
+    finalize_aborted_virtual_mount_create(write_db, sandbox_id, stop_result).await
+}
+
+/// Clear incomplete virtual-mount flags and mark the sandbox stopped after
+/// spawn fails before the VM is running.
+async fn finalize_create_spawn_failure(
+    write_db: &DbWriteConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<()> {
+    clear_incomplete_virtual_mount_persistence(write_db, sandbox_id).await?;
+    update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await
+}
+
+/// Clear incomplete virtual-mount flags after a post-spawn create abort.
+///
+/// Always clears `attempted_virtual_mounts` when persistence never completed.
+/// Marks the sandbox stopped only when `stop_result` succeeded so the DB
+/// cannot show `Stopped` while the VM is still running.
+async fn finalize_aborted_virtual_mount_create(
+    write_db: &DbWriteConnection,
+    sandbox_id: i32,
+    stop_result: MicrosandboxResult<()>,
+) -> MicrosandboxResult<()> {
+    let clear_result = clear_incomplete_virtual_mount_persistence(write_db, sandbox_id).await;
+    let terminal_status = if stop_result.is_ok() {
+        SandboxStatus::Stopped
+    } else {
+        SandboxStatus::Crashed
+    };
+    let status_result = update_sandbox_status(write_db, sandbox_id, terminal_status).await;
+
+    if let Err(clear_err) = clear_result {
+        return Err(match status_result {
+            Ok(()) => clear_err,
+            Err(status_err) => crate::MicrosandboxError::Runtime(format!(
+                "{clear_err}; failed to mark sandbox {terminal_status:?} after aborted create: {status_err}"
+            )),
+        });
+    }
+    match status_result {
+        Ok(()) => stop_result,
+        Err(status_err) => Err(status_err),
+    }
+}
+
+/// Combine a post-create validation error with any cleanup failure from abort.
+fn create_abort_error(
+    original: crate::MicrosandboxError,
+    abort: MicrosandboxResult<()>,
+) -> crate::MicrosandboxError {
+    match abort {
+        Ok(()) => original,
+        Err(abort_err) => crate::MicrosandboxError::Runtime(format!(
+            "{original}; cleanup after aborted create: {abort_err}"
+        )),
+    }
+}
+
+/// Error when virtual-mount create did not persist `had_virtual_mounts`.
+fn incomplete_virtual_mount_persistence_error(
+    name: &str,
+    operation: &str,
+) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::InvalidConfig(format!(
+        "{operation} sandbox '{name}': virtual mount create did not complete successfully — \
+         remove the sandbox record or recreate with .replace(), then create again with \
+         virtual_mount_with_provider instead of {operation}"
+    ))
+}
+
+/// Reject connect when the persisted sandbox used virtual mounts but this
+/// process has no live provider session, or when create never completed.
+pub(crate) fn check_virtual_mount_connect(
+    name: &str,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    if name != config.spec.name {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "connect to sandbox '{name}': persisted config name {:?} does not match handle",
+            config.spec.name
+        )));
+    }
+    if config.attempted_virtual_mounts && !config.had_virtual_mounts {
+        return Err(incomplete_virtual_mount_persistence_error(
+            name,
+            "connect to",
+        ));
+    }
+    virtual_mount::check_virtual_mount_connect(name, config.had_virtual_mounts)
+}
+
+/// Reject start when virtual-mount create did not complete successfully.
+pub(crate) fn validate_start_virtual_mount_persistence(
+    name: &str,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    if config.attempted_virtual_mounts && !config.had_virtual_mounts {
+        return Err(incomplete_virtual_mount_persistence_error(name, "start"));
+    }
+    if config.had_virtual_mounts {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "start sandbox '{name}': cannot restart a sandbox that used virtual mounts — \
+             the provider socket cannot be reattached after stop; remove the sandbox record \
+             and create a new one with virtual_mount_with_provider instead of Sandbox::start"
+        )));
+    }
+    Ok(())
 }
 
 /// Local start path. Returns a complete [`Sandbox`] wrapping the supplied
@@ -672,6 +954,7 @@ pub(crate) async fn start_local(
     let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
     config.apply_runtime_defaults();
     validate_sandbox_name_for_runtime(&config.spec.name)?;
+    validate_start_virtual_mount_persistence(name, &config)?;
     validate_hostname(config.spec.runtime.hostname.as_deref())?;
     validate_rootfs_source(&config.spec.image)?;
     validate_env(&config.spec.env)?;
@@ -684,9 +967,13 @@ pub(crate) async fn start_local(
     update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 
     match create_inner_local(local_backend, config, model.id, mode).await {
-        Ok((local_state, returned_config)) => {
-            Ok(Sandbox::from_local(backend, local_state, returned_config))
-        }
+        Ok((local_state, returned_config)) => Ok(Sandbox::from_local(
+            backend,
+            local_state,
+            returned_config,
+            None,
+            None,
+        )),
         Err(err) => {
             let _ = update_sandbox_status(write_db, model.id, SandboxStatus::Stopped).await;
             Err(err)
@@ -966,6 +1253,11 @@ impl Sandbox {
             .exec(pools.write())
             .await?;
 
+        if self.config.had_virtual_mounts {
+            virtual_mount::teardown_servers(&self.name);
+            virtual_mount::clear_live_slot(&self.name);
+        }
+
         Ok(())
     }
 
@@ -1138,6 +1430,10 @@ impl Sandbox {
     /// `reboot(RB_POWER_OFF)` for a clean ext4 unmount), falling back to
     /// SIGTERM via PID if the socket is unreachable. On cloud this issues
     /// `POST /v1/sandboxes/by-name/:name/stop`.
+    ///
+    /// Virtual-mount provider sockets stay open until the sandbox reaches a
+    /// terminal state; [`VirtualMountServers::schedule_teardown_when_stopped`]
+    /// (registered at create time) performs teardown once the VM is stopped.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
@@ -1169,6 +1465,9 @@ impl Sandbox {
     /// PID up from the DB and signals SIGKILL, then marks the row Stopped
     /// once the process is confirmed dead. Cloud currently returns
     /// `Unsupported`.
+    ///
+    /// Virtual-mount providers are torn down once the VM is stopped, not at
+    /// kill dispatch time (see [`Sandbox::stop`]).
     pub async fn kill(&self) -> MicrosandboxResult<()> {
         self.backend
             .sandboxes()
@@ -1202,7 +1501,21 @@ impl Sandbox {
     /// this handle is dropped. Intended for CLI flows like `create`, `start`,
     /// and `run --detach`. No-op for cloud sandboxes (the cloud worker owns
     /// the lifecycle regardless of this process).
-    pub async fn detach(self) {
+    ///
+    /// Returns an error when the sandbox has programmable virtual mounts: the
+    /// provider socket lives in this process, so detaching would stop serving
+    /// the mount once the handle is dropped.
+    pub async fn detach(self) -> MicrosandboxResult<()> {
+        if self.virtual_mount_session.is_some()
+            || self
+                .virtual_mount_servers
+                .as_ref()
+                .is_some_and(|servers| !servers.is_empty())
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cannot detach a sandbox with virtual mounts: the provider socket lives in this process and would stop serving once detached".into(),
+            ));
+        }
         if let crate::backend::SandboxInner::Local(local) = self.inner.as_ref()
             && let Some(h) = &local.handle
         {
@@ -1210,6 +1523,7 @@ impl Sandbox {
         }
         // Normal drop runs — client reader task is aborted and
         // ProcessHandle drops without sending SIGTERM.
+        Ok(())
     }
 }
 
@@ -1748,6 +2062,76 @@ pub(super) async fn update_sandbox_status(
             .exec(&txn)
             .await?;
         Ok((txn, ()))
+    })
+    .await
+}
+
+/// Clear `attempted_virtual_mounts` on a record whose virtual-mount create
+/// never completed (`had_virtual_mounts` still false).
+///
+/// Called when spawn or post-create validation fails so the stopped sandbox
+/// can be removed or recreated without the incomplete-create guard.
+async fn clear_incomplete_virtual_mount_persistence(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<()> {
+    let row = sandbox_entity::Entity::find_by_id(sandbox_id)
+        .one(db)
+        .await?
+        .ok_or_else(|| {
+            crate::MicrosandboxError::SandboxNotFound(format!("sandbox id {sandbox_id}"))
+        })?;
+    let mut config: SandboxConfig = serde_json::from_str(&row.config)?;
+    if !config.attempted_virtual_mounts || config.had_virtual_mounts {
+        return Ok(());
+    }
+    config.attempted_virtual_mounts = false;
+    let config_json = serde_json::to_string(&config)?;
+    db.transaction(|txn| {
+        let config_json = config_json.clone();
+        async move {
+            sandbox_entity::Entity::update_many()
+                .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
+                .col_expr(
+                    sandbox_entity::Column::UpdatedAt,
+                    Expr::value(chrono::Utc::now().naive_utc()),
+                )
+                .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                .exec(&txn)
+                .await?;
+            Ok((txn, ()))
+        }
+    })
+    .await
+}
+
+/// Mark a successfully created sandbox as having used programmable virtual mounts.
+///
+/// Deferred until create completes so a failed create does not persist
+/// `had_virtual_mounts` and block `Sandbox::start` on a record that never
+/// received a working provider attachment.
+async fn persist_had_virtual_mounts(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    config: &mut SandboxConfig,
+) -> MicrosandboxResult<()> {
+    config.had_virtual_mounts = true;
+    config.attempted_virtual_mounts = true;
+    let config_json = serde_json::to_string(config)?;
+    db.transaction(|txn| {
+        let config_json = config_json.clone();
+        async move {
+            sandbox_entity::Entity::update_many()
+                .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
+                .col_expr(
+                    sandbox_entity::Column::UpdatedAt,
+                    Expr::value(chrono::Utc::now().naive_utc()),
+                )
+                .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                .exec(&txn)
+                .await?;
+            Ok((txn, ()))
+        }
     })
     .await
 }
@@ -2463,7 +2847,7 @@ mod tests {
 
     use crate::sandbox::OciRootfsSource;
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
     use tempfile::tempdir;
 
     use super::{
@@ -2537,9 +2921,19 @@ mod tests {
         assert_eq!(super::select_tty_term(Some("dumb")), "xterm");
     }
 
+    fn open_test_pty() -> Option<nix::pty::OpenptyResult> {
+        match nix::pty::openpty(None, None) {
+            Ok(pty) => Some(pty),
+            Err(nix::errno::Errno::EPERM) => None,
+            Err(err) => panic!("openpty failed: {err}"),
+        }
+    }
+
     #[test]
     fn test_shared_tty_fd_flags_are_shared_across_dups() {
-        let pty = nix::pty::openpty(None, None).unwrap();
+        let Some(pty) = open_test_pty() else {
+            return;
+        };
         let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
         let shared_b = unsafe { OwnedFd::from_raw_fd(libc::dup(shared_a.as_raw_fd())) };
 
@@ -2565,7 +2959,9 @@ mod tests {
 
     #[test]
     fn test_open_nonblocking_terminal_input_keeps_existing_tty_fds_blocking() {
-        let pty = nix::pty::openpty(None, None).unwrap();
+        let Some(pty) = open_test_pty() else {
+            return;
+        };
         let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
         let shared_b = unsafe { OwnedFd::from_raw_fd(libc::dup(shared_a.as_raw_fd())) };
         let tty_path = super::terminal_path_for_fd(pty.slave.as_raw_fd()).unwrap();
@@ -2710,6 +3106,281 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid config: hostname is too long: 65 bytes (max 64)"
+        );
+    }
+
+    #[test]
+    fn shutdown_virtual_mount_providers_on_abort_shuts_down_servers() {
+        use std::io;
+        use std::path::Path;
+        use std::sync::Arc;
+
+        use microsandbox_filesystem::{PathFs, VAttr, VDirEntry};
+
+        use crate::sandbox::virtual_mount::{VirtualMountServer, VirtualMountServers};
+
+        struct StubProvider;
+
+        impl PathFs for StubProvider {
+            fn getattr(&self, path: &Path) -> io::Result<VAttr> {
+                if path == Path::new("/") {
+                    Ok(VAttr::dir(0o755))
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn readdir(&self, path: &Path) -> io::Result<Vec<VDirEntry>> {
+                if path == Path::new("/") {
+                    Ok(Vec::new())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn read(&self, _path: &Path, _offset: u64, _size: u32) -> io::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let name = format!("virtual-mount-abort-shutdown-{}", std::process::id());
+        crate::sandbox::virtual_mount::clear_live_slot(&name);
+        let session = crate::sandbox::virtual_mount::install_session(&name);
+        let (server, _child_fd) = VirtualMountServer::spawn(StubProvider).unwrap();
+        let servers = Arc::new(VirtualMountServers::new());
+        servers.push(Arc::new(server));
+
+        super::shutdown_virtual_mount_providers_on_abort(&name, Some(&servers), Some(&session));
+
+        assert!(
+            !crate::sandbox::virtual_mount::registry::has_active_session(&name),
+            "abort shutdown should clear the live session slot"
+        );
+    }
+
+    #[test]
+    fn check_guest_workdir_exists_skips_when_unset() {
+        super::check_guest_workdir_exists(None, None).unwrap();
+    }
+
+    #[test]
+    fn check_guest_workdir_exists_rejects_missing_path() {
+        let err = super::check_guest_workdir_exists(Some("/app"), Some(Ok(false))).unwrap_err();
+        assert!(err.to_string().contains("workdir does not exist"));
+    }
+
+    #[test]
+    fn check_guest_workdir_exists_propagates_fs_errors() {
+        let err = super::check_guest_workdir_exists(
+            Some("/app"),
+            Some(Err(crate::MicrosandboxError::Runtime("agent down".into()))),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("agent down"));
+    }
+
+    #[test]
+    fn validate_start_virtual_mount_persistence_rejects_incomplete_create() {
+        let mut config = SandboxConfig::default();
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+        let err = super::validate_start_virtual_mount_persistence("demo", &config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("virtual mount create did not complete successfully"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_aborted_virtual_mount_create_clears_attempted_when_stop_fails() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = test_config_with_rootfs(
+            "virtual-mount-abort-stop-fail",
+            RootfsSource::Bind(unique_temp_path("root")),
+        );
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        let stop_err = crate::MicrosandboxError::Runtime("stop failed".into());
+        let err =
+            super::finalize_aborted_virtual_mount_create(pools.write(), sandbox_id, Err(stop_err))
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("stop failed"), "got: {err}");
+
+        let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted: SandboxConfig = serde_json::from_str(&row.config).unwrap();
+        assert!(!persisted.attempted_virtual_mounts);
+        assert_eq!(row.status, SandboxStatus::Crashed);
+        super::validate_start_virtual_mount_persistence(
+            "virtual-mount-abort-stop-fail",
+            &persisted,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_aborted_virtual_mount_create_marks_stopped_when_stop_succeeds() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = test_config_with_rootfs(
+            "virtual-mount-abort-stop-ok",
+            RootfsSource::Bind(unique_temp_path("root")),
+        );
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        super::finalize_aborted_virtual_mount_create(pools.write(), sandbox_id, Ok(()))
+            .await
+            .unwrap();
+
+        let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted: SandboxConfig = serde_json::from_str(&row.config).unwrap();
+        assert!(!persisted.attempted_virtual_mounts);
+        assert_eq!(row.status, SandboxStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn finalize_aborted_virtual_mount_create_marks_stopped_when_clear_fails() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = test_config_with_rootfs(
+            "virtual-mount-abort-clear-fail",
+            RootfsSource::Bind(unique_temp_path("root")),
+        );
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        super::sandbox_entity::Entity::update_many()
+            .col_expr(
+                super::sandbox_entity::Column::Config,
+                Expr::value("{not-json"),
+            )
+            .filter(super::sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(pools.write())
+            .await
+            .unwrap();
+
+        let err = super::finalize_aborted_virtual_mount_create(pools.write(), sandbox_id, Ok(()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("json"),
+            "expected config parse error, got: {err}"
+        );
+
+        let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, SandboxStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn clear_incomplete_virtual_mount_persistence_clears_attempted_flag() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let mut config = test_config_with_rootfs(
+            "virtual-mount-abort",
+            RootfsSource::Bind(unique_temp_path("root")),
+        );
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+
+        super::clear_incomplete_virtual_mount_persistence(pools.write(), sandbox_id)
+            .await
+            .unwrap();
+
+        let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted: SandboxConfig = serde_json::from_str(&row.config).unwrap();
+        assert!(!persisted.attempted_virtual_mounts);
+        assert!(!persisted.had_virtual_mounts);
+        super::validate_start_virtual_mount_persistence("virtual-mount-abort", &persisted).unwrap();
+    }
+
+    #[test]
+    fn check_virtual_mount_connect_rejects_incomplete_create() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "demo".to_string();
+        config.attempted_virtual_mounts = true;
+        let err = super::check_virtual_mount_connect("demo", &config).unwrap_err();
+        assert!(
+            err.to_string().contains("connect to sandbox 'demo'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_start_virtual_mount_persistence_rejects_completed_virtual_mounts() {
+        let mut config = SandboxConfig::default();
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = true;
+        let err = super::validate_start_virtual_mount_persistence("demo", &config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot restart a sandbox that used virtual mounts"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_start_virtual_mount_persistence_allows_plain_sandbox() {
+        let config = SandboxConfig::default();
+        super::validate_start_virtual_mount_persistence("demo", &config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_local_rejects_had_virtual_mounts_without_providers() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            crate::backend::LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut config =
+            test_config_with_rootfs("test", RootfsSource::Bind(unique_temp_path("missing")));
+        config.had_virtual_mounts = true;
+
+        let err =
+            match super::create_local(backend, config, crate::runtime::SpawnMode::Attached, None)
+                .await
+            {
+                Ok(_) => panic!("expected virtual-mount config validation to fail"),
+                Err(err) => err,
+            };
+
+        assert!(
+            err.to_string().contains("used virtual mounts previously"),
+            "got: {err}"
         );
     }
 

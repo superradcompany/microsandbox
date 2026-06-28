@@ -438,7 +438,7 @@ impl Sandbox {
     pub async fn detach(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;
         if let Some(sb) = guard.take() {
-            sb.detach().await;
+            sb.detach().await.map_err(to_napi_error)?;
         }
         Ok(())
     }

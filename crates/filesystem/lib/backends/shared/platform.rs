@@ -36,7 +36,7 @@ const LINUX_ENXIO: i32 = 6;
 const LINUX_ENOEXEC: i32 = 8;
 const LINUX_EBADF: i32 = 9;
 const LINUX_ECHILD: i32 = 10;
-const LINUX_EAGAIN: i32 = 11;
+pub(crate) const LINUX_EAGAIN: i32 = 11;
 const LINUX_ENOMEM: i32 = 12;
 const LINUX_EACCES: i32 = 13;
 const LINUX_EFAULT: i32 = 14;
@@ -328,6 +328,28 @@ fn linux_errno_raw(errno: i32) -> i32 {
     }
 }
 
+/// Map a provider [`io::Error`] to a Linux wire errno for RPC responses.
+///
+/// Reference [`PathFs`] implementations and [`platform`] helpers already encode
+/// Linux wire values via `from_raw_os_error(LINUX_*)`. Host OS errors from
+/// real filesystem backends are translated with [`linux_error`].
+#[cfg(target_os = "linux")]
+pub(crate) fn provider_errno_to_wire(error: io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(LINUX_EIO)
+}
+
+/// Map a provider [`io::Error`] to a Linux wire errno for RPC responses.
+#[cfg(target_os = "macos")]
+pub(crate) fn provider_errno_to_wire(error: io::Error) -> i32 {
+    let raw = error.raw_os_error().unwrap_or(LINUX_EIO);
+    // `platform::*` helpers use wire values that differ from native BSD errnos,
+    // except where noted below. Pass them through without re-translating.
+    if matches!(raw, LINUX_EAGAIN | LINUX_ENOSYS | LINUX_ENODATA) {
+        return raw;
+    }
+    linux_errno_raw(raw)
+}
+
 /// Create an `io::Error` with Linux `EIO`.
 pub(crate) fn eio() -> io::Error {
     io::Error::from_raw_os_error(LINUX_EIO)
@@ -341,6 +363,11 @@ pub(crate) fn ebadf() -> io::Error {
 /// Create an `io::Error` with Linux `EINVAL`.
 pub(crate) fn einval() -> io::Error {
     io::Error::from_raw_os_error(LINUX_EINVAL)
+}
+
+/// Create an `io::Error` with Linux `EAGAIN`.
+pub(crate) fn eagain() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EAGAIN)
 }
 
 /// Create an `io::Error` with Linux `EACCES`.
@@ -396,6 +423,11 @@ pub(crate) fn eloop() -> io::Error {
 /// Create an `io::Error` with Linux `ENAMETOOLONG`.
 pub(crate) fn enametoolong() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENAMETOOLONG)
+}
+
+/// Create an `io::Error` with Linux `ESTALE`.
+pub(crate) fn estale() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ESTALE)
 }
 
 /// Create an `io::Error` with Linux `EEXIST`.

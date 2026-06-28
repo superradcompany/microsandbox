@@ -3263,10 +3263,15 @@ dependencies = [
 name = "microsandbox-filesystem"
 version = "0.5.8"
 dependencies = [
+ "ciborium",
+ "hex",
  "libc",
  "microsandbox-utils",
  "msb_krun",
  "scopeguard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

@@ -9,6 +9,8 @@ use std::{
 
 use crate::size::Mebibytes;
 
+use microsandbox_protocol::RUNTIME_MOUNT_POINT;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -787,6 +789,221 @@ pub(crate) fn validate_volume_mounts(mounts: &[VolumeMount]) -> crate::Microsand
     Ok(())
 }
 
+/// Ensure a virtual-mount provider fd is an open `SOCK_STREAM` Unix socket.
+#[cfg(unix)]
+pub(crate) fn validate_virtual_mount_child_fd(
+    fd: std::os::fd::RawFd,
+) -> crate::MicrosandboxResult<()> {
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFSOCK as libc::mode_t {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: not a Unix socket"
+        )));
+    }
+
+    let mut opt: i32 = 0;
+    let mut len = std::mem::size_of::<i32>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut opt as *mut _ as *mut _,
+            &mut len,
+        )
+    } != 0
+    {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if opt != libc::SOCK_STREAM {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: expected SOCK_STREAM, got {opt}"
+        )));
+    }
+
+    if !socket_address_family_is_unix(fd) {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "virtual mount child fd {fd}: not an AF_UNIX socket"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Whether `fd` belongs to the Unix address family (via `getsockname`).
+#[cfg(unix)]
+fn socket_address_family_is_unix(fd: std::os::fd::RawFd) -> bool {
+    let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    if unsafe { libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len) } != 0 {
+        return false;
+    }
+    addr.ss_family as libc::c_int == libc::AF_UNIX as libc::c_int
+}
+
+/// Whether two guest mount paths are the same or one is nested under the other.
+pub(crate) fn guest_paths_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    fn is_strict_prefix(parent: &str, child: &str) -> bool {
+        child.len() > parent.len()
+            && child.starts_with(parent)
+            && child.as_bytes().get(parent.len()) == Some(&b'/')
+    }
+    is_strict_prefix(a, b) || is_strict_prefix(b, a)
+}
+
+/// Reject virtual-mount guest paths that collide with an existing volume mount.
+pub(crate) fn validate_virtual_mounts(
+    volume_mounts: &[VolumeMount],
+    virtual_guest_paths: impl IntoIterator<Item = impl AsRef<str>>,
+) -> crate::MicrosandboxResult<()> {
+    let volume_guests: Vec<&str> = volume_mounts.iter().map(|m| m.guest()).collect();
+    for guest_path in virtual_guest_paths {
+        let guest_path = guest_path.as_ref();
+        for volume_guest in &volume_guests {
+            if guest_paths_overlap(volume_guest, guest_path) {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "virtual mount guest path {guest_path} conflicts with an existing volume mount at {volume_guest}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject virtual-mount virtio tags that collide with an existing volume mount.
+///
+/// Bind, named, and disk-image volumes each receive a virtio-fs tag derived from
+/// the guest path at spawn time; tmpfs mounts do not participate.
+pub(crate) fn validate_virtual_mount_device_tags(
+    volume_mounts: &[VolumeMount],
+    virtual_guest_paths: impl IntoIterator<Item = impl AsRef<str>>,
+) -> crate::MicrosandboxResult<()> {
+    use crate::runtime::spawn::guest_mount_tag;
+
+    let mut tag_owners: std::collections::HashMap<String, String> = volume_mounts
+        .iter()
+        .filter_map(|mount| {
+            let guest = match mount {
+                VolumeMount::Bind { guest, .. }
+                | VolumeMount::Named { guest, .. }
+                | VolumeMount::DiskImage { guest, .. } => guest.clone(),
+                VolumeMount::Tmpfs { .. } => return None,
+            };
+            Some((guest_mount_tag(&guest), guest))
+        })
+        .collect();
+
+    for guest_path in virtual_guest_paths {
+        let guest_path = guest_path.as_ref();
+        let tag = guest_mount_tag(guest_path);
+        if let Some(volume_guest) = tag_owners.get(&tag) {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "virtual mount guest path {guest_path} conflicts with existing volume mount at {volume_guest} (virtio tag {tag})"
+            )));
+        }
+        if tag_owners.insert(tag, guest_path.to_string()).is_some() {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "virtual mount guest path {guest_path} shares a virtio tag with another virtual mount"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate programmable virtual-mount configuration.
+///
+/// Shared by [`SandboxBuilder::validate`](super::SandboxBuilder::validate) and
+/// [`create_local`](super::create_local) so direct [`Sandbox::create`](super::Sandbox::create)
+/// cannot bypass mount checks.
+pub(crate) fn validate_virtual_mount_config(
+    config: &super::SandboxConfig,
+    detached: bool,
+) -> crate::MicrosandboxResult<()> {
+    if detached && !config.virtual_mounts.is_empty() {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "virtual mounts cannot be used with detached sandboxes: the provider socket lives in the controlling process".into(),
+        ));
+    }
+
+    if config.had_virtual_mounts && config.virtual_mounts.is_empty() {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "config used virtual mounts previously; re-add them with virtual_mount_with_provider (or virtual_mount_fd) before create — provider sockets cannot be restored from a persisted snapshot alone".into(),
+        ));
+    }
+
+    if config.virtual_mounts.len() > microsandbox_runtime::vm::MAX_VIRTUAL_MOUNTS {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "too many virtual mounts (max {})",
+            microsandbox_runtime::vm::MAX_VIRTUAL_MOUNTS
+        )));
+    }
+
+    let mut seen_virtual_guest_paths: HashSet<&str> = HashSet::new();
+    let mut seen_virtual_child_fds = HashSet::new();
+    for vmount in &config.virtual_mounts {
+        validate_guest_mount_path(&vmount.guest_path)?;
+        for seen in &seen_virtual_guest_paths {
+            if guest_paths_overlap(seen, &vmount.guest_path) {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "virtual mount guest path {} overlaps with {}",
+                    vmount.guest_path, seen
+                )));
+            }
+        }
+        seen_virtual_guest_paths.insert(&vmount.guest_path);
+        if vmount.child_fd < 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "virtual mount {}: invalid child fd {}",
+                vmount.guest_path, vmount.child_fd
+            )));
+        }
+        #[cfg(unix)]
+        validate_virtual_mount_child_fd(vmount.child_fd)?;
+        if !seen_virtual_child_fds.insert(vmount.child_fd) {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "multiple virtual mounts share the same child fd {}",
+                vmount.child_fd
+            )));
+        }
+        if let Some(ref fs_config) = vmount.fs_config {
+            fs_config
+                .validate()
+                .map_err(crate::MicrosandboxError::InvalidConfig)?;
+        }
+    }
+
+    validate_virtual_mounts(
+        &config.spec.mounts,
+        config.virtual_mounts.iter().map(|m| m.guest_path.as_str()),
+    )?;
+    validate_virtual_mount_device_tags(
+        &config.spec.mounts,
+        config.virtual_mounts.iter().map(|m| m.guest_path.as_str()),
+    )?;
+    Ok(())
+}
+
 fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
     match mount {
         VolumeMount::Bind {
@@ -830,7 +1047,7 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
     Ok(())
 }
 
-fn validate_guest_mount_path(guest: &str) -> crate::MicrosandboxResult<()> {
+pub(crate) fn validate_guest_mount_path(guest: &str) -> crate::MicrosandboxResult<()> {
     if !guest.starts_with('/') {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "guest mount path must be absolute: {guest}"
@@ -844,6 +1061,31 @@ fn validate_guest_mount_path(guest: &str) -> crate::MicrosandboxResult<()> {
     if guest.contains(':') || guest.contains(';') || guest.contains(',') {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "guest mount path must not contain ':', ';', or ',': {guest}"
+        )));
+    }
+    if guest.len() > 1 && guest.ends_with('/') {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must not end with '/': {guest}"
+        )));
+    }
+    if guest.split('/').any(|component| component == "..") {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must not contain '..' components: {guest}"
+        )));
+    }
+    if guest.split('/').skip(1).any(str::is_empty) {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must not contain empty components: {guest}"
+        )));
+    }
+    if guest.split('/').skip(1).any(|component| component == ".") {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path must not contain '.' components: {guest}"
+        )));
+    }
+    if guest == RUNTIME_MOUNT_POINT || guest.starts_with("/.msb/") {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "guest mount path {guest} overlaps the reserved runtime tree at /.msb"
         )));
     }
     Ok(())
@@ -946,6 +1188,75 @@ impl From<PathBuf> for ImageSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_paths_overlap_detects_nested_paths() {
+        assert!(guest_paths_overlap("/data", "/data/inbox"));
+        assert!(guest_paths_overlap("/data/inbox", "/data"));
+        assert!(!guest_paths_overlap("/data", "/data2"));
+        assert!(!guest_paths_overlap("/data", "/dat"));
+    }
+
+    #[test]
+    fn validate_guest_mount_path_rejects_trailing_slash() {
+        let err = validate_guest_mount_path("/data/").unwrap_err();
+        assert!(err.to_string().contains("must not end with '/'"));
+    }
+
+    #[test]
+    fn validate_guest_mount_path_rejects_dotdot_and_empty_components() {
+        let err = validate_guest_mount_path("/data/../x").unwrap_err();
+        assert!(err.to_string().contains("'..'"));
+        let err = validate_guest_mount_path("/foo//bar").unwrap_err();
+        assert!(err.to_string().contains("empty components"));
+        let err = validate_guest_mount_path("/./inbox").unwrap_err();
+        assert!(err.to_string().contains("'.'"));
+    }
+
+    /// Keep rejection cases aligned with `validate_guest_mount_path_wire` in
+    /// `crates/runtime/lib/vm.rs`.
+    #[test]
+    fn validate_guest_mount_path_sdk_runtime_rejection_cases() {
+        let reject = [
+            "/data/",
+            "/data/../x",
+            "/foo//bar",
+            "/./inbox",
+            RUNTIME_MOUNT_POINT,
+            "/.msb/agent",
+        ];
+        for path in reject {
+            validate_guest_mount_path(path).unwrap_err();
+        }
+        validate_guest_mount_path("/data/inbox").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_virtual_mount_child_fd_rejects_non_unix_socket() {
+        let inet = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(inet >= 0);
+        let err = validate_virtual_mount_child_fd(inet).unwrap_err();
+        assert!(err.to_string().contains("AF_UNIX"));
+        unsafe {
+            libc::close(inet);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_virtual_mount_child_fd_accepts_unix_stream_socketpair() {
+        let mut fds = [0i32; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        validate_virtual_mount_child_fd(fds[0]).unwrap();
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
 
     #[test]
     fn test_disk_image_format_from_extension() {
@@ -1055,6 +1366,19 @@ mod tests {
     }
 
     #[test]
+    fn validate_virtual_mount_config_rejects_had_mounts_without_providers() {
+        use super::super::SandboxConfig;
+
+        let mut config = SandboxConfig::default();
+        config.had_virtual_mounts = true;
+        let err = validate_virtual_mount_config(&config, false).unwrap_err();
+        assert!(
+            err.to_string().contains("used virtual mounts previously"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn test_validate_volume_mounts_rejects_direct_guest_separators() {
         let mount = VolumeMount::Tmpfs {
             guest: "/data,ro".to_string(),
@@ -1064,6 +1388,62 @@ mod tests {
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
         assert!(err.to_string().contains("guest mount path"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_allows_nested_guest_paths() {
+        let mounts = vec![
+            VolumeMount::Bind {
+                host: PathBuf::from("/host/data"),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+            },
+            VolumeMount::Tmpfs {
+                guest: "/data/inbox".to_string(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        validate_volume_mounts(&mounts).unwrap();
+    }
+
+    #[test]
+    fn validate_virtual_mount_device_tags_rejects_disk_collision() {
+        let mounts = vec![VolumeMount::DiskImage {
+            host: PathBuf::from("/host/data.raw"),
+            guest: "/data".to_string(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions::default(),
+        }];
+        let err =
+            validate_virtual_mount_device_tags(&mounts, std::iter::once("/data")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with existing volume mount"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_virtual_mount_device_tags_rejects_bind_collision() {
+        let mounts = vec![VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        }];
+        let err =
+            validate_virtual_mount_device_tags(&mounts, std::iter::once("/data")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with existing volume mount"),
+            "got: {err}"
+        );
     }
 
     #[test]

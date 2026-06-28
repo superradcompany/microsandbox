@@ -52,6 +52,7 @@ type SandboxConfig struct {
 	Secrets            []SecretEntry
 	Patches            []PatchConfig
 	Volumes            map[string]MountConfig // guest path → mount config
+	VirtualMounts      []VirtualMountConfig
 }
 
 // SandboxOption is a functional option for configuring a sandbox.

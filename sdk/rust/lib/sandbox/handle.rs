@@ -49,6 +49,11 @@ pub struct SandboxHandle {
     backend: Arc<dyn Backend>,
     inner: SandboxHandleInner,
     name: String,
+    /// Provider bundle captured when this handle was created. Stop/kill/remove
+    /// tear down only this generation so a stale handle cannot disturb a later
+    /// same-name replace.
+    pub(crate) virtual_mount_teardown_bundle:
+        Option<Arc<super::virtual_mount::VirtualMountServers>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -73,7 +78,8 @@ impl SandboxHandle {
                 updated_at: model.updated_at.map(|dt| dt.and_utc()),
                 pid,
             }),
-            name,
+            name: name.clone(),
+            virtual_mount_teardown_bundle: super::virtual_mount::snapshot_servers(&name),
         }
     }
 
@@ -103,6 +109,7 @@ impl SandboxHandle {
                 last_error: cloud.last_error,
             }),
             name,
+            virtual_mount_teardown_bundle: None,
         })
     }
 
@@ -139,6 +146,10 @@ impl SandboxHandle {
     /// for a fresh reading. The `_snapshot` suffix is deliberate to avoid
     /// confusion with `Sandbox::status()` which is async + fetch-live.
     ///
+    /// After a same-name [`.replace()`](super::SandboxBuilder::replace), call
+    /// [`refresh`](Self::refresh) before using lifecycle methods; stale handles
+    /// return an error from those methods rather than from this snapshot.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -169,6 +180,9 @@ impl SandboxHandle {
     /// The serialized sandbox configuration as stored in the database (local)
     /// or returned by msb-cloud (cloud). Use [`config()`](Self::config) for a
     /// deserialized [`SandboxConfig`].
+    ///
+    /// Like [`status_snapshot`](Self::status_snapshot), this reflects handle
+    /// creation time — call [`refresh`](Self::refresh) after same-name replace.
     pub fn config_json(&self) -> &str {
         match &self.inner {
             SandboxHandleInner::Local(s) => &s.config_json,
@@ -238,12 +252,40 @@ impl SandboxHandle {
                 available_when: "when cloud logs land".into(),
             });
         }
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        ensure_local_handle_still_current(self).await?;
         crate::logs::read_logs(&self.name, opts).await
+    }
+
+    /// Stream log entries for this sandbox.
+    ///
+    /// Same backing data as [`Sandbox::log_stream`](super::Sandbox::log_stream).
+    /// Works without starting the sandbox. **Local handles only**.
+    pub async fn log_stream(
+        &self,
+        opts: &crate::logs::LogStreamOptions,
+    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+        if self.backend.as_local().is_none() {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: "SandboxHandle::log_stream on cloud".into(),
+                available_when: "when cloud logs land".into(),
+            });
+        }
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        ensure_local_handle_still_current(self).await?;
+        self.backend
+            .sandboxes()
+            .log_stream(self.backend.clone(), &self.name, opts)
+            .await
     }
 
     /// Get the latest metrics snapshot for this sandbox. **Local handles only**.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
-        let local = self
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        let local = current
             .local()
             .ok_or_else(|| crate::MicrosandboxError::Unsupported {
                 feature: "SandboxHandle::metrics on cloud".into(),
@@ -257,18 +299,20 @@ impl SandboxHandle {
             )));
         }
 
-        let config = self.config()?;
+        let config = current.config()?;
         if config.effective_metrics_interval().is_none() {
             return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 
         let local_backend =
-            self.backend
+            current
+                .backend
                 .as_local()
                 .ok_or_else(|| crate::MicrosandboxError::Unsupported {
                     feature: "SandboxHandle::metrics on cloud".into(),
                     available_when: "when cloud metrics land".into(),
                 })?;
+        ensure_local_handle_still_current(self).await?;
         let db = local_backend.db().await?.read();
         super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
@@ -279,6 +323,9 @@ impl SandboxHandle {
     /// for local; routes through `POST /v1/sandboxes/by-name/:name/start` for
     /// cloud. The handle remains usable if start fails.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        ensure_local_handle_still_current(self).await?;
         self.backend
             .sandboxes()
             .start(self.backend.clone(), &self.name)
@@ -289,6 +336,9 @@ impl SandboxHandle {
     ///
     /// The handle remains usable if start fails.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        ensure_local_handle_still_current(self).await?;
         self.backend
             .sandboxes()
             .start_detached(self.backend.clone(), &self.name)
@@ -307,7 +357,9 @@ impl SandboxHandle {
         &self,
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<Sandbox> {
-        let local = self
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        let local = current
             .local()
             .ok_or_else(|| crate::MicrosandboxError::Unsupported {
                 feature: "SandboxHandle::connect on cloud".into(),
@@ -321,28 +373,47 @@ impl SandboxHandle {
         }
 
         let local_backend =
-            self.backend
+            current
+                .backend
                 .as_local()
                 .ok_or_else(|| crate::MicrosandboxError::Unsupported {
                     feature: "SandboxHandle::connect on cloud".into(),
                     available_when: "when cloud attach lands".into(),
                 })?;
+        ensure_local_handle_still_current(self).await?;
+        let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
+        super::check_virtual_mount_connect(&self.name, &config)?;
+        let virtual_mount_session = if config.had_virtual_mounts {
+            Some(super::virtual_mount::acquire_session(&self.name)?)
+        } else {
+            None
+        };
+        ensure_local_handle_still_current(self).await?;
         let client = crate::sandbox::fs::local::connect_agent_with_timeout(
             local_backend,
             &self.name,
             timeout,
         )
         .await?;
-        let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
+        if let Some(session) = virtual_mount_session.as_ref()
+            && (!super::virtual_mount::has_live_servers(&self.name)
+                || !super::virtual_mount::is_live_session(&self.name, session))
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                super::virtual_mount::connect_error(&self.name).to_string(),
+            ));
+        }
 
         Ok(Sandbox::from_local(
-            self.backend.clone(),
+            current.backend.clone(),
             crate::backend::SandboxLocalState {
                 db_id: local.db_id,
                 handle: None,
                 client: Arc::new(client),
             },
             config,
+            virtual_mount_session,
+            None,
         ))
     }
 
@@ -362,7 +433,10 @@ impl SandboxHandle {
                 available_when: "when cloud snapshots land".into(),
             });
         }
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         use super::super::snapshot::{Snapshot, SnapshotDestination};
+        ensure_local_handle_still_current(self).await?;
         Snapshot::builder(&self.name)
             .destination(SnapshotDestination::Name(name.to_string()))
             .create()
@@ -380,7 +454,10 @@ impl SandboxHandle {
                 available_when: "when cloud snapshots land".into(),
             });
         }
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         use super::super::snapshot::{Snapshot, SnapshotDestination};
+        ensure_local_handle_still_current(self).await?;
         Snapshot::builder(&self.name)
             .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
             .create()
@@ -394,19 +471,32 @@ impl SandboxHandle {
 
     /// Stop the sandbox gracefully with an explicit timeout before escalation.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
         let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
         if timeout.is_zero() {
             current.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
         current.request_stop().await?;
         match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(_)) => {
+                if let Some(bundle) = virtual_mount_bundle {
+                    super::virtual_mount::teardown_bundle(&self.name, &bundle);
+                }
+                return Ok(());
+            }
             Ok(Err(error)) => return Err(error),
             Err(_) => {}
         }
@@ -420,6 +510,9 @@ impl SandboxHandle {
         match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, current.wait_until_stopped()).await {
             Ok(result) => {
                 result?;
+                if let Some(bundle) = virtual_mount_bundle {
+                    super::virtual_mount::teardown_bundle(&self.name, &bundle);
+                }
                 Ok(())
             }
             Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
@@ -431,16 +524,26 @@ impl SandboxHandle {
 
     /// Request graceful shutdown without waiting for observed stopped state.
     pub async fn request_stop(&self) -> MicrosandboxResult<()> {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
         let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
+        ensure_local_handle_still_current(self).await?;
         current
             .backend
             .sandboxes()
             .stop(current.backend.clone(), &current.name)
-            .await
+            .await?;
+        if let Some(bundle) = virtual_mount_bundle {
+            bundle.schedule_teardown_when_stopped(self.name.clone(), Arc::clone(&current.backend));
+        }
+        Ok(())
     }
 
     /// Kill the sandbox immediately and wait until it is observed stopped.
@@ -450,22 +553,37 @@ impl SandboxHandle {
 
     /// Request force termination without waiting for observed stopped state.
     pub async fn request_kill(&self) -> MicrosandboxResult<()> {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
         let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
+        ensure_local_handle_still_current(self).await?;
         current
             .backend
             .sandboxes()
             .kill(current.backend.clone(), &current.name)
-            .await
+            .await?;
+        if let Some(bundle) = virtual_mount_bundle {
+            bundle.schedule_teardown_when_stopped(self.name.clone(), Arc::clone(&current.backend));
+        }
+        Ok(())
     }
 
     /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
     pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
         let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
@@ -473,6 +591,9 @@ impl SandboxHandle {
         match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
             Ok(result) => {
                 result?;
+                if let Some(bundle) = virtual_mount_bundle {
+                    super::virtual_mount::teardown_bundle(&self.name, &bundle);
+                }
                 Ok(())
             }
             Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
@@ -484,22 +605,33 @@ impl SandboxHandle {
 
     /// Request drain without waiting for observed stopped state.
     pub async fn request_drain(&self) -> MicrosandboxResult<()> {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
         let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
+            if let Some(bundle) = virtual_mount_bundle {
+                super::virtual_mount::teardown_bundle(&self.name, &bundle);
+            }
             return Ok(());
         }
 
+        ensure_local_handle_still_current(self).await?;
         current
             .backend
             .sandboxes()
             .drain(current.backend.clone(), &current.name)
-            .await
+            .await?;
+        if let Some(bundle) = virtual_mount_bundle {
+            bundle.schedule_teardown_when_stopped(self.name.clone(), Arc::clone(&current.backend));
+        }
+        Ok(())
     }
 
     /// Wait until this sandbox is observed in a terminal non-running state.
     pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        let mut current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
         loop {
-            let current = self.refresh().await?;
             let status = current.status_snapshot();
             if sandbox_status_is_terminal(status) {
                 return Ok(SandboxStopResult {
@@ -513,6 +645,8 @@ impl SandboxHandle {
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            current = current.refresh().await?;
+            ensure_local_handle_current(self, &current)?;
         }
     }
 
@@ -522,7 +656,10 @@ impl SandboxHandle {
     /// [`kill`](Self::kill) to stop it before removing. Routes through the
     /// backend trait so cloud handles hit `DELETE /v1/sandboxes/by-name/:name`.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
-        match &self.inner {
+        let virtual_mount_bundle = self.virtual_mount_teardown_bundle.clone();
+        let current = self.refresh().await?;
+        ensure_local_handle_current(self, &current)?;
+        match &current.inner {
             SandboxHandleInner::Local(local) => {
                 if local.status == SandboxStatus::Running || local.status == SandboxStatus::Draining
                 {
@@ -532,7 +669,7 @@ impl SandboxHandle {
                     )));
                 }
 
-                let local_backend = self.backend.as_local().ok_or_else(|| {
+                let local_backend = current.backend.as_local().ok_or_else(|| {
                     crate::MicrosandboxError::Unsupported {
                         feature: "SandboxHandle::remove on cloud".into(),
                         available_when: "wired via Cloud variant".into(),
@@ -540,17 +677,26 @@ impl SandboxHandle {
                 })?;
                 let pools = local_backend.db().await?;
 
+                ensure_local_handle_still_current(self).await?;
                 super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
                 sandbox_entity::Entity::delete_by_id(local.db_id)
                     .exec(pools.write())
                     .await?;
+                let teardown_bundle = virtual_mount_bundle
+                    .or_else(|| super::virtual_mount::snapshot_servers(&self.name));
+                if let Some(bundle) = teardown_bundle {
+                    super::virtual_mount::teardown_bundle(&self.name, &bundle);
+                }
+                super::virtual_mount::clear_live_slot(&self.name);
 
                 Ok(())
             }
             SandboxHandleInner::Cloud(_) => {
-                self.backend
+                ensure_local_handle_still_current(self).await?;
+                current
+                    .backend
                     .sandboxes()
-                    .remove(self.backend.clone(), &self.name)
+                    .remove(current.backend.clone(), &self.name)
                     .await
             }
         }
@@ -565,6 +711,55 @@ fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
     matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)
 }
 
+pub(crate) fn stale_sandbox_handle_error(name: &str) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::SandboxHandleStale(format!(
+        "sandbox '{name}' was replaced or removed since this handle was created; \
+         refresh the handle with Sandbox::get or SandboxHandle::refresh before \
+         connect, start, stop, or remove"
+    ))
+}
+
+pub(crate) async fn ensure_local_handle_still_current(
+    handle: &SandboxHandle,
+) -> MicrosandboxResult<()> {
+    let current = handle.refresh().await?;
+    ensure_local_handle_current(handle, &current)
+}
+
+pub(crate) fn ensure_local_handle_current(
+    handle: &SandboxHandle,
+    current: &SandboxHandle,
+) -> MicrosandboxResult<()> {
+    let Some(handle_local) = handle.local() else {
+        return Ok(());
+    };
+    let Some(current_local) = current.local() else {
+        return Ok(());
+    };
+    if handle_local.db_id != current_local.db_id {
+        return Err(stale_sandbox_handle_error(&handle.name));
+    }
+    // When db_id is unavailable (0), fall back to updated_at so a same-name
+    // replace is still detected. Also compare captured virtual mount bundle pointers
+    // when this handle registered virtual-mount providers.
+    if handle_local.db_id == 0
+        && let (Some(handle_updated), Some(current_updated)) =
+            (handle.updated_at(), current.updated_at())
+        && handle_updated != current_updated
+    {
+        return Err(stale_sandbox_handle_error(&handle.name));
+    }
+    if let Some(handle_bundle) = handle.virtual_mount_teardown_bundle.as_ref()
+        && !current
+            .virtual_mount_teardown_bundle
+            .as_ref()
+            .is_some_and(|current_bundle| Arc::ptr_eq(handle_bundle, current_bundle))
+    {
+        return Err(stale_sandbox_handle_error(&handle.name));
+    }
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -576,5 +771,86 @@ impl std::fmt::Debug for SandboxHandle {
             .field("backend_kind", &self.backend.kind())
             .field("status", &self.status_snapshot())
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MicrosandboxError;
+    use crate::db::entity::sandbox as sandbox_entity;
+
+    fn model(id: i32) -> sandbox_entity::Model {
+        sandbox_entity::Model {
+            id,
+            name: "demo".into(),
+            config: "{}".into(),
+            status: sandbox_entity::SandboxStatus::Stopped,
+            ephemeral: false,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_local_handle_current_rejects_replaced_sandbox() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(
+            crate::backend::LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let first = SandboxHandle::from_local_model(Arc::clone(&backend), model(1), None);
+        let second = SandboxHandle::from_local_model(backend, model(2), None);
+        let err = ensure_local_handle_current(&first, &second).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::SandboxHandleStale(_)));
+        ensure_local_handle_current(&first, &first).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_local_handle_current_rejects_stale_updated_at_when_db_id_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(
+            crate::backend::LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut first_model = model(0);
+        first_model.updated_at = Some(chrono::Utc::now().naive_utc());
+        let mut second_model = model(0);
+        second_model.updated_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(5)).naive_utc());
+        let first = SandboxHandle::from_local_model(Arc::clone(&backend), first_model, None);
+        let second = SandboxHandle::from_local_model(backend, second_model, None);
+        let err = ensure_local_handle_current(&first, &second).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::SandboxHandleStale(_)));
+    }
+
+    #[tokio::test]
+    async fn ensure_local_handle_current_rejects_stale_virtual_mount_bundle() {
+        use super::super::virtual_mount::VirtualMountServers;
+
+        let temp = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(
+            crate::backend::LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut first = SandboxHandle::from_local_model(Arc::clone(&backend), model(1), None);
+        let mut second = SandboxHandle::from_local_model(Arc::clone(&backend), model(1), None);
+        first.virtual_mount_teardown_bundle = Some(Arc::new(VirtualMountServers::new()));
+        second.virtual_mount_teardown_bundle = Some(Arc::new(VirtualMountServers::new()));
+        let err = ensure_local_handle_current(&first, &second).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::SandboxHandleStale(_)));
     }
 }

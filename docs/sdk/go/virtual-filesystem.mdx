@@ -1,0 +1,292 @@
+---
+title: Virtual filesystem
+description: Go SDK - programmable filesystem (virtual mount) API reference
+---
+
+Serve a guest directory from your own code instead of host storage. You implement `vfs.PathFs`, attach it with `WithVirtualMount`, and the SDK runs the provider loop for you. See [Virtual filesystem](/sandboxes/virtual-filesystem) for concepts and usage patterns.
+
+Virtual mounts are available in the **Go** and **Rust** SDKs today. Python and Node SDKs do not expose them yet.
+
+Builder options live in `microsandbox`; the provider interface, types, and helpers live in `github.com/superradcompany/microsandbox/sdk/go/vfs`.
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#options"><span className="msb-rn">WithVirtualMount()</span><span className="msb-rg">+ 4 tuning helpers</span></a>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">3</span></p>
+  <a className="msb-row" href="#functions"><span className="msb-rn">vfs.Serve()</span><span className="msb-rg">vfs.Err()</span></a>
+  <a className="msb-row" href="#functions"><span className="msb-rn">SetVirtualMountLogger()</span></a>
+
+  <p className="msb-gl"><span className="msb-dot instance"></span>Interface<span className="msb-ct">1</span></p>
+  <a className="msb-row" href="#pathfs"><span className="msb-rn">vfs.PathFs</span><span className="msb-rg">19 methods</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types<span className="msb-ct">10</span></p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#readonly">vfs.ReadOnly</a>
+    <a className="msb-typepill" href="#attr">vfs.Attr</a>
+    <a className="msb-typepill" href="#direntry">vfs.DirEntry</a>
+    <a className="msb-typepill" href="#statfs">vfs.StatFs</a>
+    <a className="msb-typepill" href="#nodekind">vfs.NodeKind</a>
+    <a className="msb-typepill" href="#setattrvalid">vfs.SetAttrValid</a>
+    <a className="msb-typepill" href="#errno">vfs.Errno</a>
+    <a className="msb-typepill" href="#virtualmountconfig">VirtualMountConfig</a>
+    <a className="msb-typepill" href="#vfscachepolicy">VfsCachePolicy</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```go
+import (
+    m "github.com/superradcompany/microsandbox/sdk/go"
+    "github.com/superradcompany/microsandbox/sdk/go/vfs"
+)
+
+type myFs struct{ vfs.ReadOnly }
+
+func (myFs) GetAttr(path []byte) (vfs.Attr, error) { /* ... */ }
+func (myFs) ReadDir(path []byte) ([]vfs.DirEntry, error) { /* ... */ }
+func (myFs) Read(path []byte, off uint64, n uint32) ([]byte, error) { /* ... */ }
+
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithVirtualMount("/inbox", myFs{},
+        m.WithVirtualMountCachePolicy(m.VfsCacheAuto),
+    ),
+)
+defer sb.Close() // keep open for the sandbox lifetime; closing stops the provider
+```
+
+The SDK runs `vfs.Serve` on a goroutine per mount — you normally never call it directly. Providers must be concurrency-safe and report failures with `vfs.Err`. Virtual mounts require an attached sandbox (`WithDetached` is incompatible).
+
+### Lifecycle
+
+Provider sockets are tied to **VM lifetime**, not handle refcount: they stay open while the guest may perform I/O and are torn down once (idempotently) after the VM reaches stopped state. `Stop` and `Kill` on a live `Sandbox` or `SandboxHandle` tear providers down synchronously after stopped state is observed. `RequestStop`, `RequestKill`, and `Close` on a lifecycle-owning `Sandbox` schedule the same teardown in the background after the VM stops. `SandboxHandle.RequestStop` and `RequestKill` schedule teardown by sandbox name. `Close` on a `Connect()` handle only drops that handle's reference; sockets stay up until the VM stops. `RemoveSandbox` also tears down providers when this process still hosts them. Route diagnostics with `SetVirtualMountLogger`. Always call `Close` before letting a lifecycle-owning `Sandbox` go out of scope — if a handle is garbage-collected without `Close`, lifecycle owners schedule teardown after the VM stops. A running sandbox with virtual mounts cannot be booted again via `StartSandbox` — use `Connect` instead. **Stopped sandboxes that successfully created with virtual mounts cannot be restarted** — remove the sandbox record and call `CreateSandbox` with a fresh `WithVirtualMount` provider instead of `StartSandbox`. If create fails before it completes successfully, the record persists `attempted_virtual_mounts` without `had_virtual_mounts` and **`StartSandbox` and `Connect` are rejected** — remove the record or recreate with `WithReplace`, then create again. When `CreateSandbox` returns an error, the Go SDK closes any `vfs.Serve` goroutines it started; in-process provider shutdown inside the native `create` path covers Rust-managed mounts. Provider registry installation in Go happens only after a successful create; Rust registers servers at the end of successful create but starts provider-exit watches immediately after spawn succeeds. Both SDKs close every mount socket on the first unexpected provider exit. If a provider serve loop exits unexpectedly, the Go SDK shuts down every virtual-mount provider in that sandbox and requests sandbox stop. If deferred teardown keeps retrying for 30 minutes (for example a wedged VM), the background waiter forces provider shutdown even when the sandbox has not reached a terminal state. Virtual-mount guest paths must not overlap each other, any volume mount, or share a virtio-fs tag with any bind, named, or disk-image volume. Nested volume guest paths (without a virtual mount) remain allowed.
+
+Deploy the Go SDK and the `msb` runtime from the same release when using virtual mounts: the inherited-socket protocol is currently **v4** and accepts **v3** on the handshake. A skew of two or more versions fails at boot. Mixed v3/v4 pairs can pass the hello but **`FsyncDir` (v4) is required for guest `fsyncdir` to refresh stale directory listings** on RPC mounts; without it, out-of-band provider changes stay invisible until a guest mutation invalidates the cache.
+
+Plain `readdir` may show provisional inode numbers (`d_ino`) that change after a later `lookup` establishes the authoritative inode; `readdirplus` interns real inodes during listing. When two paths hash to the same provisional value within one listing, the scaffold salts the second so `d_ino` stays unique in that directory. Tools that compare listing vs stat should not rely on plain `readdir` `d_ino` until lookup.
+
+`vfs.Serve` caches each connection's last full `ReadDir` listing for paginated replies and invalidates that cache when a mutating op completes on the connection. At most **64** distinct directory paths are cached per connection (LRU eviction); continuing pagination after eviction returns `EAGAIN`. A concurrent `ReadDir` that overlaps a write may still return the pre-write listing; do not rely on paginated `ReadDir` alone for strict read-your-writes ordering across parallel guest I/O. Cache invalidation may briefly overlap two in-flight `ReadDir` calls for the same path — providers must be concurrency-safe.
+
+The runtime scaffold checks `access(2)` permission bits against the caller's uid and primary gid only; supplementary groups are not consulted.
+
+## Options
+
+<p id="options" />
+
+Functional options for [CreateSandbox](/sdk/go/sandbox#createsandbox). Pass `WithVirtualMount` to `CreateSandbox`; pass the `WithVirtualMount*` tuning helpers as `opts` to `WithVirtualMount`.
+
+| Option | Signature | Kind | Description |
+|--------|-----------|------|-------------|
+| `WithVirtualMount` | `func WithVirtualMount(guestPath string, provider vfs.PathFs, opts ...VirtualMountOption) SandboxOption` | `SandboxOption` | Mount a programmable filesystem at `guestPath`. Allocates a socket pair, runs `provider` on the parent end via `vfs.Serve`, and inherits the child end into the runtime. May be passed more than once; each `guestPath` must be unique and must not nest under another mount (for example `/data` and `/data/inbox` together is rejected). `guestPath` must be absolute, not `/`, must not end with `/`, and must not contain `:`, `;`, or `,`. |
+| `WithVirtualMountEntryTimeout` | `func WithVirtualMountEntryTimeout(d time.Duration) VirtualMountOption` | `VirtualMountOption` | Directory-entry cache lifetime. Longer values keep repeated `lookup` calls off the channel. Rounded up to whole seconds; zero or negative leaves the default. |
+| `WithVirtualMountAttrTimeout` | `func WithVirtualMountAttrTimeout(d time.Duration) VirtualMountOption` | `VirtualMountOption` | Attribute cache lifetime before the guest re-asks via `GetAttr`. Rounded up to whole seconds; zero or negative leaves the default. |
+| `WithVirtualMountCachePolicy` | `func WithVirtualMountCachePolicy(policy VfsCachePolicy) VirtualMountOption` | `VirtualMountOption` | FUSE data-caching policy for guest reads (`VfsCacheNever`, `VfsCacheAuto`, or `VfsCacheAlways`). |
+| `WithVirtualMountWriteback` | `func WithVirtualMountWriteback(enabled bool) VirtualMountOption` | `VirtualMountOption` | Enable FUSE writeback caching so the guest kernel can buffer and coalesce writes before they reach the provider's `Write`. |
+| `WithVirtualMountCallTimeout` | `func WithVirtualMountCallTimeout(d time.Duration) VirtualMountOption` | `VirtualMountOption` | How long a single guest filesystem op waits for the provider before it is failed and surfaced to the guest as `EIO` (freeing the FUSE worker rather than pinning it). Rounded up to whole seconds; zero or negative leaves the default (30s). Raise it for slow backends such as cold object-store misses. |
+
+## Functions
+
+<p id="functions" />
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `Serve` | `func Serve(conn io.ReadWriter, fs PathFs, opts ...ServeOption) error` | Run the request/response loop for one mount: read framed requests from `conn`, dispatch to `fs`, write replies. `WithVirtualMount` calls this for you. Up to `MaxConcurrentOps` (16) concurrent dispatches per mount. Malformed requests get `EIO`; clean EOF returns `nil`. Pass `WithErrorLog` to route recovered provider panics and non-EOF serve-loop exits. |
+| `WithErrorLog` | `func WithErrorLog(fn func(format string, args ...any)) ServeOption` | Set the function `Serve` uses to report recovered provider panics and non-EOF serve-loop exit errors. Defaults to a no-op; `WithVirtualMount` passes `SetVirtualMountLogger`'s hook when set. |
+| `SetVirtualMountLogger` | `func SetVirtualMountLogger(fn func(format string, args ...any))` | Route virtual-mount diagnostics (serve-loop exit, panics, handles garbage-collected without `Close`). Defaults to a no-op. |
+| `Err` | `func Err(code int) error` | Wrap a Linux errno as `*Errno` for return from a `PathFs` method. Any other non-nil error becomes `EIO` in the guest. |
+
+## Types
+
+### vfs.PathFs
+
+<span id="pathfs" />
+
+Path-addressed filesystem backend. Paths are absolute `[]byte` values starting with `/`; names are raw bytes, not validated UTF-8. Report failures with `vfs.Err`. Embed `ReadOnly` for a read-only tree (implement `GetAttr`, `ReadDir`, and `Read` only). `ReadDir` names must be single path components (no `.`, `..`, or `/`); the server rejects invalid names before they reach the guest. Read/write payloads are capped at 128 KiB per RPC.
+
+| Group | Method | Signature | Returns | ReadOnly default | Description |
+|-------|--------|-----------|---------|------------------|-------------|
+| Read | `GetAttr` | `(path []byte)` | `(Attr, error)` | — | Node attributes, or `ENOENT` if absent |
+| Read | `ReadDir` | `(path []byte)` | `([]DirEntry, error)` | — | Directory children (excluding `.`/`..`) |
+| Read | `Read` | `(path []byte, offset uint64, size uint32)` | `([]byte, error)` | — | Up to `size` bytes from `offset`; short result signals EOF |
+| Read | `ReadLink` | `(path []byte)` | `([]byte, error)` | `ENOSYS` | Symlink target |
+| Write | `Write` | `(path []byte, offset uint64, data []byte)` | `(int, error)` | `ENOSYS` | Bytes accepted at `offset` |
+| Write | `Create` | `(path []byte, attr Attr)` | `(Attr, error)` | `ENOSYS` | Create a node per `attr.Kind` |
+| Write | `Mkdir` | `(path []byte, mode uint32)` | `(Attr, error)` | `ENOSYS` | Create a directory |
+| Write | `Remove` | `(path []byte)` | `error` | `ENOSYS` | Delete a node or empty directory |
+| Write | `Rename` | `(from, to []byte)` | `error` | `ENOSYS` | Move `from` to `to` |
+| Write | `SetAttr` | `(path []byte, attr Attr, valid SetAttrValid)` | `(Attr, error)` | `ENOSYS` | Apply selected `attr` fields |
+| Write | `Symlink` | `(path, target []byte)` | `(Attr, error)` | `ENOSYS` | Create a symlink |
+| Write | `Flush` | `(path []byte)` | `error` | no-op | Commit buffered writes for a file |
+| Write | `Fsync` | `(path []byte, datasync bool)` | `error` | no-op | Sync file data (and metadata unless `datasync`) to stable storage |
+| Xattr | `SetXattr` | `(path, name, value []byte, flags uint32)` | `error` | `ENOSYS` | Set extended attribute |
+| Xattr | `GetXattr` | `(path, name []byte)` | `([]byte, error)` | `ENODATA` | Get extended attribute |
+| Xattr | `ListXattr` | `(path []byte)` | `([][]byte, error)` | empty list | List xattr names |
+| Xattr | `RemoveXattr` | `(path, name []byte)` | `error` | `ENOSYS` | Remove extended attribute |
+| Info | `StatFs` | `()` | `(StatFs, error)` | generic unbounded volume | Filesystem statistics |
+
+### vfs.ReadOnly
+
+<span id="readonly" />
+
+Embeddable base for read-only providers. Override `GetAttr`, `ReadDir`, and `Read`; all other methods use the **ReadOnly default** column in the `PathFs` table.
+
+### vfs.RenameFlagsAware
+
+<span id="renameflagsaware" />
+
+Optional interface for providers that enforce Linux `renameat2` flags atomically (typically under their own lock). When your provider implements `RenameWithFlags`, the `Serve` loop calls it for `Rename` RPCs that carry flag bits; otherwise the server falls back to a best-effort `GetAttr` pre-check before `Rename`.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `RenameWithFlags` | `(from, to []byte, flags uint32) error` | Rename honoring `RenameNoReplace` (1) and rejecting `RenameExchange` (2) with `ENOSYS` |
+
+Dynamic providers that mutate outside the guest should expose fresh listings after the guest calls `fsyncdir` on an open directory handle; until then, open handles keep their point-in-time snapshot and a non-zero `readdir` cookie after refresh returns `EAGAIN` until the client rewinds to offset `0`. Mutations invalidate only directory handles whose path is affected; unrelated open directory handles stay valid.
+
+Before removing a directory, the runtime treats `ReadDir` as empty when every returned name fails guest validation. Providers must not hide real children behind invalid names — that would allow removing a non-empty directory.
+
+### vfs.Attr
+
+<span id="attr" />
+
+Portable node attributes. The runtime fills sensible defaults for zero-valued optional fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Kind` | `NodeKind` | Node type; combined with `Mode` for full `st_mode` |
+| `Mode` | `uint32` | Permission bits (e.g. `0o644`); type bits derive from `Kind` |
+| `Size` | `uint64` | Size in bytes (0 for non-regular files) |
+| `UID` | `uint32` | Owner user id |
+| `GID` | `uint32` | Owner group id |
+| `Nlink` | `uint64` | Hard-link count; 0 lets the runtime default |
+| `Rdev` | `uint32` | Device number for `Char`/`Block` nodes |
+| `Atime` | `time.Time` | Last access; zero means current time |
+| `Mtime` | `time.Time` | Last modification; zero means current time |
+| `Ctime` | `time.Time` | Last status change; zero means current time |
+
+### vfs.DirEntry
+
+<span id="direntry" />
+
+One child from `ReadDir`. Do not include `.` or `..` — the runtime synthesizes those.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | `[]byte` | Single path component (no `/`) |
+| `Kind` | `NodeKind` | Entry node type |
+
+### vfs.StatFs
+
+<span id="statfs" />
+
+Filesystem statistics from `StatFs`. Zero value becomes a generic unbounded volume after runtime defaults.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Bsize` | `uint64` | Filesystem block size |
+| `Frsize` | `uint64` | Fragment size |
+| `Blocks` | `uint64` | Total data blocks |
+| `Bfree` | `uint64` | Free blocks |
+| `Bavail` | `uint64` | Free blocks for unprivileged users |
+| `Files` | `uint64` | Total inodes |
+| `Ffree` | `uint64` | Free inodes |
+| `Namemax` | `uint64` | Maximum filename length |
+
+### vfs.NodeKind
+
+<span id="nodekind" />
+
+`type NodeKind uint8` — node type; byte values match the runtime wire encoding.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `File` | `0` | Regular file |
+| `Dir` | `1` | Directory |
+| `Symlink` | `2` | Symbolic link |
+| `Char` | `3` | Character device |
+| `Block` | `4` | Block device |
+| `Fifo` | `5` | Named pipe |
+| `Socket` | `6` | Unix domain socket |
+
+### vfs.SetAttrValid
+
+<span id="setattrvalid" />
+
+`type SetAttrValid uint32` — bitset for `SetAttr`; values match FUSE `FATTR_*` flags. Test with `valid.Has(vfs.SetSize)`.
+
+| Name | Kind | Description |
+|------|------|-------------|
+| `SetMode` | constant | `Mode` field is valid |
+| `SetUID` | constant | `UID` field is valid |
+| `SetGID` | constant | `GID` field is valid |
+| `SetSize` | constant | `Size` field is valid (truncate/extend) |
+| `SetAtime` | constant | `Atime` field is valid |
+| `SetMtime` | constant | `Mtime` field is valid |
+| `SetAtimeNow` | constant | Set `Atime` to now |
+| `SetMtimeNow` | constant | Set `Mtime` to now |
+| `SetCtime` | constant | `Ctime` field is valid |
+| `Has(flag)` | method | Returns whether `flag` is set |
+
+### vfs.Errno
+
+<span id="errno" />
+
+Linux errno wrapper returned by `Err`. Use these constants — not host `syscall.Errno` — because the guest is always Linux.
+
+| Name | Value | Description |
+|------|-------|-------------|
+| `Code` | — | `int` field on `*Errno`; the Linux errno value |
+| `EPERM` | 1 | Operation not permitted |
+| `ENOENT` | 2 | Path does not exist |
+| `EIO` | 5 | I/O error; fallback for non-`*Errno` errors |
+| `EBADF` | 9 | Bad file descriptor |
+| `EAGAIN` | 11 | Resource temporarily unavailable |
+| `ENOMEM` | 12 | Out of memory |
+| `EACCES` | 13 | Permission denied |
+| `EBUSY` | 16 | Resource busy |
+| `EEXIST` | 17 | Path already exists |
+| `ENOTDIR` | 20 | Not a directory |
+| `EISDIR` | 21 | Is a directory |
+| `EINVAL` | 22 | Invalid argument |
+| `EFBIG` | 27 | File too large |
+| `ENOSPC` | 28 | No space left |
+| `EROFS` | 30 | Read-only filesystem |
+| `ERANGE` | 34 | Result out of range |
+| `ENOSYS` | 38 | Not implemented |
+| `ENOTEMPTY` | 39 | Directory not empty |
+| `ENODATA` | 61 | No such extended attribute |
+| `ENOTSUP` | 95 | Operation not supported |
+| `MaxConcurrentOps` | 16 | Max concurrent provider calls per mount |
+
+### VirtualMountConfig
+
+<span id="virtualmountconfig" />
+
+Config populated by `WithVirtualMount` and its tuning helpers. Most callers use the option functions rather than building this directly.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `GuestPath` | `string` | Absolute guest mount point |
+| `Provider` | `vfs.PathFs` | Filesystem implementation |
+| `EntryTimeout` | `time.Duration` | Entry cache lifetime; zero = default |
+| `AttrTimeout` | `time.Duration` | Attribute cache lifetime; zero = default |
+| `CachePolicy` | `VfsCachePolicy` | Data-caching policy |
+| `Writeback` | `bool` | Writeback caching enabled |
+| `CallTimeout` | `time.Duration` | Per-op provider timeout; zero = default (30s) |
+
+`VirtualMountOption` is `func(*VirtualMountConfig)` — the type of the tuning helpers in the **Options** table.
+
+### VfsCachePolicy
+
+<span id="vfscachepolicy" />
+
+`type VfsCachePolicy string` — FUSE kernel caching policy.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `VfsCacheNever` | `"never"` | Disable guest-side caching |
+| `VfsCacheAuto` | `"auto"` | Let the kernel decide |
+| `VfsCacheAlways` | `"always"` | Aggressive attr/entry/data caching |

@@ -124,7 +124,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     // Detach mode: ensure running and exit.
     if args.detach {
         warn_detached_command_ignored(&name, &args);
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
@@ -213,7 +213,7 @@ async fn run_new(
 
     // Detach mode: just print the name and exit.
     if args.detach {
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }

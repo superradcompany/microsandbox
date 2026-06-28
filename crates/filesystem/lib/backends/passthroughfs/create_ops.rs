@@ -55,7 +55,7 @@ pub(crate) fn do_create(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -160,7 +160,7 @@ pub(crate) fn do_mkdir(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -221,7 +221,7 @@ pub(crate) fn do_mknod(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -314,7 +314,7 @@ pub(crate) fn do_symlink(
     name: &CStr,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -429,7 +429,7 @@ pub(crate) fn do_link(
     newparent: u64,
     newname: &CStr,
 ) -> io::Result<Entry> {
-    name_validation::validate_name(newname)?;
+    name_validation::validate_create_name(newname)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }

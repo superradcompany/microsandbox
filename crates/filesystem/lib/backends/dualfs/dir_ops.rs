@@ -16,10 +16,7 @@ use super::{
 };
 use crate::{
     Context, DirEntry, Entry, OpenOptions,
-    backends::shared::{
-        dir_snapshot::{self, SnapshotEntry},
-        init_binary, platform,
-    },
+    backends::shared::{dir_snapshot::SnapshotEntry, init_binary, platform},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -101,6 +98,9 @@ pub(crate) fn do_opendir(
             backend_b_inode,
             readdir_plan,
             snapshot: std::sync::Mutex::new(None),
+            fuse_cache: std::sync::Mutex::new(
+                crate::backends::shared::dir_snapshot::FuseDirCache::new(),
+            ),
         }),
     );
 
@@ -113,7 +113,7 @@ pub(crate) fn do_readdir(
     ctx: Context,
     _ino: u64,
     handle: u64,
-    _size: u32,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
     let dh = get_dir_handle(fs, handle)?;
@@ -125,7 +125,7 @@ pub(crate) fn do_readdir(
     }
 
     let snapshot = snapshot_guard.as_ref().unwrap();
-    serve_readdir(snapshot, offset)
+    serve_readdir(&dh, snapshot, size, offset)
 }
 
 /// Handle readdirplus.
@@ -134,7 +134,7 @@ pub(crate) fn do_readdirplus(
     ctx: Context,
     _ino: u64,
     handle: u64,
-    _size: u32,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
     let dh = get_dir_handle(fs, handle)?;
@@ -145,7 +145,7 @@ pub(crate) fn do_readdirplus(
     }
 
     let snapshot = snapshot_guard.as_ref().unwrap();
-    let dir_entries = serve_readdir(snapshot, offset)?;
+    let dir_entries = serve_readdir(&dh, snapshot, size, offset)?;
 
     let mut result = Vec::with_capacity(dir_entries.len());
     for de in dir_entries {
@@ -204,7 +204,9 @@ pub(crate) fn do_releasedir(
     _flags: u32,
     handle: u64,
 ) -> io::Result<()> {
-    fs.state.dir_handles.write().unwrap().remove(&handle);
+    if let Some(dh) = fs.state.dir_handles.write().unwrap().remove(&handle) {
+        dh.fuse_cache.lock().unwrap().clear_on_release();
+    }
     Ok(())
 }
 
@@ -419,8 +421,9 @@ fn collect_backend_entries(
     let dir_handle_val = dir_handle.unwrap_or(0);
 
     let child_entries =
-        backend(fs, backend_id).readdir(ctx, backend_inode, dir_handle_val, u32::MAX, 0)?;
-    let _ = backend(fs, backend_id).releasedir(ctx, backend_inode, 0, dir_handle_val);
+        // `max_bytes == 0` means "return the full listing" (see `dir_snapshot`); do
+        // not pass a large non-zero size — that is treated as a FUSE buffer cap.
+        backend(fs, backend_id).readdir(ctx, backend_inode, dir_handle_val, 0, 0)?;
 
     for entry in child_entries {
         let name = entry.name.to_vec();
@@ -467,6 +470,8 @@ fn collect_backend_entries(
             *off += 1;
         }
     }
+
+    let _ = backend(fs, backend_id).releasedir(ctx, backend_inode, 0, dir_handle_val);
 
     Ok(())
 }
@@ -523,11 +528,16 @@ fn collect_dentry_entries(
 }
 
 /// Serve readdir results from a snapshot starting at the given offset.
-fn serve_readdir(snapshot: &DirSnapshot, offset: u64) -> io::Result<Vec<DirEntry<'static>>> {
-    Ok(dir_snapshot::serve_snapshot_entries(
-        &snapshot.entries,
-        offset,
-    ))
+fn serve_readdir(
+    dh: &DualDirHandle,
+    snapshot: &DirSnapshot,
+    size: u32,
+    offset: u64,
+) -> io::Result<Vec<DirEntry<'static>>> {
+    dh.fuse_cache
+        .lock()
+        .unwrap()
+        .serve(&snapshot.entries, offset, size)
 }
 
 /// Get a directory handle by guest handle ID.
@@ -539,4 +549,15 @@ fn get_dir_handle(fs: &DualFs, handle: u64) -> io::Result<Arc<DualDirHandle>> {
         .get(&handle)
         .cloned()
         .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
+}
+
+/// Drop cached directory snapshots for every open handle after a mutation.
+///
+/// Merged directory snapshots stay frozen until `releasedir`; only the FUSE
+/// byte cache is dropped so pagination is rebuilt from the frozen listing.
+#[allow(dead_code)]
+pub(crate) fn invalidate_all_dir_snapshots(fs: &DualFs) {
+    for dh in fs.state.dir_handles.read().unwrap().values() {
+        dh.fuse_cache.lock().unwrap().invalidate();
+    }
 }

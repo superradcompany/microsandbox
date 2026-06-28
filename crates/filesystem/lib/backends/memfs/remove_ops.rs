@@ -66,7 +66,6 @@ pub(crate) fn do_unlink(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> 
 
     // Try to evict if unreferenced.
     inode::try_evict(fs, child_ino);
-
     Ok(())
 }
 
@@ -127,7 +126,6 @@ pub(crate) fn do_rmdir(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> i
 
     // Try to evict if unreferenced.
     inode::try_evict(fs, child_ino);
-
     Ok(())
 }
 
@@ -259,7 +257,6 @@ pub(crate) fn do_rename(
             meta.mtime = now;
             meta.ctime = now;
         }
-
         return Ok(());
     }
 
@@ -366,6 +363,5 @@ pub(crate) fn do_rename(
     if let Some(dest) = evict_dest {
         inode::try_evict(fs, dest);
     }
-
     Ok(())
 }

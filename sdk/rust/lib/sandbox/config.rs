@@ -138,6 +138,51 @@ pub struct SandboxConfig {
     /// One-shot foreground command requested by attached `msb run`.
     #[serde(skip)]
     pub(crate) initial_command: Option<Vec<String>>,
+
+    /// True when this sandbox was originally created with programmable virtual
+    /// mounts. Virtual mounts cannot be restarted without a live provider.
+    #[serde(default)]
+    pub had_virtual_mounts: bool,
+
+    /// True when create was started with virtual mounts but may not have
+    /// finished successfully. Blocks `Sandbox::start` until the record is
+    /// removed and create is retried with a fresh provider.
+    #[serde(default)]
+    pub attempted_virtual_mounts: bool,
+
+    /// Programmable virtual-filesystem mounts.
+    ///
+    /// Transient: each carries a live socket fd whose runtime-side end is
+    /// inherited by the spawned sandbox process, so this can never be
+    /// serialized into the persisted sandbox config. Set via
+    /// [`SandboxBuilder::virtual_mount_fd`](super::SandboxBuilder::virtual_mount_fd)
+    /// and consumed during spawn.
+    #[serde(skip)]
+    pub virtual_mounts: Vec<VirtualMountSpec>,
+
+    /// In-process provider servers for [`virtual_mounts`]. Never persisted.
+    #[serde(skip)]
+    pub(crate) runtime_virtual_mount_servers: super::virtual_mount::RuntimeVirtualMountServers,
+}
+
+/// A programmable virtual-filesystem mount: a guest path served over an
+/// already-connected socket whose runtime-side (child) end is `child_fd`.
+///
+/// The peer end is owned by the caller, which must run a virtual mount provider
+/// server on it (Go: `vfs.Serve`; Rust: `microsandbox_filesystem::rpc::serve`).
+/// The runtime adopts `child_fd`, builds a
+/// `VirtualFs` whose semantics are answered over the socket, and exposes it to
+/// the guest at `guest_path`.
+#[derive(Debug, Clone)]
+pub struct VirtualMountSpec {
+    /// Absolute guest path to mount at.
+    pub guest_path: String,
+
+    /// Runtime-side socket fd, inherited by the spawned sandbox process.
+    pub child_fd: std::os::fd::RawFd,
+
+    /// Optional FUSE cache knobs for this mount.
+    pub fs_config: Option<microsandbox_filesystem::VirtualFsMountConfig>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -166,6 +211,9 @@ impl SandboxConfig {
         let mut config = self.clone();
         config.startup_command_requested = false;
         config.initial_command = None;
+        config.attempted_virtual_mounts |= !self.virtual_mounts.is_empty();
+        config.virtual_mounts.clear();
+        config.runtime_virtual_mount_servers.take();
         config
     }
 
@@ -503,6 +551,11 @@ impl Default for SandboxConfig {
             snapshot_upper_source: None,
             startup_command_requested: false,
             initial_command: None,
+            had_virtual_mounts: false,
+            attempted_virtual_mounts: false,
+            virtual_mounts: Vec::new(),
+            runtime_virtual_mount_servers:
+                super::virtual_mount::RuntimeVirtualMountServers::default(),
         }
     }
 }
@@ -516,7 +569,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{SandboxConfig, merge_env};
-    use crate::sandbox::{HandoffInit, MountOptions, RootfsSource, VolumeMount};
+    use crate::sandbox::{HandoffInit, MountOptions, RootfsSource, VirtualMountSpec, VolumeMount};
     use microsandbox_image::ImageConfig;
     use microsandbox_types::{
         EnvVar, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
@@ -844,6 +897,113 @@ mod tests {
         config.set_persistent_initial_command(Vec::new());
 
         assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
+    }
+
+    #[test]
+    fn test_clone_for_persistence_does_not_set_had_virtual_mounts() {
+        let mut config = SandboxConfig::default();
+        config.virtual_mounts.push(VirtualMountSpec {
+            guest_path: "/inbox".to_string(),
+            child_fd: libc::STDERR_FILENO,
+            fs_config: None,
+        });
+
+        let persisted = config.clone_for_persistence();
+
+        assert!(!persisted.had_virtual_mounts);
+        assert!(persisted.attempted_virtual_mounts);
+        assert!(persisted.virtual_mounts.is_empty());
+    }
+
+    #[test]
+    fn test_clone_for_persistence_leaves_attempted_false_without_virtual_mounts() {
+        let config = SandboxConfig::default();
+        let persisted = config.clone_for_persistence();
+        assert!(!persisted.attempted_virtual_mounts);
+        assert!(!persisted.had_virtual_mounts);
+    }
+
+    #[test]
+    fn test_check_virtual_mount_connect_rejects_incomplete_create() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "demo".to_string();
+        config.attempted_virtual_mounts = true;
+        config.had_virtual_mounts = false;
+
+        let err = crate::sandbox::check_virtual_mount_connect("demo", &config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("virtual mount create did not complete successfully"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_virtual_mount_connect_rejects_without_session() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "demo".to_string();
+        config.had_virtual_mounts = true;
+
+        let err = crate::sandbox::check_virtual_mount_connect("demo", &config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("virtual mount provider is not active"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_virtual_mount_connect_allows_with_live_providers() {
+        use std::path::Path;
+        use std::sync::Arc;
+
+        use microsandbox_filesystem::{PathFs, VAttr, VDirEntry};
+
+        use crate::sandbox::virtual_mount::{VirtualMountServer, VirtualMountServers};
+
+        struct StubProvider;
+
+        impl PathFs for StubProvider {
+            fn getattr(&self, path: &Path) -> std::io::Result<VAttr> {
+                if path == Path::new("/") {
+                    Ok(VAttr::dir(0o755))
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn readdir(&self, path: &Path) -> std::io::Result<Vec<VDirEntry>> {
+                if path == Path::new("/") {
+                    Ok(Vec::new())
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            }
+
+            fn read(&self, _path: &Path, _offset: u64, _size: u32) -> std::io::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let name = format!("virtual-mount-connect-{}", std::process::id());
+        crate::sandbox::virtual_mount::clear_live_slot(&name);
+
+        let mut config = SandboxConfig::default();
+        config.spec.name = name.clone();
+        config.had_virtual_mounts = true;
+
+        let _session = crate::sandbox::virtual_mount::install_session(&name);
+        let (server, _) = VirtualMountServer::spawn(StubProvider).unwrap();
+        let bundle = Arc::new(VirtualMountServers::new());
+        bundle.push(Arc::new(server));
+        crate::sandbox::virtual_mount::register_servers(&name, Arc::clone(&bundle));
+
+        crate::sandbox::check_virtual_mount_connect(&name, &config)
+            .expect("live providers should allow connect");
+
+        crate::sandbox::virtual_mount::teardown_servers(&name);
+        crate::sandbox::virtual_mount::clear_live_slot(&name);
+        bundle.shutdown_all();
     }
 
     #[test]

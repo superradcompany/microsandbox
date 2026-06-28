@@ -175,6 +175,21 @@ where
         })
     }
 
+    /// Remove an entry by its alternate key, dropping both keys.
+    pub fn remove_alt<Q2>(&mut self, key: &Q2) -> Option<V>
+    where
+        K2: Borrow<Q2>,
+        Q2: Ord + ?Sized,
+    {
+        let k1 = self.alt.remove(key)?;
+        self.main.remove(&k1).map(|(_, v)| v)
+    }
+
+    /// Iterate `(alternate key, primary key)` pairs, in alternate-key order.
+    pub fn iter_alt(&self) -> impl Iterator<Item = (&K2, &K1)> {
+        self.alt.iter()
+    }
+
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.alt.clear();

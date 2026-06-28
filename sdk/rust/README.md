@@ -12,6 +12,7 @@ Lightweight VM sandboxes for running AI agents and untrusted code with hardware-
 - **Command execution** — Run commands with streaming or collected output, interactive shells
 - **Guest filesystem access** — Read, write, list, copy files inside a running sandbox
 - **Named volumes** — Persistent storage that survives sandbox restarts, with quotas
+- **Virtual mounts** — Serve a guest directory from your own [`PathFs`](https://docs.microsandbox.dev/sdk/rust/virtual-filesystem) code ([docs](https://docs.microsandbox.dev/sdk/rust/virtual-filesystem))
 - **Network policies** — Control outbound access: public-only (default), allow-all, or fully airgapped
 - **DNS filtering** — Block specific domains or domain suffixes
 - **TLS interception** — Transparent MITM proxy for HTTPS inspection and secret substitution

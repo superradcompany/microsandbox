@@ -93,6 +93,45 @@ fn test_readdir_snapshot_stable() {
 }
 
 #[test]
+fn test_readdir_paginates_with_nonzero_size() {
+    let sb = DualFsTestSandbox::with_backend_b(|b| {
+        memfs_create_file(b, 1, "b_file.txt", b"from b");
+    });
+    sb.create_file_with_content(ROOT_INODE, "a_file.txt", b"from a")
+        .unwrap();
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let first = sb
+        .fs
+        .readdir(DualFsTestSandbox::ctx(), ROOT_INODE, handle, 64, 0)
+        .unwrap();
+    assert!(!first.is_empty(), "first readdir page should not be empty");
+    let cookie = first.last().unwrap().offset;
+    let second = sb
+        .fs
+        .readdir(DualFsTestSandbox::ctx(), ROOT_INODE, handle, 65536, cookie)
+        .unwrap();
+
+    let names: Vec<String> = first
+        .iter()
+        .chain(second.iter())
+        .map(|e| String::from_utf8_lossy(e.name).to_string())
+        .collect();
+    sb.fs
+        .releasedir(DualFsTestSandbox::ctx(), ROOT_INODE, 0, handle)
+        .unwrap();
+
+    assert!(
+        names.iter().any(|n| n == "a_file.txt"),
+        "paginated readdir should include backend_a file, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "b_file.txt"),
+        "paginated readdir should include backend_b file, got {names:?}"
+    );
+}
+
+#[test]
 fn test_readdir_root_has_init() {
     let sb = DualFsTestSandbox::new();
     let names = sb.readdir_names(ROOT_INODE).unwrap();

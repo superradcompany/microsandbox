@@ -1,0 +1,92 @@
+---
+title: Virtual filesystem
+description: Rust SDK - programmable filesystem (virtual mount) API reference
+---
+
+Serve a guest directory from your own code instead of host storage. Implement [`PathFs`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/trait.PathFs.html), attach it with [`SandboxBuilder::virtual_mount_with_provider`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.virtual_mount_with_provider), and the SDK runs the provider loop for you. See [Virtual filesystem](/sandboxes/virtual-filesystem) for concepts and usage patterns.
+
+```rust
+use microsandbox::{SandboxBuilder, MicrosandboxResult};
+use microsandbox_filesystem::{PathFs, VAttr, VDirEntry};
+use std::io;
+use std::path::Path;
+
+struct Inbox;
+
+impl PathFs for Inbox {
+    fn getattr(&self, path: &Path) -> io::Result<VAttr> {
+        match path.to_str() {
+            Some("/") => Ok(VAttr::dir(0o755)),
+            Some("/hello.txt") => Ok(VAttr::file(0o644, 6)),
+            _ => Err(io::Error::from_raw_os_error(libc::ENOENT)),
+        }
+    }
+
+    fn readdir(&self, path: &Path) -> io::Result<Vec<VDirEntry>> {
+        if path == Path::new("/") {
+            Ok(vec![VDirEntry::new(b"hello.txt", microsandbox_filesystem::NodeKind::File)])
+        } else {
+            Err(io::Error::from_raw_os_error(libc::ENOENT))
+        }
+    }
+
+    fn read(&self, path: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+        if path != Path::new("/hello.txt") {
+            return Err(io::Error::from_raw_os_error(libc::ENOENT));
+        }
+        let data = b"hello\n";
+        let off = offset as usize;
+        if off >= data.len() {
+            return Ok(Vec::new());
+        }
+        let end = (off + size as usize).min(data.len());
+        Ok(data[off..end].to_vec())
+    }
+}
+
+async fn demo() -> MicrosandboxResult<()> {
+    let config = SandboxBuilder::new("demo")
+        .image("alpine")
+        .virtual_mount_with_provider("/inbox", Inbox)
+        .build()
+        .await?;
+    let sandbox = microsandbox::Sandbox::create(config).await?;
+    sandbox.stop().await?;
+    Ok(())
+}
+```
+
+## Builder methods
+
+| Method | Description |
+|--------|-------------|
+| `virtual_mount_with_provider(guest_path, provider)` | Spawn an in-process `rpc::serve` loop on a socketpair and attach the runtime-side fd. |
+| `virtual_mount_with_provider_and_config(...)` | Same, with optional [`VirtualFsMountConfig`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/struct.VirtualFsMountConfig.html) FUSE cache knobs. |
+| `virtual_mount_fd(guest_path, child_fd)` | Low-level escape hatch when you already own the runtime-side socket fd. |
+| `virtual_mount_fd_with(...)` | Same, with optional mount config. |
+
+Providers must be `Send + Sync`. Virtual mounts cannot be used with [`detached`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.detached) sandboxes — the provider socket lives in the controlling process.
+
+## `PathFs` mutations
+
+For writable providers, implement [`rename`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/trait.PathFs.html#method.rename) and override [`rename_with_flags`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/trait.PathFs.html#method.rename_with_flags) when the guest may pass `RENAME_NOREPLACE` (Linux flag `1`). The default `rename_with_flags` performs a best-effort `getattr` pre-check only; **override it and enforce noreplace under your own lock** when overwrites must be impossible.
+
+Dynamic backends that change listings outside guest syscalls should expect guests to call `fsyncdir` on open directory handles to refresh; until then, open handles keep their point-in-time snapshot and a non-zero `readdir` cookie after refresh returns `EAGAIN` until the client rewinds to offset `0`. Mutations invalidate only directory handles whose path is affected; unrelated open directory handles stay valid.
+
+Writable providers should implement [`flush`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/trait.PathFs.html#method.flush) and [`fsync`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/trait.PathFs.html#method.fsync) when durability matters. The runtime calls them on explicit guest `flush`/`fsync` and calls `flush` when the kernel closes a file with flush enabled on release.
+
+Before removing a directory, the runtime treats `ReadDir` as empty when every returned name fails guest validation. Providers must not hide real children behind invalid names.
+
+## Lifecycle
+
+Keep a live [`Sandbox`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.Sandbox.html) handle (or [`SandboxHandle::connect`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxHandle.html#method.connect) from the same process) open for the VM's lifetime. Provider servers shut down once the sandbox reaches a terminal state. Rust starts provider-exit watches immediately after spawn succeeds (before registry registration); the Go SDK installs them only after `CreateSandbox` succeeds. Both close every mount socket on the first unexpected provider exit. Sandboxes that **successfully** complete create with virtual mounts persist `had_virtual_mounts`; **`Sandbox::start` cannot reattach providers after stop** — remove the sandbox record and create a new one with `virtual_mount_with_provider`. If create fails before it completes, the record persists `attempted_virtual_mounts` without `had_virtual_mounts` and **`Sandbox::start` and `SandboxHandle::connect` are rejected** — remove the record or recreate with [`.replace()`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.replace), then create again. [`Connect`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxHandle.html#method.connect) from another process is refused when no in-process provider session is active. If a provider serve loop exits unexpectedly, the SDK shuts down every virtual-mount provider in that sandbox and requests sandbox stop.
+
+The RPC server caches each connection's last full `ReadDir` listing for paginated replies (at most **64** distinct paths per connection, LRU eviction) and invalidates that cache when a mutating op completes on the connection. Continuing pagination after eviction or an overlapping mutation returns `EAGAIN`. Cache invalidation may briefly overlap two in-flight `ReadDir` calls for the same path — providers must be `Send + Sync` and tolerate concurrent `readdir` on one directory.
+
+For manual socket wiring, run [`microsandbox_filesystem::rpc::serve`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/rpc/fn.serve.html) (or `serve_unix`) on the parent end of a socketpair and pass the child fd to `virtual_mount_fd`.
+
+If deferred teardown keeps retrying for 30 minutes (for example a wedged VM), the background waiter **forces provider shutdown** even when the sandbox has not reached a terminal state.
+
+Deploy the Rust SDK and the `msb` runtime from the same release when using virtual mounts: the inherited-socket protocol is currently **v4** and accepts **v3** on the handshake. A skew of two or more versions fails at boot. Mixed v3/v4 pairs can pass the hello but **`FsyncDir` (v4) is required for guest `fsyncdir` to refresh stale directory listings** on RPC mounts; without it, out-of-band provider changes stay invisible until a guest mutation invalidates the cache.
+
+Python and Node SDKs do not expose virtual mounts yet.

@@ -24,7 +24,7 @@ use crate::{
 /// Handle unlink.
 pub(crate) fn do_unlink(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     // Protect init.krun.
     if parent == ROOT_INODE && init_binary::is_init_name(name_bytes) {
@@ -135,7 +135,7 @@ pub(crate) fn do_unlink(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
 /// Handle rmdir.
 pub(crate) fn do_rmdir(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     if parent == ROOT_INODE && init_binary::is_init_name(name_bytes) {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
@@ -242,8 +242,8 @@ pub(crate) fn do_rename(
 ) -> io::Result<()> {
     let oldname_bytes = oldname.to_bytes();
     let newname_bytes = newname.to_bytes();
-    name_validation::validate_name(oldname)?;
-    name_validation::validate_name(newname)?;
+    name_validation::validate_create_name(oldname)?;
+    name_validation::validate_create_name(newname)?;
 
     // Reject unknown flags.
     if flags & !KNOWN_RENAME_FLAGS != 0 {
@@ -514,25 +514,20 @@ fn check_merged_dir_empty(
 
     if let Some(other_inode) = dir_node.state.read().unwrap().backend_inode(other) {
         let other_backend = backend(fs, other);
-        if let Ok((dh, _)) = other_backend.opendir(ctx, other_inode, 0) {
-            let dh_val = dh.unwrap_or(0);
-            if let Ok(entries) = other_backend.readdir(ctx, other_inode, dh_val, u32::MAX, 0) {
-                let whiteouts = fs.state.whiteouts.read().unwrap();
-                for entry in &entries {
-                    let name = entry.name.to_vec();
-                    if name == b"." || name == b".." {
-                        continue;
-                    }
-                    if dir_ino == ROOT_INODE && name == STAGING_DIR_NAME {
-                        continue;
-                    }
-                    if !whiteouts.contains(&(dir_ino, name, other)) {
-                        let _ = other_backend.releasedir(ctx, other_inode, 0, dh_val);
-                        return Err(io::Error::from_raw_os_error(libc::ENOTEMPTY));
-                    }
-                }
+        let (dh, _) = other_backend.opendir(ctx, other_inode, 0)?;
+        let dh_val = dh.unwrap_or(0);
+        let entries = other_backend.readdir(ctx, other_inode, dh_val, 0, 0)?;
+        let _ = other_backend.releasedir(ctx, other_inode, 0, dh_val);
+        let whiteouts = fs.state.whiteouts.read().unwrap();
+        for name in entries
+            .iter()
+            .map(|entry| entry.name)
+            .filter(|name| *name != b"." && *name != b"..")
+            .filter(|name| !(dir_ino == ROOT_INODE && *name == STAGING_DIR_NAME))
+        {
+            if !whiteouts.contains(&(dir_ino, name.to_vec(), other)) {
+                return Err(io::Error::from_raw_os_error(libc::ENOTEMPTY));
             }
-            let _ = other_backend.releasedir(ctx, other_inode, 0, dh_val);
         }
     }
 

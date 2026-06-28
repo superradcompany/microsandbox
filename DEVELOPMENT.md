@@ -188,6 +188,8 @@ Create a PR that bumps the version across all crates and packages. All crates an
 
 The PR title should follow the format: `chore: bump version to X.Y.Z`
 
+When the release includes virtual-filesystem or mount changes, note in the release description that virtio-fs tags and virtio-blk ids are now derived with a 12-hex-character truncated SHA-256 suffix (replacing the previous 8-hex format). External tooling keyed on the old tag strings must be updated.
+
 ### 2. Tag and Release
 
 After the version bump PR is merged, create a signed tag on `main` to trigger the release CI:

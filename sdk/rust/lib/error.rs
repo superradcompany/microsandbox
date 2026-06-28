@@ -57,6 +57,12 @@ pub enum MicrosandboxError {
     #[error("sandbox still running: {0}")]
     SandboxStillRunning(String),
 
+    /// A metadata handle refers to a sandbox generation that was replaced or
+    /// removed. Refresh with [`Sandbox::get`](crate::Sandbox::get) or
+    /// [`SandboxHandle::refresh`](crate::sandbox::SandboxHandle::refresh).
+    #[error("sandbox handle stale: {0}")]
+    SandboxHandleStale(String),
+
     /// A runtime error occurred.
     #[error("runtime error: {0}")]
     Runtime(String),

@@ -33,7 +33,7 @@ pub(crate) fn do_unlink(
     parent: u64,
     name: &CStr,
 ) -> io::Result<()> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -147,7 +147,7 @@ pub(crate) fn do_rmdir(
     parent: u64,
     name: &CStr,
 ) -> io::Result<()> {
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }
@@ -223,8 +223,8 @@ pub(crate) fn do_rename(
     newname: &CStr,
     flags: u32,
 ) -> io::Result<()> {
-    name_validation::validate_name(oldname)?;
-    name_validation::validate_name(newname)?;
+    name_validation::validate_create_name(oldname)?;
+    name_validation::validate_create_name(newname)?;
     if fs.cfg.readonly() {
         return Err(platform::erofs());
     }

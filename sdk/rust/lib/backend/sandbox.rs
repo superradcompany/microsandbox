@@ -1140,6 +1140,11 @@ fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
 pub(super) fn cloud_create_request_from_config(
     config: SandboxConfig,
 ) -> MicrosandboxResult<CloudCreateSandboxRequest> {
+    if !config.virtual_mounts.is_empty() {
+        return Err(unsupported("virtual mounts", "never on cloud"));
+    }
+    crate::sandbox::validate_virtual_mount_config(&config, false)?;
+
     reject_cloud_deferred(
         !config.spec.mounts.is_empty(),
         "mounts",
@@ -1437,6 +1442,33 @@ mod tests {
             });
         let err = cloud_create_request_from_config(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cloud_create_request_rejects_virtual_mounts() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (_parent, child) = UnixStream::pair().unwrap();
+        let mut config = base_cloud_config();
+        config
+            .virtual_mounts
+            .push(crate::sandbox::VirtualMountSpec {
+                guest_path: "/data".into(),
+                child_fd: child.as_raw_fd(),
+                fs_config: None,
+            });
+        let err = cloud_create_request_from_config(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_had_virtual_mounts_without_providers() {
+        let mut config = base_cloud_config();
+        config.had_virtual_mounts = true;
+        let err = cloud_create_request_from_config(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::InvalidConfig(_)));
     }
 
     #[test]

@@ -143,6 +143,7 @@ pub fn run(args: SandboxArgs) -> ! {
         },
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
         mounts: launch.mounts,
+        virtual_mounts: launch.virtual_mounts,
         disks,
         backends: vec![],
         init_path: launch.init_path,

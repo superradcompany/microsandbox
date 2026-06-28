@@ -145,6 +145,9 @@ func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
 // Logs reads persisted output for this sandbox handle. It works without
 // starting or connecting to the sandbox.
 func (h *SandboxHandle) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	entries, err := ffi.SandboxHandleLogs(ctx, h.name, logOptionsToFFI(opts))
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -202,6 +205,9 @@ func (h *SandboxHandle) LogStream(
 	ctx context.Context,
 	opts LogStreamOptions,
 ) (*LogStreamHandle, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	inner, err := ffi.SandboxHandleLogStream(ctx, h.name, logStreamOptionsToFFI(opts))
 	if err != nil {
 		return nil, wrapFFI(err)

@@ -16,7 +16,7 @@ use super::{
 use crate::{
     Context, DirEntry, Entry, OpenOptions,
     backends::shared::{
-        dir_snapshot::{self, SnapshotEntry},
+        dir_snapshot::{FuseDirCache, SnapshotEntry},
         init_binary, platform,
     },
 };
@@ -42,6 +42,7 @@ pub(crate) fn do_opendir(
     let dh = Arc::new(DirHandle {
         node: Arc::clone(&node),
         snapshot: Mutex::new(None),
+        fuse_cache: Mutex::new(FuseDirCache::new()),
     });
 
     fs.dir_handles.write().unwrap().insert(handle, dh);
@@ -54,10 +55,10 @@ pub(crate) fn do_readdir(
     _ctx: Context,
     ino: u64,
     handle: u64,
-    _size: u32,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
-    serve_snapshot_entries(fs, ino, handle, offset)
+    serve_snapshot_entries(fs, ino, handle, size, offset)
 }
 
 /// Read directory entries with attributes (readdirplus).
@@ -66,10 +67,10 @@ pub(crate) fn do_readdirplus(
     _ctx: Context,
     ino: u64,
     handle: u64,
-    _size: u32,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
-    let dir_entries = serve_snapshot_entries(fs, ino, handle, offset)?;
+    let dir_entries = serve_snapshot_entries(fs, ino, handle, size, offset)?;
     let mut result = Vec::with_capacity(dir_entries.len());
 
     for de in dir_entries {
@@ -107,7 +108,9 @@ pub(crate) fn do_releasedir(
     _flags: u32,
     handle: u64,
 ) -> io::Result<()> {
-    fs.dir_handles.write().unwrap().remove(&handle);
+    if let Some(dh) = fs.dir_handles.write().unwrap().remove(&handle) {
+        dh.fuse_cache.lock().unwrap().clear_on_release();
+    }
     Ok(())
 }
 
@@ -142,6 +145,7 @@ fn serve_snapshot_entries(
     fs: &MemFs,
     ino: u64,
     handle: u64,
+    size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
     let handles = fs.dir_handles.read().unwrap();
@@ -154,10 +158,10 @@ fn serve_snapshot_entries(
     }
     let snapshot = snapshot_lock.as_ref().unwrap();
 
-    Ok(dir_snapshot::serve_snapshot_entries(
-        &snapshot.entries,
-        offset,
-    ))
+    dh.fuse_cache
+        .lock()
+        .unwrap()
+        .serve(&snapshot.entries, offset, size)
 }
 
 /// Build a point-in-time snapshot of a directory's entries.

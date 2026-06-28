@@ -5,6 +5,7 @@
 //! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
 //! `_exit()` on guest shutdown after running exit observers.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::num::NonZero;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
@@ -61,6 +62,14 @@ pub const PARENT_WATCH_FD: i32 = 97;
 
 /// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
 pub const STARTUP_FD: i32 = 98;
+
+/// First fixed fd used to pass programmable virtual-filesystem mount sockets
+/// into `msb sandbox`. The Nth virtual mount (in config order) is inherited at
+/// `VIRTUAL_MOUNT_FD_BASE + N`; its tag and guest path travel in [`crate::launch::LaunchConfig`].
+pub const VIRTUAL_MOUNT_FD_BASE: i32 = 99;
+
+/// Maximum programmable virtual-filesystem mounts per sandbox.
+pub const MAX_VIRTUAL_MOUNTS: usize = 16;
 
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
@@ -223,6 +232,26 @@ pub struct DiskMountSpec {
     pub readonly: bool,
 }
 
+/// A programmable virtual-filesystem mount served over an inherited socket.
+///
+/// The runtime adopts `fd` (a connected Unix-domain socket inherited from the
+/// controlling process), builds a `VirtualFs` whose `PathFs` semantics are
+/// answered by the peer over the rpc protocol, and exposes it to the guest at
+/// virtio-fs `tag`. The guest-side mount point is carried separately in
+/// `MSB_DIR_MOUNTS`, exactly like passthrough mounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualMount {
+    /// virtio-fs tag the guest mounts.
+    pub tag: String,
+
+    /// Inherited file descriptor of this mount's runtime-side socket.
+    pub fd: i32,
+
+    /// Optional FUSE cache knobs for this mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_config: Option<microsandbox_filesystem::VirtualFsMountConfig>,
+}
+
 /// VM hardware and rootfs configuration.
 pub struct VmConfig {
     /// Path to the libkrunfw shared library.
@@ -267,6 +296,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
+
+    /// Programmable virtual-filesystem mounts served over inherited sockets.
+    pub virtual_mounts: Vec<VirtualMount>,
 
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
@@ -347,6 +379,7 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
             .field("mounts", &self.mounts)
+            .field("virtual_mounts", &self.virtual_mounts)
             .field("disks", &self.disks)
             .field("backends", &format!("[{} backend(s)]", self.backends.len()))
             .field("init_path", &self.init_path)
@@ -958,6 +991,8 @@ fn build_vm(
         mount_count: 0,
     };
 
+    validate_launch_virtual_mounts(vm)?;
+
     let mut builder = VmBuilder::new()
         .machine(|m| {
             let m = m
@@ -1090,6 +1125,24 @@ fn build_vm(
         };
         let backend = PassthroughFs::new(cfg)
             .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Programmable virtual-filesystem mounts. Each adopts an inherited socket
+    // and serves a `VirtualFs` whose semantics live in the controlling process.
+    for (i, vmount) in vm.virtual_mounts.iter().enumerate() {
+        validate_virtual_mount_socket_fd(vmount.fd, VIRTUAL_MOUNT_FD_BASE + i as i32)?;
+        let tag = vmount.tag.clone();
+        // SAFETY: `fd` was inherited from the parent specifically for this
+        // mount; ownership transfers to the adopted `UnixStream` here.
+        let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(vmount.fd) };
+        let call_timeout = vmount.fs_config.as_ref().and_then(|c| c.call_timeout());
+        let backend = microsandbox_filesystem::rpc::unix_socket_backend_with_config(
+            stream,
+            vmount.fs_config.clone().map(|c| c.into_virtual_fs_config()),
+            call_timeout,
+        )
+        .map_err(|e| RuntimeError::Custom(format!("virtual mount {tag}: {e}")))?;
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -1660,8 +1713,491 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions: Virtual Mount Validation
+//--------------------------------------------------------------------------------------------------
+
+/// Ensure an inherited virtual-mount fd is an open `SOCK_STREAM` Unix socket.
+fn validate_virtual_mount_socket_fd(fd: i32, expected_fd: i32) -> RuntimeResult<()> {
+    if fd != expected_fd {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount: expected inherited fd {expected_fd}, got {fd}"
+        )));
+    }
+
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFSOCK as libc::mode_t {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: not a Unix socket"
+        )));
+    }
+
+    let mut opt: i32 = 0;
+    let mut len = std::mem::size_of::<i32>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut opt as *mut _ as *mut _,
+            &mut len,
+        )
+    } != 0
+    {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if opt != libc::SOCK_STREAM {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: expected SOCK_STREAM socket"
+        )));
+    }
+
+    if !socket_address_family_is_unix(fd) {
+        return Err(RuntimeError::Custom(format!(
+            "virtual mount fd {fd}: not an AF_UNIX socket"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Whether `fd` belongs to the Unix address family (via `getsockname`).
+fn socket_address_family_is_unix(fd: i32) -> bool {
+    let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    if unsafe { libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len) } != 0 {
+        return false;
+    }
+    addr.ss_family as libc::c_int == libc::AF_UNIX as libc::c_int
+}
+
+/// Parse `MSB_DIR_MOUNTS` into virtio tag → guest path.
+///
+/// When `strict` is true, malformed entries are hard errors (used when virtual
+/// mounts are configured so overlap checks cannot be silently skipped).
+fn parse_msb_dir_mounts(env: &[String], strict: bool) -> RuntimeResult<HashMap<String, String>> {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_DIR_MOUNTS);
+    let Some(val) = env.iter().find_map(|e| e.strip_prefix(&prefix)) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut out = HashMap::new();
+    for entry in val.split(';') {
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((tag, rest)) = entry.split_once(':') else {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "invalid {} entry (expected tag:guest_path[:opts]): {entry}",
+                    microsandbox_protocol::ENV_DIR_MOUNTS
+                )));
+            }
+            continue;
+        };
+        if tag.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty tag: {entry}",
+                    microsandbox_protocol::ENV_DIR_MOUNTS
+                )));
+            }
+            continue;
+        }
+        let guest = rest.split(':').next().unwrap_or("");
+        if guest.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty guest path: {entry}",
+                    microsandbox_protocol::ENV_DIR_MOUNTS
+                )));
+            }
+            continue;
+        }
+        if let Some(prev_guest) = out.insert(tag.to_string(), guest.to_string()) {
+            return Err(RuntimeError::Custom(format!(
+                "{} has duplicate tag {:?} (guest paths {prev_guest} and {guest})",
+                microsandbox_protocol::ENV_DIR_MOUNTS,
+                tag
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// Parse guest paths from `MSB_DISK_MOUNTS` (`id:guest_path[:opts]` entries).
+fn parse_msb_disk_guest_paths(env: &[String], strict: bool) -> RuntimeResult<Vec<String>> {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_DISK_MOUNTS);
+    let Some(val) = env.iter().find_map(|e| e.strip_prefix(&prefix)) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for entry in val.split(';') {
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.splitn(3, ':');
+        let id = parts.next().unwrap_or("");
+        let guest = parts.next();
+        if id.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty id: {entry}",
+                    microsandbox_protocol::ENV_DISK_MOUNTS
+                )));
+            }
+            continue;
+        }
+        let Some(guest) = guest else {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "invalid {} entry (expected id:guest_path[:opts]): {entry}",
+                    microsandbox_protocol::ENV_DISK_MOUNTS
+                )));
+            }
+            continue;
+        };
+        if guest.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty guest path: {entry}",
+                    microsandbox_protocol::ENV_DISK_MOUNTS
+                )));
+            }
+            continue;
+        }
+        out.push(guest.to_string());
+    }
+    Ok(out)
+}
+
+/// Parse guest paths from `MSB_FILE_MOUNTS` (`tag:filename:guest_path[:opts]`).
+fn parse_msb_file_guest_paths(env: &[String], strict: bool) -> RuntimeResult<Vec<String>> {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_FILE_MOUNTS);
+    let Some(val) = env.iter().find_map(|e| e.strip_prefix(&prefix)) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for entry in val.split(';') {
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.splitn(4, ':');
+        let tag = parts.next().unwrap_or("");
+        let filename = parts.next();
+        let guest = parts.next();
+        if tag.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty tag: {entry}",
+                    microsandbox_protocol::ENV_FILE_MOUNTS
+                )));
+            }
+            continue;
+        }
+        let Some(filename) = filename else {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "invalid {} entry (expected tag:filename:guest_path[:opts]): {entry}",
+                    microsandbox_protocol::ENV_FILE_MOUNTS
+                )));
+            }
+            continue;
+        };
+        if filename.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty filename: {entry}",
+                    microsandbox_protocol::ENV_FILE_MOUNTS
+                )));
+            }
+            continue;
+        }
+        let Some(guest) = guest else {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "invalid {} entry (expected tag:filename:guest_path[:opts]): {entry}",
+                    microsandbox_protocol::ENV_FILE_MOUNTS
+                )));
+            }
+            continue;
+        };
+        if guest.is_empty() {
+            if strict {
+                return Err(RuntimeError::Custom(format!(
+                    "{} entry has empty guest path: {entry}",
+                    microsandbox_protocol::ENV_FILE_MOUNTS
+                )));
+            }
+            continue;
+        }
+        out.push(guest.to_string());
+    }
+    Ok(out)
+}
+
+/// Whether two guest mount paths are the same or one is nested under the other.
+fn guest_paths_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    fn is_strict_prefix(parent: &str, child: &str) -> bool {
+        child.len() > parent.len()
+            && child.starts_with(parent)
+            && child.as_bytes().get(parent.len()) == Some(&b'/')
+    }
+    is_strict_prefix(a, b) || is_strict_prefix(b, a)
+}
+
+/// Reject guest paths that overlap the reserved `/.msb` runtime tree.
+fn validate_reserved_guest_mount_path(guest: &str) -> RuntimeResult<()> {
+    if guest == microsandbox_protocol::RUNTIME_MOUNT_POINT || guest.starts_with("/.msb/") {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path {guest} overlaps the reserved runtime tree at /.msb"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate guest mount path wire syntax (mirrors SDK `validate_guest_mount_path`).
+///
+/// Keep rejection cases aligned with `sdk/rust/lib/sandbox/types.rs::validate_guest_mount_path`.
+fn validate_guest_mount_path_wire(guest: &str) -> RuntimeResult<()> {
+    if !guest.starts_with('/') {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must be absolute: {guest}"
+        )));
+    }
+    if guest == "/" {
+        return Err(RuntimeError::Custom(
+            "cannot mount a volume at guest root /".into(),
+        ));
+    }
+    if guest.contains(':') || guest.contains(';') || guest.contains(',') {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must not contain ':', ';', or ',': {guest}"
+        )));
+    }
+    if guest.len() > 1 && guest.ends_with('/') {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must not end with '/': {guest}"
+        )));
+    }
+    if guest.split('/').any(|component| component == "..") {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must not contain '..' components: {guest}"
+        )));
+    }
+    if guest
+        .split('/')
+        .skip(1)
+        .any(|component| component.is_empty())
+    {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must not contain empty components: {guest}"
+        )));
+    }
+    if guest.split('/').skip(1).any(|component| component == ".") {
+        return Err(RuntimeError::Custom(format!(
+            "guest mount path must not contain '.' components: {guest}"
+        )));
+    }
+    validate_reserved_guest_mount_path(guest)
+}
+
+/// Parse `MSB_TMPFS` into guest mount paths (path portion of each entry).
+fn parse_msb_tmpfs_guest_paths(env: &[String]) -> RuntimeResult<Vec<String>> {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_TMPFS);
+    let Some(val) = env.iter().find_map(|e| e.strip_prefix(&prefix)) else {
+        return Ok(Vec::new());
+    };
+
+    let mut paths = Vec::new();
+    for entry in val.split(';').filter(|e| !e.is_empty()) {
+        let path = entry.split_once(':').map(|(p, _)| p).unwrap_or(entry);
+        if path.is_empty() {
+            continue;
+        }
+        validate_guest_mount_path_wire(path)?;
+        paths.push(path.to_string());
+    }
+    Ok(paths)
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Mount Spec Parsing
 //--------------------------------------------------------------------------------------------------
+
+/// Validate programmable virtual-filesystem mounts before adopting inherited fds.
+fn validate_launch_virtual_mounts(vm: &VmConfig) -> RuntimeResult<()> {
+    if vm.virtual_mounts.len() > MAX_VIRTUAL_MOUNTS {
+        return Err(RuntimeError::Custom(format!(
+            "too many virtual mounts (max {MAX_VIRTUAL_MOUNTS})"
+        )));
+    }
+
+    let mut seen_tags = HashSet::new();
+    for (i, vmount) in vm.virtual_mounts.iter().enumerate() {
+        let expected_fd = VIRTUAL_MOUNT_FD_BASE + i as i32;
+        if vmount.fd != expected_fd {
+            return Err(RuntimeError::Custom(format!(
+                "virtual mount {}: expected inherited fd {expected_fd}, got {}",
+                vmount.tag, vmount.fd
+            )));
+        }
+        if vmount.tag.is_empty() {
+            return Err(RuntimeError::Custom(
+                "virtual mount tag must not be empty".into(),
+            ));
+        }
+        if vmount.tag == "/dev/root" || vmount.tag == microsandbox_protocol::RUNTIME_FS_TAG {
+            return Err(RuntimeError::Custom(format!(
+                "virtual mount tag {:?} is reserved",
+                vmount.tag
+            )));
+        }
+        if !seen_tags.insert(&vmount.tag) {
+            return Err(RuntimeError::Custom(format!(
+                "duplicate virtual mount tag {:?}",
+                vmount.tag
+            )));
+        }
+        if let Some(ref fs_config) = vmount.fs_config {
+            fs_config
+                .validate()
+                .map_err(|e| RuntimeError::Custom(format!("virtual mount {}: {e}", vmount.tag)))?;
+        }
+    }
+
+    if !vm.virtual_mounts.is_empty() {
+        let dir_mounts = parse_msb_dir_mounts(&vm.env, true)?;
+        let disk_env_guests = parse_msb_disk_guest_paths(&vm.env, true)?;
+        let file_env_guests = parse_msb_file_guest_paths(&vm.env, true)?;
+        let mut virtual_guest_paths: Vec<&str> = Vec::new();
+        for vmount in &vm.virtual_mounts {
+            let guest = dir_mounts.get(&vmount.tag).ok_or_else(|| {
+                RuntimeError::Custom(format!(
+                    "virtual mount tag {:?} is missing from {}",
+                    vmount.tag,
+                    microsandbox_protocol::ENV_DIR_MOUNTS
+                ))
+            })?;
+            validate_reserved_guest_mount_path(guest)?;
+            validate_guest_mount_path_wire(guest)?;
+            for seen in &virtual_guest_paths {
+                if guest_paths_overlap(seen, guest) {
+                    return Err(RuntimeError::Custom(format!(
+                        "virtual mount guest path {guest} overlaps with {seen}"
+                    )));
+                }
+            }
+            virtual_guest_paths.push(guest.as_str());
+        }
+
+        for mount_spec in &vm.mounts {
+            let parsed = parse_mount_spec(mount_spec).map_err(RuntimeError::Custom)?;
+            if let Some(guest) = dir_mounts.get(&parsed.tag) {
+                for vguest in &virtual_guest_paths {
+                    if guest_paths_overlap(vguest, guest) {
+                        return Err(RuntimeError::Custom(format!(
+                            "virtual mount guest path {vguest} overlaps with volume mount guest path {guest}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        for disk in &vm.disks {
+            for vguest in &virtual_guest_paths {
+                if !disk.guest.is_empty() && guest_paths_overlap(vguest, &disk.guest) {
+                    return Err(RuntimeError::Custom(format!(
+                        "virtual mount guest path {vguest} overlaps with disk guest path {}",
+                        disk.guest
+                    )));
+                }
+            }
+        }
+
+        for disk_guest in &disk_env_guests {
+            for vguest in &virtual_guest_paths {
+                if guest_paths_overlap(vguest, disk_guest) {
+                    return Err(RuntimeError::Custom(format!(
+                        "virtual mount guest path {vguest} overlaps with disk guest path {disk_guest}"
+                    )));
+                }
+            }
+        }
+
+        for file_guest in &file_env_guests {
+            for vguest in &virtual_guest_paths {
+                if guest_paths_overlap(vguest, file_guest) {
+                    return Err(RuntimeError::Custom(format!(
+                        "virtual mount guest path {vguest} overlaps with file mount guest path {file_guest}"
+                    )));
+                }
+            }
+        }
+
+        for tmpfs_guest in parse_msb_tmpfs_guest_paths(&vm.env)? {
+            for vguest in &virtual_guest_paths {
+                if guest_paths_overlap(vguest, &tmpfs_guest) {
+                    return Err(RuntimeError::Custom(format!(
+                        "virtual mount guest path {vguest} overlaps with tmpfs guest path {tmpfs_guest}"
+                    )));
+                }
+            }
+        }
+    }
+
+    for mount_spec in &vm.mounts {
+        let parsed = parse_mount_spec(mount_spec).map_err(RuntimeError::Custom)?;
+        if seen_tags.contains(&parsed.tag) {
+            return Err(RuntimeError::Custom(format!(
+                "virtual mount tag {:?} conflicts with --mount tag",
+                parsed.tag
+            )));
+        }
+    }
+
+    for disk in &vm.disks {
+        if seen_tags.contains(&disk.id) {
+            return Err(RuntimeError::Custom(format!(
+                "virtual mount tag {:?} conflicts with disk volume id",
+                disk.id
+            )));
+        }
+    }
+
+    for (tag, _) in &vm.backends {
+        if seen_tags.contains(tag) {
+            return Err(RuntimeError::Custom(format!(
+                "virtual mount tag {:?} conflicts with pre-built filesystem backend",
+                tag
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// Validate a disk image format string.
 pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
@@ -1709,17 +2245,451 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindIdentityMapRegistration, ConsoleSharedState, HostPermissions, PARENT_WATCH_DETACH,
-        ParentWatchdogSignal, StatVirtualization, append_block_root_env,
-        bind_identity_map_for_mount, parse_mount_spec, prepend_scripts_path,
-        read_parent_watchdog_signal, request_guest_shutdown, request_guest_shutdown_with_timeout,
-        validate_disk_format,
+        BindIdentityMapRegistration, ConsoleSharedState, DiskMountSpec, HostPermissions,
+        PARENT_WATCH_DETACH, ParentWatchdogSignal, StatVirtualization, VIRTUAL_MOUNT_FD_BASE,
+        VirtualMount, append_block_root_env, bind_identity_map_for_mount, parse_mount_spec,
+        prepend_scripts_path, read_parent_watchdog_signal, request_guest_shutdown,
+        request_guest_shutdown_with_timeout, validate_disk_format, validate_launch_virtual_mounts,
     };
 
     use microsandbox_protocol::{codec, message::MessageType};
     use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn virtual_mount_json_round_trips() {
+        // VirtualMount travels in the LaunchConfig over the config fd as JSON.
+        let m = VirtualMount {
+            tag: "inbox".to_string(),
+            fd: 97,
+            fs_config: Some(microsandbox_filesystem::VirtualFsMountConfig {
+                entry_timeout_secs: Some(5),
+                attr_timeout_secs: Some(3),
+                cache_policy: Some("always".into()),
+                writeback: Some(true),
+                call_timeout_secs: Some(45),
+            }),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: VirtualMount = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tag, "inbox");
+        assert_eq!(back.fd, 97);
+        assert_eq!(
+            back.fs_config.as_ref().unwrap().cache_policy.as_deref(),
+            Some("always")
+        );
+        assert_eq!(back.fs_config.as_ref().unwrap().call_timeout_secs, Some(45));
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_bad_fd_and_duplicate_tags() {
+        use std::path::PathBuf;
+
+        use super::VmConfig;
+
+        fn test_vm(virtual_mounts: Vec<VirtualMount>) -> VmConfig {
+            let mut env = Vec::new();
+            if !virtual_mounts.is_empty() {
+                let mut dir_mounts = String::new();
+                for (i, vmount) in virtual_mounts.iter().enumerate() {
+                    if i > 0 {
+                        dir_mounts.push(';');
+                    }
+                    dir_mounts.push_str(&vmount.tag);
+                    dir_mounts.push_str(&format!(":/mnt{i}"));
+                }
+                env.push(format!(
+                    "{}={dir_mounts}",
+                    microsandbox_protocol::ENV_DIR_MOUNTS
+                ));
+            }
+            VmConfig {
+                libkrunfw_path: PathBuf::from("/dev/null"),
+                vcpus: 1,
+                memory_mib: 64,
+                rootfs_path: None,
+                rootfs_disk: None,
+                rootfs_disk_format: None,
+                rootfs_disk_readonly: false,
+                rootfs_vmdk: None,
+                rootfs_upper: None,
+                rootfs_upper_spec: None,
+                mounts: vec![],
+                virtual_mounts,
+                disks: vec![],
+                backends: vec![],
+                init_path: None,
+                env,
+                workdir: None,
+                exec_path: None,
+                exec_args: vec![],
+                #[cfg(feature = "net")]
+                network: Default::default(),
+                #[cfg(feature = "net")]
+                sandbox_slot: 0,
+            }
+        }
+
+        let mut vm = test_vm(vec![
+            VirtualMount {
+                tag: "inbox".into(),
+                fd: VIRTUAL_MOUNT_FD_BASE,
+                fs_config: None,
+            },
+            VirtualMount {
+                tag: "inbox".into(),
+                fd: VIRTUAL_MOUNT_FD_BASE + 1,
+                fs_config: None,
+            },
+        ]);
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(err.to_string().contains("duplicate virtual mount tag"));
+
+        vm.virtual_mounts[1].tag = "outbox".into();
+        vm.virtual_mounts[1].fd = VIRTUAL_MOUNT_FD_BASE;
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(err.to_string().contains("expected inherited fd"));
+    }
+
+    #[test]
+    fn validate_virtual_mount_socket_fd_rejects_non_socket_fd() {
+        use std::os::unix::io::AsRawFd;
+
+        let mut pipe_fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let read_fd = pipe_fds[0];
+        let err = super::validate_virtual_mount_socket_fd(read_fd, read_fd).unwrap_err();
+        assert!(
+            err.to_string().contains("not a Unix socket"),
+            "unexpected error: {err}"
+        );
+        let _ = unsafe { libc::close(pipe_fds[1]) };
+        let _ = unsafe { libc::close(read_fd) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_virtual_mount_socket_fd_accepts_unix_stream_socket() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (a, _b) = UnixStream::pair().unwrap();
+        let fd = a.as_raw_fd();
+        super::validate_virtual_mount_socket_fd(fd, fd)
+            .expect("unix stream socket should validate");
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_disk_tag_collision() {
+        use std::path::PathBuf;
+
+        use super::VmConfig;
+
+        let tag = "data_a1b2c3d4".to_string();
+        let vm = VmConfig {
+            libkrunfw_path: PathBuf::from("/dev/null"),
+            vcpus: 1,
+            memory_mib: 64,
+            rootfs_path: None,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: vec![],
+            virtual_mounts: vec![VirtualMount {
+                tag: tag.clone(),
+                fd: VIRTUAL_MOUNT_FD_BASE,
+                fs_config: None,
+            }],
+            disks: vec![DiskMountSpec {
+                id: tag.clone(),
+                host: PathBuf::from("/host/data.raw"),
+                guest: "/other".into(),
+                format: msb_krun::DiskImageFormat::Raw,
+                fstype: None,
+                readonly: false,
+            }],
+            backends: vec![],
+            init_path: None,
+            env: vec![format!(
+                "{}={tag}:/inbox",
+                microsandbox_protocol::ENV_DIR_MOUNTS
+            )],
+            workdir: None,
+            exec_path: None,
+            exec_args: vec![],
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
+        };
+
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(err.to_string().contains("conflicts with disk volume id"));
+    }
+
+    #[test]
+    fn parse_msb_dir_mounts_strict_rejects_duplicate_tags() {
+        use super::parse_msb_dir_mounts;
+
+        let env = vec![format!(
+            "{}=tag_a:/one;tag_a:/two",
+            microsandbox_protocol::ENV_DIR_MOUNTS
+        )];
+        let err = parse_msb_dir_mounts(&env, true).unwrap_err();
+        assert!(err.to_string().contains("duplicate tag"));
+    }
+
+    #[test]
+    fn parse_msb_dir_mounts_non_strict_rejects_duplicate_tags() {
+        use super::parse_msb_dir_mounts;
+
+        let env = vec![format!(
+            "{}=tag_a:/one;tag_a:/two",
+            microsandbox_protocol::ENV_DIR_MOUNTS
+        )];
+        let err = parse_msb_dir_mounts(&env, false).unwrap_err();
+        assert!(err.to_string().contains("duplicate tag"));
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_backend_tag_collision() {
+        use std::path::PathBuf;
+
+        use microsandbox_filesystem::{DynFileSystem, FsOptions, MemFs};
+
+        use super::VmConfig;
+
+        let tag = "inbox_a1b2c3d4".to_string();
+        let fs = MemFs::builder().build().unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+        let vm = VmConfig {
+            libkrunfw_path: PathBuf::from("/dev/null"),
+            vcpus: 1,
+            memory_mib: 64,
+            rootfs_path: None,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: vec![],
+            virtual_mounts: vec![VirtualMount {
+                tag: tag.clone(),
+                fd: VIRTUAL_MOUNT_FD_BASE,
+                fs_config: None,
+            }],
+            disks: vec![],
+            backends: vec![(
+                tag.clone(),
+                Box::new(fs) as Box<dyn DynFileSystem + Send + Sync>,
+            )],
+            init_path: None,
+            env: vec![format!(
+                "{}={tag}:/inbox",
+                microsandbox_protocol::ENV_DIR_MOUNTS
+            )],
+            workdir: None,
+            exec_path: None,
+            exec_args: vec![],
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
+        };
+
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with pre-built filesystem backend")
+        );
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_overlapping_guest_paths() {
+        use std::path::PathBuf;
+
+        use super::VmConfig;
+
+        let mut vm = VmConfig {
+            libkrunfw_path: PathBuf::from("/dev/null"),
+            vcpus: 1,
+            memory_mib: 64,
+            rootfs_path: None,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: vec!["data:/host/data".into()],
+            virtual_mounts: vec![
+                VirtualMount {
+                    tag: "inbox".into(),
+                    fd: VIRTUAL_MOUNT_FD_BASE,
+                    fs_config: None,
+                },
+                VirtualMount {
+                    tag: "nested".into(),
+                    fd: VIRTUAL_MOUNT_FD_BASE + 1,
+                    fs_config: None,
+                },
+            ],
+            disks: vec![],
+            backends: vec![],
+            init_path: None,
+            env: vec![format!(
+                "{}=inbox:/data;nested:/data/inbox",
+                microsandbox_protocol::ENV_DIR_MOUNTS
+            )],
+            workdir: None,
+            exec_path: None,
+            exec_args: vec![],
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
+        };
+
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(err.to_string().contains("overlaps with"));
+
+        vm.virtual_mounts.pop();
+        vm.env = vec![format!(
+            "{}=inbox:/data;data:/data",
+            microsandbox_protocol::ENV_DIR_MOUNTS
+        )];
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("overlaps with volume mount guest path")
+        );
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_tmpfs_overlap() {
+        use std::path::PathBuf;
+
+        use super::VmConfig;
+
+        let vm = VmConfig {
+            libkrunfw_path: PathBuf::from("/dev/null"),
+            vcpus: 1,
+            memory_mib: 64,
+            rootfs_path: None,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: vec![],
+            virtual_mounts: vec![VirtualMount {
+                tag: "inbox".into(),
+                fd: VIRTUAL_MOUNT_FD_BASE,
+                fs_config: None,
+            }],
+            disks: vec![],
+            backends: vec![],
+            init_path: None,
+            env: vec![
+                format!("{}=inbox:/tmp", microsandbox_protocol::ENV_DIR_MOUNTS),
+                format!("{}=/tmp:size=256", microsandbox_protocol::ENV_TMPFS),
+            ],
+            workdir: None,
+            exec_path: None,
+            exec_args: vec![],
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
+        };
+
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(err.to_string().contains("tmpfs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_msb_tmpfs_guest_paths_rejects_dotdot() {
+        use super::parse_msb_tmpfs_guest_paths;
+
+        let env = vec![format!(
+            "{}=/data/../inbox:size=256",
+            microsandbox_protocol::ENV_TMPFS
+        )];
+        let err = parse_msb_tmpfs_guest_paths(&env).unwrap_err();
+        assert!(err.to_string().contains("'..'"));
+    }
+
+    #[test]
+    fn validate_launch_virtual_mounts_rejects_malformed_guest_path() {
+        use std::path::PathBuf;
+
+        use super::VmConfig;
+
+        let vm = VmConfig {
+            libkrunfw_path: PathBuf::from("/dev/null"),
+            vcpus: 1,
+            memory_mib: 64,
+            rootfs_path: None,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: vec![],
+            virtual_mounts: vec![VirtualMount {
+                tag: "inbox".into(),
+                fd: VIRTUAL_MOUNT_FD_BASE,
+                fs_config: None,
+            }],
+            disks: vec![],
+            backends: vec![],
+            init_path: None,
+            env: vec![format!(
+                "{}=inbox:/data/",
+                microsandbox_protocol::ENV_DIR_MOUNTS
+            )],
+            workdir: None,
+            exec_path: None,
+            exec_args: vec![],
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
+        };
+
+        let err = validate_launch_virtual_mounts(&vm).unwrap_err();
+        assert!(
+            err.to_string().contains("must not end with '/'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_guest_mount_path_wire_matches_sdk_rejection_cases() {
+        let reject = [
+            "/data/",
+            "/data/../x",
+            "/foo//bar",
+            "/./inbox",
+            microsandbox_protocol::RUNTIME_MOUNT_POINT,
+            "/.msb/agent",
+        ];
+        for path in reject {
+            let err = super::validate_guest_mount_path_wire(path).unwrap_err();
+            assert!(
+                !err.to_string().is_empty(),
+                "expected rejection for {path}, got ok"
+            );
+        }
+        super::validate_guest_mount_path_wire("/data/inbox").unwrap();
+    }
 
     #[test]
     fn test_parse_mount_spec_minimal() {

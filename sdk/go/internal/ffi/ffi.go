@@ -975,6 +975,7 @@ const (
 	KindSandboxNotFound        = "sandbox_not_found"
 	KindSandboxAlreadyExists   = "sandbox_already_exists"
 	KindSandboxStillRunning    = "sandbox_still_running"
+	KindSandboxHandleStale     = "sandbox_handle_stale"
 	KindVolumeNotFound         = "volume_not_found"
 	KindVolumeAlreadyExists    = "volume_already_exists"
 	KindExecTimeout            = "exec_timeout"
@@ -1379,39 +1380,57 @@ type SandboxListFilter struct {
 // Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
 // The Rust side applies defaults when optional fields are absent.
 type CreateOptions struct {
-	Image                string               `json:"image,omitempty"`
-	ImageFstype          string               `json:"image_fstype,omitempty"`
-	OCIUpperSizeMiB      *uint32              `json:"oci_upper_size_mib,omitempty"`
-	Snapshot             string               `json:"snapshot,omitempty"`
-	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
-	CPUs                 uint8                `json:"cpus,omitempty"`
-	Workdir              string               `json:"workdir,omitempty"`
-	Shell                string               `json:"shell,omitempty"`
-	SecurityProfile      string               `json:"security_profile,omitempty"`
-	Hostname             string               `json:"hostname,omitempty"`
-	User                 string               `json:"user,omitempty"`
-	Replace              bool                 `json:"replace,omitempty"`
-	ReplaceWithTimeoutMs *uint64              `json:"replace_with_timeout_ms,omitempty"`
-	Env                  map[string]string    `json:"env,omitempty"`
-	Labels               map[string]string    `json:"labels,omitempty"`
-	Detached             bool                 `json:"detached,omitempty"`
-	Ephemeral            bool                 `json:"ephemeral,omitempty"`
-	Entrypoint           []string             `json:"entrypoint,omitempty"`
-	Init                 *InitOptions         `json:"init,omitempty"`
-	LogLevel             string               `json:"log_level,omitempty"`
-	QuietLogs            bool                 `json:"quiet_logs,omitempty"`
-	Scripts              map[string]string    `json:"scripts,omitempty"`
-	PullPolicy           string               `json:"pull_policy,omitempty"`
-	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
-	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
-	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
-	Ports                map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP             map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings         []PortBindingOptions `json:"port_bindings,omitempty"`
-	Network              *NetworkOptions      `json:"network,omitempty"`
-	Secrets              []SecretOptions      `json:"secrets,omitempty"`
-	Patches              []PatchOptions       `json:"patches,omitempty"`
-	Volumes              map[string]MountSpec `json:"volumes,omitempty"`
+	Image                string                `json:"image,omitempty"`
+	ImageFstype          string                `json:"image_fstype,omitempty"`
+	OCIUpperSizeMiB      *uint32               `json:"oci_upper_size_mib,omitempty"`
+	Snapshot             string                `json:"snapshot,omitempty"`
+	MemoryMiB            uint32                `json:"memory_mib,omitempty"`
+	CPUs                 uint8                 `json:"cpus,omitempty"`
+	Workdir              string                `json:"workdir,omitempty"`
+	Shell                string                `json:"shell,omitempty"`
+	SecurityProfile      string                `json:"security_profile,omitempty"`
+	Hostname             string                `json:"hostname,omitempty"`
+	User                 string                `json:"user,omitempty"`
+	Replace              bool                  `json:"replace,omitempty"`
+	ReplaceWithTimeoutMs *uint64               `json:"replace_with_timeout_ms,omitempty"`
+	Env                  map[string]string     `json:"env,omitempty"`
+	Labels               map[string]string     `json:"labels,omitempty"`
+	Detached             bool                  `json:"detached,omitempty"`
+	Ephemeral            bool                  `json:"ephemeral,omitempty"`
+	Entrypoint           []string              `json:"entrypoint,omitempty"`
+	Init                 *InitOptions          `json:"init,omitempty"`
+	LogLevel             string                `json:"log_level,omitempty"`
+	QuietLogs            bool                  `json:"quiet_logs,omitempty"`
+	Scripts              map[string]string     `json:"scripts,omitempty"`
+	PullPolicy           string                `json:"pull_policy,omitempty"`
+	MaxDurationSecs      uint64                `json:"max_duration_secs,omitempty"`
+	IdleTimeoutSecs      uint64                `json:"idle_timeout_secs,omitempty"`
+	RegistryAuth         *RegistryAuthOptions  `json:"registry_auth,omitempty"`
+	Ports                map[uint16]uint16     `json:"ports,omitempty"`
+	PortsUDP             map[uint16]uint16     `json:"ports_udp,omitempty"`
+	PortBindings         []PortBindingOptions  `json:"port_bindings,omitempty"`
+	Network              *NetworkOptions       `json:"network,omitempty"`
+	Secrets              []SecretOptions       `json:"secrets,omitempty"`
+	Patches              []PatchOptions        `json:"patches,omitempty"`
+	Volumes              map[string]MountSpec  `json:"volumes,omitempty"`
+	VirtualMounts        []VirtualMountOptions `json:"virtual_mounts,omitempty"`
+}
+
+// VirtualMountOptions describes one programmable guest mount for create.
+type VirtualMountOptions struct {
+	GuestPath string                 `json:"guest_path"`
+	FD        int                    `json:"fd"`
+	FsConfig  *VirtualFsMountOptions `json:"fs_config,omitempty"`
+}
+
+// VirtualFsMountOptions carries FUSE cache knobs and the per-op RPC call
+// timeout for a virtual mount.
+type VirtualFsMountOptions struct {
+	EntryTimeoutSecs *uint64 `json:"entry_timeout_secs,omitempty"`
+	AttrTimeoutSecs  *uint64 `json:"attr_timeout_secs,omitempty"`
+	CachePolicy      *string `json:"cache_policy,omitempty"`
+	Writeback        bool    `json:"writeback,omitempty"`
+	CallTimeoutSecs  *uint64 `json:"call_timeout_secs,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.
@@ -1611,6 +1630,7 @@ type SandboxHandleInfo struct {
 	Name          string `json:"name"`
 	Status        string `json:"status"`
 	ConfigJSON    string `json:"config_json"`
+	DbID          int32  `json:"db_id"`
 	CreatedAtUnix *int64 `json:"created_at_unix"`
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
 }

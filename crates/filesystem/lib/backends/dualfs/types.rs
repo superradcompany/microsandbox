@@ -145,6 +145,9 @@ pub(crate) struct DualDirHandle {
     pub readdir_plan: DualDispatchPlan,
     /// Merged snapshot, built on first readdir.
     pub snapshot: Mutex<Option<DirSnapshot>>,
+
+    /// Cached FUSE entries for this handle (one names-buffer allocation).
+    pub fuse_cache: Mutex<crate::backends::shared::dir_snapshot::FuseDirCache>,
 }
 
 /// Point-in-time snapshot of a directory's merged entries.

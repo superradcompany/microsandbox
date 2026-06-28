@@ -46,7 +46,7 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
 
         match Sandbox::start_detached(name).await {
             Ok(sandbox) => {
-                sandbox.detach().await;
+                sandbox.detach().await?;
                 spinner.finish_success("Started");
             }
             Err(e) => {

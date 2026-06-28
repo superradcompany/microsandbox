@@ -22,6 +22,11 @@ pub mod backends;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+/// Virtual-filesystem RPC bridge (see `docs/sandboxes/virtual-filesystem.mdx`).
+///
+/// Prefer accessing through [`backends::vfs::rpc`] when working inside the
+/// filesystem crate; this re-export exists for SDK and runtime callers.
+pub use backends::vfs::rpc;
 pub use backends::{
     dualfs::{
         BackendAFallbackToBackendBRead, BackendAOnly, CachePolicy as DualCachePolicy, DualFs,
@@ -31,6 +36,10 @@ pub use backends::{
     passthroughfs::{
         BindIdentityMap, BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughConfig,
         PassthroughFs, PassthroughFsBuilder, StatVirtualization,
+    },
+    vfs::{
+        CachePolicy as VfsCachePolicy, NodeKind, PathFs, VAttr, VDirEntry, VirtualFs,
+        VirtualFsConfig, VirtualFsMountConfig,
     },
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};

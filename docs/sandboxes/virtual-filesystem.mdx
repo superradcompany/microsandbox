@@ -1,0 +1,170 @@
+---
+title: Virtual filesystem
+description: Back a guest directory with your own code instead of host storage
+icon: "code"
+---
+
+A virtual filesystem mounts a guest directory that is answered entirely by your own program. Instead of pointing at a host directory ([bind mounts](/sandboxes/volumes)) or managed storage ([named volumes](/sandboxes/volumes)), you implement a small interface that responds to filesystem operations — `getattr`, `readdir`, `read`, `write`, and friends — addressed by absolute guest path. Inside the sandbox it looks like an ordinary directory tree; every operation is served by your code.
+
+Virtual mounts are available in the **Go** and **Rust** SDKs today. Python and Node SDKs do not expose them yet.
+
+This is the "filesystem is all you need" pattern: back a mount with an in-memory map, a database, an object store, or a remote API, and present it to the guest as plain files. The guest reads and writes normally; your provider decides what those files contain and what writing them means.
+
+> Virtual mounts are available in the [Go SDK](/sdk/go/virtual-filesystem) via `WithVirtualMount` and the `vfs` package, and in the [Rust SDK](/sdk/rust/virtual-filesystem) via `SandboxBuilder::virtual_mount_with_provider`. For manual socket wiring, use `microsandbox_filesystem::rpc::serve` on the parent end of an inherited socketpair together with `SandboxBuilder::virtual_mount_fd`.
+
+## How it works
+
+microsandbox does not boot the VM inside your process — it spawns a separate runtime process that serves the guest's filesystems. So your provider cannot be called directly across that boundary. Instead:
+
+- Your provider runs in **your** process (the trusted parent).
+- The runtime serves the FUSE-shaped scaffold in **its** process (the child).
+- Each guest filesystem operation is forwarded from the runtime to your provider over a private socket, your code answers, and the reply flows back to the guest.
+
+The channel is a dedicated, inherited socket per mount — it never touches the guest, and it is independent of the guest agent. Your provider only ever sees the operations the guest issues against the mounted tree. Because each mount has its own socket and serve loop, a slow or wedged provider on one mount cannot stall operations on another.
+
+### Wire protocol version
+
+The parent↔runtime socket uses a versioned CBOR protocol (currently **v4**). The Go SDK and `msb` runtime negotiate this once at channel open via an 8-byte hello handshake. Each side sends its native version; the peer accepts the current version or the immediately previous one (v4 accepts v3, v3 accepts v2). A skew of two or more versions fails immediately with an explicit error rather than mid-stream decode failures. Deploy matching releases when using virtual mounts; mixed v3/v4 pairs are supported only within that one-version window.
+
+v3 added **`Flush`** and **`Fsync`** provider calls so the guest can commit buffered writes through your backend. When the kernel closes a file with flush enabled, the runtime also calls `Flush` on release.
+
+v4 added **`FsyncDir`**, which invalidates the provider-side paginated `ReadDir` cache when the guest calls `fsyncdir` on an open directory handle so out-of-band listing changes become visible after refresh.
+
+If the SDK and runtime are only one protocol version apart the hello handshake succeeds, but a **v3 provider with a v4 runtime** (or the reverse) does not understand `FsyncDir`. Guest `fsyncdir` then fails and directory listings can stay stale until a guest mutation invalidates the cache. Deploy matching v4 builds for virtual mounts that rely on out-of-band refresh.
+
+## A read-only provider
+
+The simplest provider serves a read directory tree. Embed `vfs.ReadOnly` to get sensible defaults for every mutating method, then implement just `GetAttr`, `ReadDir`, and `Read`.
+
+```go
+import (
+    "strings"
+
+    m "github.com/superradcompany/microsandbox/sdk/go"
+    "github.com/superradcompany/microsandbox/sdk/go/vfs"
+)
+
+type greeter struct{ vfs.ReadOnly }
+
+func (greeter) GetAttr(path []byte) (vfs.Attr, error) {
+    switch string(path) {
+    case "/":
+        return vfs.Attr{Kind: vfs.Dir, Mode: 0o755}, nil
+    case "/hello.txt":
+        return vfs.Attr{Kind: vfs.File, Mode: 0o644, Size: 6}, nil
+    }
+    return vfs.Attr{}, vfs.Err(vfs.ENOENT)
+}
+
+func (greeter) ReadDir(path []byte) ([]vfs.DirEntry, error) {
+    return []vfs.DirEntry{{Name: []byte("hello.txt"), Kind: vfs.File}}, nil
+}
+
+func (greeter) Read(path []byte, offset uint64, size uint32) ([]byte, error) {
+    if string(path) != "/hello.txt" {
+        return nil, vfs.Err(vfs.ENOENT)
+    }
+    return []byte("hello\n")[offset:], nil
+}
+
+sb, err := m.CreateSandbox(ctx, "demo",
+    m.WithImage("alpine"),
+    m.WithVirtualMount("/inbox", greeter{}),
+)
+```
+
+Inside the guest, `cat /inbox/hello.txt` prints `hello` and `ls /inbox` lists `hello.txt`. To make the mount writable, implement the mutating methods (`Write`, `Create`, `Mkdir`, `Remove`, `Rename`, `SetAttr`, `Symlink`, and the xattr methods) instead of inheriting the `ReadOnly` defaults.
+
+## Errors
+
+Filesystem errors are delivered to the guest as Linux errno values, so a provider must report failure with `vfs.Err` using the package's errno constants (for example `vfs.Err(vfs.ENOENT)` or `vfs.Err(vfs.EISDIR)`). Any other non-nil error is surfaced to the guest as `EIO`. The errno constants are Linux values regardless of the host platform, because the guest is always Linux.
+
+## Paths and concurrency
+
+Paths and names arrive as raw bytes (`[]byte`), never as validated UTF-8 strings, and are always absolute with the root as `/`. The runtime calls your provider from multiple workers at once, so a provider **must be safe for concurrent use**. Guard shared state with a mutex or use concurrency-safe data structures.
+
+`ReadDir` must return single path components only: no `.`, `..`, or `/` in names. The runtime rejects invalid names before they reach the guest. Individual read/write requests are capped at 128 KiB per operation. Wire frames are capped at 2 MiB; `GetAttrMany` batches are limited to 4096 paths and 256 KiB of total path bytes. `ReadDir` returns the entire directory listing in a single call — there is no provider-side paging — so back very large directories with care.
+
+Plain `readdir` may advertise **provisional** inode numbers (`d_ino`) that are not stable until a later `lookup` or `readdirplus` establishes the authoritative inode; this avoids leaking scaffold state for entries the kernel never looked up. Prefer `readdirplus` or explicit lookups when tools depend on stable `d_ino`.
+
+### Listing cache and concurrent mutations
+
+The RPC server caches each connection's last full `ReadDir` result so paginated replies do not re-query your provider on every page. The cache is invalidated when a mutating operation (`write`, `create`, `mkdir`, `remove`, `rename`, `setattr`, symlink/xattr changes) completes on that connection. If a paginated listing is interrupted by such a mutation, continuation pages return `EAGAIN` and the runtime restarts the listing from offset zero rather than merging entries from two different snapshots. Providers should not rely on paginated `ReadDir` alone for strict read-your-writes ordering across parallel guest I/O — use explicit `getattr`/`lookup` when you need a fresh view after a write.
+
+Each connection retains at most **64** distinct directory paths in this listing cache (LRU eviction). Continuing pagination on a path that was evicted also returns `EAGAIN`. Cache invalidation unblocks in-flight fetches but may briefly overlap two `ReadDir` calls for the same path — implementations must tolerate concurrent `ReadDir` on one directory.
+
+On the runtime scaffold, directory listing snapshots are invalidated **only for handles whose path is affected** by a mutation (the parent directory, renamed paths, or paths under a rename target). Open handles on unrelated directories keep their point-in-time snapshot until `fsyncdir` or `releasedir`.
+
+Each logical directory listing is capped at **1,048,576** entries; larger directories return `EINVAL`. Keep individual `ReadDir` responses bounded in your provider — the server materializes the full listing in memory once per cache generation.
+
+### Directory removal
+
+Before removing a directory, the runtime checks that `ReadDir` returns no **guest-visible** child names (the same validation applied when serving listings). Names your provider returns that fail validation (`.`, `..`, embedded `/`, overlong components) are ignored for emptiness checks. **Do not hide real children behind invalid names** — a dishonest provider could make a non-empty directory appear empty and allow removal.
+
+## Caching and performance
+
+Every uncached guest operation is one round trip to your provider, so a slow backend (a remote API or cold object-store miss) is felt directly. A provider that blocks past the mount's call timeout (default 30s, raise it with `WithVirtualMountCallTimeout`) has that op failed as `EIO`, freeing the FUSE worker rather than pinning it. Tune the kernel's FUSE caching to keep steady-state reads off the channel:
+
+```go
+sb, err := m.CreateSandbox(ctx, "demo",
+    m.WithImage("alpine"),
+    m.WithVirtualMount("/inbox", provider,
+        m.WithVirtualMountCachePolicy(m.VfsCacheAlways),
+        m.WithVirtualMountAttrTimeout(5*time.Second),
+        m.WithVirtualMountEntryTimeout(5*time.Second),
+        m.WithVirtualMountWriteback(true),
+    ),
+)
+```
+
+With caching enabled the kernel can serve repeated `getattr`/`lookup`/`read` requests from its own cache instead of calling your provider every time.
+
+## Lifecycle constraints
+
+Virtual-mount provider sockets live in the process that created the sandbox, so it cannot be persisted like a data volume:
+
+- It requires an **attached** sandbox and cannot be combined with detached mode.
+- Provider sockets are tied to **VM lifetime**: they stay open while the guest may perform I/O and are torn down once after the VM reaches stopped state (`Stop`/`Kill`, scheduled teardown after `RequestStop`/`RequestKill`/`Close`, or `RemoveSandbox` in this process). If stop-state observation keeps retrying for 30 minutes (for example a wedged VM), the background waiter **forces provider shutdown** even when the sandbox has not reached a terminal state.
+- The creating process must stay alive while the VM runs: keep a lifecycle-owning `Sandbox` handle open, or stop the VM before exiting.
+- `Close` on a lifecycle-owning handle triggers VM shutdown and schedules provider teardown after stopped state is observed (same as `RequestStop`).
+- Additional handles in the same process (`Connect`) share the provider; closing a Connect handle only drops that handle's reference — sockets stay up until the VM stops.
+- A virtual mount cannot be reconnected from a different process or restarted after the sandbox stops. **Stop/start does not bring providers back** — remove the sandbox record and call `CreateSandbox` again with a fresh `WithVirtualMount` provider.
+- If create fails before it completes successfully, the persisted record sets `attempted_virtual_mounts` but not `had_virtual_mounts`; **`Start`/`StartSandbox` and `Connect` are rejected** — remove the sandbox record or recreate with `.replace()` / `WithReplace`, then create again with a fresh provider. After a **successful** create, both flags are persisted and stop/start cannot reattach providers.
+- If a provider serve loop exits unexpectedly (crash or I/O failure), the SDK shuts down **every** virtual-mount provider in that sandbox, requests sandbox stop, and schedules teardown so the guest does not keep running against a dead mount.
+- **Go** installs provider-exit watches only after `CreateSandbox` succeeds; **Rust** starts them immediately after spawn succeeds (before registry registration). Both close every mount socket on the first unexpected provider exit, including during post-spawn create validation on the Rust path.
+- Virtual-mount guest paths must not overlap each other, any volume mount (including tmpfs), or share a virtio-fs tag with any bind, named, or disk-image volume.
+- Always call `Close` (or `Stop`/`Kill` and wait) on lifecycle-owning handles before dropping them. Use `SetVirtualMountLogger` to route provider diagnostics.
+
+### Virtio tag derivation
+
+Bind, named, disk-image, and virtual mounts each receive a stable virtio-fs tag (and virtio-blk id for disk images) derived from the guest path: a short slug prefix (up to 7 characters) plus a 12-hex-character truncated SHA-256 digest, for example `/data` → `data_<hash>`. Tags are recomputed at every spawn from the guest path; keep the Go SDK, Rust SDK, and `msb` runtime on the same release so tag derivation stays aligned. External tooling that keyed on an older tag format (shorter hash suffix) must be updated when upgrading.
+
+Treat virtual-mount providers as **trusted code** in your process. Invalid `readdir` names (other than `.` and `..`, which the scaffold ignores) are hidden from the guest, and `rmdir` returns `EIO` when a listing contains only other invalid names so a provider cannot make a non-empty directory appear empty.
+
+Deploy the Go SDK and the `msb` runtime from the same release: the inherited-socket protocol is currently **v4** and accepts **v3** on the handshake. A skew of two or more versions fails at boot. Mixed v3/v4 pairs can pass the hello but **`FsyncDir` (v4) is required for guest `fsyncdir` to refresh stale directory listings** on RPC mounts.
+
+Plain `readdir` may advertise **provisional** inode numbers (`d_ino`) that differ from the authoritative inode established by a later `lookup` or by `readdirplus`. When two paths hash to the same provisional value within one listing, the scaffold salts the second so `d_ino` stays unique in that directory. Tools that stat by `d_ino` from a plain directory listing alone should not rely on those values until lookup; prefer `readdirplus` or follow listings with explicit lookups when inode stability matters.
+
+## Rust SDK
+
+The Rust SDK mirrors Go's `WithVirtualMount` via [`SandboxBuilder::virtual_mount_with_provider`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.virtual_mount_with_provider): it spawns an in-process `rpc::serve` loop on a socketpair and wires the child fd into the sandbox. Use [`virtual_mount_with_provider_and_config`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.virtual_mount_with_provider_and_config) when you need FUSE cache knobs.
+
+For advanced wiring (for example a provider server you already run in another thread), [`SandboxBuilder::virtual_mount_fd`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.SandboxBuilder.html#method.virtual_mount_fd) accepts a pre-connected runtime-side fd. Unlike Go, that low-level path does **not** start a serve loop for you — you must run [`microsandbox_filesystem::rpc::serve`](https://docs.rs/microsandbox-filesystem/latest/microsandbox_filesystem/rpc/fn.serve.html) (or `serve_unix`) on the parent end, keep that server running for the VM's lifetime, and keep a lifecycle-owning [`Sandbox`](https://docs.rs/microsandbox/latest/microsandbox/sandbox/struct.Sandbox.html) handle open in the creating process. `Connect` and restart are rejected once `had_virtual_mounts` is persisted after a successful create.
+
+## Security
+
+The provider runs in your trusted process; the guest is sandboxed and only ever sees the mounted tree. Each virtual mount uses a dedicated inherited Unix-domain socket: any process that holds that fd can invoke every filesystem operation against your provider with no further authentication. Keep fds inside the creating process, mark them close-on-exec, and treat socket inheritance as a full-trust boundary.
+
+A hostile guest can still issue arbitrary paths, offsets, and sizes, so treat every input as untrusted: validate paths, bound read sizes and directory listings, and never trust a path component to stay within an intended subtree. The RPC layer rejects non-absolute paths, `.` and `..` segments, embedded NUL bytes, and read/write payloads larger than 128 KiB before they reach your provider.
+
+Symlink targets must be **relative** (no leading `/`) and must not contain `..` components. Absolute targets are rejected on the wire because they could escape the mounted subtree when the guest resolves the link.
+
+Permission checks on the FUSE scaffold use the caller's uid and primary gid only; supplementary group membership is not consulted.
+
+Deploy the Go SDK and the `msb` runtime from the same release: the inherited-socket protocol (`PROTOCOL_VERSION`, currently **v4**) accepts **v3** on the handshake. A skew of two or more versions fails at boot. Deploy matching v4 builds when virtual mounts rely on guest `fsyncdir` to refresh out-of-band listing changes.
+
+Rename flags are partially supported: `RENAME_NOREPLACE` is checked best-effort before rename (not atomic under concurrent renames — enforce strict semantics in your provider if needed), `RENAME_EXCHANGE` returns `ENOSYS`, and unknown flags return `EINVAL`.
+
+Extended-attribute names must not be empty, contain NUL or `/`, or exceed Linux `NAME_MAX`; invalid names are rejected on the wire before they reach your provider.
+
+See the [Go SDK reference](/sdk/go/virtual-filesystem) for the full `WithVirtualMount` options and the `vfs` package API.

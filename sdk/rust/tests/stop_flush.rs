@@ -67,7 +67,7 @@ async fn graceful_stop_flushes_writes_to_rootfs() {
 
     // Detach so the next stop goes through the same SandboxHandle path
     // as `msb stop` rather than the in-process owner drop path.
-    sb.detach().await;
+    sb.detach().await.expect("detach");
 
     let handle = Sandbox::get(name).await.expect("get handle");
     handle.stop().await.expect("graceful stop");

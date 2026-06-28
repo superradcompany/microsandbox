@@ -16,6 +16,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrUnknown, "Unknown"},
 		{ErrSandboxNotFound, "SandboxNotFound"},
 		{ErrSandboxStillRunning, "SandboxStillRunning"},
+		{ErrSandboxHandleStale, "SandboxHandleStale"},
 		{ErrVolumeNotFound, "VolumeNotFound"},
 		{ErrVolumeAlreadyExists, "VolumeAlreadyExists"},
 		{ErrExecTimeout, "ExecTimeout"},
@@ -126,6 +127,26 @@ func TestWrapFFINonFfiError(t *testing.T) {
 	}
 }
 
+func TestWrapFFIDoesNotDoubleWrapSDKError(t *testing.T) {
+	once := wrapFFI(&ffi.Error{Kind: ffi.KindSandboxStillRunning, Message: "still running"})
+	var first *Error
+	if !errors.As(once, &first) {
+		t.Fatalf("first wrap should return *Error, got %T", once)
+	}
+	if first.Kind != ErrSandboxStillRunning {
+		t.Fatalf("first wrap kind = %v, want ErrSandboxStillRunning", first.Kind)
+	}
+
+	twice := wrapFFI(once)
+	var second *Error
+	if !errors.As(twice, &second) {
+		t.Fatalf("second wrap should return *Error, got %T", twice)
+	}
+	if second.Kind != ErrSandboxStillRunning {
+		t.Fatalf("double wrap must preserve kind, got %v", second.Kind)
+	}
+}
+
 func TestKindFromFFIAllTags(t *testing.T) {
 	cases := []struct {
 		tag  string
@@ -134,6 +155,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindSandboxNotFound, ErrSandboxNotFound},
 		{ffi.KindSandboxAlreadyExists, ErrSandboxAlreadyExists},
 		{ffi.KindSandboxStillRunning, ErrSandboxStillRunning},
+		{ffi.KindSandboxHandleStale, ErrSandboxHandleStale},
 		{ffi.KindVolumeNotFound, ErrVolumeNotFound},
 		{ffi.KindVolumeAlreadyExists, ErrVolumeAlreadyExists},
 		{ffi.KindExecTimeout, ErrExecTimeout},

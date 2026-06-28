@@ -56,10 +56,14 @@ pub fn init_isolated_home() -> IsolatedHome {
     let real_home = PathBuf::from(
         std::env::var_os("HOME").expect("HOME must be set for integration-test setup"),
     );
-    let real_msb_path = real_home.join(".microsandbox").join("bin").join("msb");
+    let real_msb_path = std::env::var_os("MSB_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| real_home.join(".microsandbox").join("bin").join("msb"));
     if !real_msb_path.exists() {
         panic!(
-            "required msb binary missing for isolated home: {}",
+            "required msb binary missing for isolated home: {} \
+             (install with `just install` or set MSB_PATH to a working binary)",
             real_msb_path.display()
         );
     }

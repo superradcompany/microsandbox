@@ -11,6 +11,7 @@ The `microsandbox` npm package provides native bindings to the [microsandbox](ht
 - **OCI image support** — Pull and run images from Docker Hub, GHCR, ECR, or any OCI registry
 - **Command execution** — Run commands with collected or streaming output, interactive shells
 - **Guest filesystem access** — Read, write, list, copy files inside a running sandbox
+- **Programmable virtual filesystems** — Not available in the Node.js SDK yet; use the Go or Rust SDK (see the microsandbox docs: *Virtual filesystem*)
 - **Named volumes** — Persistent storage across sandbox restarts, with quotas
 - **Network policies** — Public-only (default), allow-all, or fully airgapped
 - **DNS filtering** — Block specific domains or domain suffixes

@@ -7,3 +7,4 @@ pub mod dualfs;
 pub mod memfs;
 pub mod passthroughfs;
 pub(crate) mod shared;
+pub mod vfs;

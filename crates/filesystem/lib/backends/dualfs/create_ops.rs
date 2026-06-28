@@ -41,7 +41,7 @@ pub(crate) fn do_create(
     extensions: Extensions,
 ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     let parent_node = get_node(&fs.state, parent)?;
     let node_state = parent_node.state.read().unwrap().clone();
@@ -171,7 +171,7 @@ pub(crate) fn do_mkdir(
     extensions: Extensions,
 ) -> io::Result<Entry> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     let parent_node = get_node(&fs.state, parent)?;
     let node_state = parent_node.state.read().unwrap().clone();
@@ -266,7 +266,7 @@ pub(crate) fn do_mknod(
     extensions: Extensions,
 ) -> io::Result<Entry> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     let parent_node = get_node(&fs.state, parent)?;
     let view = DualNamespaceView { state: &fs.state };
@@ -327,7 +327,7 @@ pub(crate) fn do_symlink(
     extensions: Extensions,
 ) -> io::Result<Entry> {
     let name_bytes = name.to_bytes();
-    name_validation::validate_name(name)?;
+    name_validation::validate_create_name(name)?;
 
     let parent_node = get_node(&fs.state, parent)?;
     let view = DualNamespaceView { state: &fs.state };
@@ -386,7 +386,7 @@ pub(crate) fn do_link(
     newname: &CStr,
 ) -> io::Result<Entry> {
     let newname_bytes = newname.to_bytes();
-    name_validation::validate_name(newname)?;
+    name_validation::validate_create_name(newname)?;
 
     if ino == init_binary::INIT_INODE {
         return Err(io::Error::from_raw_os_error(libc::EPERM));

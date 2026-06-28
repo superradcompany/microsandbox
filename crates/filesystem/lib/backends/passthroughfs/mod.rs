@@ -202,6 +202,9 @@ pub(crate) struct PassthroughDirHandle {
 
     /// Snapshot built on the first readdir call.
     pub snapshot: Mutex<Option<DirSnapshot>>,
+
+    /// Cached FUSE entries for this handle (one names-buffer allocation).
+    pub fuse_cache: Mutex<crate::backends::shared::dir_snapshot::FuseDirCache>,
 }
 
 /// Snapshot of one directory handle's entries.

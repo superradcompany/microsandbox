@@ -3,6 +3,9 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -19,6 +22,14 @@ const (
 // Sandbox is safe for concurrent use from multiple goroutines.
 type Sandbox struct {
 	inner *ffi.Sandbox
+	// virtualMountEntry is this handle's release token for its virtual-mount provider
+	// servers, or nil when the sandbox has none. Releasing through the entry
+	// (rather than by name) keeps a replaced same-name sandbox from disturbing
+	// this handle's refcount.
+	virtualMountEntry *virtualMountRegistryEntry
+	// virtualMountReleaseOnce schedules at most one background wait that releases
+	// virtual-mount sockets after RequestStop/RequestKill observes stopped state.
+	virtualMountReleaseOnce sync.Once
 }
 
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
@@ -34,13 +45,132 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		opt(&o)
 	}
 
+	if o.Detached && len(o.VirtualMounts) > 0 {
+		return nil, fmt.Errorf("virtual mounts cannot be used with detached sandboxes: the provider socket lives in the controlling process")
+	}
+
+	// Mirror Rust create_local: tear down any in-process providers for this
+	// name before spawn so WithReplace without new virtual mounts cannot leave
+	// zombie provider goroutines from the replaced sandbox.
+	if o.Replace {
+		teardownVirtualMountProvidersByName(name)
+	}
+
 	ffiOpts := buildFFICreateOptions(o)
+	virtualMountServers, err := attachVirtualMounts(&ffiOpts, o)
+	if err != nil {
+		return nil, err
+	}
+
+	var virtualMountEntry *virtualMountRegistryEntry
+	if len(virtualMountServers) > 0 {
+		virtualMountEntry = registerVirtualMountServers(name, virtualMountServers)
+	}
 
 	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
 	if err != nil {
+		// Rust create may have stopped the VM after post-spawn validation; close
+		// the Go-side virtual mount serve loops (`vfs.Serve`) started in attachVirtualMounts.
+		if virtualMountEntry != nil {
+			teardownVirtualMountProvidersForEntry(name, virtualMountEntry)
+		} else {
+			closeVirtualMountServers(virtualMountServers)
+		}
+		// WithReplace may have stopped a prior same-name sandbox whose
+		// providers are still registered; tear them down when already stopped.
+		if prev, ok := sandboxVirtualMountRegistry.Load(name); ok && prev != virtualMountEntry {
+			virtualMountEntryTeardownIfStopped(context.Background(), name, prev.(*virtualMountRegistryEntry))
+		}
 		return nil, wrapFFI(err)
 	}
-	return &Sandbox{inner: inner}, nil
+	for i := range virtualMountServers {
+		// Rust spawn closes the child fd after dup; do not close it again here.
+		virtualMountServers[i].childFile = nil
+	}
+	if virtualMountEntry != nil {
+		if !virtualMountServersLive(virtualMountServers) {
+			teardownVirtualMountProvidersForEntry(name, virtualMountEntry)
+			abortSandboxAfterFailedVirtualMountCreate(ctx, name, inner)
+			return nil, fmt.Errorf(
+				"create sandbox %q: virtual mount provider exited before create completed",
+				name,
+			)
+		}
+		scheduleVirtualMountTeardownAfterStopped(context.Background(), name, virtualMountEntry)
+	}
+	return newSandboxWithVirtualMount(inner, virtualMountEntry), nil
+}
+
+// abortSandboxAfterFailedVirtualMountCreate stops a VM whose create succeeded at
+// the FFI layer but failed post-create virtual-mount validation (mirrors Rust
+// abort_sandbox_after_failed_create).
+func abortSandboxAfterFailedVirtualMountCreate(ctx context.Context, name string, inner *ffi.Sandbox) {
+	_ = inner.Close()
+	stopCtx := context.WithoutCancel(ctx)
+	stopMs := uint64(defaultStopTimeout / time.Millisecond)
+	if err := ffi.StopSandboxByName(stopCtx, name, stopMs); err != nil {
+		_ = ffi.KillSandboxByName(stopCtx, name, stopMs)
+	}
+}
+
+func newSandboxWithVirtualMount(inner *ffi.Sandbox, virtualMountEntry *virtualMountRegistryEntry) *Sandbox {
+	s := &Sandbox{inner: inner, virtualMountEntry: virtualMountEntry}
+	if virtualMountEntry != nil {
+		runtime.SetFinalizer(s, finalizeSandboxVirtualMount)
+	}
+	return s
+}
+
+// virtualMountFinalizeRelease runs when a Sandbox with virtual mounts is garbage-collected
+// without Close(). Lifecycle owners defer provider teardown until stopped state
+// is observed so a leaked handle does not break guest I/O on a still-running VM.
+// Connect handles drop their reference immediately.
+func virtualMountFinalizeRelease(name string, entry *virtualMountRegistryEntry, ownsLifecycle bool, ownsErr error) {
+	if entry == nil {
+		return
+	}
+	virtualMountLogf(
+		"microsandbox: sandbox %q handle was garbage-collected without Close(); releasing virtual-mount provider reference",
+		name,
+	)
+	if virtualMountCloseDefersRelease(ownsLifecycle, ownsErr) {
+		scheduleVirtualMountTeardownAfterStopped(context.Background(), name, entry)
+		return
+	}
+	releaseVirtualMountEntry(name, entry)
+}
+
+// finalizeSandboxVirtualMount is a last-resort leak guard when a Sandbox with virtual
+// mounts is garbage-collected without Close().
+func finalizeSandboxVirtualMount(s *Sandbox) {
+	if s.virtualMountEntry == nil {
+		return
+	}
+	name := s.inner.Name()
+	entry := s.virtualMountEntry
+	s.virtualMountEntry = nil
+	runtime.SetFinalizer(s, nil)
+	owns, err := s.inner.OwnsLifecycle()
+	virtualMountFinalizeRelease(name, entry, owns, wrapFFI(err))
+	// Best-effort: release the native handle when the Go wrapper was leaked.
+	if err := wrapFFI(s.inner.Close()); err != nil && !IsKind(err, ErrInvalidHandle) {
+		virtualMountLogf(
+			"microsandbox: sandbox %q finalizer Close failed: %v",
+			name, err,
+		)
+	}
+}
+
+func attachVirtualMounts(ffiOpts *ffi.CreateOptions, o SandboxConfig) ([]virtualMountServer, error) {
+	if len(o.VirtualMounts) == 0 {
+		return nil, nil
+	}
+	vms, servers, err := buildFFIVirtualMounts(o.VirtualMounts, o.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	ffiOpts.VirtualMounts = vms
+	return servers, nil
 }
 
 // buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
@@ -292,6 +422,9 @@ func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error) {
 // StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	if err := virtualMountRestartBlocked(ctx, name); err != nil {
+		return nil, err
+	}
 	inner, err := ffi.StartSandbox(ctx, name, false)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -303,6 +436,9 @@ func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
 // running after the returned handle is released. Sandbox names are limited to
 // 128 UTF-8 bytes.
 func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
+	if err := virtualMountRestartBlocked(ctx, name); err != nil {
+		return nil, err
+	}
 	inner, err := ffi.StartSandbox(ctx, name, true)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -419,8 +555,21 @@ func listSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHan
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
 // Sandbox names are limited to 128 UTF-8 bytes.
+//
+// This is a name-addressed API: it always targets the current sandbox record
+// for name and does not check SandboxHandle db_id generation. Prefer
+// (*SandboxHandle).Remove after GetSandbox when holding a metadata handle.
+//
+// When this process still hosts virtual-mount providers for name, they are torn
+// down as part of remove so provider goroutines and sockets cannot leak after
+// persisted state is deleted.
 func RemoveSandbox(ctx context.Context, name string) error {
-	return wrapFFI(ffi.RemoveSandbox(ctx, name))
+	entry := snapshotVirtualMountRegistryEntry(name)
+	err := wrapFFI(ffi.RemoveSandbox(ctx, name))
+	if err == nil {
+		teardownVirtualMountCapturedEntry(name, entry)
+	}
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +583,52 @@ type SandboxHandle struct {
 	name          string
 	status        SandboxStatus
 	configJSON    string
+	dbID          int32
 	createdAtUnix *int64
 	updatedAtUnix *int64
+	// virtualMountEntry is the provider generation captured when this handle was created.
+	// Stop/kill/remove tear down only this entry so a stale handle cannot disturb
+	// a later same-name replace.
+	virtualMountEntry *virtualMountRegistryEntry
+}
+
+func staleSandboxHandleError(name string) error {
+	return &Error{
+		Kind: ErrSandboxHandleStale,
+		Message: fmt.Sprintf(
+			"sandbox %q was replaced or removed since this handle was created; refresh the handle with GetSandbox before connect, start, stop, or remove",
+			name,
+		),
+	}
+}
+
+func (h *SandboxHandle) ensureCurrent(ctx context.Context) (*SandboxHandle, error) {
+	current, err := GetSandbox(ctx, h.name)
+	if err != nil {
+		return nil, err
+	}
+	if current.dbID != h.dbID {
+		return nil, staleSandboxHandleError(h.name)
+	}
+	// When the native library omits db_id (0), fall back to updated_at so a
+	// same-name replace is still detected. Also compare virtualMountEntry pointers when
+	// virtual mounts captured a registry generation on this handle.
+	if h.dbID == 0 && h.updatedAtUnix != nil && current.updatedAtUnix != nil &&
+		*current.updatedAtUnix != *h.updatedAtUnix {
+		return nil, staleSandboxHandleError(h.name)
+	}
+	if h.virtualMountEntry != nil && current.virtualMountEntry != h.virtualMountEntry {
+		return nil, staleSandboxHandleError(h.name)
+	}
+	return current, nil
+}
+
+// reensureCurrent repeats the db_id generation check immediately before a
+// name-addressed mutation so a same-name replace cannot slip in after an
+// earlier ensureCurrent call.
+func (h *SandboxHandle) reensureCurrent(ctx context.Context) error {
+	_, err := h.ensureCurrent(ctx)
+	return err
 }
 
 func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
@@ -443,8 +636,10 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
 		configJSON:    info.ConfigJSON,
+		dbID:          info.DbID,
 		createdAtUnix: info.CreatedAtUnix,
 		updatedAtUnix: info.UpdatedAtUnix,
+		virtualMountEntry:      snapshotVirtualMountRegistryEntry(info.Name),
 	}
 }
 
@@ -452,6 +647,9 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 func (h *SandboxHandle) Name() string { return h.name }
 
 // Status returns the sandbox's last-known lifecycle status.
+//
+// This reflects handle creation time. Call Refresh after same-name replace
+// before relying on lifecycle methods; use Refresh to obtain a current status.
 func (h *SandboxHandle) Status() SandboxStatus { return h.status }
 
 // ConfigJSON returns the raw JSON configuration stored for this sandbox.
@@ -490,6 +688,9 @@ func (h *SandboxHandle) UpdatedAt() time.Time {
 // Metrics returns a point-in-time resource snapshot for this sandbox.
 // The sandbox must be running or draining.
 func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	m, err := ffi.SandboxHandleMetrics(ctx, h.name)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -514,62 +715,139 @@ func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
 
 // Connect reattaches to the running sandbox and returns a live handle.
 func (h *SandboxHandle) Connect(ctx context.Context) (*Sandbox, error) {
+	current, err := h.ensureCurrent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := configHadVirtualMounts(current.configJSON); err != nil {
+		return nil, fmt.Errorf("connect sandbox %q: %w", h.name, err)
+	}
+	virtualMountEntry, err := connectVirtualMounts(h.name, current.configJSON)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.reensureCurrent(ctx); err != nil {
+		releaseVirtualMountEntry(h.name, virtualMountEntry)
+		return nil, err
+	}
 	inner, err := ffi.ConnectSandbox(ctx, h.name)
 	if err != nil {
+		releaseVirtualMountEntry(h.name, virtualMountEntry)
 		return nil, wrapFFI(err)
 	}
-	return &Sandbox{inner: inner}, nil
+	if virtualMountEntry != nil && !isLiveVirtualMountRegistryEntry(h.name, virtualMountEntry) {
+		_ = inner.Close()
+		releaseVirtualMountEntry(h.name, virtualMountEntry)
+		return nil, virtualMountReconnectError(h.name)
+	}
+	return newSandboxWithVirtualMount(inner, virtualMountEntry), nil
 }
 
 // Start boots the sandbox (if stopped) and returns a live handle.
 func (h *SandboxHandle) Start(ctx context.Context) (*Sandbox, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	return StartSandbox(ctx, h.name)
 }
 
 // StartDetached boots the sandbox in detached mode.
 func (h *SandboxHandle) StartDetached(ctx context.Context) (*Sandbox, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	return StartSandboxDetached(ctx, h.name)
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.StopSandboxByName(ctx, h.name, stopTimeoutMillis(opts)))
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.StopSandboxByName(ctx, h.name, stopTimeoutMillis(opts)))
+	releaseVirtualMountAfterSuccess(err, func() { teardownVirtualMountCapturedEntry(h.name, h.virtualMountEntry) })
+	return err
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
+//
+// When the sandbox has virtual mounts, a background wait releases provider
+// sockets once stopped state is observed.
 func (h *SandboxHandle) RequestStop(ctx context.Context) error {
-	return wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
+	if err == nil {
+		scheduleVirtualMountTeardownForCapturedEntry(ctx, h.name, h.virtualMountEntry)
+	}
+	return err
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
-	return wrapFFI(ffi.KillSandboxByName(ctx, h.name, killTimeoutMillis(opts)))
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.KillSandboxByName(ctx, h.name, killTimeoutMillis(opts)))
+	releaseVirtualMountAfterSuccess(err, func() { teardownVirtualMountCapturedEntry(h.name, h.virtualMountEntry) })
+	return err
 }
 
 // RequestKill requests force termination and returns once the request is sent.
+//
+// When the sandbox has virtual mounts, a background wait releases provider
+// sockets once stopped state is observed.
 func (h *SandboxHandle) RequestKill(ctx context.Context) error {
-	return wrapFFI(ffi.RequestKillSandboxByName(ctx, h.name))
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.RequestKillSandboxByName(ctx, h.name))
+	if err == nil {
+		scheduleVirtualMountTeardownForCapturedEntry(ctx, h.name, h.virtualMountEntry)
+	}
+	return err
 }
 
 // RequestDrain requests graceful drain and returns once the request is sent.
 func (h *SandboxHandle) RequestDrain(ctx context.Context) error {
-	return wrapFFI(ffi.RequestDrainSandboxByName(ctx, h.name))
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.RequestDrainSandboxByName(ctx, h.name))
+	if err == nil {
+		scheduleVirtualMountTeardownForCapturedEntry(ctx, h.name, h.virtualMountEntry)
+	}
+	return err
 }
 
 // WaitUntilStopped waits until this sandbox is observed in terminal state.
 func (h *SandboxHandle) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	result, err := ffi.WaitSandboxByNameUntilStopped(ctx, h.name)
 	return sandboxStopResultFromFFI(result), wrapFFI(err)
 }
 
 // Remove deletes the sandbox's persisted state. The sandbox must be stopped.
 func (h *SandboxHandle) Remove(ctx context.Context) error {
-	return RemoveSandbox(ctx, h.name)
+	if err := h.reensureCurrent(ctx); err != nil {
+		return err
+	}
+	err := wrapFFI(ffi.RemoveSandbox(ctx, h.name))
+	if err == nil {
+		teardownVirtualMountCapturedEntry(h.name, h.virtualMountEntry)
+	}
+	return err
 }
 
 // Snapshot captures this stopped sandbox under a bare name in the default
 // snapshots directory.
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -579,6 +857,9 @@ func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArt
 
 // SnapshotTo captures this stopped sandbox to an explicit artifact directory.
 func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error) {
+	if err := h.reensureCurrent(ctx); err != nil {
+		return nil, err
+	}
 	info, err := ffi.SandboxHandleSnapshotTo(ctx, h.name, path)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -595,22 +876,41 @@ func (s *Sandbox) Name() string { return s.inner.Name() }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+	err := wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+	releaseVirtualMountAfterSuccess(err, s.teardownVirtualMountAfterVMStopped)
+	return err
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
+//
+// When the sandbox has virtual mounts, a background wait releases provider
+// sockets once stopped state is observed, so dropping the handle after
+// RequestStop alone does not leak goroutines or socket pairs.
 func (s *Sandbox) RequestStop(ctx context.Context) error {
-	return wrapFFI(s.inner.RequestStop(ctx))
+	err := wrapFFI(s.inner.RequestStop(ctx))
+	if err == nil {
+		s.scheduleReleaseVirtualMountWhenStopped(ctx)
+	}
+	return err
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.
 func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error {
-	return wrapFFI(s.inner.Kill(ctx, killTimeoutMillis(opts)))
+	err := wrapFFI(s.inner.Kill(ctx, killTimeoutMillis(opts)))
+	releaseVirtualMountAfterSuccess(err, s.teardownVirtualMountAfterVMStopped)
+	return err
 }
 
 // RequestKill requests force termination and returns once the request is sent.
+//
+// When the sandbox has virtual mounts, a background wait releases provider
+// sockets once stopped state is observed (same as [Sandbox.RequestStop]).
 func (s *Sandbox) RequestKill(ctx context.Context) error {
-	return wrapFFI(s.inner.RequestKill(ctx))
+	err := wrapFFI(s.inner.RequestKill(ctx))
+	if err == nil {
+		s.scheduleReleaseVirtualMountWhenStopped(ctx)
+	}
+	return err
 }
 
 // Close releases the Rust-side handle. Safe to call multiple times; the
@@ -618,8 +918,80 @@ func (s *Sandbox) RequestKill(ctx context.Context) error {
 //
 // For a sandbox created with WithDetached(), Close will stop the VM —
 // use Detach instead if the intent is to leave the sandbox running.
+//
+// When the sandbox has virtual mounts, a lifecycle-owning handle defers
+// provider teardown until stopped state is observed (same as RequestStop), so
+// the guest can finish I/O during shutdown. Connect handles only drop their
+// handle reference; sockets stay up until the VM stops.
 func (s *Sandbox) Close() error {
-	return wrapFFI(s.inner.Close())
+	err := wrapFFI(s.inner.Close())
+	s.releaseVirtualMountsAfterClose()
+	return err
+}
+
+// releaseVirtualMountsAfterClose tears down or schedules teardown of
+// virtual-mount provider sockets after Close (even when the FFI close fails).
+func (s *Sandbox) releaseVirtualMountsAfterClose() {
+	if s.virtualMountEntry == nil {
+		return
+	}
+	owns, err := s.inner.OwnsLifecycle()
+	if virtualMountCloseDefersRelease(owns, wrapFFI(err)) {
+		s.scheduleReleaseVirtualMountWhenStopped(context.Background())
+	}
+	s.dropVirtualMountHandleRef()
+}
+
+// virtualMountCloseDefersRelease reports whether Close should wait for stopped state
+// before releasing virtual-mount sockets. Lifecycle owners (and handles where
+// ownership cannot be determined) defer; Connect handles release immediately.
+func virtualMountCloseDefersRelease(ownsLifecycle bool, ownsErr error) bool {
+	return ownsErr != nil || ownsLifecycle
+}
+
+// releaseVirtualMountAfterSuccess releases virtual-mount provider sockets when an
+// operation that stops or closes the sandbox succeeded.
+func releaseVirtualMountAfterSuccess(err error, release func()) {
+	if err == nil {
+		release()
+	}
+}
+
+func (s *Sandbox) dropVirtualMountHandleRef() {
+	if s.virtualMountEntry == nil {
+		return
+	}
+	runtime.SetFinalizer(s, nil)
+	releaseVirtualMountEntry(s.inner.Name(), s.virtualMountEntry)
+	s.virtualMountEntry = nil
+}
+
+func (s *Sandbox) teardownVirtualMountAfterVMStopped() {
+	teardownVirtualMountProvidersForEntry(s.inner.Name(), s.virtualMountEntry)
+	s.dropVirtualMountHandleRef()
+}
+
+// scheduleReleaseVirtualMountWhenStopped waits for terminal state after a non-blocking
+// stop/kill request, then tears down virtual-mount provider sockets. Stop/Kill
+// tear down synchronously; this covers RequestStop/RequestKill without requiring
+// another call before the handle is dropped. Provider sockets are always torn
+// down afterward, even when the wait fails, so a wedged or already-torn-down
+// handle cannot leak goroutines or registry entries.
+func (s *Sandbox) scheduleReleaseVirtualMountWhenStopped(ctx context.Context) {
+	if s.virtualMountEntry == nil {
+		return
+	}
+	s.virtualMountReleaseOnce.Do(func() {
+		scheduleVirtualMountTeardownAfterStopped(ctx, s.inner.Name(), s.virtualMountEntry)
+	})
+}
+
+// scheduleVirtualMountTeardownAfterStoppedForName schedules teardown for name's current
+// live registry entry.
+func scheduleVirtualMountTeardownAfterStoppedForName(ctx context.Context, name string) {
+	if entry := snapshotVirtualMountRegistryEntry(name); entry != nil {
+		scheduleVirtualMountTeardownAfterStopped(ctx, name, entry)
+	}
 }
 
 // Detach releases the Rust-side handle without stopping the VM. Use this
@@ -628,13 +1000,25 @@ func (s *Sandbox) Close() error {
 //
 // After Detach, the handle is invalid; a subsequent Close returns
 // ErrInvalidHandle.
+//
+// Detach is rejected for a sandbox with virtual mounts: the provider socket
+// lives in this process, so detaching (which is meant to outlive the handle)
+// would stop serving the mount and leak its goroutine/socket/registry entry.
+// This mirrors the same restriction enforced at creation time.
 func (s *Sandbox) Detach(ctx context.Context) error {
+	if s.virtualMountEntry != nil {
+		return fmt.Errorf("cannot detach a sandbox with virtual mounts: the provider socket lives in this process and would stop serving once detached")
+	}
 	return wrapFFI(s.inner.Detach(ctx))
 }
 
 // RequestDrain requests graceful drain and returns once the request is sent.
 func (s *Sandbox) RequestDrain(ctx context.Context) error {
-	return wrapFFI(s.inner.RequestDrain(ctx))
+	err := wrapFFI(s.inner.RequestDrain(ctx))
+	if err == nil {
+		s.scheduleReleaseVirtualMountWhenStopped(ctx)
+	}
+	return err
 }
 
 // WaitUntilStopped waits until this sandbox is observed in terminal state.
