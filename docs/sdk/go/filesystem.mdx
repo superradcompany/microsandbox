@@ -46,7 +46,7 @@ fmt.Printf("%d bytes\n", len(data))
 
 </Accordion>
 
-Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB; for files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream) so callers get a uniform bytes-returning interface up to runtime memory limits.
+Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after base64 inflation), the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream). Callers get a uniform bytes-returning interface up to runtime memory limits.
 
 <p className="msb-label">Parameters</p>
 
