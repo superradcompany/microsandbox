@@ -2954,6 +2954,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_socket_resolution_uses_explicit_local_backend_paths() {
+        // Root the backend home under a short directory so the derived AF_UNIX
+        // socket path stays within the platform `sun_path` limit (104 bytes on
+        // macOS). The default system temp dir on macOS lives under
+        // `/var/folders/...`, long enough to overflow that limit and make
+        // resolution fail spuriously. Windows uses named pipes (no length
+        // limit), so the default temp dir is fine there.
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
         let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
         let home = temp.path().join("msb-home");
         let backend = LocalBackend::builder().home(&home).build().await.unwrap();
