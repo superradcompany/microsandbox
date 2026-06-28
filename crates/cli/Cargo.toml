@@ -41,7 +41,9 @@ indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox.workspace = true
+microsandbox-db.workspace = true
 microsandbox-image.workspace = true
+microsandbox-migration.workspace = true
 microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-runtime.workspace = true
@@ -51,6 +53,7 @@ regex = "1"
 reqwest.workspace = true
 rpassword.workspace = true
 russh = { workspace = true, optional = true }
+sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -58,6 +61,9 @@ thiserror = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 test-utils.workspace = true

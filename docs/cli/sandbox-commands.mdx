@@ -385,6 +385,8 @@ msb self doctor              # Check runtime and host virtualization prerequisit
 msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
+msb self downgrade 0.6.0      # Downgrade to a supported older release
+msb self downgrade 0.6.0 -y   # Skip downgrade confirmations
 msb self uninstall            # Remove msb (with confirmation prompt)
 msb self uninstall --yes      # Skip confirmation
 ```
@@ -393,10 +395,19 @@ msb self uninstall --yes      # Skip confirmation
 |------------|-------------|
 | `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
+| `downgrade <version>` | Downgrade msb and compatible local state to an older release. V1 supports targets at or above 0.6.0 and refuses on Windows before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
+
+`msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Before a downgrade rolls back schema, `msb` checks the target release, reads that release's schema baseline, refuses targets below 0.6.0, refuses irreversible migration paths, and blocks the rollback while matching running sandboxes are active. When rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless `--no-backup` is passed. If rollback metadata marks the image cache affected, `msb` purges the cache after schema rollback unless `--keep-cache` is passed. The target binary is always installed fresh and checked with `msb --version` before command links are refreshed.
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
 | `--fix` | `doctor` | Try supported host setup fixes; on Windows this opens an elevated PowerShell prompt to enable Windows Hypervisor Platform without forcing an immediate reboot |
 | `-f`, `--force` | `update` | Re-download even if already on the latest version |
+| `-f`, `--force` | `downgrade` | Accepted for an explicit reinstall request; downgrade always reinstalls the target and this flag does not bypass safety checks |
+| `-y`, `--yes` | `downgrade` | Skip destructive-step confirmations |
+| `--keep-cache` | `downgrade` | Keep the image cache even when rollback metadata marks it affected |
+| `--no-backup` | `downgrade` | Skip the database backup before schema rollback |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |

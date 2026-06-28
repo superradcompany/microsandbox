@@ -53,6 +53,10 @@ pub struct Table {
     rows: Vec<Vec<String>>,
 }
 
+/// Marker error for commands that already rendered a styled error block.
+#[derive(Debug)]
+pub struct AlreadyRenderedError;
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -259,6 +263,18 @@ impl Table {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Display for AlreadyRenderedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("command failed")
+    }
+}
+
+impl std::error::Error for AlreadyRenderedError {}
 
 //--------------------------------------------------------------------------------------------------
 // Functions

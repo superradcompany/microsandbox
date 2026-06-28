@@ -30,7 +30,7 @@ use sea_orm::{
     ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
-use crate::RuntimeResult;
+use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -43,6 +43,14 @@ const LEASE_DURATION_SECS: i64 = 10;
 /// Minimum interval between successful sweeps. Read-gates the lease so most
 /// startups skip the maintenance write entirely.
 const MIN_SWEEP_INTERVAL_SECS: i64 = 30;
+
+/// Default duration for the install-exclusive lease.
+///
+/// This is deliberately much longer than lifecycle maintenance because it can
+/// cover a bundle download, DB backup, rollback, cache removal, and binary
+/// install on slow disks or networks. The CLI clears the row on success/failure;
+/// expiry is the crash self-heal path.
+pub const INSTALL_EXCLUSIVE_LEASE_SECS: i64 = 30 * 60;
 
 /// Wall-clock budget for a single maintenance sweep. The sweep stops early
 /// (leaving the rest for the next window) once this elapses.
@@ -105,6 +113,24 @@ pub struct MaintenanceReport {
     pub errors: u64,
     /// Whether the sweep stopped early due to the time budget.
     pub timed_out: bool,
+}
+
+/// A currently active sandbox that blocks schema rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSandbox {
+    /// Sandbox name.
+    pub name: String,
+    /// Live or last-known run PID, when available.
+    pub pid: Option<i32>,
+}
+
+/// Install-exclusive lease acquired by an install-mutating command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallExclusiveLease {
+    /// PID that acquired the lease.
+    pub holder_pid: i32,
+    /// When the lease self-expires if the holder crashes.
+    pub lease_expires_at: chrono::NaiveDateTime,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -234,6 +260,45 @@ pub async fn run_sandbox_lifecycle_maintenance(
     }
 
     Ok(report)
+}
+
+/// Return active sandboxes that must stop before schema rollback.
+///
+/// Downgrade only needs this when rollback removes columns/tables. The query is
+/// intentionally status-based rather than "PID is live" based: a non-terminal
+/// row with no PID is still state owned by a runtime transition and should not
+/// be mutated out from under it.
+pub async fn active_sandboxes_for_schema_rollback(
+    db: &DbWriteConnection,
+) -> RuntimeResult<Vec<ActiveSandbox>> {
+    let sandboxes = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Status.is_in([
+            sandbox_entity::SandboxStatus::Created,
+            sandbox_entity::SandboxStatus::Starting,
+            sandbox_entity::SandboxStatus::Running,
+            sandbox_entity::SandboxStatus::Draining,
+            sandbox_entity::SandboxStatus::Paused,
+        ]))
+        .order_by_asc(sandbox_entity::Column::Name)
+        .all(db)
+        .await?;
+
+    let mut active = Vec::with_capacity(sandboxes.len());
+    for sandbox in sandboxes {
+        let run = run_entity::Entity::find()
+            .filter(run_entity::Column::SandboxId.eq(sandbox.id))
+            .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
+            .order_by_desc(run_entity::Column::StartedAt)
+            .one(db)
+            .await?;
+
+        active.push(ActiveSandbox {
+            name: sandbox.name,
+            pid: run.and_then(|run| run.pid),
+        });
+    }
+
+    Ok(active)
 }
 
 /// Remove a single terminal ephemeral sandbox's persisted state.
@@ -389,9 +454,168 @@ async fn record_completion(db: &DbWriteConnection) -> RuntimeResult<()> {
     Ok(())
 }
 
+/// Acquire the install-exclusive lease if it is currently free or expired.
+pub async fn acquire_install_exclusive_lease(
+    db: &DbWriteConnection,
+) -> RuntimeResult<InstallExclusiveLease> {
+    let now = chrono::Utc::now().naive_utc();
+    let holder_pid = std::process::id() as i32;
+
+    seed_install_exclusive_lease(db, now).await?;
+
+    let lease_deadline = now + chrono::Duration::seconds(INSTALL_EXCLUSIVE_LEASE_SECS);
+    let result = lease_entity::Entity::update_many()
+        .col_expr(lease_entity::Column::HolderPid, Expr::value(holder_pid))
+        .col_expr(
+            lease_entity::Column::LeaseExpiresAt,
+            Expr::value(lease_deadline),
+        )
+        .col_expr(
+            lease_entity::Column::LastCompletedAt,
+            Expr::value(None::<chrono::NaiveDateTime>),
+        )
+        .filter(lease_entity::Column::Name.eq(lease_entity::INSTALL_EXCLUSIVE))
+        .filter(lease_entity::Column::LeaseExpiresAt.lte(now))
+        .exec(db)
+        .await?;
+
+    if result.rows_affected == 1 {
+        return Ok(InstallExclusiveLease {
+            holder_pid,
+            lease_expires_at: lease_deadline,
+        });
+    }
+
+    let Some(lease) = lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
+        .one(db)
+        .await?
+    else {
+        return Err(RuntimeError::Custom(
+            "install-exclusive lease disappeared while acquiring it".into(),
+        ));
+    };
+
+    Err(RuntimeError::Custom(format!(
+        "another microsandbox install operation is in progress until {}",
+        lease.lease_expires_at
+    )))
+}
+
+/// Renew an install-exclusive lease if this process still owns the exact row.
+pub async fn renew_install_exclusive_lease(
+    db: &DbWriteConnection,
+    lease: &mut InstallExclusiveLease,
+) -> RuntimeResult<()> {
+    let now = chrono::Utc::now().naive_utc();
+    let lease_deadline = now + chrono::Duration::seconds(INSTALL_EXCLUSIVE_LEASE_SECS);
+    let previous_deadline = lease.lease_expires_at;
+    let result = lease_entity::Entity::update_many()
+        .col_expr(
+            lease_entity::Column::LeaseExpiresAt,
+            Expr::value(lease_deadline),
+        )
+        .col_expr(
+            lease_entity::Column::LastCompletedAt,
+            Expr::value(None::<chrono::NaiveDateTime>),
+        )
+        .filter(lease_entity::Column::Name.eq(lease_entity::INSTALL_EXCLUSIVE))
+        .filter(lease_entity::Column::HolderPid.eq(lease.holder_pid))
+        .filter(lease_entity::Column::LeaseExpiresAt.eq(previous_deadline))
+        .exec(db)
+        .await?;
+
+    if result.rows_affected != 1 {
+        return Err(RuntimeError::Custom(
+            "install-exclusive lease is no longer held by this process".into(),
+        ));
+    }
+
+    lease.lease_expires_at = lease_deadline;
+    Ok(())
+}
+
+/// Clear the install-exclusive lease after an install-mutating command exits.
+pub async fn clear_install_exclusive_lease(
+    db: &DbWriteConnection,
+    lease: &InstallExclusiveLease,
+) -> RuntimeResult<()> {
+    let now = chrono::Utc::now().naive_utc();
+    let result = lease_entity::Entity::update_many()
+        .col_expr(lease_entity::Column::HolderPid, Expr::value(None::<i32>))
+        .col_expr(lease_entity::Column::LeaseExpiresAt, Expr::value(now))
+        .col_expr(lease_entity::Column::LastCompletedAt, Expr::value(now))
+        .filter(lease_entity::Column::Name.eq(lease_entity::INSTALL_EXCLUSIVE))
+        .filter(lease_entity::Column::HolderPid.eq(lease.holder_pid))
+        .filter(lease_entity::Column::LeaseExpiresAt.eq(lease.lease_expires_at))
+        .exec(db)
+        .await?;
+
+    if result.rows_affected != 1 {
+        return Err(RuntimeError::Custom(
+            "install-exclusive lease is no longer held by this process".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Refuse startup/migration when an install-mutating command is active.
+///
+/// A missing table means the database has not reached the maintenance-lease
+/// migration yet. In that case startup continues so normal migrations can
+/// create it. Once the table exists, the install-exclusive row becomes a hard
+/// refusal while unexpired.
+pub async fn refuse_if_install_exclusive_held(db: &DbWriteConnection) -> RuntimeResult<()> {
+    let now = chrono::Utc::now().naive_utc();
+    let lease = match lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
+        .one(db)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(err) if is_missing_maintenance_lease_table(&err) => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+
+    if let Some(lease) = lease
+        && lease.lease_expires_at > now
+    {
+        return Err(RuntimeError::Custom(format!(
+            "microsandbox install operation in progress until {}; retry after it completes",
+            lease.lease_expires_at
+        )));
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+async fn seed_install_exclusive_lease(
+    db: &DbWriteConnection,
+    now: chrono::NaiveDateTime,
+) -> RuntimeResult<()> {
+    let seed = lease_entity::ActiveModel {
+        name: Set(lease_entity::INSTALL_EXCLUSIVE.to_string()),
+        holder_pid: Set(None),
+        lease_expires_at: Set(now),
+        last_completed_at: Set(None),
+    };
+    let insert = lease_entity::Entity::insert(seed)
+        .on_conflict(
+            OnConflict::column(lease_entity::Column::Name)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await;
+    match insert {
+        Ok(_) => Ok(()),
+        Err(DbErr::RecordNotInserted) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
 
 /// Reconcile one active sandbox whose owning runtime may have died. Returns
 /// `true` when the sandbox was marked terminal.
@@ -518,6 +742,11 @@ fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+fn is_missing_maintenance_lease_table(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("no such table") && message.contains("maintenance_lease")
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -718,6 +947,80 @@ mod tests {
             .unwrap();
 
         assert!(try_acquire_lease(&db).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn install_exclusive_lease_blocks_startup_until_cleared() {
+        let (_dir, db) = test_db().await;
+
+        let lease = acquire_install_exclusive_lease(&db).await.unwrap();
+        assert_eq!(lease.holder_pid, std::process::id() as i32);
+
+        let err = refuse_if_install_exclusive_held(&db).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("microsandbox install operation in progress")
+        );
+
+        clear_install_exclusive_lease(&db, &lease).await.unwrap();
+        refuse_if_install_exclusive_held(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_exclusive_lease_renew_and_clear_require_current_holder() {
+        let (_dir, db) = test_db().await;
+
+        let mut lease = acquire_install_exclusive_lease(&db).await.unwrap();
+        let original_deadline = lease.lease_expires_at;
+
+        renew_install_exclusive_lease(&db, &mut lease)
+            .await
+            .unwrap();
+        assert!(lease.lease_expires_at >= original_deadline);
+
+        let stale_lease = InstallExclusiveLease {
+            holder_pid: lease.holder_pid + 1,
+            lease_expires_at: lease.lease_expires_at,
+        };
+
+        let err = clear_install_exclusive_lease(&db, &stale_lease)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("install-exclusive lease is no longer held")
+        );
+        assert!(refuse_if_install_exclusive_held(&db).await.is_err());
+
+        clear_install_exclusive_lease(&db, &lease).await.unwrap();
+        refuse_if_install_exclusive_held(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_sandboxes_include_non_terminal_rows_with_pid() {
+        let (_dir, db) = test_db().await;
+        let running =
+            insert_sandbox(&db, "run", sandbox_entity::SandboxStatus::Running, false).await;
+        insert_run(&db, running, Some(DEAD_PID), run_entity::RunStatus::Running).await;
+        let stopped =
+            insert_sandbox(&db, "stop", sandbox_entity::SandboxStatus::Stopped, false).await;
+        insert_run(
+            &db,
+            stopped,
+            Some(DEAD_PID),
+            run_entity::RunStatus::Terminated,
+        )
+        .await;
+
+        let active = active_sandboxes_for_schema_rollback(&db).await.unwrap();
+
+        assert_eq!(
+            active,
+            vec![ActiveSandbox {
+                name: "run".to_string(),
+                pid: Some(DEAD_PID),
+            }]
+        );
     }
 
     #[tokio::test]
