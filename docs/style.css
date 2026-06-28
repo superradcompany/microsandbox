@@ -138,6 +138,13 @@ table td:first-child { white-space: nowrap; }
 details.accordion:has(.code-block) > *:not(summary) { margin: 0 0.75rem 0.75rem !important; }
 details.accordion:has(.code-block) .code-block { margin: 0 !important; }
 
+/* The example now sits directly under the signature. The signature code
+ * block's 2rem bottom margin and the accordion's top margin stacked into a
+ * wide gap; collapse them to one even, tight inset so the example reads as
+ * attached to the signature it documents. */
+.code-block:has(+ details.accordion) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block) { margin-top: 0.75rem !important; }
+
 @media (max-width: 640px) {
   .msb-row { grid-template-columns: 1fr; gap: 0; }
   .msb-rg { font-size: 11.5px; opacity: .6; }
