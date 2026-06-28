@@ -69,6 +69,10 @@ enum Commands {
     #[command(hide = true)]
     Sandbox(Box<SandboxArgs>),
 
+    /// Print the schema baseline owned by this binary (internal).
+    #[command(name = "__schema-baseline", hide = true)]
+    SchemaBaseline(self_cmd::SchemaBaselineArgs),
+
     /// Create a sandbox from an image and run a command in it.
     Run(run::RunArgs),
 
@@ -450,6 +454,13 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if err.chain().any(|cause| {
+        cause
+            .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
+            .is_some()
+    }) {
+        return 1;
+    }
     if let Some((name, boot_err)) = find_boot_start_in_chain(err) {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
         return 1;
@@ -596,6 +607,7 @@ fn run_async_command_anyhow(
         // reaper here.
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
+            Commands::SchemaBaseline(args) => self_cmd::run_schema_baseline(args),
 
             Commands::Run(args) => run::run(args, log_level).await,
             Commands::Create(args) => create::run(args, log_level).await,

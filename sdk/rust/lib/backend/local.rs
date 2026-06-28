@@ -29,7 +29,8 @@ use std::{
 };
 
 use microsandbox_db::pool::DbPools;
-use microsandbox_migration::{Migrator, MigratorTrait};
+use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
 use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
@@ -507,6 +508,10 @@ async fn connect_and_migrate(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
+    microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
+        .await
+        .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
+    refuse_schema_ahead(pools.write().inner()).await?;
     Migrator::up(pools.write().inner(), None).await?;
 
     Ok(pools)
@@ -520,6 +525,41 @@ async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLo
     tokio::task::spawn_blocking(move || MigrationLock::acquire(path))
         .await
         .map_err(|err| MicrosandboxError::Runtime(format!("migration lock task failed: {err}")))?
+}
+
+async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()> {
+    let rows = match conn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) if is_missing_migrations_table(&err) => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+
+    let applied: Vec<String> = rows
+        .iter()
+        .map(|row| row.try_get_by_index::<String>(0))
+        .collect::<Result<_, _>>()?;
+    let known: Vec<&str> = schema_metadata::migration_ids().collect();
+
+    for (index, version) in applied.iter().enumerate() {
+        if known.get(index).copied() != Some(version.as_str()) {
+            return Err(MicrosandboxError::Runtime(format!(
+                "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_missing_migrations_table(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("no such table") && message.contains("seaql_migrations")
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -589,6 +629,57 @@ mod tests {
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(pools.write().inner(), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_refuses_active_install_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let database = DatabaseConfig::default();
+
+        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let future = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(10);
+        pools
+            .write()
+            .inner()
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT OR REPLACE INTO maintenance_lease (name, holder_pid, lease_expires_at, last_completed_at) VALUES (?, ?, ?, NULL)",
+                [
+                    "install_exclusive".into(),
+                    (std::process::id() as i32).into(),
+                    future.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        drop(pools);
+
+        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        assert!(err.to_string().contains("install operation in progress"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_refuses_schema_ahead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let database = DatabaseConfig::default();
+
+        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        pools
+            .write()
+            .inner()
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
+                ["m20990101_000001_future".into(), 4_102_444_800_i64.into()],
+            ))
+            .await
+            .unwrap();
+        drop(pools);
+
+        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        assert!(err.to_string().contains("database schema is newer"));
     }
 
     #[tokio::test]

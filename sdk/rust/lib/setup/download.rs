@@ -36,6 +36,10 @@ pub struct Setup {
     /// Force re-download even if binaries already exist.
     #[builder(default = false)]
     force: bool,
+
+    /// Allow CI to install from the workspace `build/` directory.
+    #[builder(default = true)]
+    allow_ci_local_bundle: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -79,7 +83,9 @@ impl Setup {
             return Ok(());
         }
 
-        if install_ci_local_bundle(bin_dir, lib_dir, &msb_name, &libkrunfw_name).await? {
+        if self.allow_ci_local_bundle
+            && install_ci_local_bundle(bin_dir, lib_dir, &msb_name, &libkrunfw_name).await?
+        {
             tracing::debug!("setup: installed runtime dependencies from local CI build/");
             return Ok(());
         }
