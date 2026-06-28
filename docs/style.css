@@ -3,16 +3,17 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
- * Content width — Mintlify caps #content-area at max-w-xl (36rem), centered
- * with mx-auto, so on wide screens the content is a narrow column with large
- * dead zones on either side. The region between the sidebar and the TOC is
- * `calc(100% - 28rem)`; widen the content to 98% of that (mx-auto then leaves
- * a ~1% gutter on each side). Only applied on xl+ where that width applies, so
- * mid-size screens are untouched. Overriding max-width keeps the existing
- * centering — no margin/overflow changes, so the flex layout can't collapse.
+ * Content width — Mintlify caps #content-area at max-w-xl (36rem) and sets its
+ * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
+ * content is a narrow column with large dead zones. The TOC column to its right
+ * is only 19rem wide (#table-of-contents-layout, with its own pl-10 gap), so
+ * that 28rem reserve leaves ~9rem unused. Drop the 36rem cap and reserve only
+ * 20rem on the right, so the content fills nearly to the TOC; mx-auto keeps a
+ * small symmetric margin. Applied on xl+ where that width applies. This sets a
+ * definite width (no auto-margins), so the flex layout can't collapse.
  * -------------------------------------------------------------------------- */
 @media (min-width: 1280px) {
-  #content-area { max-width: calc((100% - 28rem) * 0.98) !important; }
+  #content-area { max-width: none !important; width: calc(100% - 20rem) !important; }
 }
 
 /*
