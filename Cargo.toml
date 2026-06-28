@@ -76,8 +76,8 @@ microsandbox-network = { version = "=0.6.0", path = "crates/network" }
 microsandbox-protocol = { version = "=0.6.0", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.0", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.0", path = "crates/utils" }
-msb_krun = "=0.1.18"
-msb_krun_utils = "=0.1.18"
+msb_krun = "=0.1.19"
+msb_krun_utils = "=0.1.19"
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }
 
