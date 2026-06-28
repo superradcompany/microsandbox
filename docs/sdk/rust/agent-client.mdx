@@ -12,67 +12,6 @@ The client has two tiers that share one socket and one background reader task:
 
 The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload. The typed and raw methods reach the connection through `Deref` to the underlying client; everything below is callable directly on the value `connect_sandbox` returns.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Module functions<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#agentconnect_sandbox"><span className="msb-rn">agent::connect_sandbox()</span><span className="msb-rg">resolve a name and connect</span></a>
-  <a className="msb-row" href="#agentconnect_sandbox_with_timeout"><span className="msb-rn">agent::connect_sandbox_with_timeout()</span><span className="msb-rg">connect with a handshake timeout</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · AgentClient<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#agentclientconnect"><span className="msb-rn">AgentClient::connect()</span><span className="msb-rg">dial a socket path</span></a>
-  <a className="msb-row" href="#agentclientconnect_with_timeout"><span className="msb-rn">AgentClient::connect_with_timeout()</span><span className="msb-rg">dial with a timeout</span></a>
-  <a className="msb-row" href="#agentclientconnect_with_deadline"><span className="msb-rn">AgentClient::connect_with_deadline()</span><span className="msb-rg">dial with a deadline</span></a>
-  <a className="msb-row" href="#agentclientconnect_sandbox"><span className="msb-rn">AgentClient::connect_sandbox()</span><span className="msb-rg">resolve a name and connect</span></a>
-  <a className="msb-row" href="#agentclientconnect_sandbox_with_timeout"><span className="msb-rn">AgentClient::connect_sandbox_with_timeout()</span><span className="msb-rg">resolve a name, with timeout</span></a>
-  <a className="msb-row" href="#agentclientsocket_path"><span className="msb-rn">AgentClient::socket_path()</span><span className="msb-rg">resolve a path without connecting</span></a>
-  <a className="msb-row" href="#agentclientensure_version_compat_for"><span className="msb-rn">AgentClient::ensure_version_compat_for()</span><span className="msb-rg">gate a type at a generation</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · AgentClient<span className="msb-ct">15</span></p>
-  <a className="msb-row" href="#client-request"><span className="msb-rn">client.request()</span><span className="msb-rg">one-shot typed RPC</span></a>
-  <a className="msb-row" href="#client-stream"><span className="msb-rn">client.stream()</span><span className="msb-rg">open a typed stream</span></a>
-  <a className="msb-row" href="#client-send"><span className="msb-rn">client.send()</span><span className="msb-rg">typed follow-up message</span></a>
-  <a className="msb-row" href="#client-request_raw"><span className="msb-rn">client.request_raw()</span><span className="msb-rg">one-shot raw RPC</span></a>
-  <a className="msb-row" href="#client-stream_raw"><span className="msb-rn">client.stream_raw()</span><span className="msb-rg">open a raw stream</span></a>
-  <a className="msb-row" href="#client-send_raw"><span className="msb-rn">client.send_raw()</span><span className="msb-rg">raw follow-up frame</span></a>
-  <a className="msb-row" href="#client-ready"><span className="msb-rn">client.ready()</span><span className="msb-rg">decoded handshake payload</span></a>
-  <a className="msb-row" href="#client-ready_bytes"><span className="msb-rn">client.ready_bytes()</span><span className="msb-rg">raw handshake CBOR</span></a>
-  <a className="msb-row" href="#client-protocol"><span className="msb-rn">client.protocol()</span><span className="msb-rg">codec generation</span></a>
-  <a className="msb-row" href="#client-is_legacy_protocol"><span className="msb-rn">client.is_legacy_protocol()</span><span className="msb-rg">pre-0.5 relay?</span></a>
-  <a className="msb-row" href="#client-negotiated_version"><span className="msb-rn">client.negotiated_version()</span><span className="msb-rg">negotiated capability generation</span></a>
-  <a className="msb-row" href="#client-agent_version"><span className="msb-rn">client.agent_version()</span><span className="msb-rg">runtime package version</span></a>
-  <a className="msb-row" href="#client-supports"><span className="msb-rn">client.supports()</span><span className="msb-rg">message type available?</span></a>
-  <a className="msb-row" href="#client-ensure_version_compat"><span className="msb-rn">client.ensure_version_compat()</span><span className="msb-rg">gate a type, error if too old</span></a>
-  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the connection</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · AgentBridge<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#agentbridgeconnect_sandbox"><span className="msb-rn">AgentBridge::connect_sandbox()</span><span className="msb-rg">connect by sandbox name</span></a>
-  <a className="msb-row" href="#agentbridgeconnect_sandbox_with_timeout"><span className="msb-rn">AgentBridge::connect_sandbox_with_timeout()</span><span className="msb-rg">connect by name, with timeout</span></a>
-  <a className="msb-row" href="#agentbridgeconnect_path"><span className="msb-rn">AgentBridge::connect_path()</span><span className="msb-rg">connect to a socket path</span></a>
-  <a className="msb-row" href="#agentbridgeconnect_path_with_timeout"><span className="msb-rn">AgentBridge::connect_path_with_timeout()</span><span className="msb-rg">connect to a path, with timeout</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · AgentBridge<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#bridge-request"><span className="msb-rn">bridge.request()</span><span className="msb-rg">one-shot raw request</span></a>
-  <a className="msb-row" href="#bridge-send"><span className="msb-rn">bridge.send()</span><span className="msb-rg">follow-up frame</span></a>
-  <a className="msb-row" href="#bridge-stream_open"><span className="msb-rn">bridge.stream_open()</span><span className="msb-rg">open a stream</span></a>
-  <a className="msb-row" href="#bridge-stream_next"><span className="msb-rn">bridge.stream_next()</span><span className="msb-rg">pull the next frame</span></a>
-  <a className="msb-row" href="#bridge-stream_close"><span className="msb-rn">bridge.stream_close()</span><span className="msb-rg">close a stream</span></a>
-  <a className="msb-row" href="#bridge-ready_bytes"><span className="msb-rn">bridge.ready_bytes()</span><span className="msb-rg">raw handshake CBOR</span></a>
-  <a className="msb-row" href="#bridge-close"><span className="msb-rn">bridge.close()</span><span className="msb-rg">close the connection</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#agentclient">AgentClient</a>
-    <a className="msb-typepill" href="#agentbridge">AgentBridge</a>
-    <a className="msb-typepill" href="#bridgeframe">BridgeFrame</a>
-    <a className="msb-typepill" href="#streamhandle">StreamHandle</a>
-    <a className="msb-typepill" href="#agentprotocol">AgentProtocol</a>
-    <a className="msb-typepill" href="#rawframe">RawFrame</a>
-    <a className="msb-typepill" href="#agentclienterror">AgentClientError</a>
-    <a className="msb-typepill" href="#agentclientresult">AgentClientResult</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust

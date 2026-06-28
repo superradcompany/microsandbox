@@ -9,38 +9,6 @@ Inspect and prune the local OCI image cache: the images that sandbox creation ha
 import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#image-get"><span className="msb-rn">Image.Get()</span><span className="msb-rg">one cached image by reference</span></a>
-  <a className="msb-row" href="#image-list"><span className="msb-rn">Image.List()</span><span className="msb-rg">every cached image</span></a>
-  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.Inspect()</span><span className="msb-rg">handle + config + layers</span></a>
-  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.Remove()</span><span className="msb-rg">delete a cached image</span></a>
-  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.Prune()</span><span className="msb-rg">reclaim unused image data</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · ImageHandle<span className="msb-ct">10</span></p>
-  <a className="msb-row" href="#h-reference"><span className="msb-rn">h.Reference()</span><span className="msb-rg">image reference</span></a>
-  <a className="msb-row" href="#h-manifestdigest"><span className="msb-rn">h.ManifestDigest()</span><span className="msb-rg">manifest digest</span></a>
-  <a className="msb-row" href="#h-architecture"><span className="msb-rn">h.Architecture()</span><span className="msb-rg">resolved architecture</span></a>
-  <a className="msb-row" href="#h-os"><span className="msb-rn">h.OS()</span><span className="msb-rg">resolved operating system</span></a>
-  <a className="msb-row" href="#h-layercount"><span className="msb-rn">h.LayerCount()</span><span className="msb-rg">number of layers</span></a>
-  <a className="msb-row" href="#h-sizebytes"><span className="msb-rn">h.SizeBytes()</span><span className="msb-rg">total size in bytes</span></a>
-  <a className="msb-row" href="#h-createdat"><span className="msb-rn">h.CreatedAt()</span><span className="msb-rg">first-pulled time</span></a>
-  <a className="msb-row" href="#h-lastusedat"><span className="msb-rn">h.LastUsedAt()</span><span className="msb-rg">last-referenced time</span></a>
-  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.Remove()</span><span className="msb-rg">delete this image</span></a>
-  <a className="msb-row" href="#h-inspect"><span className="msb-rn">h.Inspect()</span><span className="msb-rg">full detail for this image</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
-    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
-    <a className="msb-typepill" href="#imageconfig">ImageConfig</a>
-    <a className="msb-typepill" href="#imagelayer">ImageLayer</a>
-    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

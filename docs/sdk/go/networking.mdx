@@ -7,37 +7,6 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
 
 The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) struct passed to [`WithNetwork`](#m-withnetwork). Common shapes come from the [`NetworkPolicy`](#networkpolicy) factory; custom firewalls are built by populating `NetworkConfig.Rules` directly.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#m-withnetwork"><span className="msb-rn">m.WithNetwork()</span><span className="msb-rg">attach a network config</span></a>
-  <a className="msb-row" href="#m-withports"><span className="msb-rn">m.WithPorts()</span><span className="msb-rg">publish TCP ports</span></a>
-  <a className="msb-row" href="#m-withportsudp"><span className="msb-rn">m.WithPortsUDP()</span><span className="msb-rg">publish UDP ports</span></a>
-  <a className="msb-row" href="#m-withportbindings"><span className="msb-rn">m.WithPortBindings()</span><span className="msb-rg">publish on explicit binds</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · NetworkPolicy<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#networkpolicy-publiconly"><span className="msb-rn">NetworkPolicy.PublicOnly()</span><span className="msb-rg">public internet only (default)</span></a>
-  <a className="msb-row" href="#networkpolicy-none"><span className="msb-rn">NetworkPolicy.None()</span><span className="msb-rg">deny everything</span></a>
-  <a className="msb-row" href="#networkpolicy-allowall"><span className="msb-rn">NetworkPolicy.AllowAll()</span><span className="msb-rg">allow everything</span></a>
-  <a className="msb-row" href="#networkpolicy-nonlocal"><span className="msb-rn">NetworkPolicy.NonLocal()</span><span className="msb-rg">public + private, no local</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#networkconfig">NetworkConfig</a>
-    <a className="msb-typepill" href="#policyrule">PolicyRule</a>
-    <a className="msb-typepill" href="#dnsconfig">DNSConfig</a>
-    <a className="msb-typepill" href="#tlsconfig">TLSConfig</a>
-    <a className="msb-typepill" href="#portbinding">PortBinding</a>
-    <a className="msb-typepill" href="#portprotocol">PortProtocol</a>
-    <a className="msb-typepill" href="#policyaction">PolicyAction</a>
-    <a className="msb-typepill" href="#policydirection">PolicyDirection</a>
-    <a className="msb-typepill" href="#policyprotocol">PolicyProtocol</a>
-    <a className="msb-typepill" href="#networkpolicypreset">NetworkPolicyPreset</a>
-    <a className="msb-typepill" href="#destination-groups">Destination groups</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

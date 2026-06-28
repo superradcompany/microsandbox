@@ -7,41 +7,6 @@ description: TypeScript SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `cbor-x`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Constants<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#flag_terminal"><span className="msb-rn">FLAG_TERMINAL</span><span className="msb-rg">last frame for a correlation id</span></a>
-  <a className="msb-row" href="#flag_session_start"><span className="msb-rn">FLAG_SESSION_START</span><span className="msb-rg">first frame of a session</span></a>
-  <a className="msb-row" href="#flag_shutdown"><span className="msb-rn">FLAG_SHUTDOWN</span><span className="msb-rg">request sandbox shutdown</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · AgentClient<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#agentclient-connectsandbox"><span className="msb-rn">AgentClient.connectSandbox()</span><span className="msb-rg">connect by sandbox name</span></a>
-  <a className="msb-row" href="#agentclient-connect"><span className="msb-rn">AgentClient.connect()</span><span className="msb-rg">connect by socket path</span></a>
-  <a className="msb-row" href="#agentclient-socketpath"><span className="msb-rn">AgentClient.socketPath()</span><span className="msb-rg">resolve socket path only</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · AgentClient<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#client-request"><span className="msb-rn">client.request()</span><span className="msb-rg">one frame, one response</span></a>
-  <a className="msb-row" href="#client-stream"><span className="msb-rn">client.stream()</span><span className="msb-rg">open a streaming session</span></a>
-  <a className="msb-row" href="#client-send"><span className="msb-rn">client.send()</span><span className="msb-rg">follow-up frame on an id</span></a>
-  <a className="msb-row" href="#client-readybytes"><span className="msb-rn">client.readyBytes()</span><span className="msb-rg">cached handshake frame</span></a>
-  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the connection</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · AgentStream<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#agentstream"><span className="msb-rn">stream.id</span><span className="msb-rg">protocol correlation id</span></a>
-  <a className="msb-row" href="#agentstream"><span className="msb-rn">stream.next()</span><span className="msb-rg">pull the next frame</span></a>
-  <a className="msb-row" href="#agentstream"><span className="msb-rn">stream.close()</span><span className="msb-rg">release the stream handle</span></a>
-  <a className="msb-row" href="#agentstream"><span className="msb-rn">stream.return()</span><span className="msb-rg">iterator early-exit hook</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#agentclient">AgentClient</a>
-    <a className="msb-typepill" href="#agentstream">AgentStream</a>
-    <a className="msb-typepill" href="#rawframe">RawFrame</a>
-    <a className="msb-typepill" href="#agentconnectoptions">AgentConnectOptions</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript

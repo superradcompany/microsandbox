@@ -14,61 +14,6 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
   Snapshots are **disk-only** and require a sandbox that is not running (stopped or crashed).
 </Note>
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Capture &amp; boot<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="/sdk/typescript/sandbox#fromsnapshot"><span className="msb-rn">.fromSnapshot()</span><span className="msb-rg">boot a sandbox from a snapshot</span></a>
-  <a className="msb-row" href="#handle-snapshot"><span className="msb-rn">handle.snapshot()</span><span className="msb-rg">snapshot a stopped sandbox by name</span></a>
-  <a className="msb-row" href="#handle-snapshotto"><span className="msb-rn">handle.snapshotTo()</span><span className="msb-rg">snapshot to an explicit path</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Snapshot · static<span className="msb-ct">9</span></p>
-  <a className="msb-row" href="#snapshotbuilder"><span className="msb-rn">Snapshot.builder()</span><span className="msb-rg">configure a new snapshot</span></a>
-  <a className="msb-row" href="#snapshot-open"><span className="msb-rn">Snapshot.open()</span><span className="msb-rg">open an existing artifact</span></a>
-  <a className="msb-row" href="#snapshot-get"><span className="msb-rn">Snapshot.get()</span><span className="msb-rg">indexed handle by name or digest</span></a>
-  <a className="msb-row" href="#snapshot-list"><span className="msb-rn">Snapshot.list()</span><span className="msb-rg">indexed snapshots</span></a>
-  <a className="msb-row" href="#snapshot-listdir"><span className="msb-rn">Snapshot.listDir()</span><span className="msb-rg">parse a directory, no index</span></a>
-  <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.remove()</span><span className="msb-rg">delete an artifact</span></a>
-  <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.reindex()</span><span className="msb-rg">rebuild the local index</span></a>
-  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.export()</span><span className="msb-rg">bundle into an archive</span></a>
-  <a className="msb-row" href="#snapshot-import"><span className="msb-rn">Snapshot.import()</span><span className="msb-rg">unpack an archive</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Snapshot · instance<span className="msb-ct">12</span></p>
-  <a className="msb-row" href="#snap-path"><span className="msb-rn">snap.path</span><span className="msb-rg">artifact directory</span></a>
-  <a className="msb-row" href="#snap-digest"><span className="msb-rn">snap.digest</span><span className="msb-rg">canonical content digest</span></a>
-  <a className="msb-row" href="#snap-sizebytes"><span className="msb-rn">snap.sizeBytes</span><span className="msb-rg">apparent upper-layer size</span></a>
-  <a className="msb-row" href="#snap-imageref"><span className="msb-rn">snap.imageRef</span><span className="msb-rg">source image reference</span></a>
-  <a className="msb-row" href="#snap-imagemanifestdigest"><span className="msb-rn">snap.imageManifestDigest</span><span className="msb-rg">pinned image manifest digest</span></a>
-  <a className="msb-row" href="#snap-format"><span className="msb-rn">snap.format</span><span className="msb-rg">upper-layer on-disk format</span></a>
-  <a className="msb-row" href="#snap-fstype"><span className="msb-rn">snap.fstype</span><span className="msb-rg">upper-layer filesystem type</span></a>
-  <a className="msb-row" href="#snap-parent"><span className="msb-rn">snap.parent</span><span className="msb-rg">parent digest, or null</span></a>
-  <a className="msb-row" href="#snap-createdat"><span className="msb-rn">snap.createdAt</span><span className="msb-rg">creation timestamp</span></a>
-  <a className="msb-row" href="#snap-labels"><span className="msb-rn">snap.labels</span><span className="msb-rg">user labels</span></a>
-  <a className="msb-row" href="#snap-sourcesandbox"><span className="msb-rn">snap.sourceSandbox</span><span className="msb-rg">recorded source sandbox</span></a>
-  <a className="msb-row" href="#snap-verify"><span className="msb-rn">snap.verify()</span><span className="msb-rg">recheck content hash</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SnapshotBuilder<span className="msb-ct">6</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#name">.name()</a>
-    <a className="msb-chip" href="#path">.path()</a>
-    <a className="msb-chip" href="#label">.label()</a>
-    <a className="msb-chip" href="#force">.force()</a>
-    <a className="msb-chip" href="#recordintegrity">.recordIntegrity()</a>
-    <a className="msb-chip" href="#create">.create()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SnapshotHandle<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#snapshothandleopen"><span className="msb-rn">snapshotHandle.open()</span><span className="msb-rg">open the underlying artifact</span></a>
-  <a className="msb-row" href="#snapshothandleremove"><span className="msb-rn">snapshotHandle.remove()</span><span className="msb-rg">delete artifact and index row</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#snapshothandle-class">SnapshotHandle</a>
-    <a className="msb-typepill" href="#exportopts-interface">ExportOpts</a>
-    <a className="msb-typepill" href="#snapshotverifyreport-union">SnapshotVerifyReport</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript

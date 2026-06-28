@@ -5,56 +5,6 @@ description: Go SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable SSH server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods<span className="msb-ct">20</span></p>
-  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.SSH()</span><span className="msb-rg">SSH namespace for this sandbox</span></a>
-  <a className="msb-row" href="#ssh-openclient"><span className="msb-rn">ssh.OpenClient()</span><span className="msb-rg">open a native client</span></a>
-  <a className="msb-row" href="#ssh-prepareserver"><span className="msb-rn">ssh.PrepareServer()</span><span className="msb-rg">prepare a server endpoint</span></a>
-  <a className="msb-row" href="#c-exec"><span className="msb-rn">c.Exec()</span><span className="msb-rg">run a command</span></a>
-  <a className="msb-row" href="#c-attach"><span className="msb-rn">c.Attach()</span><span className="msb-rg">interactive shell</span></a>
-  <a className="msb-row" href="#c-sftp"><span className="msb-rn">c.SFTP()</span><span className="msb-rg">open an SFTP session</span></a>
-  <a className="msb-row" href="#c-close"><span className="msb-rn">c.Close()</span><span className="msb-rg">close the client</span></a>
-  <a className="msb-row" href="#srv-serveconnection"><span className="msb-rn">srv.ServeConnection()</span><span className="msb-rg">serve one connection</span></a>
-  <a className="msb-row" href="#srv-close"><span className="msb-rn">srv.Close()</span><span className="msb-rg">release the endpoint</span></a>
-  <a className="msb-row" href="#o-success"><span className="msb-rn">o.Success()</span><span className="msb-rg">exit status was 0</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Read()</span><span className="msb-rg">read a file</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Write()</span><span className="msb-rg">write a file</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Mkdir()</span><span className="msb-rg">create a directory</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Rename()</span><span className="msb-rg">rename a path</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.RealPath()</span><span className="msb-rg">resolve a canonical path</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Symlink()</span><span className="msb-rg">create a symlink</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Close()</span><span className="msb-rg">+ 3 more in SFTPClient</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">10</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#sshclientoption">WithSSHUser()</a>
-    <a className="msb-chip" href="#sshclientoption">WithSSHTerm()</a>
-    <a className="msb-chip" href="#sshclientoption">WithSSHClientSFTP()</a>
-    <a className="msb-chip" href="#sshexecoption">WithSSHTTY()</a>
-    <a className="msb-chip" href="#sshattachoption">WithSSHAttachTerm()</a>
-    <a className="msb-chip" href="#sshattachoption">WithSSHDetachKeys()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHHostKeyPath()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHAuthorizedKeysPath()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHServerUser()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHServerSFTP()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxsshops">SandboxSSHOps</a>
-    <a className="msb-typepill" href="#sshclient">SSHClient</a>
-    <a className="msb-typepill" href="#sftpclient">SFTPClient</a>
-    <a className="msb-typepill" href="#sshserver">SSHServer</a>
-    <a className="msb-typepill" href="#sshoutput">SSHOutput</a>
-    <a className="msb-typepill" href="#sshclientoption">SSHClientOption</a>
-    <a className="msb-typepill" href="#sshexecoption">SSHExecOption</a>
-    <a className="msb-typepill" href="#sshattachoption">SSHAttachOption</a>
-    <a className="msb-typepill" href="#sshserveroption">SSHServerOption</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

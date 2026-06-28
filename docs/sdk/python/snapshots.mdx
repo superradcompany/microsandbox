@@ -5,41 +5,6 @@ description: Python SDK - Snapshot API reference
 
 Capture the disk state of a stopped sandbox as a reusable artifact, then boot fresh sandboxes from it. Snapshots are disk-only and require a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Take a snapshot<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#handle-snapshot"><span className="msb-rn">handle.snapshot()</span><span className="msb-rg">snapshot under a name</span></a>
-  <a className="msb-row" href="#handle-snapshot_to"><span className="msb-rn">handle.snapshot_to()</span><span className="msb-rg">snapshot to a path</span></a>
-  <a className="msb-row" href="#snapshot-create"><span className="msb-rn">Snapshot.create()</span><span className="msb-rg">snapshot a stopped sandbox by name</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Boot from a snapshot<span className="msb-ct">1</span></p>
-  <a className="msb-row" href="#sandbox-create"><span className="msb-rn">Sandbox.create(snapshot=...)</span><span className="msb-rg">boot a fresh sandbox from an artifact</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Manage artifacts<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#snapshot-open"><span className="msb-rn">Snapshot.open()</span><span className="msb-rg">open an artifact by name or path</span></a>
-  <a className="msb-row" href="#snapshot-get"><span className="msb-rn">Snapshot.get()</span><span className="msb-rg">handle from the local index</span></a>
-  <a className="msb-row" href="#snapshot-list"><span className="msb-rn">Snapshot.list()</span><span className="msb-rg">indexed snapshots</span></a>
-  <a className="msb-row" href="#snapshot-list_dir"><span className="msb-rn">Snapshot.list_dir()</span><span className="msb-rg">parse a directory of artifacts</span></a>
-  <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.remove()</span><span className="msb-rg">delete an artifact</span></a>
-  <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.reindex()</span><span className="msb-rg">rebuild the local index</span></a>
-  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.export()</span><span className="msb-rg">bundle into an archive</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Move artifacts<span className="msb-ct">1</span></p>
-  <a className="msb-row" href="#snapshot-import_"><span className="msb-rn">Snapshot.import_()</span><span className="msb-rg">unpack an archive</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Inspect<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#snap-verify"><span className="msb-rn">snap.verify()</span><span className="msb-rg">recompute and check integrity</span></a>
-  <a className="msb-row" href="#handle-open"><span className="msb-rn">handle.open()</span><span className="msb-rg">load full metadata from a handle</span></a>
-  <a className="msb-row" href="#handle-remove"><span className="msb-rn">handle.remove()</span><span className="msb-rg">delete via a handle</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#snapshot">Snapshot</a>
-    <a className="msb-typepill" href="#snapshothandle">SnapshotHandle</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python

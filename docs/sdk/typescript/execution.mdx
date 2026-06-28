@@ -5,66 +5,6 @@ description: TypeScript SDK - Command execution API reference
 
 Run commands inside a running sandbox: collect output in one shot, stream it as it arrives, attach an interactive PTY, or pipe data to stdin. These methods live on a running [`Sandbox`](/sdk/typescript/sandbox). See [Commands](/sandboxes/commands) for usage examples.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Run &amp; collect<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#sandbox-exec"><span className="msb-rn">sandbox.exec()</span><span className="msb-rg">run, buffer output</span></a>
-  <a className="msb-row" href="#sandbox-execwith"><span className="msb-rn">sandbox.execWith()</span><span className="msb-rg">run with per-call overrides</span></a>
-  <a className="msb-row" href="#sandbox-shell"><span className="msb-rn">sandbox.shell()</span><span className="msb-rg">run through the shell</span></a>
-  <a className="msb-row" href="#sandbox-attachshell"><span className="msb-rn">sandbox.attachShell()</span><span className="msb-rg">attach the default shell</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Stream &amp; attach<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#sandbox-execstream"><span className="msb-rn">sandbox.execStream()</span><span className="msb-rg">stream events live</span></a>
-  <a className="msb-row" href="#sandbox-execstreamwith"><span className="msb-rn">sandbox.execStreamWith()</span><span className="msb-rg">stream with overrides</span></a>
-  <a className="msb-row" href="#sandbox-shellstream"><span className="msb-rn">sandbox.shellStream()</span><span className="msb-rg">stream through the shell</span></a>
-  <a className="msb-row" href="#sandbox-attach"><span className="msb-rn">sandbox.attach()</span><span className="msb-rg">interactive PTY bridge</span></a>
-  <a className="msb-row" href="#sandbox-attachwith"><span className="msb-rn">sandbox.attachWith()</span><span className="msb-rg">attach with overrides</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · ExecOptionsBuilder<span className="msb-ct">13</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#execoptionsbuilder">.arg()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.args()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.cwd()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.user()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.env()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.envs()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.timeout()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.stdinPipe()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.stdinBytes()</a>
-    <a className="msb-chip" href="#execoptionsbuilder">.tty()</a>
-    <a className="msb-more" href="#execoptionsbuilder">+ 3 more in the Types section</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · AttachOptionsBuilder<span className="msb-ct">9</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#attachoptionsbuilder">.arg()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.args()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.cwd()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.user()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.env()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.envs()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.detachKeys()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.rlimit()</a>
-    <a className="msb-chip" href="#attachoptionsbuilder">.rlimitRange()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#execoutput">ExecOutput</a>
-    <a className="msb-typepill" href="#exechandle">ExecHandle</a>
-    <a className="msb-typepill" href="#execsink">ExecSink</a>
-    <a className="msb-typepill" href="#execevent">ExecEvent</a>
-    <a className="msb-typepill" href="#exitstatus">ExitStatus</a>
-    <a className="msb-typepill" href="#execoptionsbuilder">ExecOptionsBuilder</a>
-    <a className="msb-typepill" href="#attachoptionsbuilder">AttachOptionsBuilder</a>
-    <a className="msb-typepill" href="#stdin">Stdin</a>
-    <a className="msb-typepill" href="#stdinmode">StdinMode</a>
-    <a className="msb-typepill" href="#rlimit">Rlimit</a>
-    <a className="msb-typepill" href="#rlimitresource">RlimitResource</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript

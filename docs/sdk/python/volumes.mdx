@@ -5,44 +5,6 @@ description: Python SDK - Volume API reference
 
 Create and manage named persistent volumes, and build the mount configs that attach storage to a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · Volume<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#volume-create"><span className="msb-rn">Volume.create()</span><span className="msb-rg">create a named volume</span></a>
-  <a className="msb-row" href="#volume-get"><span className="msb-rn">Volume.get()</span><span className="msb-rg">handle to an existing one</span></a>
-  <a className="msb-row" href="#volume-list"><span className="msb-rn">Volume.list()</span><span className="msb-rg">all volumes</span></a>
-  <a className="msb-row" href="#volume-remove"><span className="msb-rn">Volume.remove()</span><span className="msb-rg">delete a volume</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Mount factories · Volume<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#volume-bind"><span className="msb-rn">Volume.bind()</span><span className="msb-rg">mount a host directory</span></a>
-  <a className="msb-row" href="#volume-named"><span className="msb-rn">Volume.named()</span><span className="msb-rg">mount a named volume</span></a>
-  <a className="msb-row" href="#volume-tmpfs"><span className="msb-rn">Volume.tmpfs()</span><span className="msb-rg">in-memory filesystem</span></a>
-  <a className="msb-row" href="#volume-disk"><span className="msb-rn">Volume.disk()</span><span className="msb-rg">mount a disk image</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · Volume<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#volume-name"><span className="msb-rn">volume.name</span><span className="msb-rg">volume name</span></a>
-  <a className="msb-row" href="#volume-path"><span className="msb-rn">volume.path</span><span className="msb-rg">host path</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · VolumeFs<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.read()</span><span className="msb-rg">read bytes</span></a>
-  <a className="msb-row" href="#fs-read_text"><span className="msb-rn">fs.read_text()</span><span className="msb-rg">read UTF-8 text</span></a>
-  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.write()</span><span className="msb-rg">write bytes</span></a>
-  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.list()</span><span className="msb-rg">list a directory</span></a>
-  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.mkdir()</span><span className="msb-rg">create a directory</span></a>
-  <a className="msb-row" href="#fs-remove_file"><span className="msb-rn">fs.remove_file()</span><span className="msb-rg">remove a file</span></a>
-  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.exists()</span><span className="msb-rg">check a path exists</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
-    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
-    <a className="msb-typepill" href="#mountconfig">MountConfig</a>
-    <a className="msb-typepill" href="#mountkind">MountKind</a>
-    <a className="msb-typepill" href="#diskimageformat">DiskImageFormat</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python

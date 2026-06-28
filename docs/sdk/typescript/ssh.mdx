@@ -5,48 +5,6 @@ description: TypeScript SDK - SSH API reference
 
 Reach a running sandbox over SSH: open an in-process client, run commands or attach an interactive shell, transfer files over SFTP, or expose the sandbox as a server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Sandbox · SandboxSshOps<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH namespace for the sandbox</span></a>
-  <a className="msb-row" href="#ssh-openclient"><span className="msb-rn">ssh.openClient()</span><span className="msb-rg">open an in-process SSH client</span></a>
-  <a className="msb-row" href="#ssh-prepareserver"><span className="msb-rn">ssh.prepareServer()</span><span className="msb-rg">prepare a server endpoint</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SshClient<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#client-exec"><span className="msb-rn">client.exec()</span><span className="msb-rg">run a command, collect output</span></a>
-  <a className="msb-row" href="#client-attach"><span className="msb-rn">client.attach()</span><span className="msb-rg">attach an interactive shell</span></a>
-  <a className="msb-row" href="#client-sftp"><span className="msb-rn">client.sftp()</span><span className="msb-rg">open an SFTP session</span></a>
-  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the client</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SftpClient<span className="msb-ct">10</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#sftp-read">.read()</a>
-    <a className="msb-chip" href="#sftp-write">.write()</a>
-    <a className="msb-chip" href="#sftp-mkdir">.mkdir()</a>
-    <a className="msb-chip" href="#sftp-removefile">.removeFile()</a>
-    <a className="msb-chip" href="#sftp-removedir">.removeDir()</a>
-    <a className="msb-chip" href="#sftp-rename">.rename()</a>
-    <a className="msb-chip" href="#sftp-realpath">.realPath()</a>
-    <a className="msb-chip" href="#sftp-readlink">.readLink()</a>
-    <a className="msb-chip" href="#sftp-symlink">.symlink()</a>
-    <a className="msb-chip" href="#sftp-close">.close()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SshServer<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#server-serveconnection"><span className="msb-rn">server.serveConnection()</span><span className="msb-rg">serve one transport over stdio</span></a>
-  <a className="msb-row" href="#server-close"><span className="msb-rn">server.close()</span><span className="msb-rg">release the endpoint</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sshoutput">SshOutput</a>
-    <a className="msb-typepill" href="#sshclientoptions">SshClientOptions</a>
-    <a className="msb-typepill" href="#sshexecoptions">SshExecOptions</a>
-    <a className="msb-typepill" href="#sshattachoptions">SshAttachOptions</a>
-    <a className="msb-typepill" href="#sshserveroptions">SshServerOptions</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript

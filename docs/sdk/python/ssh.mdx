@@ -5,50 +5,6 @@ description: Python SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable server endpoint that serves connections over stdin/stdout. See [SSH](/sandboxes/ssh) for usage flows.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Sandbox<span className="msb-ct">1</span></p>
-  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH namespace for this sandbox</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SandboxSshOps<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#ssh-open_client"><span className="msb-rn">ssh.open_client()</span><span className="msb-rg">open a client</span></a>
-  <a className="msb-row" href="#ssh-prepare_server"><span className="msb-rn">ssh.prepare_server()</span><span className="msb-rg">prepare a server endpoint</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SshClient<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#client-exec"><span className="msb-rn">client.exec()</span><span className="msb-rg">run a command</span></a>
-  <a className="msb-row" href="#client-attach"><span className="msb-rn">client.attach()</span><span className="msb-rg">interactive shell</span></a>
-  <a className="msb-row" href="#client-sftp"><span className="msb-rn">client.sftp()</span><span className="msb-rg">open an SFTP session</span></a>
-  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the session</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SshServer<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#server-serve_connection"><span className="msb-rn">server.serve_connection()</span><span className="msb-rg">serve one connection over stdin/stdout</span></a>
-  <a className="msb-row" href="#server-close"><span className="msb-rn">server.close()</span><span className="msb-rg">release the endpoint</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>SftpClient<span className="msb-ct">10</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#sftpclient">read()</a>
-    <a className="msb-chip" href="#sftpclient">write()</a>
-    <a className="msb-chip" href="#sftpclient">mkdir()</a>
-    <a className="msb-chip" href="#sftpclient">remove_file()</a>
-    <a className="msb-chip" href="#sftpclient">remove_dir()</a>
-    <a className="msb-chip" href="#sftpclient">rename()</a>
-    <a className="msb-chip" href="#sftpclient">real_path()</a>
-    <a className="msb-chip" href="#sftpclient">read_link()</a>
-    <a className="msb-chip" href="#sftpclient">symlink()</a>
-    <a className="msb-chip" href="#sftpclient">close()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxsshops">SandboxSshOps</a>
-    <a className="msb-typepill" href="#sshclient">SshClient</a>
-    <a className="msb-typepill" href="#sshserver">SshServer</a>
-    <a className="msb-typepill" href="#sftpclient">SftpClient</a>
-    <a className="msb-typepill" href="#sshoutput">SshOutput</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python

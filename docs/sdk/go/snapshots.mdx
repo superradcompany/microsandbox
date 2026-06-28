@@ -9,66 +9,6 @@ Disk-only snapshots of a sandbox that is not running. Create artifacts from a st
   Snapshots are **disk-only** and require a sandbox that is stopped or crashed.
 </Note>
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Functions · Snapshot<span className="msb-ct">9</span></p>
-  <a className="msb-row" href="#snapshot-create"><span className="msb-rn">Snapshot.Create()</span><span className="msb-rg">snapshot a stopped sandbox</span></a>
-  <a className="msb-row" href="#snapshot-open"><span className="msb-rn">Snapshot.Open()</span><span className="msb-rg">open an artifact by name/path</span></a>
-  <a className="msb-row" href="#snapshot-get"><span className="msb-rn">Snapshot.Get()</span><span className="msb-rg">index handle by name/digest</span></a>
-  <a className="msb-row" href="#snapshot-list"><span className="msb-rn">Snapshot.List()</span><span className="msb-rg">indexed snapshots</span></a>
-  <a className="msb-row" href="#snapshot-listdir"><span className="msb-rn">Snapshot.ListDir()</span><span className="msb-rg">walk a directory</span></a>
-  <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.Remove()</span><span className="msb-rg">delete artifact + index row</span></a>
-  <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.Reindex()</span><span className="msb-rg">rebuild the local index</span></a>
-  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.Export()</span><span className="msb-rg">bundle into an archive</span></a>
-  <a className="msb-row" href="#snapshot-import"><span className="msb-rn">Snapshot.Import()</span><span className="msb-rg">unpack an archive</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SandboxHandle<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#h-snapshot"><span className="msb-rn">h.Snapshot()</span><span className="msb-rg">snapshot to a bare name</span></a>
-  <a className="msb-row" href="#h-snapshotto"><span className="msb-rn">h.SnapshotTo()</span><span className="msb-rg">snapshot to a directory</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SnapshotArtifact<span className="msb-ct">12</span></p>
-  <a className="msb-row" href="#s-verify"><span className="msb-rn">s.Verify()</span><span className="msb-rg">recompute content integrity</span></a>
-  <a className="msb-row" href="#s-path"><span className="msb-rn">s.Path()</span><span className="msb-rg">artifact directory</span></a>
-  <a className="msb-row" href="#s-digest"><span className="msb-rn">s.Digest()</span><span className="msb-rg">manifest digest</span></a>
-  <a className="msb-row" href="#s-sizebytes"><span className="msb-rn">s.SizeBytes()</span><span className="msb-rg">upper-layer size</span></a>
-  <a className="msb-row" href="#s-imageref"><span className="msb-rn">s.ImageRef()</span><span className="msb-rg">source image reference</span></a>
-  <a className="msb-row" href="#s-imagemanifestdigest"><span className="msb-rn">s.ImageManifestDigest()</span><span className="msb-rg">pinned OCI manifest digest</span></a>
-  <a className="msb-row" href="#s-format"><span className="msb-rn">s.Format()</span><span className="msb-rg">raw or qcow2</span></a>
-  <a className="msb-row" href="#s-fstype"><span className="msb-rn">s.Fstype()</span><span className="msb-rg">upper filesystem type</span></a>
-  <a className="msb-row" href="#s-parent"><span className="msb-rn">s.Parent()</span><span className="msb-rg">parent digest, or nil</span></a>
-  <a className="msb-row" href="#s-createdat"><span className="msb-rn">s.CreatedAt()</span><span className="msb-rg">RFC 3339 timestamp</span></a>
-  <a className="msb-row" href="#s-labels"><span className="msb-rn">s.Labels()</span><span className="msb-rg">user labels</span></a>
-  <a className="msb-row" href="#s-sourcesandbox"><span className="msb-rn">s.SourceSandbox()</span><span className="msb-rg">source sandbox name</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *SnapshotHandle<span className="msb-ct">10</span></p>
-  <a className="msb-row" href="#h-open"><span className="msb-rn">h.Open()</span><span className="msb-rg">open the artifact</span></a>
-  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.Remove()</span><span className="msb-rg">delete this snapshot</span></a>
-  <a className="msb-row" href="#h-digest"><span className="msb-rn">h.Digest()</span><span className="msb-rg">manifest digest</span></a>
-  <a className="msb-row" href="#h-name"><span className="msb-rn">h.Name()</span><span className="msb-rg">bare-name alias, or nil</span></a>
-  <a className="msb-row" href="#h-parentdigest"><span className="msb-rn">h.ParentDigest()</span><span className="msb-rg">parent digest, or nil</span></a>
-  <a className="msb-row" href="#h-imageref"><span className="msb-rn">h.ImageRef()</span><span className="msb-rg">pinned image reference</span></a>
-  <a className="msb-row" href="#h-format"><span className="msb-rn">h.Format()</span><span className="msb-rg">raw or qcow2</span></a>
-  <a className="msb-row" href="#h-sizebytes"><span className="msb-rn">h.SizeBytes()</span><span className="msb-rg">upper size at index time</span></a>
-  <a className="msb-row" href="#h-path"><span className="msb-rn">h.Path()</span><span className="msb-rg">artifact directory</span></a>
-  <a className="msb-row" href="#h-createdat"><span className="msb-rn">h.CreatedAt()</span><span className="msb-rg">creation time</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Options<span className="msb-ct">1</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="/sdk/go/sandbox#withsnapshot">WithSnapshot()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#snapshotartifactstruct">SnapshotArtifact</a>
-    <a className="msb-typepill" href="#snapshothandlestruct">SnapshotHandle</a>
-    <a className="msb-typepill" href="#snapshotcreateoptionsstruct">SnapshotCreateOptions</a>
-    <a className="msb-typepill" href="#snapshotexportoptionsstruct">SnapshotExportOptions</a>
-    <a className="msb-typepill" href="#snapshotverifyreportstruct">SnapshotVerifyReport</a>
-    <a className="msb-typepill" href="#snapshotupperverifystatusstruct">SnapshotUpperVerifyStatus</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

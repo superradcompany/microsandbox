@@ -7,35 +7,6 @@ description: Python SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Constructors<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#agentclient-connect_sandbox"><span className="msb-rn">AgentClient.connect_sandbox()</span><span className="msb-rg">connect to a running sandbox by name</span></a>
-  <a className="msb-row" href="#agentclient-connect"><span className="msb-rn">AgentClient.connect()</span><span className="msb-rg">connect to a relay socket by path</span></a>
-  <a className="msb-row" href="#agentclient-socket_path"><span className="msb-rn">AgentClient.socket_path()</span><span className="msb-rg">resolve the socket path, don't connect</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#client-request"><span className="msb-rn">client.request()</span><span className="msb-rg">one frame, one response</span></a>
-  <a className="msb-row" href="#client-stream"><span className="msb-rn">client.stream()</span><span className="msb-rg">open a streaming session</span></a>
-  <a className="msb-row" href="#client-send"><span className="msb-rn">client.send()</span><span className="msb-rg">follow-up frame on a session</span></a>
-  <a className="msb-row" href="#client-ready_bytes"><span className="msb-rn">client.ready_bytes()</span><span className="msb-rg">cached handshake frame</span></a>
-  <a className="msb-row" href="#client-close"><span className="msb-rn">client.close()</span><span className="msb-rg">close the client</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Constants</p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#constants">FLAG_TERMINAL</a>
-    <a className="msb-chip" href="#constants">FLAG_SESSION_START</a>
-    <a className="msb-chip" href="#constants">FLAG_SHUTDOWN</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#rawframe">RawFrame</a>
-    <a className="msb-typepill" href="#agentstream">AgentStream</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python

@@ -7,60 +7,6 @@ Run commands inside a running sandbox, collect their output, or stream events li
 
 The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *Sandbox<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#sb-exec"><span className="msb-rn">sb.Exec()</span><span className="msb-rg">run a command, collect output</span></a>
-  <a className="msb-row" href="#sb-shell"><span className="msb-rn">sb.Shell()</span><span className="msb-rg">run via /bin/sh -c</span></a>
-  <a className="msb-row" href="#sb-execstream"><span className="msb-rn">sb.ExecStream()</span><span className="msb-rg">run with streaming events</span></a>
-  <a className="msb-row" href="#sb-shellstream"><span className="msb-rn">sb.ShellStream()</span><span className="msb-rg">streaming shell</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecHandle<span className="msb-ct">8</span></p>
-  <a className="msb-row" href="#h-recv"><span className="msb-rn">h.Recv()</span><span className="msb-rg">next streamed event</span></a>
-  <a className="msb-row" href="#h-collect"><span className="msb-rn">h.Collect()</span><span className="msb-rg">drain into ExecOutput</span></a>
-  <a className="msb-row" href="#h-wait"><span className="msb-rn">h.Wait()</span><span className="msb-rg">wait for exit code</span></a>
-  <a className="msb-row" href="#h-takestdin"><span className="msb-rn">h.TakeStdin()</span><span className="msb-rg">take the stdin pipe</span></a>
-  <a className="msb-row" href="#h-id"><span className="msb-rn">h.ID()</span><span className="msb-rg">session correlation id</span></a>
-  <a className="msb-row" href="#h-signal"><span className="msb-rn">h.Signal()</span><span className="msb-rg">send a Unix signal</span></a>
-  <a className="msb-row" href="#h-kill"><span className="msb-rn">h.Kill()</span><span className="msb-rg">send SIGKILL</span></a>
-  <a className="msb-row" href="#h-close"><span className="msb-rn">h.Close()</span><span className="msb-rg">release the handle</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecOutput<span className="msb-ct">6</span></p>
-  <a className="msb-row" href="#out-stdout"><span className="msb-rn">out.Stdout()</span><span className="msb-rg">stdout as string</span></a>
-  <a className="msb-row" href="#out-stderr"><span className="msb-rn">out.Stderr()</span><span className="msb-rg">stderr as string</span></a>
-  <a className="msb-row" href="#out-stdoutbytes"><span className="msb-rn">out.StdoutBytes()</span><span className="msb-rg">raw stdout bytes</span></a>
-  <a className="msb-row" href="#out-stderrbytes"><span className="msb-rn">out.StderrBytes()</span><span className="msb-rg">raw stderr bytes</span></a>
-  <a className="msb-row" href="#out-exitcode"><span className="msb-rn">out.ExitCode()</span><span className="msb-rg">exit code, or -1</span></a>
-  <a className="msb-row" href="#out-success"><span className="msb-rn">out.Success()</span><span className="msb-rg">exited with code 0</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecSink<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#sink-write"><span className="msb-rn">sink.Write()</span><span className="msb-rg">write to stdin (io.Writer)</span></a>
-  <a className="msb-row" href="#sink-writectx"><span className="msb-rn">sink.WriteCtx()</span><span className="msb-rg">write with explicit ctx</span></a>
-  <a className="msb-row" href="#sink-close"><span className="msb-rn">sink.Close()</span><span className="msb-rg">send EOF, finalize</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options · ExecOption<span className="msb-ct">5</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#withexeccwd">WithExecCwd()</a>
-    <a className="msb-chip" href="#withexectimeout">WithExecTimeout()</a>
-    <a className="msb-chip" href="#withexecstdinpipe">WithExecStdinPipe()</a>
-    <a className="msb-chip" href="#withexecuser">WithExecUser()</a>
-    <a className="msb-chip" href="#withexecenv">WithExecEnv()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#execoutput">ExecOutput</a>
-    <a className="msb-typepill" href="#exechandle">ExecHandle</a>
-    <a className="msb-typepill" href="#execsink">ExecSink</a>
-    <a className="msb-typepill" href="#execevent">ExecEvent</a>
-    <a className="msb-typepill" href="#execeventkind">ExecEventKind</a>
-    <a className="msb-typepill" href="#execfailure">ExecFailure</a>
-    <a className="msb-typepill" href="#execconfig">ExecConfig</a>
-    <a className="msb-typepill" href="#execoption">ExecOption</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

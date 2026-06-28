@@ -7,40 +7,6 @@ description: Go SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `fxamacker/cbor`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Constants<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#flagterminal"><span className="msb-rn">FlagTerminal</span><span className="msb-rg">last frame for a correlation id</span></a>
-  <a className="msb-row" href="#flagsessionstart"><span className="msb-rn">FlagSessionStart</span><span className="msb-rg">first frame of a session</span></a>
-  <a className="msb-row" href="#flagshutdown"><span className="msb-rn">FlagShutdown</span><span className="msb-rg">request sandbox shutdown</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#m-connectagentsandbox"><span className="msb-rn">m.ConnectAgentSandbox()</span><span className="msb-rg">connect by sandbox name</span></a>
-  <a className="msb-row" href="#m-connectagentpath"><span className="msb-rn">m.ConnectAgentPath()</span><span className="msb-rg">connect by socket path</span></a>
-  <a className="msb-row" href="#m-agentsocketpath"><span className="msb-rn">m.AgentSocketPath()</span><span className="msb-rg">resolve socket path only</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · AgentClient<span className="msb-ct">6</span></p>
-  <a className="msb-row" href="#c-request"><span className="msb-rn">c.Request()</span><span className="msb-rg">one frame, one response</span></a>
-  <a className="msb-row" href="#c-stream"><span className="msb-rn">c.Stream()</span><span className="msb-rg">open a streaming session</span></a>
-  <a className="msb-row" href="#c-send"><span className="msb-rn">c.Send()</span><span className="msb-rg">follow-up frame on an id</span></a>
-  <a className="msb-row" href="#c-readybytes"><span className="msb-rn">c.ReadyBytes()</span><span className="msb-rg">cached handshake frame</span></a>
-  <a className="msb-row" href="#c-close"><span className="msb-rn">c.Close()</span><span className="msb-rg">close the connection</span></a>
-  <a className="msb-row" href="#c-closectx"><span className="msb-rn">c.CloseCtx()</span><span className="msb-rg">close with a context</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · AgentStream<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#s-next"><span className="msb-rn">s.Next()</span><span className="msb-rg">pull the next frame</span></a>
-  <a className="msb-row" href="#s-id"><span className="msb-rn">s.ID()</span><span className="msb-rg">protocol correlation id</span></a>
-  <a className="msb-row" href="#s-close"><span className="msb-rn">s.Close()</span><span className="msb-rg">release the stream handle</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#agentclient">AgentClient</a>
-    <a className="msb-typepill" href="#agentstream">AgentStream</a>
-    <a className="msb-typepill" href="#rawframe">RawFrame</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go

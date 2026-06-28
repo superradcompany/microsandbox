@@ -5,69 +5,6 @@ description: Rust SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static<span className="msb-ct">6</span></p>
-  <a className="msb-row" href="#sandboxbuilder"><span className="msb-rn">Sandbox::builder()</span><span className="msb-rg">configure a new sandbox</span></a>
-  <a className="msb-row" href="#sandboxget"><span className="msb-rn">Sandbox::get()</span><span className="msb-rg">handle to an existing one</span></a>
-  <a className="msb-row" href="#sandboxlist"><span className="msb-rn">Sandbox::list()</span><span className="msb-rg">all sandboxes</span></a>
-  <a className="msb-row" href="#sandboxstart"><span className="msb-rn">Sandbox::start()</span><span className="msb-rg">restart a stopped one</span></a>
-  <a className="msb-row" href="#sandboxstart_detached"><span className="msb-rn">Sandbox::start_detached()</span><span className="msb-rg">restart detached</span></a>
-  <a className="msb-row" href="#sandboxremove"><span className="msb-rn">Sandbox::remove()</span><span className="msb-rg">delete a stopped one</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">16</span></p>
-  <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run a command</span></a>
-  <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.shell()</span><span className="msb-rg">interactive shell</span></a>
-  <a className="msb-row" href="#sb-fs"><span className="msb-rn">sb.fs()</span><span className="msb-rg">read / write files</span></a>
-  <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.logs()</span><span className="msb-rg">captured output</span></a>
-  <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.metrics()</span><span className="msb-rg">resource snapshot</span></a>
-  <a className="msb-row" href="#sb-metrics_stream"><span className="msb-rn">sb.metrics_stream()</span><span className="msb-rg">stream metrics</span></a>
-  <a className="msb-row" href="#sb-stop"><span className="msb-rn">sb.stop()</span><span className="msb-rg">graceful shutdown</span></a>
-  <a className="msb-row" href="#sb-kill"><span className="msb-rn">sb.kill()</span><span className="msb-rg">force terminate</span></a>
-  <a className="msb-row" href="#sb-drain"><span className="msb-rn">sb.drain()</span><span className="msb-rg">graceful drain</span></a>
-  <a className="msb-row" href="#sb-detach"><span className="msb-rn">sb.detach()</span><span className="msb-rg">release, keep running</span></a>
-  <a className="msb-row" href="#sb-wait"><span className="msb-rn">sb.wait()</span><span className="msb-rg">block until it exits</span></a>
-  <a className="msb-row" href="#sb-stop_and_wait"><span className="msb-rn">sb.stop_and_wait()</span><span className="msb-rg">stop, then await exit</span></a>
-  <a className="msb-row" href="#sb-config"><span className="msb-rn">sb.config()</span><span className="msb-rg">full configuration</span></a>
-  <a className="msb-row" href="#sb-name"><span className="msb-rn">sb.name()</span><span className="msb-rg">sandbox name</span></a>
-  <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle()</span><span className="msb-rg">attached vs detached</span></a>
-  <a className="msb-row" href="#sb-remove_persisted"><span className="msb-rn">sb.remove_persisted()</span><span className="msb-rg">delete persisted state</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">32</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#image">.image()</a>
-    <a className="msb-chip" href="#memory">.memory()</a>
-    <a className="msb-chip" href="#cpus">.cpus()</a>
-    <a className="msb-chip" href="#port">.port()</a>
-    <a className="msb-chip" href="#volume">.volume()</a>
-    <a className="msb-chip" href="#env">.env()</a>
-    <a className="msb-chip" href="#secret">.secret()</a>
-    <a className="msb-chip" href="#network">.network()</a>
-    <a className="msb-chip" href="#init">.init()</a>
-    <a className="msb-chip" href="#patch">.patch()</a>
-    <a className="msb-chip" href="#create">.create()</a>
-    <a className="msb-chip" href="#build">.build()</a>
-    <a className="msb-more" href="#build">+ 20 more in the Builder section</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxconfig">SandboxConfig</a>
-    <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
-    <a className="msb-typepill" href="#sandboxmetrics">SandboxMetrics</a>
-    <a className="msb-typepill" href="#sandboxstatus">SandboxStatus</a>
-    <a className="msb-typepill" href="#logentry">LogEntry</a>
-    <a className="msb-typepill" href="#logoptions">LogOptions</a>
-    <a className="msb-typepill" href="#logsource">LogSource</a>
-    <a className="msb-typepill" href="#loglevel">LogLevel</a>
-    <a className="msb-typepill" href="#pullpolicy">PullPolicy</a>
-    <a className="msb-typepill" href="#registryauth">RegistryAuth</a>
-    <a className="msb-typepill" href="/sdk/rust/execution#exitstatus">ExitStatus</a>
-    <a className="msb-typepill" href="#patchbuilder">PatchBuilder</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust

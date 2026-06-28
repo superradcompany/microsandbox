@@ -5,34 +5,6 @@ description: Python SDK - Command execution API reference
 
 Run commands inside a running sandbox: collect output in one shot, stream events as they arrive, or bridge your terminal to an interactive PTY. These methods live on a running [`Sandbox`](/sdk/python/sandbox). See [Commands](/sandboxes/commands) for usage examples.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Run &amp; collect<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#sandbox-exec"><span className="msb-rn">sandbox.exec()</span><span className="msb-rg">run, buffer output</span></a>
-  <a className="msb-row" href="#sandbox-shell"><span className="msb-rn">sandbox.shell()</span><span className="msb-rg">run through the shell</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Stream<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#sandbox-exec_stream"><span className="msb-rn">sandbox.exec_stream()</span><span className="msb-rg">stream events live</span></a>
-  <a className="msb-row" href="#sandbox-shell_stream"><span className="msb-rn">sandbox.shell_stream()</span><span className="msb-rg">stream through the shell</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Attach<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#sandbox-attach"><span className="msb-rn">sandbox.attach()</span><span className="msb-rg">interactive PTY bridge</span></a>
-  <a className="msb-row" href="#sandbox-attach_shell"><span className="msb-rn">sandbox.attach_shell()</span><span className="msb-rg">attach the default shell</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#execoutput">ExecOutput</a>
-    <a className="msb-typepill" href="#exechandle">ExecHandle</a>
-    <a className="msb-typepill" href="#execsink">ExecSink</a>
-    <a className="msb-typepill" href="#execevent">ExecEvent</a>
-    <a className="msb-typepill" href="#exitstatus">ExitStatus</a>
-    <a className="msb-typepill" href="#stdin">Stdin</a>
-    <a className="msb-typepill" href="#rlimit">Rlimit</a>
-    <a className="msb-typepill" href="#rlimitresource">RlimitResource</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python
