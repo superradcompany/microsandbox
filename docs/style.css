@@ -17,7 +17,7 @@ body {
  * separate one method from the previous one's body and keep the list
  * scannable. Scoped to method headings so section/type headings are
  * unaffected. */
-h4:has(.msb-hn) { margin-top: 3rem !important; }
+h4:has(.msb-hn) { margin-top: 9rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }
