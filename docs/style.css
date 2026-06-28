@@ -32,6 +32,9 @@ body {
  * scannable. Scoped to method headings so section/type headings are
  * unaffected. */
 h4:has(.msb-hn) { margin-top: 5rem !important; }
+/* but the first method directly under a section heading needs far less — the
+ * section heading already separates it from what came before. */
+h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }
