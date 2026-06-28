@@ -107,6 +107,15 @@ async fn exec(
 ) -> MicrosandboxResult<ExecOutput>
 ```
 
+<Accordion title="Example">
+
+```rust
+let out = sb.exec("python", ["-V"]).await?;
+println!("{}", out.stdout()?);
+```
+
+</Accordion>
+
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit status. `cmd` is passed literally to the guest agent: the image ENTRYPOINT is **not** consulted, and `args` are not shell-interpreted. For long-running processes or large output, use [`exec_stream()`](#sb-exec_stream); for shell syntax like pipes and redirects, use [`shell()`](#sb-shell).
 
 <p className="msb-label">Parameters</p>
@@ -131,15 +140,6 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let out = sb.exec("python", ["-V"]).await?;
-println!("{}", out.stdout()?);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec_with()</span>
@@ -152,6 +152,21 @@ async fn exec_with(
     f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
 ) -> MicrosandboxResult<ExecOutput>
 ```
+
+<Accordion title="Example">
+
+```rust
+use std::time::Duration;
+
+let out = sb.exec_with("python", |e| e
+    .args(["compute.py"])
+    .cwd("/app")
+    .env("LOG_LEVEL", "debug")
+    .timeout(Duration::from_secs(30)))
+    .await?;
+```
+
+</Accordion>
 
 Run a command with per-execution overrides and wait for completion. The closure receives an [`ExecOptionsBuilder`](#execoptionsbuilder) to set args, working directory, environment variables, user, timeout, resource limits, stdin mode, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
 
@@ -177,21 +192,6 @@ Run a command with per-execution overrides and wait for completion. The closure 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use std::time::Duration;
-
-let out = sb.exec_with("python", |e| e
-    .args(["compute.py"])
-    .cwd("/app")
-    .env("LOG_LEVEL", "debug")
-    .timeout(Duration::from_secs(30)))
-    .await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">shell()</span>
@@ -200,6 +200,15 @@ let out = sb.exec_with("python", |e| e
 ```rust
 async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput>
 ```
+
+<Accordion title="Example">
+
+```rust
+let out = sb.shell("cat /etc/os-release | grep PRETTY_NAME").await?;
+println!("{}", out.stdout()?);
+```
+
+</Accordion>
 
 Run a command through the sandbox's configured shell (default: `/bin/sh`, set via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell)). The script is run as `<shell> -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
 
@@ -221,15 +230,6 @@ Run a command through the sandbox's configured shell (default: `/bin/sh`, set vi
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let out = sb.shell("cat /etc/os-release | grep PRETTY_NAME").await?;
-println!("{}", out.stdout()?);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">shell_with()</span>
@@ -242,6 +242,14 @@ async fn shell_with(
     f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
 ) -> MicrosandboxResult<ExecOutput>
 ```
+
+<Accordion title="Example">
+
+```rust
+let out = sb.shell_with("env | sort", |e| e.env("STAGE", "build")).await?;
+```
+
+</Accordion>
 
 Run a shell command with per-execution overrides and wait for completion. The `-c <script>` arguments are prepended to whatever the [`ExecOptionsBuilder`](#execoptionsbuilder) configures, so use the builder for env, cwd, user, timeout, and resource limits rather than for positional args.
 
@@ -267,14 +275,6 @@ Run a shell command with per-execution overrides and wait for completion. The `-
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let out = sb.shell_with("env | sort", |e| e.env("STAGE", "build")).await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec_stream()</span>
@@ -287,6 +287,23 @@ async fn exec_stream(
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> MicrosandboxResult<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::ExecEvent;
+
+let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
+while let Some(event) = handle.recv().await {
+    match event {
+        ExecEvent::Stdout(chunk) => print!("{}", String::from_utf8_lossy(&chunk)),
+        ExecEvent::Exited { code } => { println!("exited {code}"); break; }
+        _ => {}
+    }
+}
+```
+
+</Accordion>
 
 Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, started, and exit events as they happen, rather than buffering everything until the command finishes. Use this for long-running processes, large output, or when you need to process output incrementally.
 
@@ -312,23 +329,6 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use microsandbox::ExecEvent;
-
-let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
-while let Some(event) = handle.recv().await {
-    match event {
-        ExecEvent::Stdout(chunk) => print!("{}", String::from_utf8_lossy(&chunk)),
-        ExecEvent::Exited { code } => { println!("exited {code}"); break; }
-        _ => {}
-    }
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec_stream_with()</span>
@@ -341,6 +341,18 @@ async fn exec_stream_with(
     f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
 ) -> MicrosandboxResult<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
+if let Some(stdin) = handle.take_stdin() {
+    stdin.write(b"print(2 + 2)\n").await?;
+    stdin.close().await?;
+}
+```
+
+</Accordion>
 
 Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#stdin_pipe) to write to the process's stdin via [`ExecHandle::take_stdin()`](#exechandle), and [`tty(true)`](#tty) to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
 
@@ -366,18 +378,6 @@ Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#stdin
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
-if let Some(stdin) = handle.take_stdin() {
-    stdin.write(b"print(2 + 2)\n").await?;
-    stdin.close().await?;
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">shell_stream()</span>
@@ -386,6 +386,15 @@ if let Some(stdin) = handle.take_stdin() {
 ```rust
 async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done").await?;
+let out = handle.collect().await?;
+```
+
+</Accordion>
 
 Like [`shell()`](#sb-shell), but returns a streaming [`ExecHandle`](#exechandle) instead of waiting for completion.
 
@@ -407,15 +416,6 @@ Like [`shell()`](#sb-shell), but returns a streaming [`ExecHandle`](#exechandle)
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut handle = sb.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done").await?;
-let out = handle.collect().await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">shell_stream_with()</span>
@@ -428,6 +428,14 @@ async fn shell_stream_with(
     f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
 ) -> MicrosandboxResult<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut handle = sb.shell_stream_with("npm run build", |e| e.cwd("/app")).await?;
+```
+
+</Accordion>
 
 Run a shell command with per-execution overrides and streaming I/O. As with [`shell_with()`](#sb-shell_with), the `-c <script>` arguments are prepended to whatever the builder configures.
 
@@ -453,14 +461,6 @@ Run a shell command with per-execution overrides and streaming I/O. As with [`sh
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut handle = sb.shell_stream_with("npm run build", |e| e.cwd("/app")).await?;
-```
-
-</Accordion>
-
 ---
 
 ## Attach methods
@@ -477,6 +477,14 @@ async fn attach(
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> MicrosandboxResult<i32>
 ```
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach("bash", ["-l"]).await?;
+```
+
+</Accordion>
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. The host terminal is put into raw mode and its stdin, stdout, and window-size changes are wired to the guest process. Press the detach key (default `Ctrl+]`) to disconnect without stopping the process; it keeps running in the guest. Returns when the process exits or you detach.
 
@@ -502,14 +510,6 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let exit_code = sb.attach("bash", ["-l"]).await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach_with()</span>
@@ -522,6 +522,17 @@ async fn attach_with(
     f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
 ) -> MicrosandboxResult<i32>
 ```
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach_with("zsh", |a| a
+    .env("TERM", "xterm-256color")
+    .detach_keys("ctrl-p,ctrl-q"))
+    .await?;
+```
+
+</Accordion>
 
 Interactive PTY attach with options. The closure receives an [`AttachOptionsBuilder`](#attachoptionsbuilder) to set args, environment variables, working directory, user, custom detach keys, and resource limits.
 
@@ -547,17 +558,6 @@ Interactive PTY attach with options. The closure receives an [`AttachOptionsBuil
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let exit_code = sb.attach_with("zsh", |a| a
-    .env("TERM", "xterm-256color")
-    .detach_keys("ctrl-p,ctrl-q"))
-    .await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach_shell()</span>
@@ -566,6 +566,14 @@ let exit_code = sb.attach_with("zsh", |a| a
 ```rust
 async fn attach_shell(&self) -> MicrosandboxResult<i32>
 ```
+
+<Accordion title="Example">
+
+```rust
+let exit_code = sb.attach_shell().await?;
+```
+
+</Accordion>
 
 Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell), default `/bin/sh`) with an interactive PTY session.
 
@@ -577,14 +585,6 @@ Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`
     <div className="msb-param-desc">Exit code, or <code>-1</code> if you detached.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-let exit_code = sb.attach_shell().await?;
-```
-
-</Accordion>
 
 ---
 
@@ -810,6 +810,16 @@ Provide fixed bytes as stdin. The process reads them and then sees EOF.
 fn rlimit(self, resource: RlimitResource, limit: u64) -> Self
 ```
 
+<Accordion title="Example">
+
+```rust
+use microsandbox::sandbox::RlimitResource;
+
+let out = sb.exec_with("./worker", |e| e.rlimit(RlimitResource::Nofile, 1024)).await?;
+```
+
+</Accordion>
+
 Set a POSIX resource limit with soft equal to hard. Applied via `setrlimit()` before exec.
 
 <p className="msb-label">Parameters</p>
@@ -824,16 +834,6 @@ Set a POSIX resource limit with soft equal to hard. Applied via `setrlimit()` be
     <div className="msb-param-desc">Limit value (soft = hard).</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-use microsandbox::sandbox::RlimitResource;
-
-let out = sb.exec_with("./worker", |e| e.rlimit(RlimitResource::Nofile, 1024)).await?;
-```
-
-</Accordion>
 
 ---
 

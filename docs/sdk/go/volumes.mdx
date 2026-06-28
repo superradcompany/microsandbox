@@ -110,6 +110,17 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error)
 ```
 
+<Accordion title="Example">
+
+```go
+vol, err := m.CreateVolume(ctx, "docker-data",
+    m.WithVolumeKind(m.VolumeKindDisk),
+    m.WithVolumeSize(20*1024),
+)
+```
+
+</Accordion>
+
 Create a named volume and return a populated [`*Volume`](#volume) with its name and host path. Configure the kind, quota, disk size, and labels with [option functions](#options). Returns `ErrVolumeAlreadyExists` if a volume with the given name already exists.
 
 <p className="msb-label">Parameters</p>
@@ -138,17 +149,6 @@ Create a named volume and return a populated [`*Volume`](#volume) with its name 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-vol, err := m.CreateVolume(ctx, "docker-data",
-    m.WithVolumeKind(m.VolumeKindDisk),
-    m.WithVolumeSize(20*1024),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetVolume()</span>
@@ -157,6 +157,15 @@ vol, err := m.CreateVolume(ctx, "docker-data",
 ```go
 func GetVolume(ctx context.Context, name string) (*VolumeHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := m.GetVolume(ctx, "my-data")
+fmt.Println(h.Path(), h.UsedBytes())
+```
+
+</Accordion>
 
 Look up a volume by name and return its metadata. Returns `ErrVolumeNotFound` if no such volume exists.
 
@@ -182,15 +191,6 @@ Look up a volume by name and return its metadata. Returns `ErrVolumeNotFound` if
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-h, err := m.GetVolume(ctx, "my-data")
-fmt.Println(h.Path(), h.UsedBytes())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv"></span><span className="msb-hn">ListVolumes()</span>
@@ -199,6 +199,17 @@ fmt.Println(h.Path(), h.UsedBytes())
 ```go
 func ListVolumes(ctx context.Context) ([]*VolumeHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+vols, err := m.ListVolumes(ctx)
+for _, h := range vols {
+    fmt.Printf("%s — %s\n", h.Name(), h.Kind())
+}
+```
+
+</Accordion>
 
 Return metadata for every named volume on the host.
 
@@ -220,17 +231,6 @@ Return metadata for every named volume on the host.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-vols, err := m.ListVolumes(ctx)
-for _, h := range vols {
-    fmt.Printf("%s — %s\n", h.Name(), h.Kind())
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv"></span><span className="msb-hn">RemoveVolume()</span>
@@ -239,6 +239,14 @@ for _, h := range vols {
 ```go
 func RemoveVolume(ctx context.Context, name string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := m.RemoveVolume(ctx, "my-data")
+```
+
+</Accordion>
 
 Delete a volume by name. All sandboxes referencing the volume must be stopped first.
 
@@ -254,14 +262,6 @@ Delete a volume by name. All sandboxes referencing the volume must be stopped fi
     <div className="msb-param-desc">Volume name.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-err := m.RemoveVolume(ctx, "my-data")
-```
-
-</Accordion>
 
 ## Volume methods
 
@@ -298,6 +298,15 @@ Return the host filesystem path of the volume's data directory.
 func (v *Volume) FS() *VolumeFs
 ```
 
+<Accordion title="Example">
+
+```go
+vfs := vol.FS()
+err := vfs.WriteString("seed.txt", "hello")
+```
+
+</Accordion>
+
 Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this volume.
 
 <p className="msb-label">Returns</p>
@@ -309,15 +318,6 @@ Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this v
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-vfs := vol.FS()
-err := vfs.WriteString("seed.txt", "hello")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">Remove()</span>
@@ -327,8 +327,6 @@ err := vfs.WriteString("seed.txt", "hello")
 func (v *Volume) Remove(ctx context.Context) error
 ```
 
-Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, v.Name())`](#removevolume).
-
 <Accordion title="Example">
 
 ```go
@@ -336,6 +334,8 @@ err := vol.Remove(ctx)
 ```
 
 </Accordion>
+
+Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, v.Name())`](#removevolume).
 
 ## VolumeHandle methods
 
@@ -738,6 +738,14 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
 ```
 
+<Accordion title="Example">
+
+```go
+"/host": m.Mount.Bind("/var/data", m.MountOptions{Readonly: true})
+```
+
+</Accordion>
+
 Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
 
 <p className="msb-label">Parameters</p>
@@ -753,14 +761,6 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-"/host": m.Mount.Bind("/var/data", m.MountOptions{Readonly: true})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Named()</span>
@@ -769,6 +769,14 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
 ```go
 func (mountFactory) Named(name string, opts MountOptions) MountConfig
 ```
+
+<Accordion title="Example">
+
+```go
+"/data": m.Mount.Named("my-data", m.MountOptions{})
+```
+
+</Accordion>
 
 Mount an existing named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)). Returns a [`MountConfig`](#mountconfig).
 
@@ -785,14 +793,6 @@ Mount an existing named persistent volume. The volume must already exist (create
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-"/data": m.Mount.Named("my-data", m.MountOptions{})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">NamedWith()</span>
@@ -801,25 +801,6 @@ Mount an existing named persistent volume. The volume must already exist (create
 ```go
 func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
 ```
-
-Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#mountoptions">MountOptions</a></div>
-    <div className="msb-param-desc">Mount tuning.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>namedOpts</code><a className="msb-type" href="#namedvolumeoptions">NamedVolumeOptions</a></div>
-    <div className="msb-param-desc">Provisioning mode, kind, size, and quota.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -841,6 +822,25 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 </Accordion>
 
+Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#mountoptions">MountOptions</a></div>
+    <div className="msb-param-desc">Mount tuning.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>namedOpts</code><a className="msb-type" href="#namedvolumeoptions">NamedVolumeOptions</a></div>
+    <div className="msb-param-desc">Provisioning mode, kind, size, and quota.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Tmpfs()</span>
@@ -849,6 +849,14 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```go
 func (mountFactory) Tmpfs(opts TmpfsOptions) MountConfig
 ```
+
+<Accordion title="Example">
+
+```go
+"/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128})
+```
+
+</Accordion>
 
 Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox stops. Returns a [`MountConfig`](#mountconfig).
 
@@ -861,14 +869,6 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-"/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
@@ -877,6 +877,18 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig
 ```
+
+<Accordion title="Example">
+
+```go
+"/img": m.Mount.Disk("./data.qcow2", m.DiskOptions{
+    Format:   "qcow2",
+    Fstype:   "ext4",
+    Readonly: true,
+})
+```
+
+</Accordion>
 
 Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk formats. Returns a [`MountConfig`](#mountconfig).
 
@@ -892,18 +904,6 @@ Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk fo
     <div className="msb-param-desc">Format, inner filesystem, and mount flags.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-"/img": m.Mount.Disk("./data.qcow2", m.DiskOptions{
-    Format:   "qcow2",
-    Fstype:   "ext4",
-    Readonly: true,
-})
-```
-
-</Accordion>
 
 ## Types
 

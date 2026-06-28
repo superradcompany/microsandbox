@@ -106,6 +106,18 @@ Package-level helpers for snapshot artifacts. Access them through the exported `
 func (snapshotFactory) Create(ctx context.Context, sourceSandbox string, opts SnapshotCreateOptions) (*SnapshotArtifact, error)
 ```
 
+<Accordion title="Example">
+
+```go
+snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
+    Name:            "after-pip-install",
+    Labels:          map[string]string{"stage": "post-deps"},
+    RecordIntegrity: true,
+})
+```
+
+</Accordion>
+
 Create a snapshot from a stopped or crashed sandbox. Set exactly one of [`SnapshotCreateOptions.Name`](#snapshotcreateoptionsstruct) (resolved under the default snapshots directory) or [`SnapshotCreateOptions.Path`](#snapshotcreateoptionsstruct) (an explicit artifact directory).
 
 <p className="msb-label">Parameters</p>
@@ -134,18 +146,6 @@ Create a snapshot from a stopped or crashed sandbox. Set exactly one of [`Snapsh
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
-    Name:            "after-pip-install",
-    Labels:          map[string]string{"stage": "post-deps"},
-    RecordIntegrity: true,
-})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Open()</span>
@@ -154,6 +154,14 @@ snap, err := m.Snapshot.Create(ctx, "baseline", m.SnapshotCreateOptions{
 ```go
 func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error)
 ```
+
+<Accordion title="Example">
+
+```go
+snap, err := m.Snapshot.Open(ctx, "after-pip-install")
+```
+
+</Accordion>
 
 Open an existing artifact by bare name or filesystem path. This validates metadata only; call [`s.Verify()`](#s-verify) for content checks.
 
@@ -179,14 +187,6 @@ Open an existing artifact by bare name or filesystem path. This validates metada
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-snap, err := m.Snapshot.Open(ctx, "after-pip-install")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Get()</span>
@@ -195,6 +195,14 @@ snap, err := m.Snapshot.Open(ctx, "after-pip-install")
 ```go
 func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := m.Snapshot.Get(ctx, "after-pip-install")
+```
+
+</Accordion>
 
 Look up a lightweight handle in the local index by name, digest, or path.
 
@@ -220,14 +228,6 @@ Look up a lightweight handle in the local index by name, digest, or path.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-h, err := m.Snapshot.Get(ctx, "after-pip-install")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">List()</span>
@@ -236,17 +236,6 @@ h, err := m.Snapshot.Get(ctx, "after-pip-install")
 ```go
 func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error)
 ```
-
-List indexed snapshots from the local DB cache.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">[]*SnapshotHandle</a></div>
-    <div className="msb-param-desc">All indexed handles.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -258,6 +247,17 @@ for _, h := range handles {
 ```
 
 </Accordion>
+
+List indexed snapshots from the local DB cache.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">[]*SnapshotHandle</a></div>
+    <div className="msb-param-desc">All indexed handles.</div>
+  </div>
+</div>
 
 ---
 
@@ -301,6 +301,14 @@ Walk a directory and parse each subdirectory's manifest without touching the ind
 func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error
 ```
 
+<Accordion title="Example">
+
+```go
+err := m.Snapshot.Remove(ctx, "after-pip-install", false)
+```
+
+</Accordion>
+
 Remove a snapshot artifact and its index row. Refuses to delete a snapshot with indexed children unless `force` is true.
 
 <p className="msb-label">Parameters</p>
@@ -320,14 +328,6 @@ Remove a snapshot artifact and its index row. Refuses to delete a snapshot with 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := m.Snapshot.Remove(ctx, "after-pip-install", false)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Reindex()</span>
@@ -336,6 +336,15 @@ err := m.Snapshot.Remove(ctx, "after-pip-install", false)
 ```go
 func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error)
 ```
+
+<Accordion title="Example">
+
+```go
+n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
+fmt.Printf("indexed %d snapshots\n", n)
+```
+
+</Accordion>
 
 Walk `dir` and rebuild the local index from the artifacts it finds.
 
@@ -361,15 +370,6 @@ Walk `dir` and rebuild the local index from the artifacts it finds.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
-fmt.Printf("indexed %d snapshots\n", n)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Export()</span>
@@ -378,6 +378,16 @@ fmt.Printf("indexed %d snapshots\n", n)
 ```go
 func (snapshotFactory) Export(ctx context.Context, nameOrPath, outPath string, opts SnapshotExportOptions) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := m.Snapshot.Export(ctx, "after-pip-install", "/tmp/snap.tar.zst",
+    m.SnapshotExportOptions{WithParents: true},
+)
+```
+
+</Accordion>
 
 Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotExportOptions.PlainTar`](#snapshotexportoptionsstruct) to skip compression.
 
@@ -402,16 +412,6 @@ Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotExportOp
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := m.Snapshot.Export(ctx, "after-pip-install", "/tmp/snap.tar.zst",
-    m.SnapshotExportOptions{WithParents: true},
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Import()</span>
@@ -420,6 +420,14 @@ err := m.Snapshot.Export(ctx, "after-pip-install", "/tmp/snap.tar.zst",
 ```go
 func (snapshotFactory) Import(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
+```
+
+</Accordion>
 
 Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
 
@@ -449,14 +457,6 @@ Unpack a snapshot archive into the snapshots directory or an explicit `dest` dir
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
-```
-
-</Accordion>
-
 ## SandboxHandle methods
 
 Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#getsandbox).
@@ -480,6 +480,14 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 ```go
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
 ```
+
+<Accordion title="Example">
+
+```go
+snap, err := h.Snapshot(ctx, "after-pip-install")
+```
+
+</Accordion>
 
 Snapshot this sandbox under a bare name in the default snapshots directory. The sandbox must be stopped or crashed.
 
@@ -505,14 +513,6 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-snap, err := h.Snapshot(ctx, "after-pip-install")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">SnapshotTo()</span>
@@ -521,6 +521,14 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 ```go
 func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error)
 ```
+
+<Accordion title="Example">
+
+```go
+snap, err := h.SnapshotTo(ctx, "/srv/snapshots/baseline")
+```
+
+</Accordion>
 
 Snapshot this sandbox to an explicit artifact directory. The sandbox must be stopped or crashed.
 
@@ -546,14 +554,6 @@ Snapshot this sandbox to an explicit artifact directory. The sandbox must be sto
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-snap, err := h.SnapshotTo(ctx, "/srv/snapshots/baseline")
-```
-
-</Accordion>
-
 ## SnapshotArtifact methods
 
 An artifact on disk. The accessors below are plain field reads; only [`Verify`](#s-verify) touches the filesystem.
@@ -567,17 +567,6 @@ An artifact on disk. The accessors below are plain field reads; only [`Verify`](
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute recorded content integrity for this snapshot. Requires that the artifact was created with [`RecordIntegrity`](#snapshotcreateoptionsstruct) set.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreportstruct">*SnapshotVerifyReport</a></div>
-    <div className="msb-param-desc">Recomputed digest and upper-layer status.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -589,6 +578,17 @@ fmt.Println(report.Upper.Digest)
 ```
 
 </Accordion>
+
+Recompute recorded content integrity for this snapshot. Requires that the artifact was created with [`RecordIntegrity`](#snapshotcreateoptionsstruct) set.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreportstruct">*SnapshotVerifyReport</a></div>
+    <div className="msb-param-desc">Recomputed digest and upper-layer status.</div>
+  </div>
+</div>
 
 ---
 
@@ -724,6 +724,14 @@ A lightweight handle backed by the local index. The accessors below are plain fi
 func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error)
 ```
 
+<Accordion title="Example">
+
+```go
+snap, err := h.Open(ctx)
+```
+
+</Accordion>
+
 Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot-open) on this handle's path.
 
 <p className="msb-label">Returns</p>
@@ -735,14 +743,6 @@ Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-snap, err := h.Open(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
@@ -751,6 +751,14 @@ snap, err := h.Open(ctx)
 ```go
 func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := h.Remove(ctx, false)
+```
+
+</Accordion>
 
 Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on this handle's digest.
 
@@ -766,14 +774,6 @@ Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on thi
     <div className="msb-param-desc">Delete even if the snapshot has indexed children.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-err := h.Remove(ctx, false)
-```
-
-</Accordion>
 
 ---
 

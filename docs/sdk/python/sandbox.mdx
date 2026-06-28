@@ -100,6 +100,17 @@ async with await Sandbox.create("api", image="python", memory=1024) as sb:
 async def create(name: str, **kwargs) -> Sandbox
 ```
 
+<Accordion title="Example">
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    output = await sb.shell("echo hello")
+    print(output.stdout_text)
+# sandbox is automatically killed and removed on exit
+```
+
+</Accordion>
+
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed.
@@ -126,17 +137,6 @@ The returned `Sandbox` is an async context manager. Use `async with` to guarante
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-async with await Sandbox.create("my-sandbox", image="alpine") as sb:
-    output = await sb.shell("echo hello")
-    print(output.stdout_text)
-# sandbox is automatically killed and removed on exit
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create_with_progress()</span>
@@ -146,6 +146,18 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 @staticmethod
 def create_with_progress(name: str, **kwargs) -> PullSession
 ```
+
+<Accordion title="Example">
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event.event_type)
+    sb = await session.result()
+```
+
+</Accordion>
 
 Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable); the async work happens through the `PullSession`.
 
@@ -171,18 +183,6 @@ Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        print(event.event_type)
-    sb = await session.result()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">start()</span>
@@ -192,6 +192,14 @@ async with session:
 @staticmethod
 async def start(name: str, *, detached: bool = False) -> Sandbox
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.start("api")
+```
+
+</Accordion>
 
 Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
 
@@ -217,14 +225,6 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.start("api")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
@@ -234,6 +234,15 @@ sb = await Sandbox.start("api")
 @staticmethod
 async def get(name: str) -> SandboxHandle
 ```
+
+<Accordion title="Example">
+
+```python
+handle = await Sandbox.get("api")
+print(handle.status)
+```
+
+</Accordion>
 
 Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
 
@@ -255,15 +264,6 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-handle = await Sandbox.get("api")
-print(handle.status)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
@@ -273,6 +273,15 @@ print(handle.status)
 @staticmethod
 async def list() -> list[SandboxHandle]
 ```
+
+<Accordion title="Example">
+
+```python
+for h in await Sandbox.list():
+    print(h.name, h.status)
+```
+
+</Accordion>
 
 List all sandboxes (running, stopped, and crashed).
 
@@ -285,15 +294,6 @@ List all sandboxes (running, stopped, and crashed).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for h in await Sandbox.list():
-    print(h.name, h.status)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list_with()</span>
@@ -303,6 +303,14 @@ for h in await Sandbox.list():
 @staticmethod
 async def list_with(*, labels: Mapping[str, str] | None = None) -> list[SandboxHandle]
 ```
+
+<Accordion title="Example">
+
+```python
+workers = await Sandbox.list_with(labels={"role": "worker"})
+```
+
+</Accordion>
 
 List sandboxes filtered by label. Only sandboxes whose labels match every supplied key/value pair are returned.
 
@@ -324,14 +332,6 @@ List sandboxes filtered by label. Only sandboxes whose labels match every suppli
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-workers = await Sandbox.list_with(labels={"role": "worker"})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">remove()</span>
@@ -341,6 +341,14 @@ workers = await Sandbox.list_with(labels={"role": "worker"})
 @staticmethod
 async def remove(name: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await Sandbox.remove("api")
+```
+
+</Accordion>
 
 Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running; stop it first.
 
@@ -352,14 +360,6 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-await Sandbox.remove("api")
-```
-
-</Accordion>
 
 ---
 
@@ -374,6 +374,14 @@ await Sandbox.remove("api")
 async def name(self) -> str
 ```
 
+<Accordion title="Example">
+
+```python
+print(await sb.name())
+```
+
+</Accordion>
+
 The sandbox name. This is an async method; call `await sb.name()`.
 
 <p className="msb-label">Returns</p>
@@ -384,14 +392,6 @@ The sandbox name. This is an async method; call `await sb.name()`.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-print(await sb.name())
-```
-
-</Accordion>
 
 ---
 
@@ -424,6 +424,14 @@ Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [
 def fs(self) -> SandboxFsOps
 ```
 
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/tmp/hello.txt", b"hi")
+```
+
+</Accordion>
+
 Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
 
 <p className="msb-label">Returns</p>
@@ -434,14 +442,6 @@ Get a filesystem handle for reading and writing files inside the running sandbox
     <div className="msb-param-desc">Filesystem handle.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-await sb.fs.write("/tmp/hello.txt", b"hi")
-```
-
-</Accordion>
 
 ---
 
@@ -466,6 +466,14 @@ async def attach(
     detach_keys: str | None = None,
 ) -> int
 ```
+
+<Accordion title="Example">
+
+```python
+code = await sb.attach("python", ["-i"])
+```
+
+</Accordion>
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Returns the process exit code once the session ends.
 
@@ -507,14 +515,6 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-code = await sb.attach("python", ["-i"])
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach_shell()</span>
@@ -523,6 +523,14 @@ code = await sb.attach("python", ["-i"])
 ```python
 async def attach_shell(self) -> int
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.attach_shell()
+```
+
+</Accordion>
 
 Attach your terminal to the sandbox's default shell for an interactive session.
 
@@ -535,14 +543,6 @@ Attach your terminal to the sandbox's default shell for an interactive session.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.attach_shell()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
@@ -551,6 +551,15 @@ await sb.attach_shell()
 ```python
 async def metrics(self) -> SandboxMetrics
 ```
+
+<Accordion title="Example">
+
+```python
+m = await sb.metrics()
+print(f"cpu {m.cpu_percent:.1f}% · mem {m.memory_bytes // 1_048_576} MiB")
+```
+
+</Accordion>
 
 Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, optional upper disk usage, and uptime.
 
@@ -563,15 +572,6 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-m = await sb.metrics()
-print(f"cpu {m.cpu_percent:.1f}% · mem {m.memory_bytes // 1_048_576} MiB")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
@@ -580,6 +580,16 @@ print(f"cpu {m.cpu_percent:.1f}% · mem {m.memory_bytes // 1_048_576} MiB")
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
 ```
+
+<Accordion title="Example">
+
+```python
+stream = await sb.metrics_stream(1.0)
+async for snapshot in stream:
+    print(f"{snapshot.cpu_percent:.1f}%")
+```
+
+</Accordion>
 
 Stream resource metrics at a regular interval. The returned [`MetricsStream`](#metricsstream) supports both `recv()` and `async for`.
 
@@ -601,16 +611,6 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-stream = await sb.metrics_stream(1.0)
-async for snapshot in stream:
-    print(f"{snapshot.cpu_percent:.1f}%")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
@@ -625,6 +625,30 @@ async def logs(
     sources: list[LogReadSource] | None = None,
 ) -> list[LogEntry]
 ```
+
+<Accordion title="Example">
+
+```python
+import time
+from microsandbox import Sandbox
+
+handle = await Sandbox.get("web")
+
+# Default — all user-program output, regardless of pipe/pty mode
+entries = await handle.logs()
+for e in entries:
+    label = {"stdout": "OUT", "stderr": "ERR", "output": "PTY", "system": "SYS"}[e.source]
+    print(f"[{e.timestamp_ms / 1000:.3f}] {label} {e.session_id}: {e.text().rstrip()}")
+
+# Filtered: last 50 entries from the past hour, including system lines
+recent = await handle.logs(
+    tail=50,
+    since_ms=(time.time() - 3600) * 1000,
+    sources=["stdout", "stderr", "output", "system"],
+)
+```
+
+</Accordion>
 
 Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
@@ -660,30 +684,6 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-import time
-from microsandbox import Sandbox
-
-handle = await Sandbox.get("web")
-
-# Default — all user-program output, regardless of pipe/pty mode
-entries = await handle.logs()
-for e in entries:
-    label = {"stdout": "OUT", "stderr": "ERR", "output": "PTY", "system": "SYS"}[e.source]
-    print(f"[{e.timestamp_ms / 1000:.3f}] {label} {e.session_id}: {e.text().rstrip()}")
-
-# Filtered: last 50 entries from the past hour, including system lines
-recent = await handle.logs(
-    tail=50,
-    since_ms=(time.time() - 3600) * 1000,
-    sources=["stdout", "stderr", "output", "system"],
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
@@ -699,6 +699,16 @@ async def log_stream(
     follow: bool = False,
 ) -> LogStream
 ```
+
+<Accordion title="Example">
+
+```python
+stream = await sb.log_stream(follow=True)
+async for entry in stream:
+    print(entry.text().rstrip())
+```
+
+</Accordion>
 
 Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` the stream stays open and yields new entries as they are written, like `tail -f`. Resume an earlier stream by passing the [`cursor`](#logentry) of the last entry you saw as `from_cursor`. Also available on [`SandboxHandle`](#sandboxhandle).
 
@@ -736,16 +746,6 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-stream = await sb.log_stream(follow=True)
-async for entry in stream:
-    print(entry.text().rstrip())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
@@ -754,6 +754,14 @@ async for entry in stream:
 ```python
 async def stop(self, timeout: float | None = None) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.stop()
+```
+
+</Accordion>
 
 Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
 
@@ -766,14 +774,6 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.stop()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
@@ -783,8 +783,6 @@ await sb.stop()
 async def request_stop(self) -> None
 ```
 
-Request graceful shutdown and return once the request is sent, without waiting for stopped state. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs to observe the terminal state.
-
 <Accordion title="Example">
 
 ```python
@@ -792,6 +790,8 @@ await sb.request_stop()
 ```
 
 </Accordion>
+
+Request graceful shutdown and return once the request is sent, without waiting for stopped state. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs to observe the terminal state.
 
 ---
 
@@ -801,6 +801,14 @@ await sb.request_stop()
 ```python
 async def kill(self, timeout: float | None = None) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.kill()  # SIGKILL, no graceful shutdown
+```
+
+</Accordion>
 
 Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown; use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
@@ -813,14 +821,6 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.kill()  # SIGKILL, no graceful shutdown
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
@@ -830,8 +830,6 @@ await sb.kill()  # SIGKILL, no graceful shutdown
 async def request_kill(self) -> None
 ```
 
-Request force termination and return once the signal is sent, without waiting for stopped state.
-
 <Accordion title="Example">
 
 ```python
@@ -839,6 +837,8 @@ await sb.request_kill()
 ```
 
 </Accordion>
+
+Request force termination and return once the signal is sent, without waiting for stopped state.
 
 ---
 
@@ -849,8 +849,6 @@ await sb.request_kill()
 async def request_drain(self) -> None
 ```
 
-Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
-
 <Accordion title="Example">
 
 ```python
@@ -858,6 +856,8 @@ await sb.request_drain()
 ```
 
 </Accordion>
+
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
 
 ---
 
@@ -867,6 +867,15 @@ await sb.request_drain()
 ```python
 async def wait_until_stopped(self) -> SandboxStopResult
 ```
+
+<Accordion title="Example">
+
+```python
+result = await sb.wait_until_stopped()
+print(result.status, result.exit_code)
+```
+
+</Accordion>
 
 Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
 
@@ -879,15 +888,6 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-result = await sb.wait_until_stopped()
-print(result.status, result.exit_code)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
@@ -897,8 +897,6 @@ print(result.status, result.exit_code)
 async def detach(self) -> None
 ```
 
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
-
 <Accordion title="Example">
 
 ```python
@@ -907,6 +905,8 @@ await sb.detach()  # keeps running in the background
 ```
 
 </Accordion>
+
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
 
 ---
 
@@ -923,6 +923,20 @@ Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`.
 @staticmethod
 def text(path: str, content: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig
 ```
+
+<Accordion title="Example">
+
+```python
+from microsandbox import Patch, Sandbox
+
+sb = await Sandbox.create(
+    "api",
+    image="python",
+    patches=[Patch.text("/etc/app.conf", "debug=1\n", mode=0o644)],
+)
+```
+
+</Accordion>
 
 Write UTF-8 text content at `path`.
 
@@ -946,20 +960,6 @@ Write UTF-8 text content at `path`.
     <div className="msb-param-desc">When <code>True</code>, overwrite an existing path.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-from microsandbox import Patch, Sandbox
-
-sb = await Sandbox.create(
-    "api",
-    image="python",
-    patches=[Patch.text("/etc/app.conf", "debug=1\n", mode=0o644)],
-)
-```
-
-</Accordion>
 
 ---
 

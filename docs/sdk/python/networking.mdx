@@ -103,6 +103,14 @@ The default policy denies egress except for an implicit allow-public rule, and a
 def none() -> Network
 ```
 
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create("offline", image="python", network=Network.none())
+```
+
+</Accordion>
+
 Deny all traffic. No network interface is created; the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
 
 <p className="msb-label">Returns</p>
@@ -113,14 +121,6 @@ Deny all traffic. No network interface is created; the guest is fully offline. `
     <div className="msb-param-desc">Fully airgapped network configuration.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create("offline", image="python", network=Network.none())
-```
-
-</Accordion>
 
 ---
 
@@ -214,6 +214,16 @@ def allow(
 ) -> Rule
 ```
 
+<Accordion title="Example">
+
+```python
+from microsandbox import Destination, Protocol, Rule
+
+r = Rule.allow(protocol=Protocol.TCP, port=443, destination=Destination.domain("api.example.com"))
+```
+
+</Accordion>
+
 Create a rule that permits matching traffic. All filters are keyword-only.
 
 <p className="msb-label">Parameters</p>
@@ -245,16 +255,6 @@ Create a rule that permits matching traffic. All filters are keyword-only.
     <div className="msb-param-desc">An allow rule.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-from microsandbox import Destination, Protocol, Rule
-
-r = Rule.allow(protocol=Protocol.TCP, port=443, destination=Destination.domain("api.example.com"))
-```
-
-</Accordion>
 
 ---
 
@@ -314,19 +314,6 @@ Create a rule that blocks matching traffic. Same keyword-only filters as [`allow
 def allow_dns() -> tuple[Rule, Rule]
 ```
 
-Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
-
-Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape carries a single protocol; splat into `NetworkPolicy.rules`. DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#rule">tuple[Rule, Rule]</a></div>
-    <div className="msb-param-desc"><code>(udp_rule, tcp_rule)</code> for <code>DestGroup.HOST</code> on port 53.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```python
@@ -346,6 +333,19 @@ policy = NetworkPolicy(
 ```
 
 </Accordion>
+
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape carries a single protocol; splat into `NetworkPolicy.rules`. DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#rule">tuple[Rule, Rule]</a></div>
+    <div className="msb-param-desc"><code>(udp_rule, tcp_rule)</code> for <code>DestGroup.HOST</code> on port 53.</div>
+  </div>
+</div>
 
 ## Destination factory
 

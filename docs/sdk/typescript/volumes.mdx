@@ -68,6 +68,16 @@ await Volume.remove("my-data");                 // 4. delete
 static builder(name: string): VolumeBuilder
 ```
 
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data")
+  .label("env", "prod")
+  .create();
+```
+
+</Accordion>
+
 Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` for a disk-backed volume. See [`VolumeBuilder`](#volumebuilder) for all options.
 
 <p className="msb-label">Parameters</p>
@@ -88,16 +98,6 @@ Begin building a named volume. Directory-backed volumes are the default. Call `.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const data = await Volume.builder("my-data")
-  .label("env", "prod")
-  .create();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
@@ -106,6 +106,15 @@ const data = await Volume.builder("my-data")
 ```typescript
 static get(name: string): Promise<VolumeHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const handle = await Volume.get("my-data");
+console.log(handle.usedBytes);
+```
+
+</Accordion>
 
 Get a live handle to an existing named volume. A live handle supports `.fs()` and `.remove()`, unlike the read-only handles returned by [`list()`](#volume-list).
 
@@ -127,15 +136,6 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const handle = await Volume.get("my-data");
-console.log(handle.usedBytes);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
@@ -144,6 +144,16 @@ console.log(handle.usedBytes);
 ```typescript
 static list(): Promise<VolumeHandle[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const v of await Volume.list()) {
+  console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
+}
+```
+
+</Accordion>
 
 List all named volumes. Handles returned here are **read-only**: calling `.fs()` or `.remove()` on them throws. Call [`Volume.get(name)`](#volume-get) to upgrade to a live handle.
 
@@ -156,16 +166,6 @@ List all named volumes. Handles returned here are **read-only**: calling `.fs()`
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const v of await Volume.list()) {
-  console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
@@ -174,6 +174,14 @@ for (const v of await Volume.list()) {
 ```typescript
 static remove(name: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await Volume.remove("my-data");
+```
+
+</Accordion>
 
 Delete a named volume and its contents. Fails if the volume is currently mounted by a sandbox.
 
@@ -185,14 +193,6 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
     <div className="msb-param-desc">Volume name.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-await Volume.remove("my-data");
-```
-
-</Accordion>
 
 ---
 
@@ -247,6 +247,16 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
 fs(): VolumeFs
 ```
 
+<Accordion title="Example">
+
+```typescript
+const vfs = data.fs();
+await vfs.write("seed.txt", "hello");
+console.log(await vfs.readToString("seed.txt"));
+```
+
+</Accordion>
+
 Get a host-side filesystem handle for this volume's directory. Reads and writes happen directly on the host, with no sandbox running. See [`VolumeFs`](#volumefs-methods) for the full API.
 
 <p className="msb-label">Returns</p>
@@ -257,16 +267,6 @@ Get a host-side filesystem handle for this volume's directory. Reads and writes 
     <div className="msb-param-desc">Host-side filesystem handle.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-const vfs = data.fs();
-await vfs.write("seed.txt", "hello");
-console.log(await vfs.readToString("seed.txt"));
-```
-
-</Accordion>
 
 ---
 
@@ -294,8 +294,6 @@ Create a directory-backed volume. This is the default, so calling it is only nee
 disk(): this
 ```
 
-Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
-
 <Accordion title="Example">
 
 ```typescript
@@ -306,6 +304,8 @@ const dockerData = await Volume.builder("docker-data")
 ```
 
 </Accordion>
+
+Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
 ---
 
@@ -400,6 +400,14 @@ Materialize the volume configuration without creating the volume on disk. To cre
 create(): Promise<Volume>
 ```
 
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data").create();
+```
+
+</Accordion>
+
 Build and create the volume on disk, returning a [`Volume`](#instance-methods).
 
 <p className="msb-label">Returns</p>
@@ -410,14 +418,6 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
     <div className="msb-param-desc">The created volume.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-const data = await Volume.builder("my-data").create();
-```
-
-</Accordion>
 
 ---
 
@@ -433,6 +433,14 @@ Host-side filesystem operations on a volume's directory. Obtained via [`volume.f
 ```typescript
 read(path: string): Promise<Uint8Array>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const bytes = await vfs.read("data.bin");
+```
+
+</Accordion>
 
 Read a file's full contents as bytes.
 
@@ -454,14 +462,6 @@ Read a file's full contents as bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const bytes = await vfs.read("data.bin");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
@@ -470,6 +470,14 @@ const bytes = await vfs.read("data.bin");
 ```typescript
 readToString(path: string): Promise<string>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const text = await vfs.readToString("config.json");
+```
+
+</Accordion>
 
 Read a file's full contents as a UTF-8 string.
 
@@ -491,14 +499,6 @@ Read a file's full contents as a UTF-8 string.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const text = await vfs.readToString("config.json");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
@@ -507,6 +507,17 @@ const text = await vfs.readToString("config.json");
 ```typescript
 readStream(path: string): Promise<VolumeFsReadStream>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const stream = await vfs.readStream("large.bin");
+for await (const chunk of stream) {
+  console.log(chunk.byteLength);
+}
+```
+
+</Accordion>
 
 Open a streaming reader for a file, for chunked reads of large files without loading them fully into memory.
 
@@ -528,17 +539,6 @@ Open a streaming reader for a file, for chunked reads of large files without loa
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const stream = await vfs.readStream("large.bin");
-for await (const chunk of stream) {
-  console.log(chunk.byteLength);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
@@ -547,6 +547,14 @@ for await (const chunk of stream) {
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.write("seed.txt", "hello");
+```
+
+</Accordion>
 
 Write a file, replacing any existing contents. Strings are encoded as UTF-8.
 
@@ -563,14 +571,6 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.write("seed.txt", "hello");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
@@ -579,6 +579,16 @@ await vfs.write("seed.txt", "hello");
 ```typescript
 writeStream(path: string): Promise<VolumeFsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const sink = await vfs.writeStream("out.bin");
+await sink.write(chunk);
+await sink.close();
+```
+
+</Accordion>
 
 Open a streaming writer for a file, for chunked writes of large files.
 
@@ -600,16 +610,6 @@ Open a streaming writer for a file, for chunked writes of large files.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const sink = await vfs.writeStream("out.bin");
-await sink.write(chunk);
-await sink.close();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">list()</span>
@@ -618,6 +618,16 @@ await sink.close();
 ```typescript
 list(path: string): Promise<FsEntry[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const e of await vfs.list("")) {
+  console.log(e.path, e.kind, e.size);
+}
+```
+
+</Accordion>
 
 List the entries in a directory. Pass `""` for the volume root.
 
@@ -639,16 +649,6 @@ List the entries in a directory. Pass `""` for the volume root.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const e of await vfs.list("")) {
-  console.log(e.path, e.kind, e.size);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">mkdir()</span>
@@ -657,6 +657,14 @@ for (const e of await vfs.list("")) {
 ```typescript
 mkdir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.mkdir("cache/images");
+```
+
+</Accordion>
 
 Create a directory, including any missing parents.
 
@@ -669,14 +677,6 @@ Create a directory, including any missing parents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.mkdir("cache/images");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">removeDir()</span>
@@ -685,6 +685,14 @@ await vfs.mkdir("cache/images");
 ```typescript
 removeDir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.removeDir("cache");
+```
+
+</Accordion>
 
 Recursively remove a directory and its contents.
 
@@ -697,14 +705,6 @@ Recursively remove a directory and its contents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.removeDir("cache");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">remove()</span>
@@ -713,6 +713,14 @@ await vfs.removeDir("cache");
 ```typescript
 remove(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.remove("seed.txt");
+```
+
+</Accordion>
 
 Remove a single file.
 
@@ -725,14 +733,6 @@ Remove a single file.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.remove("seed.txt");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">copy()</span>
@@ -741,6 +741,14 @@ await vfs.remove("seed.txt");
 ```typescript
 copy(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.copy("seed.txt", "backup/seed.txt");
+```
+
+</Accordion>
 
 Copy a file or directory from one path to another.
 
@@ -757,14 +765,6 @@ Copy a file or directory from one path to another.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.copy("seed.txt", "backup/seed.txt");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">rename()</span>
@@ -773,6 +773,14 @@ await vfs.copy("seed.txt", "backup/seed.txt");
 ```typescript
 rename(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.rename("draft.txt", "final.txt");
+```
+
+</Accordion>
 
 Move or rename a file or directory.
 
@@ -789,14 +797,6 @@ Move or rename a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.rename("draft.txt", "final.txt");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">stat()</span>
@@ -805,6 +805,15 @@ await vfs.rename("draft.txt", "final.txt");
 ```typescript
 stat(path: string): Promise<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const meta = await vfs.stat("seed.txt");
+console.log(meta.size, meta.kind);
+```
+
+</Accordion>
 
 Get metadata for a file or directory.
 
@@ -826,15 +835,6 @@ Get metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const meta = await vfs.stat("seed.txt");
-console.log(meta.size, meta.kind);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">exists()</span>
@@ -843,6 +843,16 @@ console.log(meta.size, meta.kind);
 ```typescript
 exists(path: string): Promise<boolean>
 ```
+
+<Accordion title="Example">
+
+```typescript
+if (await vfs.exists("seed.txt")) {
+  await vfs.remove("seed.txt");
+}
+```
+
+</Accordion>
 
 Check whether a path exists.
 
@@ -863,16 +873,6 @@ Check whether a path exists.
     <div className="msb-param-desc"><code>true</code> if the path exists.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-if (await vfs.exists("seed.txt")) {
-  await vfs.remove("seed.txt");
-}
-```
-
-</Accordion>
 
 ---
 

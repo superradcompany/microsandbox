@@ -89,6 +89,17 @@ The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).
 func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error)
 ```
 
+<Accordion title="Example">
+
+```go
+out, err := sb.Exec(ctx, "make", []string{"build"},
+    m.WithExecCwd("/app"),
+    m.WithExecEnv(map[string]string{"DEBUG": "1"}),
+)
+```
+
+</Accordion>
+
 Run a command in the sandbox and return its collected output. Blocks until the command exits. The returned error is non-nil only on transport or runtime failures; a non-zero exit code is reported via [`ExecOutput.ExitCode`](#out-exitcode), not as an error.
 
 <p className="msb-label">Parameters</p>
@@ -121,17 +132,6 @@ Run a command in the sandbox and return its collected output. Blocks until the c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-out, err := sb.Exec(ctx, "make", []string{"build"},
-    m.WithExecCwd("/app"),
-    m.WithExecEnv(map[string]string{"DEBUG": "1"}),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Shell()</span>
@@ -140,6 +140,18 @@ out, err := sb.Exec(ctx, "make", []string{"build"},
 ```go
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error)
 ```
+
+<Accordion title="Example">
+
+```go
+out, err := sb.Shell(ctx, "echo $HOME && ls /tmp")
+if err != nil {
+    return err
+}
+fmt.Print(out.Stdout())
+```
+
+</Accordion>
 
 Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the command exits. A convenience wrapper over [`Exec`](#sb-exec) for shell one-liners.
 
@@ -169,18 +181,6 @@ Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-out, err := sb.Shell(ctx, "echo $HOME && ls /tmp")
-if err != nil {
-    return err
-}
-fmt.Print(out.Stdout())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ExecStream()</span>
@@ -189,6 +189,18 @@ fmt.Print(out.Stdout())
 ```go
 func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
+if err != nil {
+    return err
+}
+defer h.Close()
+```
+
+</Accordion>
 
 Start a streaming exec session and return an [`*ExecHandle`](#exechandle). The handle MUST be closed with [`Close`](#h-close) when the stream is no longer needed. Nonblocking: the handle returns immediately and the stream starts in the background.
 
@@ -224,18 +236,6 @@ Start a streaming exec session and return an [`*ExecHandle`](#exechandle). The h
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
-if err != nil {
-    return err
-}
-defer h.Close()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ShellStream()</span>
@@ -244,6 +244,31 @@ defer h.Close()
 ```go
 func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := sb.ShellStream(ctx, "tail -f /var/log/app.log")
+if err != nil {
+    return err
+}
+defer h.Close()
+
+for {
+    ev, err := h.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    switch ev.Kind {
+    case m.ExecEventStdout:
+        os.Stdout.Write(ev.Data)
+    case m.ExecEventDone:
+        return nil
+    }
+}
+```
+
+</Accordion>
 
 Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`ExecStream`](#sb-execstream). Nonblocking: the handle returns immediately and the stream starts in the background.
 
@@ -272,31 +297,6 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
     <div className="msb-param-desc">Live exec session. Close it when done.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-h, err := sb.ShellStream(ctx, "tail -f /var/log/app.log")
-if err != nil {
-    return err
-}
-defer h.Close()
-
-for {
-    ev, err := h.Recv(ctx)
-    if err != nil {
-        return err
-    }
-    switch ev.Kind {
-    case m.ExecEventStdout:
-        os.Stdout.Write(ev.Data)
-    case m.ExecEventDone:
-        return nil
-    }
-}
-```
-
-</Accordion>
 
 ## ExecHandle methods
 
@@ -331,6 +331,16 @@ Return the unique identifier for this exec session, assigned by the guest agent.
 func (h *ExecHandle) TakeStdin() *ExecSink
 ```
 
+<Accordion title="Example">
+
+```go
+sink := h.TakeStdin()
+sink.Write([]byte("hello\n"))
+sink.Close()
+```
+
+</Accordion>
+
 Return the stdin sink for this exec session. Single-take: returns `nil` if the session was not started with [`WithExecStdinPipe`](#withexecstdinpipe), or if `TakeStdin` was already called on this handle (matching the Node and Python SDKs). The caller is responsible for closing the sink when done writing; closing the sink without closing the exec handle is fine, they own different Rust-side resources.
 
 <p className="msb-label">Returns</p>
@@ -342,16 +352,6 @@ Return the stdin sink for this exec session. Single-take: returns `nil` if the s
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sink := h.TakeStdin()
-sink.Write([]byte("hello\n"))
-sink.Close()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Recv()</span>
@@ -360,26 +360,6 @@ sink.Close()
 ```go
 func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error)
 ```
-
-Block until the next event arrives or the stream ends. Returns an event with `Kind == ExecEventDone` when all events have been consumed. `ctx` controls the wait; cancellation causes `Recv` to return `ctx.Err()` immediately. The underlying Rust call may continue to completion in the background.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
-    <div className="msb-param-desc">Cancels the wait for the next event.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#execevent">*ExecEvent</a></div>
-    <div className="msb-param-desc">The next streamed event.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -406,6 +386,26 @@ for {
 
 </Accordion>
 
+Block until the next event arrives or the stream ends. Returns an event with `Kind == ExecEventDone` when all events have been consumed. `ctx` controls the wait; cancellation causes `Recv` to return `ctx.Err()` immediately. The underlying Rust call may continue to completion in the background.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the wait for the next event.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#execevent">*ExecEvent</a></div>
+    <div className="msb-param-desc">The next streamed event.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Collect()</span>
@@ -414,6 +414,18 @@ for {
 ```go
 func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error)
 ```
+
+<Accordion title="Example">
+
+```go
+out, err := h.Collect(ctx)
+if err != nil {
+    return err
+}
+fmt.Print(out.Stdout())
+```
+
+</Accordion>
 
 Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#execoutput). Equivalent to calling [`Recv`](#h-recv) in a loop and assembling the result. The handle should be closed after `Collect` returns.
 
@@ -434,18 +446,6 @@ Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#ex
     <div className="msb-param-desc">Collected stdout, stderr, and exit code.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-out, err := h.Collect(ctx)
-if err != nil {
-    return err
-}
-fmt.Print(out.Stdout())
-```
-
-</Accordion>
 
 ---
 
@@ -505,6 +505,18 @@ Send SIGKILL to the running process.
 func (h *ExecHandle) Signal(ctx context.Context, signal int) error
 ```
 
+<Accordion title="Example">
+
+```go
+import "syscall"
+
+if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
+    return err
+}
+```
+
+</Accordion>
+
 Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int(syscall.SIGTERM)`).
 
 <p className="msb-label">Parameters</p>
@@ -520,18 +532,6 @@ Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-import "syscall"
-
-if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Close()</span>
@@ -541,8 +541,6 @@ if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
 func (h *ExecHandle) Close() error
 ```
 
-Release the Rust-side exec handle. Does not kill the running process; call [`Signal`](#h-signal) or [`Kill`](#h-kill) first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
-
 <Accordion title="Example">
 
 ```go
@@ -550,6 +548,8 @@ defer h.Close()
 ```
 
 </Accordion>
+
+Release the Rust-side exec handle. Does not kill the running process; call [`Signal`](#h-signal) or [`Kill`](#h-kill) first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
 
 ## ExecOutput methods
 
@@ -688,6 +688,25 @@ A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeS
 func (sk *ExecSink) Write(p []byte) (int, error)
 ```
 
+<Accordion title="Example">
+
+```go
+h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
+if err != nil {
+    return err
+}
+defer h.Close()
+
+sink := h.TakeStdin()
+sink.Write([]byte("hello\n"))
+sink.Close()
+
+out, _ := h.Collect(ctx)
+fmt.Print(out.Stdout()) // "hello\n"
+```
+
+</Accordion>
+
 Send data to the process stdin. Implements `io.Writer`. Uses `context.Background()` internally, there is no way to cancel a stuck write through this method alone.
 
 <p className="msb-label">Parameters</p>
@@ -707,25 +726,6 @@ Send data to the process stdin. Implements `io.Writer`. Uses `context.Background
     <div className="msb-param-desc">Number of bytes written.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
-if err != nil {
-    return err
-}
-defer h.Close()
-
-sink := h.TakeStdin()
-sink.Write([]byte("hello\n"))
-sink.Close()
-
-out, _ := h.Collect(ctx)
-fmt.Print(out.Stdout()) // "hello\n"
-```
-
-</Accordion>
 
 ---
 
@@ -769,8 +769,6 @@ Like [`Write`](#sink-write), but with a caller-controlled context, so a stuck st
 func (sk *ExecSink) Close() error
 ```
 
-Close the stdin pipe, sending EOF to the process. Implements `io.Closer`.
-
 <Accordion title="Example">
 
 ```go
@@ -778,6 +776,8 @@ sink.Close()
 ```
 
 </Accordion>
+
+Close the stdin pipe, sending EOF to the process. Implements `io.Closer`.
 
 ## Types
 
@@ -966,17 +966,6 @@ Set the working directory for a single command.
 func WithExecTimeout(d time.Duration) ExecOption
 ```
 
-Set a per-command timeout. When exceeded, the guest terminates the process and the call returns an error with `Kind == ErrExecTimeout`. Sub-second precision rounds up to whole seconds; pass at least 1 second.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>d</code><span className="msb-type">time.Duration</span></div>
-    <div className="msb-param-desc">Timeout duration, rounded up to whole seconds.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -988,6 +977,17 @@ if m.IsKind(err, m.ErrExecTimeout) {
 ```
 
 </Accordion>
+
+Set a per-command timeout. When exceeded, the guest terminates the process and the call returns an error with `Kind == ErrExecTimeout`. Sub-second precision rounds up to whole seconds; pass at least 1 second.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>d</code><span className="msb-type">time.Duration</span></div>
+    <div className="msb-param-desc">Timeout duration, rounded up to whole seconds.</div>
+  </div>
+</div>
 
 ---
 
@@ -1029,17 +1029,6 @@ Run the command as the given guest user (UID or name).
 func WithExecEnv(env map[string]string) ExecOption
 ```
 
-Add per-command environment variables. Called repeatedly, maps merge; later keys overwrite earlier ones.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
-    <div className="msb-param-desc">Environment variables for this command.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -1050,3 +1039,14 @@ out, err := sb.Exec(ctx, "make", []string{"build"},
 ```
 
 </Accordion>
+
+Add per-command environment variables. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Environment variables for this command.</div>
+  </div>
+</div>

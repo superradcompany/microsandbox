@@ -121,6 +121,18 @@ Frame flag: this message requests sandbox shutdown. Also available as `FLAG_SHUT
 func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
 ```
 
+<Accordion title="Example">
+
+```go
+client, err := m.ConnectAgentSandbox(ctx, "dev")
+if err != nil {
+    return err
+}
+defer client.Close()
+```
+
+</Accordion>
+
 Connect to a running sandbox by name. Resolves the sandbox's relay socket path and performs the `core.ready` handshake. Sandbox names are limited to 128 UTF-8 bytes. Use `context.WithTimeout` to override the default 10s handshake timeout.
 
 <p className="msb-label">Parameters</p>
@@ -149,18 +161,6 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-client, err := m.ConnectAgentSandbox(ctx, "dev")
-if err != nil {
-    return err
-}
-defer client.Close()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentPath()</span>
@@ -169,6 +169,23 @@ defer client.Close()
 ```go
 func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error)
 ```
+
+<Accordion title="Example">
+
+```go
+path, err := m.AgentSocketPath("dev")
+if err != nil {
+    return err
+}
+
+client, err := m.ConnectAgentPath(ctx, path)
+if err != nil {
+    return err
+}
+defer client.Close()
+```
+
+</Accordion>
 
 Connect to an `agentd` relay socket by path. Use this when you already have the socket path, for example one returned by [`AgentSocketPath()`](#m-agentsocketpath). Use `context.WithTimeout` to override the default 10s handshake timeout.
 
@@ -198,23 +215,6 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-path, err := m.AgentSocketPath("dev")
-if err != nil {
-    return err
-}
-
-client, err := m.ConnectAgentPath(ctx, path)
-if err != nil {
-    return err
-}
-defer client.Close()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">AgentSocketPath()</span>
@@ -223,6 +223,18 @@ defer client.Close()
 ```go
 func AgentSocketPath(name string) (string, error)
 ```
+
+<Accordion title="Example">
+
+```go
+path, err := m.AgentSocketPath("dev")
+if err != nil {
+    return err
+}
+fmt.Println(path)
+```
+
+</Accordion>
 
 Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`ConnectAgentSandbox()`](#m-connectagentsandbox) would dial internally (preferring the hashed path, falling back to the legacy name-derived path), so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes between a WebSocket and the socket) instead of this frame client. The sandbox need not be running; the path is derived from the name and the configured home directory.
 
@@ -248,18 +260,6 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-path, err := m.AgentSocketPath("dev")
-if err != nil {
-    return err
-}
-fmt.Println(path)
-```
-
-</Accordion>
-
 ## AgentClient methods
 
 ---
@@ -270,6 +270,22 @@ fmt.Println(path)
 ```go
 func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*RawFrame, error)
 ```
+
+<Accordion title="Example">
+
+```go
+frame, err := client.Request(ctx, m.FlagSessionStart, body)
+if err != nil {
+    return err
+}
+
+var msg map[string]any
+if err := cbor.Unmarshal(frame.Body, &msg); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Send one frame and await a single response frame. Use for request/response RPCs that produce exactly one terminal response (for example a `core.fs.request` to its `core.fs.response`).
 
@@ -303,22 +319,6 @@ Send one frame and await a single response frame. Use for request/response RPCs 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-frame, err := client.Request(ctx, m.FlagSessionStart, body)
-if err != nil {
-    return err
-}
-
-var msg map[string]any
-if err := cbor.Unmarshal(frame.Body, &msg); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Stream()</span>
@@ -327,6 +327,28 @@ if err := cbor.Unmarshal(frame.Body, &msg); err != nil {
 ```go
 func (c *AgentClient) Stream(ctx context.Context, flags uint8, body []byte) (*AgentStream, error)
 ```
+
+<Accordion title="Example">
+
+```go
+stream, err := client.Stream(ctx, m.FlagSessionStart, body)
+if err != nil {
+    return err
+}
+defer stream.Close(ctx)
+
+for {
+    frame, err := stream.Next(ctx)
+    if err != nil {
+        return err
+    }
+    if frame == nil || frame.Flags&m.FlagTerminal != 0 {
+        break
+    }
+}
+```
+
+</Accordion>
 
 Open a streaming session. The returned [`AgentStream`](#agentstream) carries the protocol correlation id (read it with [`ID()`](#s-id) and pass it to [`Send()`](#c-send) for follow-up frames), and yields frames one at a time via [`Next()`](#s-next).
 
@@ -360,28 +382,6 @@ Open a streaming session. The returned [`AgentStream`](#agentstream) carries the
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-stream, err := client.Stream(ctx, m.FlagSessionStart, body)
-if err != nil {
-    return err
-}
-defer stream.Close(ctx)
-
-for {
-    frame, err := stream.Next(ctx)
-    if err != nil {
-        return err
-    }
-    if frame == nil || frame.Flags&m.FlagTerminal != 0 {
-        break
-    }
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Send()</span>
@@ -390,6 +390,16 @@ for {
 ```go
 func (c *AgentClient) Send(ctx context.Context, id uint32, flags uint8, body []byte) error
 ```
+
+<Accordion title="Example">
+
+```go
+if err := client.Send(ctx, stream.ID(), 0, stdinBytes); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Send a follow-up frame on an existing correlation id (for example stdin, a signal, a resize, or data chunks on an open session). Use the id returned by [`AgentStream.ID()`](#s-id).
 
@@ -423,16 +433,6 @@ Send a follow-up frame on an existing correlation id (for example stdin, a signa
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-if err := client.Send(ctx, stream.ID(), 0, stdinBytes); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">ReadyBytes()</span>
@@ -441,21 +441,6 @@ if err := client.Send(ctx, stream.ID(), 0, stdinBytes); err != nil {
 ```go
 func (c *AgentClient) ReadyBytes() ([]byte, error)
 ```
-
-Return the cached handshake `core.ready` frame body as CBOR bytes. Captured during connect, so this reads from the cached handshake rather than producing protocol traffic.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">[]byte</span></div>
-    <div className="msb-param-desc">CBOR-encoded <code>core.ready</code> frame body.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">error</span></div>
-    <div className="msb-param-desc">Typed microsandbox error.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -473,6 +458,21 @@ if err := cbor.Unmarshal(ready, &msg); err != nil {
 
 </Accordion>
 
+Return the cached handshake `core.ready` frame body as CBOR bytes. Captured during connect, so this reads from the cached handshake rather than producing protocol traffic.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">CBOR-encoded <code>core.ready</code> frame body.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Typed microsandbox error.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
@@ -481,6 +481,14 @@ if err := cbor.Unmarshal(ready, &msg); err != nil {
 ```go
 func (c *AgentClient) Close() error
 ```
+
+<Accordion title="Example">
+
+```go
+defer client.Close()
+```
+
+</Accordion>
 
 Release the client handle. Idempotent: calling it more than once is safe.
 
@@ -493,14 +501,6 @@ Release the client handle. Idempotent: calling it more than once is safe.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-defer client.Close()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">CloseCtx()</span>
@@ -509,6 +509,16 @@ defer client.Close()
 ```go
 func (c *AgentClient) CloseCtx(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+if err := client.CloseCtx(ctx); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Release the client handle with a caller-controlled context. Like [`Close()`](#c-close), but lets you bound or cancel the teardown.
 
@@ -530,16 +540,6 @@ Release the client handle with a caller-controlled context. Like [`Close()`](#c-
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-if err := client.CloseCtx(ctx); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ## AgentStream methods
 
 ---
@@ -550,6 +550,22 @@ if err := client.CloseCtx(ctx); err != nil {
 ```go
 func (s *AgentStream) Next(ctx context.Context) (*RawFrame, error)
 ```
+
+<Accordion title="Example">
+
+```go
+for {
+    frame, err := stream.Next(ctx)
+    if err != nil {
+        return err
+    }
+    if frame == nil {
+        break
+    }
+}
+```
+
+</Accordion>
 
 Pull the next frame from the stream. Returns `nil, nil` at EOF, so loop until the frame is `nil` or carries [`FlagTerminal`](#flagterminal).
 
@@ -575,22 +591,6 @@ Pull the next frame from the stream. Returns `nil, nil` at EOF, so loop until th
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-for {
-    frame, err := stream.Next(ctx)
-    if err != nil {
-        return err
-    }
-    if frame == nil {
-        break
-    }
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
@@ -599,17 +599,6 @@ for {
 ```go
 func (s *AgentStream) ID() uint32
 ```
-
-Return the protocol correlation id for this stream. Pass it to [`AgentClient.Send()`](#c-send) for follow-up frames in the session.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">uint32</span></div>
-    <div className="msb-param-desc">Correlation id for this session.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -622,6 +611,17 @@ if err := client.Send(ctx, id, 0, stdinBytes); err != nil {
 
 </Accordion>
 
+Return the protocol correlation id for this stream. Pass it to [`AgentClient.Send()`](#c-send) for follow-up frames in the session.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Correlation id for this session.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Close()</span>
@@ -630,6 +630,14 @@ if err := client.Send(ctx, id, 0, stdinBytes); err != nil {
 ```go
 func (s *AgentStream) Close(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+defer stream.Close(ctx)
+```
+
+</Accordion>
 
 Release the stream handle.
 
@@ -650,14 +658,6 @@ Release the stream handle.
     <div className="msb-param-desc">Typed microsandbox error.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-defer stream.Close(ctx)
-```
-
-</Accordion>
 
 ## Types
 

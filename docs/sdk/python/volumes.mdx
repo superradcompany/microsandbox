@@ -83,6 +83,15 @@ async def create(
 ) -> Volume
 ```
 
+<Accordion title="Example">
+
+```python
+await Volume.create("pip-cache", quota_mib=2048)
+await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
+```
+
+</Accordion>
+
 Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volume is a backing disk image that requires `size_mib`.
 
 <p className="msb-label">Parameters</p>
@@ -119,15 +128,6 @@ Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await Volume.create("pip-cache", quota_mib=2048)
-await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
@@ -136,6 +136,15 @@ await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
 ```python
 async def get(name: str) -> VolumeHandle
 ```
+
+<Accordion title="Example">
+
+```python
+handle = await Volume.get("pip-cache")
+print(handle.kind, handle.used_bytes)
+```
+
+</Accordion>
 
 Get a lightweight handle to an existing named volume, with its metadata and a host-side filesystem handle.
 
@@ -157,15 +166,6 @@ Get a lightweight handle to an existing named volume, with its metadata and a ho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-handle = await Volume.get("pip-cache")
-print(handle.kind, handle.used_bytes)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
@@ -174,6 +174,15 @@ print(handle.kind, handle.used_bytes)
 ```python
 async def list() -> list[VolumeHandle]
 ```
+
+<Accordion title="Example">
+
+```python
+for v in await Volume.list():
+    print(v.name, v.used_bytes)
+```
+
+</Accordion>
 
 List all named volumes.
 
@@ -186,15 +195,6 @@ List all named volumes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for v in await Volume.list():
-    print(v.name, v.used_bytes)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
@@ -203,6 +203,14 @@ for v in await Volume.list():
 ```python
 async def remove(name: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await Volume.remove("pip-cache")
+```
+
+</Accordion>
 
 Delete a named volume and its contents. Fails if the volume is currently mounted.
 
@@ -214,14 +222,6 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
     <div className="msb-param-desc">Volume name.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-await Volume.remove("pip-cache")
-```
-
-</Accordion>
 
 ---
 
@@ -244,6 +244,18 @@ def bind(
     nodev: bool = False,
 ) -> MountConfig
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "build",
+    image="python",
+    volumes={"/src": Volume.bind("/home/me/project", readonly=True)},
+)
+```
+
+</Accordion>
 
 Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
 
@@ -281,18 +293,6 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "build",
-    image="python",
-    volumes={"/src": Volume.bind("/home/me/project", readonly=True)},
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
@@ -308,6 +308,21 @@ def named(
     nodev: bool = False,
 ) -> MountConfig
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={
+        "/root/.cache/pip": Volume.named("pip-cache"),
+        "/etc/config": Volume.named("shared-config", readonly=True),
+    },
+)
+```
+
+</Accordion>
 
 Mount an existing named volume. The volume must already exist; create it first with [`Volume.create()`](#volume-create).
 
@@ -345,21 +360,6 @@ Mount an existing named volume. The volume must already exist; create it first w
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "worker",
-    image="python",
-    volumes={
-        "/root/.cache/pip": Volume.named("pip-cache"),
-        "/etc/config": Volume.named("shared-config", readonly=True),
-    },
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">tmpfs()</span>
@@ -375,6 +375,18 @@ def tmpfs(
     nodev: bool = False,
 ) -> MountConfig
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "scratch",
+    image="python",
+    volumes={"/tmp/work": Volume.tmpfs(size_mib=256)},
+)
+```
+
+</Accordion>
 
 Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 
@@ -412,18 +424,6 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "scratch",
-    image="python",
-    volumes={"/tmp/work": Volume.tmpfs(size_mib=256)},
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
@@ -441,6 +441,18 @@ def disk(
     nodev: bool = False,
 ) -> MountConfig
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "db",
+    image="postgres",
+    volumes={"/var/lib/postgresql": Volume.disk("/data/pg.qcow2", fstype="ext4")},
+)
+```
+
+</Accordion>
 
 Mount a host disk image as a virtio-blk device. `format` is the disk image format (`"qcow2"`, `"raw"`, or `"vmdk"`); when omitted it is inferred from the file extension. `fstype` (e.g. `"ext4"`) is the inner filesystem agentd mounts; when omitted, agentd probes `/proc/filesystems` for a type that mounts cleanly.
 
@@ -486,18 +498,6 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "db",
-    image="postgres",
-    volumes={"/var/lib/postgresql": Volume.disk("/data/pg.qcow2", fstype="ext4")},
-)
-```
-
-</Accordion>
-
 ---
 
 ## Instance properties
@@ -541,6 +541,15 @@ Host-side filesystem operations on a named volume, obtained via the `fs` propert
 async def read(path: str) -> bytes
 ```
 
+<Accordion title="Example">
+
+```python
+handle = await Volume.get("pip-cache")
+data = await handle.fs.read("index.json")
+```
+
+</Accordion>
+
 Read the entire contents of a file as raw bytes.
 
 <p className="msb-label">Parameters</p>
@@ -560,15 +569,6 @@ Read the entire contents of a file as raw bytes.
     <div className="msb-param-desc">File contents as raw bytes.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-handle = await Volume.get("pip-cache")
-data = await handle.fs.read("index.json")
-```
-
-</Accordion>
 
 ---
 
@@ -608,6 +608,15 @@ Read the entire contents of a file and decode it as UTF-8.
 async def write(path: str, data: bytes) -> None
 ```
 
+<Accordion title="Example">
+
+```python
+handle = await Volume.get("pip-cache")
+await handle.fs.write("seed.txt", b"hello")
+```
+
+</Accordion>
+
 Write content to a file, creating it if it doesn't exist and overwriting if it does.
 
 <p className="msb-label">Parameters</p>
@@ -622,15 +631,6 @@ Write content to a file, creating it if it doesn't exist and overwriting if it d
     <div className="msb-param-desc">File content.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-handle = await Volume.get("pip-cache")
-await handle.fs.write("seed.txt", b"hello")
-```
-
-</Accordion>
 
 ---
 

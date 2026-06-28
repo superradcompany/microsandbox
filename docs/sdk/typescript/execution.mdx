@@ -97,6 +97,16 @@ await sandbox.stop();
 exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
 ```
 
+<Accordion title="Example">
+
+```typescript
+const result = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
+console.log(result.stdout()); // "2\n"
+console.log(result.code);     // 0
+```
+
+</Accordion>
+
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`execStream()`](#sandbox-execstream) instead.
 
 <p className="msb-label">Parameters</p>
@@ -121,16 +131,6 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const result = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
-console.log(result.stdout()); // "2\n"
-console.log(result.code);     // 0
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execWith()</span>
@@ -142,6 +142,19 @@ execWith(
   configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
 ): Promise<ExecOutput>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const out = await sandbox.execWith("python3", (e) =>
+  e.args(["script.py"])
+    .cwd("/app")
+    .env("PYTHONPATH", "/app/lib")
+    .timeout(30_000),
+);
+```
+
+</Accordion>
 
 Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, TTY allocation, and rlimits via the builder callback. These overrides apply only to this execution and don't change the sandbox's defaults.
 
@@ -167,19 +180,6 @@ Run a command with per-execution overrides. Configure working directory, environ
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const out = await sandbox.execWith("python3", (e) =>
-  e.args(["script.py"])
-    .cwd("/app")
-    .env("PYTHONPATH", "/app/lib")
-    .timeout(30_000),
-);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
@@ -188,6 +188,15 @@ const out = await sandbox.execWith("python3", (e) =>
 ```typescript
 shell(script: string): Promise<ExecOutput>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const out = await sandbox.shell("ls -la /app && echo done");
+console.log(out.stdout());
+```
+
+</Accordion>
 
 Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
 
@@ -209,15 +218,6 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const out = await sandbox.shell("ls -la /app && echo done");
-console.log(out.stdout());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attachShell()</span>
@@ -226,6 +226,14 @@ console.log(out.stdout());
 ```typescript
 attachShell(): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const code = await sandbox.attachShell();
+```
+
+</Accordion>
 
 Bridge your terminal to the sandbox's default shell in a fully interactive PTY session.
 
@@ -237,14 +245,6 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
     <div className="msb-param-desc">Exit code of the shell process.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-const code = await sandbox.attachShell();
-```
-
-</Accordion>
 
 ---
 
@@ -258,6 +258,18 @@ const code = await sandbox.attachShell();
 ```typescript
 execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
+for await (const event of handle) {
+  if (event.kind === "stdout") process.stdout.write(event.data);
+  if (event.kind === "exited") break;
+}
+```
+
+</Accordion>
 
 Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
 
@@ -283,18 +295,6 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
-for await (const event of handle) {
-  if (event.kind === "stdout") process.stdout.write(event.data);
-  if (event.kind === "exited") break;
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStreamWith()</span>
@@ -306,6 +306,18 @@ execStreamWith(
   configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
 ): Promise<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const handle = await sandbox.execStreamWith("python3", (e) =>
+  e.args(["-u", "worker.py"]).env("LEVEL", "debug").stdinPipe(),
+);
+const stdin = await handle.takeStdin();
+await stdin?.write("task-1\n");
+```
+
+</Accordion>
 
 Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [`ExecOptionsBuilder`](#execoptionsbuilder), but returns an [`ExecHandle`](#exechandle) instead of buffering output.
 
@@ -331,18 +343,6 @@ Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const handle = await sandbox.execStreamWith("python3", (e) =>
-  e.args(["-u", "worker.py"]).env("LEVEL", "debug").stdinPipe(),
-);
-const stdin = await handle.takeStdin();
-await stdin?.write("task-1\n");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shellStream()</span>
@@ -351,6 +351,17 @@ await stdin?.write("task-1\n");
 ```typescript
 shellStream(script: string): Promise<ExecHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const handle = await sandbox.shellStream("for i in 1 2 3; do echo $i; sleep 1; done");
+for await (const event of handle) {
+  if (event.kind === "stdout") process.stdout.write(event.data);
+}
+```
+
+</Accordion>
 
 Run a shell command with streaming output.
 
@@ -372,17 +383,6 @@ Run a shell command with streaming output.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const handle = await sandbox.shellStream("for i in 1 2 3; do echo $i; sleep 1; done");
-for await (const event of handle) {
-  if (event.kind === "stdout") process.stdout.write(event.data);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
@@ -391,6 +391,14 @@ for await (const event of handle) {
 ```typescript
 attach(cmd: string, args?: Iterable<string>): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const code = await sandbox.attach("python3");
+```
+
+</Accordion>
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process.
 
@@ -416,14 +424,6 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const code = await sandbox.attach("python3");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attachWith()</span>
@@ -435,6 +435,18 @@ attachWith(
   configure: (b: AttachOptionsBuilder) => AttachOptionsBuilder,
 ): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const code = await sandbox.attachWith("bash", (a) =>
+  a.cwd("/app")
+    .env("EDITOR", "vim")
+    .detachKeys("ctrl-]"),
+);
+```
+
+</Accordion>
 
 Interactive PTY attach with options for arguments, environment variables, working directory, user, custom detach keys, and rlimits. Configure via the builder callback.
 
@@ -459,18 +471,6 @@ Interactive PTY attach with options for arguments, environment variables, workin
     <div className="msb-param-desc">Exit code of the process.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-const code = await sandbox.attachWith("bash", (a) =>
-  a.cwd("/app")
-    .env("EDITOR", "vim")
-    .detachKeys("ctrl-]"),
-);
-```
-
-</Accordion>
 
 ---
 

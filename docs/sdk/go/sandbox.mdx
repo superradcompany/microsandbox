@@ -125,6 +125,26 @@ fmt.Println(out.Stdout())                           // 3. read output
 func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error)
 ```
 
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithMemory(512),
+    m.WithCPUs(2),
+    m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
+)
+if err != nil {
+    return err
+}
+defer func() {
+    _ = sb.Stop(context.Background())
+    _ = sb.Close()
+}()
+```
+
+</Accordion>
+
 Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process, call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
 
 <p className="msb-label">Parameters</p>
@@ -157,26 +177,6 @@ Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sb, err := m.CreateSandbox(ctx, "api",
-    m.WithImage("python:3.12"),
-    m.WithMemory(512),
-    m.WithCPUs(2),
-    m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
-)
-if err != nil {
-    return err
-}
-defer func() {
-    _ = sb.Stop(context.Background())
-    _ = sb.Close()
-}()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">GetSandbox()</span>
@@ -185,6 +185,18 @@ defer func() {
 ```go
 func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+h, err := m.GetSandbox(ctx, "api")
+if err != nil {
+    return err
+}
+fmt.Println(h.Status())
+```
+
+</Accordion>
 
 Look up a sandbox by name and return a metadata handle without connecting to it. Returns an error with `Kind == ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, `Logs`, and snapshot methods.
 
@@ -206,18 +218,6 @@ Look up a sandbox by name and return a metadata handle without connecting to it.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-h, err := m.GetSandbox(ctx, "api")
-if err != nil {
-    return err
-}
-fmt.Println(h.Status())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ListSandboxes()</span>
@@ -226,17 +226,6 @@ fmt.Println(h.Status())
 ```go
 func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error)
 ```
-
-Return metadata for every known sandbox (running, stopped, draining, crashed), ordered by creation time, newest first.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">[]*SandboxHandle</a></div>
-    <div className="msb-param-desc">All sandbox handles.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -252,6 +241,17 @@ for _, h := range handles {
 
 </Accordion>
 
+Return metadata for every known sandbox (running, stopped, draining, crashed), ordered by creation time, newest first.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">[]*SandboxHandle</a></div>
+    <div className="msb-param-desc">All sandbox handles.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ListSandboxesWith()</span>
@@ -260,6 +260,15 @@ for _, h := range handles {
 ```go
 func ListSandboxesWith(ctx context.Context, filter SandboxFilter) ([]*SandboxHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+filter := m.NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"})
+handles, err := m.ListSandboxesWith(ctx, filter)
+```
+
+</Accordion>
 
 Return sandbox metadata narrowed by a [`SandboxFilter`](#sandboxfilter). Label selectors are AND-matched: a sandbox matches only if it carries every label in the filter.
 
@@ -280,15 +289,6 @@ Return sandbox metadata narrowed by a [`SandboxFilter`](#sandboxfilter). Label s
     <div className="msb-param-desc">Matching sandbox handles.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-filter := m.NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"})
-handles, err := m.ListSandboxesWith(ctx, filter)
-```
-
-</Accordion>
 
 ---
 
@@ -319,6 +319,14 @@ Return an empty [`SandboxFilter`](#sandboxfilter) that matches every sandbox. Ch
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error)
 ```
 
+<Accordion title="Example">
+
+```go
+sb, err := m.StartSandbox(ctx, "api")
+```
+
+</Accordion>
+
 Restart a previously stopped sandbox. The VM reboots using the persisted configuration and returns a live [`*Sandbox`](#methods).
 
 <p className="msb-label">Parameters</p>
@@ -338,14 +346,6 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
     <div className="msb-param-desc">Running sandbox.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-sb, err := m.StartSandbox(ctx, "api")
-```
-
-</Accordion>
 
 ---
 
@@ -385,6 +385,14 @@ Boot a stopped sandbox in detached mode. The VM keeps running after the returned
 func RemoveSandbox(ctx context.Context, name string) error
 ```
 
+<Accordion title="Example">
+
+```go
+err := m.RemoveSandbox(ctx, "api")
+```
+
+</Accordion>
+
 Delete a stopped sandbox and all its persisted state from disk. Fails if the sandbox is still running, stop it first.
 
 <p className="msb-label">Parameters</p>
@@ -396,14 +404,6 @@ Delete a stopped sandbox and all its persisted state from disk. Fails if the san
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := m.RemoveSandbox(ctx, "api")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">AllSandboxMetrics()</span>
@@ -412,17 +412,6 @@ err := m.RemoveSandbox(ctx, "api")
 ```go
 func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error)
 ```
-
-Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox, keyed by sandbox name. Only running and draining sandboxes appear.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#metrics">map[string]*Metrics</a></div>
-    <div className="msb-param-desc">Per-sandbox metrics keyed by name.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -435,6 +424,17 @@ for name, metrics := range all {
 
 </Accordion>
 
+Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox, keyed by sandbox name. Only running and draining sandboxes appear.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#metrics">map[string]*Metrics</a></div>
+    <div className="msb-param-desc">Per-sandbox metrics keyed by name.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">EnsureInstalled()</span>
@@ -443,6 +443,16 @@ for name, metrics := range all {
 ```go
 func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
 ```
+
+<Accordion title="Example">
+
+```go
+if err := m.EnsureInstalled(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+</Accordion>
 
 Optional. Ensure msb + libkrunfw are present under `~/.microsandbox/`, downloading them from the matching GitHub release if not. Call at startup to surface install errors up front; otherwise the first sandbox call handles it. The FFI library is embedded in the Go binary and loads automatically, `EnsureInstalled` does not govern it. Idempotent; options apply only to the first call.
 
@@ -458,16 +468,6 @@ Optional. Ensure msb + libkrunfw are present under `~/.microsandbox/`, downloadi
     <div className="msb-param-desc">Install knobs, e.g. <a href="#withskipdownload">WithSkipDownload()</a>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-if err := m.EnsureInstalled(ctx); err != nil {
-    log.Fatal(err)
-}
-```
-
-</Accordion>
 
 ---
 
@@ -564,6 +564,14 @@ Return the sandbox name.
 func (s *Sandbox) FS() *SandboxFSOps
 ```
 
+<Accordion title="Example">
+
+```go
+err := sb.FS().Write(ctx, "/tmp/hello.txt", []byte("hi"))
+```
+
+</Accordion>
+
 Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for the API.
 
 <p className="msb-label">Returns</p>
@@ -575,14 +583,6 @@ Return a filesystem accessor for reading and writing files inside the running sa
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := sb.FS().Write(ctx, "/tmp/hello.txt", []byte("hi"))
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">SSH()</span>
@@ -591,6 +591,14 @@ err := sb.FS().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 ```go
 func (s *Sandbox) SSH() *SandboxSSHOps
 ```
+
+<Accordion title="Example">
+
+```go
+client, err := sb.SSH().OpenClient(ctx)
+```
+
+</Accordion>
 
 Return an SSH accessor for opening a native in-process SSH client or preparing a reusable SSH server endpoint against the running sandbox. See [SSH](/sdk/go/ssh) for the API.
 
@@ -603,14 +611,6 @@ Return an SSH accessor for opening a native in-process SSH client or preparing a
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-client, err := sb.SSH().OpenClient(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Logs()</span>
@@ -619,6 +619,19 @@ client, err := sb.SSH().OpenClient(ctx)
 ```go
 func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
 ```
+
+<Accordion title="Example">
+
+```go
+entries, err := sb.Logs(ctx, m.LogOptions{
+    Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
+})
+for _, e := range entries {
+    fmt.Printf("[%s] %s", e.Source, e.Text())
+}
+```
+
+</Accordion>
 
 Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, so it works for running and stopped sandboxes alike without guest-agent protocol traffic. The default sources are stdout and stderr; add `LogSourceOutput` for PTY-merged output or `LogSourceSystem` for runtime and kernel diagnostics. The same method exists on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
@@ -640,19 +653,6 @@ Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-entries, err := sb.Logs(ctx, m.LogOptions{
-    Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
-})
-for _, e := range entries {
-    fmt.Printf("[%s] %s", e.Source, e.Text())
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">LogStream()</span>
@@ -661,6 +661,25 @@ for _, e := range entries {
 ```go
 func (s *Sandbox) LogStream(ctx context.Context, opts LogStreamOptions) (*LogStreamHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+stream, err := sb.LogStream(ctx, m.LogStreamOptions{Follow: true})
+if err != nil {
+    return err
+}
+defer stream.Close()
+for {
+    entry, err := stream.Recv(ctx)
+    if err != nil || entry == nil {
+        break
+    }
+    fmt.Print(entry.Text())
+}
+```
+
+</Accordion>
 
 Start a streaming log subscription against a live sandbox. Pass `LogStreamOptions{Follow: true}` to keep the stream open past current EOF and pick up new entries as they are written. Close the returned [`*LogStreamHandle`](#logstreamhandle) when done. Also available on [`SandboxHandle`](#sandboxhandle).
 
@@ -682,25 +701,6 @@ Start a streaming log subscription against a live sandbox. Pass `LogStreamOption
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-stream, err := sb.LogStream(ctx, m.LogStreamOptions{Follow: true})
-if err != nil {
-    return err
-}
-defer stream.Close()
-for {
-    entry, err := stream.Recv(ctx)
-    if err != nil || entry == nil {
-        break
-    }
-    fmt.Print(entry.Text())
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
@@ -709,6 +709,16 @@ for {
 ```go
 func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error)
 ```
+
+<Accordion title="Example">
+
+```go
+metrics, err := sb.Metrics(ctx)
+fmt.Printf("cpu %.1f%% · mem %d MiB\n",
+    metrics.CPUPercent, metrics.MemoryBytes/(1<<20))
+```
+
+</Accordion>
 
 Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, optional upper-disk usage, and uptime.
 
@@ -721,16 +731,6 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-metrics, err := sb.Metrics(ctx)
-fmt.Printf("cpu %.1f%% · mem %d MiB\n",
-    metrics.CPUPercent, metrics.MemoryBytes/(1<<20))
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">MetricsStream()</span>
@@ -739,6 +739,25 @@ fmt.Printf("cpu %.1f%% · mem %d MiB\n",
 ```go
 func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*MetricsStreamHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+stream, err := sb.MetricsStream(ctx, 500*time.Millisecond)
+if err != nil {
+    return err
+}
+defer stream.Close()
+for {
+    metrics, err := stream.Recv(ctx)
+    if err != nil || metrics == nil {
+        break
+    }
+    fmt.Printf("CPU: %.1f%%\n", metrics.CPUPercent)
+}
+```
+
+</Accordion>
 
 Start a streaming metrics subscription that delivers a [`Metrics`](#metrics) snapshot every `interval`. Sub-millisecond precision is rounded up; a zero or negative value uses the runtime minimum (~1 ms). Close the returned [`*MetricsStreamHandle`](#metricsstreamhandle) when done.
 
@@ -759,25 +778,6 @@ Start a streaming metrics subscription that delivers a [`Metrics`](#metrics) sna
     <div className="msb-param-desc">Live subscription; call <code>Recv</code> in a loop.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-stream, err := sb.MetricsStream(ctx, 500*time.Millisecond)
-if err != nil {
-    return err
-}
-defer stream.Close()
-for {
-    metrics, err := stream.Recv(ctx)
-    if err != nil || metrics == nil {
-        break
-    }
-    fmt.Printf("CPU: %.1f%%\n", metrics.CPUPercent)
-}
-```
-
-</Accordion>
 
 ---
 
@@ -841,6 +841,14 @@ Attach to the sandbox's default shell (configured via [`WithShell`](#withshell),
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
 ```
 
+<Accordion title="Example">
+
+```go
+err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
+```
+
+</Accordion>
+
 Gracefully shut down the sandbox and wait until stopped state is observed. Lets the workload finish writing any pending data to disk before it exits. Defaults to a ten-second graceful window before force-kill; pass [`WithStopTimeout`](#withstoptimeout) to change it.
 
 <p className="msb-label">Parameters</p>
@@ -851,14 +859,6 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
     <div className="msb-param-desc">Graceful shutdown window, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
-```
-
-</Accordion>
 
 ---
 
@@ -880,6 +880,14 @@ Request graceful shutdown and return once the request is sent, without waiting f
 func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error
 ```
 
+<Accordion title="Example">
+
+```go
+err := sb.Kill(ctx)
+```
+
+</Accordion>
+
 Force-terminate the sandbox with SIGKILL and wait until stopped state is observed. No graceful shutdown, so pending writes the workload hasn't `fsync`'d may be lost. Prefer [`Stop`](#sb-stop) for graceful shutdown. Defaults to a five-second observation window; pass [`WithKillTimeout`](#withkilltimeout) to change it.
 
 <p className="msb-label">Parameters</p>
@@ -890,14 +898,6 @@ Force-terminate the sandbox with SIGKILL and wait until stopped state is observe
     <div className="msb-param-desc">Stopped-state observation window.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-err := sb.Kill(ctx)
-```
-
-</Accordion>
 
 ---
 
@@ -930,6 +930,15 @@ Request a graceful drain and return once the request is sent. Existing commands 
 func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error)
 ```
 
+<Accordion title="Example">
+
+```go
+result, err := sb.WaitUntilStopped(ctx)
+fmt.Printf("ended as %s\n", result.Status)
+```
+
+</Accordion>
+
 Block until the sandbox is observed in a terminal state, then return how it ended.
 
 <p className="msb-label">Returns</p>
@@ -941,15 +950,6 @@ Block until the sandbox is observed in a terminal state, then return how it ende
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-result, err := sb.WaitUntilStopped(ctx)
-fmt.Printf("ended as %s\n", result.Status)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Detach()</span>
@@ -959,8 +959,6 @@ fmt.Printf("ended as %s\n", result.Status)
 func (s *Sandbox) Detach(ctx context.Context) error
 ```
 
-Release the Rust-side handle **without** stopping the VM. Use on sandboxes created with [`WithDetached`](#withdetached) once the caller is done with the handle but the sandbox should keep running in the background. After `Detach`, the handle is invalid; a subsequent `Close` returns an error with `Kind == ErrInvalidHandle`. Reconnect later with [`GetSandbox`](#m-getsandbox).
-
 <Accordion title="Example">
 
 ```go
@@ -968,6 +966,8 @@ err := sb.Detach(ctx) // keeps running in the background
 ```
 
 </Accordion>
+
+Release the Rust-side handle **without** stopping the VM. Use on sandboxes created with [`WithDetached`](#withdetached) once the caller is done with the handle but the sandbox should keep running in the background. After `Detach`, the handle is invalid; a subsequent `Close` returns an error with `Kind == ErrInvalidHandle`. Reconnect later with [`GetSandbox`](#m-getsandbox).
 
 ---
 
@@ -978,8 +978,6 @@ err := sb.Detach(ctx) // keeps running in the background
 func (s *Sandbox) Close() error
 ```
 
-Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM, use [`Detach`](#sb-detach) instead to leave it running.
-
 <Accordion title="Example">
 
 ```go
@@ -987,6 +985,8 @@ defer sb.Close()
 ```
 
 </Accordion>
+
+Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM, use [`Detach`](#sb-detach) instead to leave it running.
 
 ---
 
@@ -1413,17 +1413,6 @@ Override the user-workload entrypoint baked into the image: the command the agen
 func WithInit(cfg InitConfig) SandboxOption
 ```
 
-Hand off PID 1 inside the guest to a custom init binary after agentd finishes boot-time setup. Construct `cfg` via the [`Init`](#init) factory. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>cfg</code><a className="msb-type" href="#initconfig">InitConfig</a></div>
-    <div className="msb-param-desc">Init specification.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -1434,6 +1423,17 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 
 </Accordion>
+
+Hand off PID 1 inside the guest to a custom init binary after agentd finishes boot-time setup. Construct `cfg` via the [`Init`](#init) factory. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cfg</code><a className="msb-type" href="#initconfig">InitConfig</a></div>
+    <div className="msb-param-desc">Init specification.</div>
+  </div>
+</div>
 
 ---
 
@@ -1635,17 +1635,6 @@ Publish ports on explicit host bind addresses, such as `0.0.0.0`. See [`PortBind
 func WithNetwork(net *NetworkConfig) SandboxOption
 ```
 
-Configure the network stack: preset, custom rules, DNS, and TLS interception. Build via the [`NetworkPolicy`](/sdk/go/networking) factory or a [`*NetworkConfig`](/sdk/go/networking#networkconfig) literal. See [Networking](/sdk/go/networking).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>net</code><a className="msb-type" href="/sdk/go/networking#networkconfig">*NetworkConfig</a></div>
-    <div className="msb-param-desc">Network configuration.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -1656,6 +1645,17 @@ sb, err := m.CreateSandbox(ctx, "api",
 ```
 
 </Accordion>
+
+Configure the network stack: preset, custom rules, DNS, and TLS interception. Build via the [`NetworkPolicy`](/sdk/go/networking) factory or a [`*NetworkConfig`](/sdk/go/networking#networkconfig) literal. See [Networking](/sdk/go/networking).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>net</code><a className="msb-type" href="/sdk/go/networking#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Network configuration.</div>
+  </div>
+</div>
 
 ---
 
@@ -1686,17 +1686,6 @@ Append credential secrets to the sandbox. Secrets never enter the VM; the networ
 func WithPatches(patches ...PatchConfig) SandboxOption
 ```
 
-Append rootfs patches applied before the VM boots. Patches go into the writable layer; the base image is untouched. Only compatible with OverlayFS rootfs (not disk images). Build entries via the [`Patch`](#patch) factory.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>patches</code><a className="msb-type" href="#patchconfig">...PatchConfig</a></div>
-    <div className="msb-param-desc">Ordered rootfs patches.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```go
@@ -1711,6 +1700,17 @@ sb, err := m.CreateSandbox(ctx, "api",
 
 </Accordion>
 
+Append rootfs patches applied before the VM boots. Patches go into the writable layer; the base image is untouched. Only compatible with OverlayFS rootfs (not disk images). Build entries via the [`Patch`](#patch) factory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>patches</code><a className="msb-type" href="#patchconfig">...PatchConfig</a></div>
+    <div className="msb-param-desc">Ordered rootfs patches.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMounts()</span>
@@ -1719,17 +1719,6 @@ sb, err := m.CreateSandbox(ctx, "api",
 ```go
 func WithMounts(mounts map[string]MountConfig) SandboxOption
 ```
-
-Add volume mount configurations keyed by guest path. Build values via the [`Mount`](/sdk/go/volumes) factory. Called repeatedly, the maps merge; later entries overwrite earlier ones for the same guest path. See [Volumes](/sdk/go/volumes).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>mounts</code><span className="msb-type">map[string]MountConfig</span></div>
-    <div className="msb-param-desc">Guest path to mount config.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -1744,6 +1733,17 @@ sb, err := m.CreateSandbox(ctx, "api",
 ```
 
 </Accordion>
+
+Add volume mount configurations keyed by guest path. Build values via the [`Mount`](/sdk/go/volumes) factory. Called repeatedly, the maps merge; later entries overwrite earlier ones for the same guest path. See [Volumes](/sdk/go/volumes).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mounts</code><span className="msb-type">map[string]MountConfig</span></div>
+    <div className="msb-param-desc">Guest path to mount config.</div>
+  </div>
+</div>
 
 ---
 
@@ -1997,6 +1997,14 @@ Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#wit
 func (initFactory) Auto() InitConfig
 ```
 
+<Accordion title="Example">
+
+```go
+m.WithInit(m.Init.Auto())
+```
+
+</Accordion>
+
 Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands; otherwise delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
 
 <p className="msb-label">Returns</p>
@@ -2008,14 +2016,6 @@ Use a known init at the start of the image ENTRYPOINT when present, preserving a
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-m.WithInit(m.Init.Auto())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Init.</span><span className="msb-hn">Cmd()</span>
@@ -2024,6 +2024,20 @@ m.WithInit(m.Init.Auto())
 ```go
 func (initFactory) Cmd(cmd string, opts InitOptions) InitConfig
 ```
+
+<Accordion title="Example">
+
+```go
+m.WithInit(m.Init.Cmd(
+    "/lib/systemd/systemd",
+    m.InitOptions{
+        Args: []string{"--unit=multi-user.target"},
+        Env:  map[string]string{"container": "microsandbox"},
+    },
+))
+```
+
+</Accordion>
 
 Specify the init binary explicitly with optional argv and env. `cmd` must be an absolute path inside the guest rootfs.
 
@@ -2039,20 +2053,6 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
     <div className="msb-param-desc">Argv and env.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-m.WithInit(m.Init.Cmd(
-    "/lib/systemd/systemd",
-    m.InitOptions{
-        Args: []string{"--unit=multi-user.target"},
-        Env:  map[string]string{"container": "microsandbox"},
-    },
-))
-```
-
-</Accordion>
 
 ---
 

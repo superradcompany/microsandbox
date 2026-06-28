@@ -66,6 +66,15 @@ Filesystem handle for a running sandbox, obtained via [`sandbox.fs()`](/sdk/type
 read(path: string): Promise<Uint8Array>
 ```
 
+<Accordion title="Example">
+
+```typescript
+const bytes = await fs.read("/app/logo.png");
+console.log(`${bytes.byteLength} bytes`);
+```
+
+</Accordion>
+
 Read the entire contents of a file as raw bytes.
 
 <p className="msb-label">Parameters</p>
@@ -86,15 +95,6 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const bytes = await fs.read("/app/logo.png");
-console.log(`${bytes.byteLength} bytes`);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readToString()</span>
@@ -103,6 +103,15 @@ console.log(`${bytes.byteLength} bytes`);
 ```typescript
 readToString(path: string): Promise<string>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const text = await fs.readToString("/etc/hostname");
+console.log(text.trim());
+```
+
+</Accordion>
 
 Read the entire contents of a file and decode it as UTF-8.
 
@@ -124,15 +133,6 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const text = await fs.readToString("/etc/hostname");
-console.log(text.trim());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
@@ -141,6 +141,14 @@ console.log(text.trim());
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.write("/tmp/config.json", '{"debug": true}');
+```
+
+</Accordion>
 
 Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist. `string` payloads are encoded as UTF-8.
 
@@ -157,14 +165,6 @@ Write content to a file, creating it if it doesn't exist and overwriting if it d
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.write("/tmp/config.json", '{"debug": true}');
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readStream()</span>
@@ -173,6 +173,16 @@ await fs.write("/tmp/config.json", '{"debug": true}');
 ```typescript
 readStream(path: string): Promise<FsReadStream>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for await (const chunk of await fs.readStream("/var/log/syslog")) {
+  process.stdout.write(chunk); // chunk is a Uint8Array
+}
+```
+
+</Accordion>
 
 Open a streaming reader for a file. Data is transferred in chunks. Use this for files too large to fit in memory. The returned [`FsReadStream`](#fsreadstream) is an `AsyncIterable<Uint8Array>`, so it works with `for await...of`.
 
@@ -194,16 +204,6 @@ Open a streaming reader for a file. Data is transferred in chunks. Use this for 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for await (const chunk of await fs.readStream("/var/log/syslog")) {
-  process.stdout.write(chunk); // chunk is a Uint8Array
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">writeStream()</span>
@@ -212,6 +212,15 @@ for await (const chunk of await fs.readStream("/var/log/syslog")) {
 ```typescript
 writeStream(path: string): Promise<FsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await using sink = await fs.writeStream("/tmp/big.bin");
+await sink.write(new Uint8Array(1 << 20));
+```
+
+</Accordion>
 
 Open a streaming writer for a file. Use this for files too large to hold in memory; pair with `await using` so the [`FsWriteSink`](#fswritesink) closes itself when the scope exits.
 
@@ -233,15 +242,6 @@ Open a streaming writer for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await using sink = await fs.writeStream("/tmp/big.bin");
-await sink.write(new Uint8Array(1 << 20));
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
@@ -250,6 +250,16 @@ await sink.write(new Uint8Array(1 << 20));
 ```typescript
 list(path: string): Promise<FsEntry[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const entry of await fs.list("/app")) {
+  console.log(`${entry.kind}\t${entry.path}`);
+}
+```
+
+</Accordion>
 
 List the entries in a directory.
 
@@ -271,16 +281,6 @@ List the entries in a directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const entry of await fs.list("/app")) {
-  console.log(`${entry.kind}\t${entry.path}`);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
@@ -289,6 +289,14 @@ for (const entry of await fs.list("/app")) {
 ```typescript
 mkdir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.mkdir("/app/data");
+```
+
+</Accordion>
 
 Create a directory. Parent directories must already exist.
 
@@ -301,14 +309,6 @@ Create a directory. Parent directories must already exist.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.mkdir("/app/data");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">removeDir()</span>
@@ -317,6 +317,14 @@ await fs.mkdir("/app/data");
 ```typescript
 removeDir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.removeDir("/app/data");
+```
+
+</Accordion>
 
 Remove a directory.
 
@@ -329,14 +337,6 @@ Remove a directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.removeDir("/app/data");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
@@ -345,6 +345,14 @@ await fs.removeDir("/app/data");
 ```typescript
 remove(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.remove("/tmp/config.json");
+```
+
+</Accordion>
 
 Remove a file.
 
@@ -357,14 +365,6 @@ Remove a file.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.remove("/tmp/config.json");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
@@ -373,6 +373,15 @@ await fs.remove("/tmp/config.json");
 ```typescript
 stat(path: string): Promise<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const meta = await fs.stat("/app/config.json");
+console.log(`${meta.size} bytes, mode ${meta.mode.toString(8)}`);
+```
+
+</Accordion>
 
 Get detailed metadata for a file or directory.
 
@@ -394,15 +403,6 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const meta = await fs.stat("/app/config.json");
-console.log(`${meta.size} bytes, mode ${meta.mode.toString(8)}`);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
@@ -411,6 +411,16 @@ console.log(`${meta.size} bytes, mode ${meta.mode.toString(8)}`);
 ```typescript
 exists(path: string): Promise<boolean>
 ```
+
+<Accordion title="Example">
+
+```typescript
+if (await fs.exists("/app/config.json")) {
+  console.log("config present");
+}
+```
+
+</Accordion>
 
 Check whether a path exists inside the sandbox.
 
@@ -432,16 +442,6 @@ Check whether a path exists inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-if (await fs.exists("/app/config.json")) {
-  console.log("config present");
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
@@ -450,6 +450,14 @@ if (await fs.exists("/app/config.json")) {
 ```typescript
 copy(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.copy("/app/config.json", "/app/config.bak.json");
+```
+
+</Accordion>
 
 Copy a file within the sandbox.
 
@@ -466,14 +474,6 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.copy("/app/config.json", "/app/config.bak.json");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
@@ -482,6 +482,14 @@ await fs.copy("/app/config.json", "/app/config.bak.json");
 ```typescript
 rename(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.rename("/tmp/draft.txt", "/tmp/final.txt");
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -498,14 +506,6 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.rename("/tmp/draft.txt", "/tmp/final.txt");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copyFromHost()</span>
@@ -514,6 +514,14 @@ await fs.rename("/tmp/draft.txt", "/tmp/final.txt");
 ```typescript
 copyFromHost(hostPath: string, guestPath: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.copyFromHost("./seed.db", "/app/data/seed.db");
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sandboxes/volumes) instead.
 
@@ -530,14 +538,6 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await fs.copyFromHost("./seed.db", "/app/data/seed.db");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copyToHost()</span>
@@ -546,6 +546,14 @@ await fs.copyFromHost("./seed.db", "/app/data/seed.db");
 ```typescript
 copyToHost(guestPath: string, hostPath: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await fs.copyToHost("/app/out/report.pdf", "./report.pdf");
+```
+
+</Accordion>
 
 Copy a file from the sandbox to the host machine.
 
@@ -561,14 +569,6 @@ Copy a file from the sandbox to the host machine.
     <div className="msb-param-desc">Destination path on the host.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-await fs.copyToHost("/app/out/report.pdf", "./report.pdf");
-```
-
-</Accordion>
 
 ---
 

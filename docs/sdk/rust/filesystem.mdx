@@ -82,6 +82,15 @@ for entry in fs.list("/tmp").await? {
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
 ```
 
+<Accordion title="Example">
+
+```rust
+let bytes = sb.fs().read("/app/logo.png").await?;
+println!("{} bytes", bytes.len());
+```
+
+</Accordion>
+
 Read an entire file from the guest filesystem into memory as raw bytes.
 
 <p className="msb-label">Parameters</p>
@@ -102,15 +111,6 @@ Read an entire file from the guest filesystem into memory as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let bytes = sb.fs().read("/app/logo.png").await?;
-println!("{} bytes", bytes.len());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
@@ -119,6 +119,15 @@ println!("{} bytes", bytes.len());
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let text = sb.fs().read_to_string("/etc/hostname").await?;
+println!("{}", text.trim());
+```
+
+</Accordion>
 
 Read an entire file and decode it as UTF-8. Errors if the contents are not valid UTF-8.
 
@@ -140,15 +149,6 @@ Read an entire file and decode it as UTF-8. Errors if the contents are not valid
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let text = sb.fs().read_to_string("/etc/hostname").await?;
-println!("{}", text.trim());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
@@ -157,6 +157,19 @@ println!("{}", text.trim());
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut stream = sb.fs().read_stream("/var/log/big.log").await?;
+let mut total = 0;
+while let Some(chunk) = stream.recv().await? {
+    total += chunk.len();
+}
+println!("read {total} bytes");
+```
+
+</Accordion>
 
 Open a streaming reader that yields chunks of file data as they arrive. Use this for files too large to hold in memory, or to process data incrementally.
 
@@ -178,19 +191,6 @@ Open a streaming reader that yields chunks of file data as they arrive. Use this
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut stream = sb.fs().read_stream("/var/log/big.log").await?;
-let mut total = 0;
-while let Some(chunk) = stream.recv().await? {
-    total += chunk.len();
-}
-println!("read {total} bytes");
-```
-
-</Accordion>
-
 ---
 
 ## Write operations
@@ -203,6 +203,14 @@ println!("read {total} bytes");
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().write("/tmp/hello.txt", "hi there").await?;
+```
+
+</Accordion>
 
 Write data to a file in the guest, creating it if it doesn't exist and truncating it if it does. Parent directories must already exist.
 
@@ -219,14 +227,6 @@ Write data to a file in the guest, creating it if it doesn't exist and truncatin
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().write("/tmp/hello.txt", "hi there").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
@@ -235,6 +235,17 @@ sb.fs().write("/tmp/hello.txt", "hi there").await?;
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```rust
+let sink = sb.fs().write_stream("/tmp/out.bin").await?;
+sink.write(&[0u8; 4096]).await?;
+sink.write(&[1u8; 4096]).await?;
+sink.close().await?;
+```
+
+</Accordion>
 
 Open a streaming writer for large files. Write chunks incrementally, then call [`FsWriteSink::close()`](#fswritesink) to flush and finalize. The file is created if missing and truncated if it exists.
 
@@ -256,17 +267,6 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let sink = sb.fs().write_stream("/tmp/out.bin").await?;
-sink.write(&[0u8; 4096]).await?;
-sink.write(&[1u8; 4096]).await?;
-sink.close().await?;
-```
-
-</Accordion>
-
 ---
 
 ## Directory operations
@@ -279,6 +279,16 @@ sink.close().await?;
 ```rust
 async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for entry in sb.fs().list("/app").await? {
+    println!("{:?} {}", entry.kind, entry.path);
+}
+```
+
+</Accordion>
 
 List the immediate children of a directory (non-recursive). Each entry carries its path, kind, size, mode, and modification time.
 
@@ -300,16 +310,6 @@ List the immediate children of a directory (non-recursive). Each entry carries i
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for entry in sb.fs().list("/app").await? {
-    println!("{:?} {}", entry.kind, entry.path);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
@@ -318,6 +318,14 @@ for entry in sb.fs().list("/app").await? {
 ```rust
 async fn mkdir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().mkdir("/app/data/cache").await?;
+```
+
+</Accordion>
 
 Create a directory, including any missing parent directories.
 
@@ -330,14 +338,6 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().mkdir("/app/data/cache").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
@@ -346,6 +346,14 @@ sb.fs().mkdir("/app/data/cache").await?;
 ```rust
 async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().remove_dir("/app/data/cache").await?;
+```
+
+</Accordion>
 
 Remove a directory and everything under it, recursively. For a single file use [`remove()`](#fs-remove).
 
@@ -357,14 +365,6 @@ Remove a directory and everything under it, recursively. For a single file use [
     <div className="msb-param-desc">Absolute directory path inside the guest.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-sb.fs().remove_dir("/app/data/cache").await?;
-```
-
-</Accordion>
 
 ---
 
@@ -379,6 +379,14 @@ sb.fs().remove_dir("/app/data/cache").await?;
 async fn remove(&self, path: &str) -> MicrosandboxResult<()>
 ```
 
+<Accordion title="Example">
+
+```rust
+sb.fs().remove("/tmp/hello.txt").await?;
+```
+
+</Accordion>
+
 Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
 <p className="msb-label">Parameters</p>
@@ -390,14 +398,6 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().remove("/tmp/hello.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
@@ -406,6 +406,14 @@ sb.fs().remove("/tmp/hello.txt").await?;
 ```rust
 async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
+```
+
+</Accordion>
 
 Copy a file from one path to another within the sandbox.
 
@@ -422,14 +430,6 @@ Copy a file from one path to another within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
@@ -438,6 +438,14 @@ sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
 ```rust
 async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -454,14 +462,6 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 ## Metadata
@@ -474,6 +474,15 @@ sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
 ```rust
 async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let meta = sb.fs().stat("/app/config.json").await?;
+println!("{} bytes, mode {:o}", meta.size, meta.mode);
+```
+
+</Accordion>
 
 Get metadata for a file or directory: kind, size, mode, read-only flag, and timestamps. A final symlink is followed (equivalent to `stat_with_follow(path, true)`); use [`stat_with_follow()`](#fs-stat_with_follow) to control that.
 
@@ -495,15 +504,6 @@ Get metadata for a file or directory: kind, size, mode, read-only flag, and time
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let meta = sb.fs().stat("/app/config.json").await?;
-println!("{} bytes, mode {:o}", meta.size, meta.mode);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat_with_follow()</span>
@@ -512,6 +512,15 @@ println!("{} bytes, mode {:o}", meta.size, meta.mode);
 ```rust
 async fn stat_with_follow(&self, path: &str, follow_symlink: bool) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let link_meta = sb.fs().stat_with_follow("/app/current", false).await?;
+println!("{:?}", link_meta.kind);
+```
+
+</Accordion>
 
 Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target. Local backend only; cloud returns `Unsupported`.
 
@@ -537,15 +546,6 @@ Get metadata, choosing whether to follow a final symlink. With `follow_symlink =
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let link_meta = sb.fs().stat_with_follow("/app/current", false).await?;
-println!("{:?}", link_meta.kind);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">set_stat()</span>
@@ -554,6 +554,19 @@ println!("{:?}", link_meta.kind);
 ```rust
 async fn set_stat(&self, path: &str, follow_symlink: bool, attrs: FsSetAttrs) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::sandbox::FsSetAttrs;
+
+sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
+    mode: Some(0o755),
+    ..Default::default()
+}).await?;
+```
+
+</Accordion>
 
 Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied. Local backend only; cloud returns `Unsupported`.
 
@@ -574,19 +587,6 @@ Update metadata on a file or directory: mode, owner uid/gid, size, and access/mo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use microsandbox::sandbox::FsSetAttrs;
-
-sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
-    mode: Some(0o755),
-    ..Default::default()
-}).await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_link()</span>
@@ -595,6 +595,15 @@ sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
 ```rust
 async fn read_link(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let target = sb.fs().read_link("/app/current").await?;
+println!("-> {target}");
+```
+
+</Accordion>
 
 Read the target of a symbolic link, returning the literal target text. Local backend only; cloud returns `Unsupported`.
 
@@ -616,15 +625,6 @@ Read the target of a symbolic link, returning the literal target text. Local bac
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let target = sb.fs().read_link("/app/current").await?;
-println!("-> {target}");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">symlink()</span>
@@ -633,6 +633,14 @@ println!("-> {target}");
 ```rust
 async fn symlink(&self, target: &str, link_path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().symlink("/app/releases/v2", "/app/current").await?;
+```
+
+</Accordion>
 
 Create a symbolic link at `link_path` that points to `target`. Local backend only; cloud returns `Unsupported`.
 
@@ -649,14 +657,6 @@ Create a symbolic link at `link_path` that points to `target`. Local backend onl
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().symlink("/app/releases/v2", "/app/current").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
@@ -665,6 +665,16 @@ sb.fs().symlink("/app/releases/v2", "/app/current").await?;
 ```rust
 async fn exists(&self, path: &str) -> MicrosandboxResult<bool>
 ```
+
+<Accordion title="Example">
+
+```rust
+if sb.fs().exists("/app/config.json").await? {
+    println!("config present");
+}
+```
+
+</Accordion>
 
 Check whether a file or directory exists at the given path in the guest. Implemented as a `stat()` probe: a successful stat yields `true`, a filesystem-op error yields `false`, and transport errors still propagate.
 
@@ -686,16 +696,6 @@ Check whether a file or directory exists at the given path in the guest. Impleme
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-if sb.fs().exists("/app/config.json").await? {
-    println!("config present");
-}
-```
-
-</Accordion>
-
 ---
 
 ## Host transfer
@@ -708,6 +708,14 @@ if sb.fs().exists("/app/config.json").await? {
 ```rust
 async fn copy_from_host(&self, host_path: impl AsRef<Path>, guest_path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox, streaming it in chunks. For transferring many files, consider a [bind-mounted volume](/sdk/rust/volumes) instead.
 
@@ -724,14 +732,6 @@ Copy a file from the host machine into the sandbox, streaming it in chunks. For 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
@@ -740,6 +740,14 @@ sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
 ```rust
 async fn copy_to_host(&self, guest_path: &str, host_path: impl AsRef<Path>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
+```
+
+</Accordion>
 
 Copy a file from the sandbox to the host machine.
 
@@ -755,14 +763,6 @@ Copy a file from the sandbox to the host machine.
     <div className="msb-param-desc">Destination path on the host.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
-```
-
-</Accordion>
 
 ---
 

@@ -73,6 +73,14 @@ async with await Sandbox.create("api", image="python") as sb:
 def ssh() -> SandboxSshOps
 ```
 
+<Accordion title="Example">
+
+```python
+client = await sb.ssh().open_client()
+```
+
+</Accordion>
+
 Return the SSH namespace for this sandbox. The namespace holds the SSH client and server helpers; nothing connects until you call [`open_client()`](#ssh-open_client) or [`prepare_server()`](#ssh-prepare_server). This method is synchronous; the helpers it returns are async.
 
 <p className="msb-label">Returns</p>
@@ -83,14 +91,6 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
     <div className="msb-param-desc">SSH namespace for this sandbox.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-client = await sb.ssh().open_client()
-```
-
-</Accordion>
 
 ## SandboxSshOps
 
@@ -109,6 +109,15 @@ async def open_client(
     sftp: bool = True,
 ) -> SshClient
 ```
+
+<Accordion title="Example">
+
+```python
+client = await sb.ssh().open_client(user="app", term="xterm-256color")
+out = await client.exec("uname -a")
+```
+
+</Accordion>
 
 Connect a native in-process SSH client to this sandbox. Generates an ephemeral client and host key pair, stands up an internal server bound to an in-memory stream, and authenticates over public key.
 
@@ -138,15 +147,6 @@ Connect a native in-process SSH client to this sandbox. Generates an ephemeral c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-client = await sb.ssh().open_client(user="app", term="xterm-256color")
-out = await client.exec("uname -a")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
@@ -161,6 +161,19 @@ async def prepare_server(
     sftp: bool = True,
 ) -> SshServer
 ```
+
+<Accordion title="Example">
+
+```python
+server = await sb.ssh().prepare_server(
+    authorized_keys_path="/home/me/.ssh/authorized_keys",
+    user="app",
+    sftp=False,
+)
+await server.serve_connection()
+```
+
+</Accordion>
 
 Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the host key and resolves authorized keys, falling back to the default authorized-keys file when no path is given. The returned [`SshServer`](#sshserver) serves one connection over this process's stdin/stdout.
 
@@ -194,19 +207,6 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-server = await sb.ssh().prepare_server(
-    authorized_keys_path="/home/me/.ssh/authorized_keys",
-    user="app",
-    sftp=False,
-)
-await server.serve_connection()
-```
-
-</Accordion>
-
 ## SshClient
 
 A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
@@ -219,6 +219,15 @@ A connected, native in-process SSH client session, obtained from [`ssh.open_clie
 ```python
 async def exec(command: str, *, tty: bool = False) -> SshOutput
 ```
+
+<Accordion title="Example">
+
+```python
+out = await client.exec("echo hello")
+print(f"exit {out.status}: {out.stdout_text}")
+```
+
+</Accordion>
 
 Run an SSH exec request and collect stdout, stderr, and the exit status. The command runs through the sandbox's configured shell. When `tty=True` a PTY is allocated and stderr is folded into stdout.
 
@@ -244,15 +253,6 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-out = await client.exec("echo hello")
-print(f"exit {out.status}: {out.stdout_text}")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
@@ -265,6 +265,15 @@ async def attach(
     detach_keys: str | None = None,
 ) -> int
 ```
+
+<Accordion title="Example">
+
+```python
+code = await client.attach(term="xterm-256color", detach_keys="ctrl-p,ctrl-q")
+print(f"shell exited with {code}")
+```
+
+</Accordion>
 
 Attach the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, and returns when the shell exits or the detach key sequence is typed.
 
@@ -290,15 +299,6 @@ Attach the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-code = await client.attach(term="xterm-256color", detach_keys="ctrl-p,ctrl-q")
-print(f"shell exited with {code}")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
@@ -307,6 +307,16 @@ print(f"shell exited with {code}")
 ```python
 async def sftp() -> SftpClient
 ```
+
+<Accordion title="Example">
+
+```python
+sftp = await client.sftp()
+await sftp.write("/tmp/hello.txt", b"hi")
+data = await sftp.read("/tmp/hello.txt")
+```
+
+</Accordion>
 
 Open an SFTP client session over this SSH connection. Requests the `sftp` subsystem and returns a high-level session for reading, writing, and listing files inside the guest.
 
@@ -319,16 +329,6 @@ Open an SFTP client session over this SSH connection. Requests the `sftp` subsys
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sftp = await client.sftp()
-await sftp.write("/tmp/hello.txt", b"hi")
-data = await sftp.read("/tmp/hello.txt")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
@@ -338,8 +338,6 @@ data = await sftp.read("/tmp/hello.txt")
 async def close() -> None
 ```
 
-Close this native SSH client session. Sends a disconnect and aborts the internal server task.
-
 <Accordion title="Example">
 
 ```python
@@ -347,6 +345,8 @@ await client.close()
 ```
 
 </Accordion>
+
+Close this native SSH client session. Sends a disconnect and aborts the internal server task.
 
 ## SshServer
 
@@ -361,8 +361,6 @@ A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server
 async def serve_connection() -> None
 ```
 
-Serve one SSH transport over this process's stdin/stdout. Runs the SSH handshake and session loop to completion, returning when the connection closes. Use this to bridge an SSH connection over the parent process's standard streams.
-
 <Accordion title="Example">
 
 ```python
@@ -371,6 +369,8 @@ await server.serve_connection()
 ```
 
 </Accordion>
+
+Serve one SSH transport over this process's stdin/stdout. Runs the SSH handshake and session loop to completion, returning when the connection closes. Use this to bridge an SSH connection over the parent process's standard streams.
 
 ---
 
@@ -381,8 +381,6 @@ await server.serve_connection()
 def close() -> None
 ```
 
-Release this prepared server endpoint. This method is synchronous.
-
 <Accordion title="Example">
 
 ```python
@@ -390,6 +388,8 @@ server.close()
 ```
 
 </Accordion>
+
+Release this prepared server endpoint. This method is synchronous.
 
 ## Types
 

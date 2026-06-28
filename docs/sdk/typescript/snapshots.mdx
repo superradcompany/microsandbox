@@ -101,6 +101,16 @@ These entry points live on `SandboxBuilder` and `SandboxHandle`; they are the br
 fromSnapshot(pathOrName: string): SandboxBuilder
 ```
 
+<Accordion title="Example">
+
+```typescript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("after-pip-install")
+  .create();
+```
+
+</Accordion>
+
 Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image) — the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
 
 <p className="msb-label">Parameters</p>
@@ -121,16 +131,6 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image(
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const sb = await Sandbox.builder("worker")
-  .fromSnapshot("after-pip-install")
-  .create();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
@@ -139,6 +139,16 @@ const sb = await Sandbox.builder("worker")
 ```typescript
 snapshot(name: string): Promise<Snapshot>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const h = await Sandbox.get("baseline");
+await h.stop();
+const snap = await h.snapshot("after-pip-install");
+```
+
+</Accordion>
 
 Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed; running sandboxes are rejected with a `SnapshotSandboxRunning` error. For an explicit filesystem destination, see [`snapshotTo()`](#handle-snapshotto).
 
@@ -160,16 +170,6 @@ Snapshot this sandbox under a bare name in the default snapshots directory (`~/.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const h = await Sandbox.get("baseline");
-await h.stop();
-const snap = await h.snapshot("after-pip-install");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshotTo()</span>
@@ -178,6 +178,14 @@ const snap = await h.snapshot("after-pip-install");
 ```typescript
 snapshotTo(path: string): Promise<Snapshot>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
+```
+
+</Accordion>
 
 Snapshot this sandbox to an explicit filesystem path. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed.
 
@@ -199,14 +207,6 @@ Snapshot this sandbox to an explicit filesystem path. Called on a [`SandboxHandl
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
-```
-
-</Accordion>
-
 ---
 
 ## Snapshot static methods
@@ -219,6 +219,18 @@ const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
 ```typescript
 static builder(sourceSandbox: string): SnapshotBuilder
 ```
+
+<Accordion title="Example">
+
+```typescript
+const snap = await Snapshot.builder("baseline")
+  .name("after-pip-install")
+  .label("stage", "post-deps")
+  .recordIntegrity()
+  .create();
+```
+
+</Accordion>
 
 Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fluent builder is what powers the CLI internally. The bare-name and explicit-path destinations are mutually exclusive — call exactly one of [`.name()`](#name) or [`.path()`](#path). See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
 
@@ -240,18 +252,6 @@ Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fl
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const snap = await Snapshot.builder("baseline")
-  .name("after-pip-install")
-  .label("stage", "post-deps")
-  .recordIntegrity()
-  .create();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
@@ -260,6 +260,15 @@ const snap = await Snapshot.builder("baseline")
 ```typescript
 static open(pathOrName: string): Promise<Snapshot>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const snap = await Snapshot.open("after-pip-install");
+console.log(snap.digest);
+```
+
+</Accordion>
 
 Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only — does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
 
@@ -281,15 +290,6 @@ Open an existing snapshot artifact. Bare names resolve under the default snapsho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const snap = await Snapshot.open("after-pip-install");
-console.log(snap.digest);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
@@ -298,6 +298,15 @@ console.log(snap.digest);
 ```typescript
 static get(nameOrDigest: string): Promise<SnapshotHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.get("after-pip-install");
+console.log(h.digest, h.createdAt);
+```
+
+</Accordion>
 
 Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`SnapshotHandle`](#snapshothandle-class) backed by the local index row.
 
@@ -319,15 +328,6 @@ Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`Sn
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const h = await Snapshot.get("after-pip-install");
-console.log(h.digest, h.createdAt);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
@@ -336,6 +336,16 @@ console.log(h.digest, h.createdAt);
 ```typescript
 static list(): Promise<SnapshotHandle[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const h of await Snapshot.list()) {
+  console.log(h.name ?? h.digest, h.sizeBytes);
+}
+```
+
+</Accordion>
 
 List indexed snapshots from the local DB cache.
 
@@ -348,16 +358,6 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const h of await Snapshot.list()) {
-  console.log(h.name ?? h.digest, h.sizeBytes);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">listDir()</span>
@@ -366,6 +366,15 @@ for (const h of await Snapshot.list()) {
 ```typescript
 static listDir(dir: string): Promise<Snapshot[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const found = await Snapshot.listDir("/mnt/external/snapshots");
+console.log(`${found.length} artifacts`);
+```
+
+</Accordion>
 
 Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections that were never imported. Skips entries that don't look like snapshot artifacts.
 
@@ -387,15 +396,6 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const found = await Snapshot.listDir("/mnt/external/snapshots");
-console.log(`${found.length} artifacts`);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
@@ -404,6 +404,14 @@ console.log(`${found.length} artifacts`);
 ```typescript
 static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.remove("after-pip-install", { force: true });
+```
+
+</Accordion>
 
 Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed children unless `force` is set.
 
@@ -420,14 +428,6 @@ Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await Snapshot.remove("after-pip-install", { force: true });
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
@@ -436,6 +436,15 @@ await Snapshot.remove("after-pip-install", { force: true });
 ```typescript
 static reindex(dir?: string): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const count = await Snapshot.reindex();
+console.log(`reindexed ${count} snapshots`);
+```
+
+</Accordion>
 
 Walk the snapshots directory (default: the configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
 
@@ -457,15 +466,6 @@ Walk the snapshots directory (default: the configured snapshots dir) and rebuild
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const count = await Snapshot.reindex();
-console.log(`reindexed ${count} snapshots`);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">export()</span>
@@ -474,6 +474,16 @@ console.log(`reindexed ${count} snapshots`);
 ```typescript
 static export(nameOrPath: string, out: string, opts?: ExportOpts): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
+  withImage: true,
+});
+```
+
+</Accordion>
 
 Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity hash yet, one is computed and embedded in the bundled manifest so the receiver can verify. See [`ExportOpts`](#exportopts-interface) for bundling options.
 
@@ -494,16 +504,6 @@ Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
-  withImage: true,
-});
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">import()</span>
@@ -512,6 +512,15 @@ await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
 ```typescript
 static import(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.import("./baseline.tar.zst");
+console.log("imported", h.digest);
+```
+
+</Accordion>
 
 Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
 
@@ -536,15 +545,6 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, v
     <div className="msb-param-desc">Handle to the imported snapshot.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-const h = await Snapshot.import("./baseline.tar.zst");
-console.log("imported", h.digest);
-```
-
-</Accordion>
 
 ---
 
@@ -682,17 +682,6 @@ Best-effort source-sandbox name, if recorded. `null` when the manifest has no so
 verify(): Promise<SnapshotVerifyReport>
 ```
 
-Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `upper.kind` is `"notRecorded"` when the manifest has no integrity hash recorded.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreport-union">Promise&lt;SnapshotVerifyReport&gt;</a></div>
-    <div className="msb-param-desc">Verification result.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```typescript
@@ -705,6 +694,17 @@ if (report.upper.kind === "verified") {
 ```
 
 </Accordion>
+
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `upper.kind` is `"notRecorded"` when the manifest has no integrity hash recorded.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreport-union">Promise&lt;SnapshotVerifyReport&gt;</a></div>
+    <div className="msb-param-desc">Verification result.</div>
+  </div>
+</div>
 
 ---
 
@@ -807,17 +807,6 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 create(): Promise<Snapshot>
 ```
 
-Capture the configured snapshot and return the resulting artifact.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
-    <div className="msb-param-desc">The created snapshot artifact.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```typescript
@@ -829,6 +818,17 @@ const snap = await Snapshot.builder("baseline")
 ```
 
 </Accordion>
+
+Capture the configured snapshot and return the resulting artifact.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">The created snapshot artifact.</div>
+  </div>
+</div>
 
 ---
 

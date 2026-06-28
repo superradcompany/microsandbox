@@ -159,17 +159,6 @@ A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-directi
 fn builder() -> NetworkPolicyBuilder
 ```
 
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). The primary construction path: string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces as [`BuildError`](#builderror).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
-    <div className="msb-param-desc">Empty builder.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```rust
@@ -182,6 +171,17 @@ let policy = NetworkPolicy::builder()
 ```
 
 </Accordion>
+
+Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). The primary construction path: string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces as [`BuildError`](#builderror).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
+    <div className="msb-param-desc">Empty builder.</div>
+  </div>
+</div>
 
 ---
 
@@ -242,8 +242,6 @@ These methods consume `self` and return a modified policy, so they chain off a p
 fn allow_domain<S: AsRef<str>>(self, name: S) -> Result<NetworkPolicy, DomainNameError>
 ```
 
-Prepend a single allow-[`Domain`](#destination) egress rule. Single-name sugar over [`allow_domains()`](#policy-allow_domains).
-
 <Accordion title="Example">
 
 ```rust
@@ -251,6 +249,8 @@ let policy = NetworkPolicy::public_only().allow_domain("api.openai.com")?;
 ```
 
 </Accordion>
+
+Prepend a single allow-[`Domain`](#destination) egress rule. Single-name sugar over [`allow_domains()`](#policy-allow_domains).
 
 ---
 
@@ -275,6 +275,15 @@ where
     S: AsRef<str>,
 ```
 
+<Accordion title="Example">
+
+```rust
+let policy = NetworkPolicy::default()
+    .allow_domains(["pypi.org", "files.pythonhosted.org"])?;
+```
+
+</Accordion>
+
 Prepend one allow-[`Domain`](#destination) egress rule per name.
 
 <p className="msb-label">Parameters</p>
@@ -285,15 +294,6 @@ Prepend one allow-[`Domain`](#destination) egress rule per name.
     <div className="msb-param-desc">Exact domain names.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-let policy = NetworkPolicy::default()
-    .allow_domains(["pypi.org", "files.pythonhosted.org"])?;
-```
-
-</Accordion>
 
 ---
 
@@ -307,8 +307,6 @@ where
     S: AsRef<str>,
 ```
 
-Prepend one deny-[`Domain`](#destination) egress rule per name. Prepending lets the denies outrank catch-all allows.
-
 <Accordion title="Example">
 
 ```rust
@@ -317,6 +315,8 @@ let policy = NetworkPolicy::allow_all()
 ```
 
 </Accordion>
+
+Prepend one deny-[`Domain`](#destination) egress rule per name. Prepending lets the denies outrank catch-all allows.
 
 ---
 
@@ -366,8 +366,6 @@ where
     S: AsRef<str>,
 ```
 
-Prepend one deny-[`DomainSuffix`](#destination) egress rule per suffix.
-
 <Accordion title="Example">
 
 ```rust
@@ -376,6 +374,8 @@ let policy = NetworkPolicy::allow_all()
 ```
 
 </Accordion>
+
+Prepend one deny-[`DomainSuffix`](#destination) egress rule per suffix.
 
 ---
 
@@ -458,8 +458,6 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule) with direction pre-set to [`Egress`](#direction).
-
 <Accordion title="Example">
 
 ```rust
@@ -470,6 +468,8 @@ NetworkPolicy::builder()
 ```
 
 </Accordion>
+
+Sugar for [`rule()`](#rule) with direction pre-set to [`Egress`](#direction).
 
 ---
 
@@ -508,8 +508,6 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](#rb-egress), [`.ingress()`](#rb-ingress), or [`.any()`](#rb-any) before any rule-adder, otherwise [`build()`](#build) returns [`BuildError::DirectionNotSet`](#builderror).
-
 <Accordion title="Example">
 
 ```rust
@@ -519,6 +517,8 @@ NetworkPolicy::builder()
 ```
 
 </Accordion>
+
+Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](#rb-egress), [`.ingress()`](#rb-ingress), or [`.any()`](#rb-any) before any rule-adder, otherwise [`build()`](#build) returns [`BuildError::DirectionNotSet`](#builderror).
 
 ---
 
@@ -810,8 +810,6 @@ where
     S: Into<String>
 ```
 
-Add one allow-[`Domain`](#destination) rule per name, inheriting the closure's current direction / protocol / port state. Lazy-parse: invalid names surface as [`BuildError::InvalidDomain`](#builderror) from [`build()`](#build).
-
 <Accordion title="Example">
 
 ```rust
@@ -824,6 +822,8 @@ NetworkPolicy::builder()
 ```
 
 </Accordion>
+
+Add one allow-[`Domain`](#destination) rule per name, inheriting the closure's current direction / protocol / port state. Lazy-parse: invalid names surface as [`BuildError::InvalidDomain`](#builderror) from [`build()`](#build).
 
 ---
 
@@ -878,8 +878,6 @@ Add one deny-[`DomainSuffix`](#destination) rule per suffix.
 fn allow(&mut self) -> RuleDestinationBuilder<'_>
 ```
 
-Begin an explicit-destination rule with action [`Allow`](#action). The returned [`RuleDestinationBuilder`](#ruledestinationbuilder) requires exactly one destination call to commit; dropping it without one adds no rule.
-
 <Accordion title="Example">
 
 ```rust
@@ -890,6 +888,8 @@ NetworkPolicy::builder()
 ```
 
 </Accordion>
+
+Begin an explicit-destination rule with action [`Allow`](#action). The returned [`RuleDestinationBuilder`](#ruledestinationbuilder) requires exactly one destination call to commit; dropping it without one adds no rule.
 
 ---
 
@@ -1003,6 +1003,14 @@ Builder for the sandbox's network stack, used in [`SandboxBuilder::network(|n| n
 fn policy(self, policy: NetworkPolicy) -> Self
 ```
 
+<Accordion title="Example">
+
+```rust
+.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
+```
+
+</Accordion>
+
 Set the network access policy. Pass a preset or a builder-constructed [`NetworkPolicy`](#networkpolicy).
 
 <p className="msb-label">Parameters</p>
@@ -1013,14 +1021,6 @@ Set the network access policy. Pass a preset or a builder-constructed [`NetworkP
     <div className="msb-param-desc">Access policy.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
-```
-
-</Accordion>
 
 ---
 
@@ -1107,8 +1107,6 @@ Publish a UDP port on a specific host bind address.
 fn dns(self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self
 ```
 
-Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
-
 <Accordion title="Example">
 
 ```rust
@@ -1121,6 +1119,8 @@ use microsandbox_network::dns::Nameserver;
 ```
 
 </Accordion>
+
+Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
 ---
 
@@ -1238,8 +1238,6 @@ fn on_secret_violation(
 ) -> Self
 ```
 
-Set the sandbox-wide action taken when a secret placeholder is detected in traffic to a host not in the secret's allow list. See [`ViolationActionBuilder`](#violationactionbuilder).
-
 <Accordion title="Example">
 
 ```rust
@@ -1250,6 +1248,8 @@ Set the sandbox-wide action taken when a secret placeholder is detected in traff
 ```
 
 </Accordion>
+
+Set the sandbox-wide action taken when a secret placeholder is detected in traffic to a host not in the secret's allow list. See [`ViolationActionBuilder`](#violationactionbuilder).
 
 Passthrough hosts receive the placeholder unchanged. They do **not** receive real secret values.
 

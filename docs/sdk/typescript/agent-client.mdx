@@ -108,6 +108,14 @@ Frame flag: this message requests sandbox shutdown.
 static connectSandbox(name: string, opts?: AgentConnectOptions): Promise<AgentClient>
 ```
 
+<Accordion title="Example">
+
+```typescript
+const client = await AgentClient.connectSandbox("dev", { timeoutMs: 5000 });
+```
+
+</Accordion>
+
 Connect to a running sandbox by name. Resolves the sandbox's relay socket path and performs the `core.ready` handshake. Sandbox names are limited to 128 UTF-8 bytes.
 
 <p className="msb-label">Parameters</p>
@@ -132,14 +140,6 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const client = await AgentClient.connectSandbox("dev", { timeoutMs: 5000 });
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
@@ -148,6 +148,15 @@ const client = await AgentClient.connectSandbox("dev", { timeoutMs: 5000 });
 ```typescript
 static connect(path: string, opts?: AgentConnectOptions): Promise<AgentClient>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const path = AgentClient.socketPath("dev");
+const client = await AgentClient.connect(path);
+```
+
+</Accordion>
 
 Connect to an `agentd` relay socket by path. Use this when you already have the socket path, for example one returned by [`socketPath()`](#agentclient-socketpath).
 
@@ -173,15 +182,6 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const path = AgentClient.socketPath("dev");
-const client = await AgentClient.connect(path);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socketPath()</span>
@@ -190,6 +190,14 @@ const client = await AgentClient.connect(path);
 ```typescript
 static socketPath(name: string): string
 ```
+
+<Accordion title="Example">
+
+```typescript
+const path = AgentClient.socketPath("dev");
+```
+
+</Accordion>
 
 Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`connectSandbox()`](#agentclient-connectsandbox) would dial, so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
 
@@ -211,14 +219,6 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const path = AgentClient.socketPath("dev");
-```
-
-</Accordion>
-
 ## Instance methods
 
 ---
@@ -229,6 +229,19 @@ const path = AgentClient.socketPath("dev");
 ```typescript
 request(flags: number, body: Buffer): Promise<RawFrame>
 ```
+
+<Accordion title="Example">
+
+```typescript
+import { encode, decode } from "cbor-x";
+import { FLAG_SESSION_START } from "microsandbox";
+
+const body = encode({ v: 1, t: "core.fs.request", p: encode({ op: { Stat: { path: "/etc" } } }) });
+const frame = await client.request(FLAG_SESSION_START, body);
+console.log(decode(frame.body));
+```
+
+</Accordion>
 
 Send one frame and await a single response frame. Use for request/response RPCs that produce exactly one terminal response (for example `FsRequest` to `FsResponse`).
 
@@ -254,19 +267,6 @@ Send one frame and await a single response frame. Use for request/response RPCs 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-import { encode, decode } from "cbor-x";
-import { FLAG_SESSION_START } from "microsandbox";
-
-const body = encode({ v: 1, t: "core.fs.request", p: encode({ op: { Stat: { path: "/etc" } } }) });
-const frame = await client.request(FLAG_SESSION_START, body);
-console.log(decode(frame.body));
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">stream()</span>
@@ -275,6 +275,19 @@ console.log(decode(frame.body));
 ```typescript
 stream(flags: number, body: Buffer): Promise<AgentStream>
 ```
+
+<Accordion title="Example">
+
+```typescript
+import { FLAG_SESSION_START, FLAG_TERMINAL } from "microsandbox";
+
+const stream = await client.stream(FLAG_SESSION_START, body);
+for await (const frame of stream) {
+  if ((frame.flags & FLAG_TERMINAL) !== 0) break;
+}
+```
+
+</Accordion>
 
 Open a streaming session. The returned [`AgentStream`](#agentstream) carries the protocol correlation `id` (pass it to [`send()`](#client-send) for follow-up frames) and is also an async iterator of raw frames.
 
@@ -300,19 +313,6 @@ Open a streaming session. The returned [`AgentStream`](#agentstream) carries the
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-import { FLAG_SESSION_START, FLAG_TERMINAL } from "microsandbox";
-
-const stream = await client.stream(FLAG_SESSION_START, body);
-for await (const frame of stream) {
-  if ((frame.flags & FLAG_TERMINAL) !== 0) break;
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">send()</span>
@@ -321,6 +321,14 @@ for await (const frame of stream) {
 ```typescript
 send(id: number, flags: number, body: Buffer): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await client.send(stream.id, 0, encode({ v: 1, t: "core.pty.stdin", p: encode({ data: "ls\n" }) }));
+```
+
+</Accordion>
 
 Send a follow-up frame on an existing correlation id (for example stdin, a signal, a resize, or data chunks on an open session). Use the `id` of the [`AgentStream`](#agentstream) returned by [`stream()`](#client-stream).
 
@@ -341,14 +349,6 @@ Send a follow-up frame on an existing correlation id (for example stdin, a signa
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await client.send(stream.id, 0, encode({ v: 1, t: "core.pty.stdin", p: encode({ data: "ls\n" }) }));
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">readyBytes()</span>
@@ -357,6 +357,16 @@ await client.send(stream.id, 0, encode({ v: 1, t: "core.pty.stdin", p: encode({ 
 ```typescript
 readyBytes(): Buffer
 ```
+
+<Accordion title="Example">
+
+```typescript
+import { decode } from "cbor-x";
+
+const ready = decode(client.readyBytes());
+```
+
+</Accordion>
 
 Return the cached handshake `core.ready` frame body as CBOR bytes. Captured during connect, so this is a synchronous accessor with no protocol traffic.
 
@@ -369,16 +379,6 @@ Return the cached handshake `core.ready` frame body as CBOR bytes. Captured duri
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-import { decode } from "cbor-x";
-
-const ready = decode(client.readyBytes());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
@@ -388,8 +388,6 @@ const ready = decode(client.readyBytes());
 close(): Promise<void>
 ```
 
-Close the connection. Idempotent: calling it more than once is safe.
-
 <Accordion title="Example">
 
 ```typescript
@@ -397,6 +395,8 @@ await client.close();
 ```
 
 </Accordion>
+
+Close the connection. Idempotent: calling it more than once is safe.
 
 ## Types
 

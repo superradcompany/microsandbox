@@ -67,6 +67,17 @@ These static methods return an [`ImageSource`](#imagesource) you can pass as the
 def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource
 ```
 
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "api",
+    image=Image.oci("python:3.12", upper_size_mib=8192),
+)
+```
+
+</Accordion>
+
 Create an OCI image rootfs source. Use `upper_size_mib` to size the writable overlay upper layer; otherwise the default applies.
 
 <p className="msb-label">Parameters</p>
@@ -91,17 +102,6 @@ Create an OCI image rootfs source. Use `upper_size_mib` to size the writable ove
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "api",
-    image=Image.oci("python:3.12", upper_size_mib=8192),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">bind()</span>
@@ -111,6 +111,14 @@ sb = await Sandbox.create(
 @staticmethod
 def bind(path: str) -> ImageSource
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
+```
+
+</Accordion>
 
 Create a rootfs source that binds a host directory as the guest root filesystem.
 
@@ -132,14 +140,6 @@ Create a rootfs source that binds a host directory as the guest root filesystem.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">disk()</span>
@@ -149,6 +149,17 @@ sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
 @staticmethod
 def disk(path: str, *, fstype: str | None = None) -> ImageSource
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create(
+    "api",
+    image=Image.disk("/data/root.qcow2", fstype="ext4"),
+)
+```
+
+</Accordion>
 
 Create a rootfs source backed by a disk image. The format is inferred from the file extension. Pass `fstype` when the filesystem type cannot be auto-detected.
 
@@ -174,17 +185,6 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create(
-    "api",
-    image=Image.disk("/data/root.qcow2", fstype="ext4"),
-)
-```
-
-</Accordion>
-
 ## Cache management
 
 These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
@@ -198,6 +198,15 @@ These static methods inspect and prune images already pulled into the local OCI 
 @staticmethod
 async def get(reference: str) -> ImageHandle
 ```
+
+<Accordion title="Example">
+
+```python
+handle = await Image.get("python:3.12")
+print(handle.reference, handle.layer_count)
+```
+
+</Accordion>
 
 Fetch one cached image by reference. Raises [`ImageNotFoundError`](#errors) when the image is not present in the local cache.
 
@@ -219,15 +228,6 @@ Fetch one cached image by reference. Raises [`ImageNotFoundError`](#errors) when
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-handle = await Image.get("python:3.12")
-print(handle.reference, handle.layer_count)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">list()</span>
@@ -237,6 +237,15 @@ print(handle.reference, handle.layer_count)
 @staticmethod
 async def list() -> list[ImageHandle]
 ```
+
+<Accordion title="Example">
+
+```python
+for image in await Image.list():
+    print(image.reference, image.size_bytes)
+```
+
+</Accordion>
 
 Return every cached image.
 
@@ -249,15 +258,6 @@ Return every cached image.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for image in await Image.list():
-    print(image.reference, image.size_bytes)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">inspect()</span>
@@ -267,6 +267,17 @@ for image in await Image.list():
 @staticmethod
 async def inspect(reference: str) -> ImageDetail
 ```
+
+<Accordion title="Example">
+
+```python
+detail = await Image.inspect("python:3.12")
+print(detail.handle.reference)
+for layer in detail.layers:
+    print(layer.position, layer.diff_id)
+```
+
+</Accordion>
 
 Return handle metadata plus the parsed OCI config and per-layer detail.
 
@@ -288,17 +299,6 @@ Return handle metadata plus the parsed OCI config and per-layer detail.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-detail = await Image.inspect("python:3.12")
-print(detail.handle.reference)
-for layer in detail.layers:
-    print(layer.position, layer.diff_id)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">remove()</span>
@@ -308,6 +308,14 @@ for layer in detail.layers:
 @staticmethod
 async def remove(reference: str, *, force: bool = False) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await Image.remove("python:3.12", force=True)
+```
+
+</Accordion>
 
 Delete a cached image. When `force` is `False`, an image still referenced by one or more sandboxes raises [`ImageInUseError`](#errors); pass `force=True` to remove it anyway.
 
@@ -324,14 +332,6 @@ Delete a cached image. When `force` is `False`, an image still referenced by one
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await Image.remove("python:3.12", force=True)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">prune()</span>
@@ -341,6 +341,15 @@ await Image.remove("python:3.12", force=True)
 @staticmethod
 async def prune() -> ImagePruneReport
 ```
+
+<Accordion title="Example">
+
+```python
+report = await Image.prune()
+print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
+```
+
+</Accordion>
 
 Remove cached image data that is not used by any sandbox or indexed snapshot. The returned report counts the removed refs, manifests, layers, fsmeta files, and VMDK files, plus any measured bytes reclaimed.
 
@@ -352,15 +361,6 @@ Remove cached image data that is not used by any sandbox or indexed snapshot. Th
     <div className="msb-param-desc">Counts of removed data and bytes reclaimed.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-report = await Image.prune()
-print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
-```
-
-</Accordion>
 
 ## Types
 

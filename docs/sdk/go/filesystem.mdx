@@ -68,6 +68,18 @@ The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#
 func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error)
 ```
 
+<Accordion title="Example">
+
+```go
+data, err := fs.Read(ctx, "/etc/hostname")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes\n", len(data))
+```
+
+</Accordion>
+
 Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB; for files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream) so callers get a uniform bytes-returning interface up to runtime memory limits.
 
 <p className="msb-label">Parameters</p>
@@ -92,18 +104,6 @@ Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-data, err := fs.Read(ctx, "/etc/hostname")
-if err != nil {
-    return err
-}
-fmt.Printf("%d bytes\n", len(data))
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadString()</span>
@@ -112,6 +112,14 @@ fmt.Printf("%d bytes\n", len(data))
 ```go
 func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error)
 ```
+
+<Accordion title="Example">
+
+```go
+content, err := fs.ReadString(ctx, "/tmp/config.json")
+```
+
+</Accordion>
 
 Read a file and return its contents as a string. The bytes are reinterpreted as UTF-8 without validation.
 
@@ -137,14 +145,6 @@ Read a file and return its contents as a string. The bytes are reinterpreted as 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-content, err := fs.ReadString(ctx, "/tmp/config.json")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Write()</span>
@@ -153,6 +153,14 @@ content, err := fs.ReadString(ctx, "/tmp/config.json")
 ```go
 func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
+```
+
+</Accordion>
 
 Write bytes to a file, creating it if it does not exist and truncating it if it does.
 
@@ -173,14 +181,6 @@ Write bytes to a file, creating it if it does not exist and truncating it if it 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteString()</span>
@@ -189,6 +189,14 @@ err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
 ```go
 func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
+```
+
+</Accordion>
 
 Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
 
@@ -209,14 +217,6 @@ Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">List()</span>
@@ -225,6 +225,20 @@ err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
 ```go
 func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error)
 ```
+
+<Accordion title="Example">
+
+```go
+entries, err := fs.List(ctx, "/etc")
+if err != nil {
+    return err
+}
+for _, e := range entries {
+    fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
+}
+```
+
+</Accordion>
 
 List the entries in a directory inside the sandbox.
 
@@ -250,20 +264,6 @@ List the entries in a directory inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-entries, err := fs.List(ctx, "/etc")
-if err != nil {
-    return err
-}
-for _, e := range entries {
-    fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Stat()</span>
@@ -272,6 +272,18 @@ for _, e := range entries {
 ```go
 func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
 ```
+
+<Accordion title="Example">
+
+```go
+st, err := fs.Stat(ctx, "/etc/hosts")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
+```
+
+</Accordion>
 
 Get detailed metadata for a file or directory.
 
@@ -297,18 +309,6 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-st, err := fs.Stat(ctx, "/etc/hosts")
-if err != nil {
-    return err
-}
-fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Mkdir()</span>
@@ -317,6 +317,14 @@ fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
 ```go
 func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Mkdir(ctx, "/app/cache/sessions")
+```
+
+</Accordion>
 
 Create a directory and any missing parents inside the sandbox.
 
@@ -333,14 +341,6 @@ Create a directory and any missing parents inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Mkdir(ctx, "/app/cache/sessions")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Remove()</span>
@@ -349,6 +349,14 @@ err := fs.Mkdir(ctx, "/app/cache/sessions")
 ```go
 func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Remove(ctx, "/tmp/scratch.txt")
+```
+
+</Accordion>
 
 Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
 
@@ -365,14 +373,6 @@ Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Remove(ctx, "/tmp/scratch.txt")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">RemoveDir()</span>
@@ -381,6 +381,14 @@ err := fs.Remove(ctx, "/tmp/scratch.txt")
 ```go
 func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.RemoveDir(ctx, "/app/cache")
+```
+
+</Accordion>
 
 Remove a directory recursively.
 
@@ -397,14 +405,6 @@ Remove a directory recursively.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.RemoveDir(ctx, "/app/cache")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Copy()</span>
@@ -413,6 +413,14 @@ err := fs.RemoveDir(ctx, "/app/cache")
 ```go
 func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
+```
+
+</Accordion>
 
 Copy a file within the sandbox.
 
@@ -433,14 +441,6 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Rename()</span>
@@ -449,6 +449,14 @@ err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
 ```go
 func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -469,14 +477,6 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Exists()</span>
@@ -485,6 +485,20 @@ err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
 ```go
 func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error)
 ```
+
+<Accordion title="Example">
+
+```go
+ok, err := fs.Exists(ctx, "/app/.initialized")
+if err != nil {
+    return err
+}
+if !ok {
+    // first boot
+}
+```
+
+</Accordion>
 
 Report whether a file or directory exists at the given path.
 
@@ -510,20 +524,6 @@ Report whether a file or directory exists at the given path.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-ok, err := fs.Exists(ctx, "/app/.initialized")
-if err != nil {
-    return err
-}
-if !ok {
-    // first boot
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyFromHost()</span>
@@ -532,6 +532,14 @@ if !ok {
 ```go
 func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
 
@@ -552,14 +560,6 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyToHost()</span>
@@ -568,6 +568,14 @@ err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
 ```go
 func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
+```
+
+</Accordion>
 
 Copy a file from the sandbox to the host machine.
 
@@ -588,14 +596,6 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadStream()</span>
@@ -604,30 +604,6 @@ err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
 ```go
 func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
 ```
-
-Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
-    <div className="msb-param-desc">Cancels opening the stream.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Absolute path inside the guest.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#fsreadstream">*FsReadStream</a></div>
-    <div className="msb-param-desc">Open read stream; close it when done.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -655,6 +631,30 @@ _, err = rs.WriteTo(os.Stdout)
 
 </Accordion>
 
+Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels opening the stream.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fsreadstream">*FsReadStream</a></div>
+    <div className="msb-param-desc">Open read stream; close it when done.</div>
+  </div>
+</div>
+
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteStream()</span>
@@ -663,6 +663,24 @@ _, err = rs.WriteTo(os.Stdout)
 ```go
 func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
 ```
+
+<Accordion title="Example">
+
+```go
+ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
+if err != nil {
+    return err
+}
+
+if _, err := ws.Write(largeChunk); err != nil {
+    return err
+}
+if err := ws.Close(ctx); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
 
@@ -687,24 +705,6 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
     <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalise.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
-if err != nil {
-    return err
-}
-
-if _, err := ws.Write(largeChunk); err != nil {
-    return err
-}
-if err := ws.Close(ctx); err != nil {
-    return err
-}
-```
-
-</Accordion>
 
 ---
 

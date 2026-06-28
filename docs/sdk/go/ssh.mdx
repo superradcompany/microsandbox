@@ -90,6 +90,15 @@ fmt.Printf("%s (exit %d)\n", out.Stdout, out.Status)
 func (s *Sandbox) SSH() *SandboxSSHOps
 ```
 
+<Accordion title="Example">
+
+```go
+ssh := sb.SSH()
+client, err := ssh.OpenClient(ctx)
+```
+
+</Accordion>
+
 Return the SSH operations namespace for this sandbox. The namespace groups the client and server helpers; it holds no resources of its own.
 
 <p className="msb-label">Returns</p>
@@ -101,15 +110,6 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-ssh := sb.SSH()
-client, err := ssh.OpenClient(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">OpenClient()</span>
@@ -118,6 +118,21 @@ client, err := ssh.OpenClient(ctx)
 ```go
 func (ssh *SandboxSSHOps) OpenClient(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error)
 ```
+
+<Accordion title="Example">
+
+```go
+client, err := sb.SSH().OpenClient(ctx,
+    m.WithSSHUser("app"),
+    m.WithSSHTerm("xterm-256color"),
+)
+if err != nil {
+    return err
+}
+defer client.Close(ctx)
+```
+
+</Accordion>
 
 Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25519 client and host key pair, stands up an internal server bound to a duplex stream, and authenticates over public key. With no options it uses login user `root`, terminal from `$TERM` (falling back to `xterm`), and SFTP enabled.
 
@@ -147,21 +162,6 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-client, err := sb.SSH().OpenClient(ctx,
-    m.WithSSHUser("app"),
-    m.WithSSHTerm("xterm-256color"),
-)
-if err != nil {
-    return err
-}
-defer client.Close(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
@@ -170,6 +170,20 @@ defer client.Close(ctx)
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
 ```
+
+<Accordion title="Example">
+
+```go
+srv, err := sb.SSH().PrepareServer(ctx,
+    m.WithSSHAuthorizedKeysPath("/etc/msb/authorized_keys"),
+)
+if err != nil {
+    return err
+}
+defer srv.Close(ctx)
+```
+
+</Accordion>
 
 Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the host key and resolves authorized keys from the default authorized-keys file unless overridden. The returned [`SSHServer`](#sshserver) can serve connections one at a time over the process's standard streams.
 
@@ -199,20 +213,6 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-srv, err := sb.SSH().PrepareServer(ctx,
-    m.WithSSHAuthorizedKeysPath("/etc/msb/authorized_keys"),
-)
-if err != nil {
-    return err
-}
-defer srv.Close(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Exec()</span>
@@ -221,6 +221,21 @@ defer srv.Close(ctx)
 ```go
 func (c *SSHClient) Exec(ctx context.Context, command string, opts ...SSHExecOption) (*SSHOutput, error)
 ```
+
+<Accordion title="Example">
+
+```go
+out, err := client.Exec(ctx, "python -V")
+if err != nil {
+    return err
+}
+if !out.Success() {
+    return fmt.Errorf("exit %d: %s", out.Status, out.Stderr)
+}
+fmt.Printf("%s", out.Stdout)
+```
+
+</Accordion>
 
 Run an SSH exec request and collect stdout, stderr, and the exit status. The command is run through the sandbox's configured shell. No PTY is requested unless [`WithSSHTTY`](#sshexecoption) is passed.
 
@@ -254,21 +269,6 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-out, err := client.Exec(ctx, "python -V")
-if err != nil {
-    return err
-}
-if !out.Success() {
-    return fmt.Errorf("exit %d: %s", out.Status, out.Stderr)
-}
-fmt.Printf("%s", out.Stdout)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Attach()</span>
@@ -277,6 +277,21 @@ fmt.Printf("%s", out.Stdout)
 ```go
 func (c *SSHClient) Attach(ctx context.Context, opts ...SSHAttachOption) (int, error)
 ```
+
+<Accordion title="Example">
+
+```go
+code, err := client.Attach(ctx,
+    m.WithSSHAttachTerm("xterm-256color"),
+    m.WithSSHDetachKeys("ctrl-p,ctrl-q"),
+)
+if err != nil {
+    return err
+}
+fmt.Printf("shell exited with %d\n", code)
+```
+
+</Accordion>
 
 Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, relays window-resize events, and returns when the shell exits or the detach key sequence is typed.
 
@@ -306,21 +321,6 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-code, err := client.Attach(ctx,
-    m.WithSSHAttachTerm("xterm-256color"),
-    m.WithSSHDetachKeys("ctrl-p,ctrl-q"),
-)
-if err != nil {
-    return err
-}
-fmt.Printf("shell exited with %d\n", code)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">SFTP()</span>
@@ -329,6 +329,22 @@ fmt.Printf("shell exited with %d\n", code)
 ```go
 func (c *SSHClient) SFTP(ctx context.Context) (*SFTPClient, error)
 ```
+
+<Accordion title="Example">
+
+```go
+sftp, err := client.SFTP(ctx)
+if err != nil {
+    return err
+}
+defer sftp.Close(ctx)
+
+if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Open an SFTP session over this SSH connection. Returns a high-level SFTP client for reading, writing, and managing files inside the guest. Requires SFTP enabled on the client (the default).
 
@@ -354,22 +370,6 @@ Open an SFTP session over this SSH connection. Returns a high-level SFTP client 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sftp, err := client.SFTP(ctx)
-if err != nil {
-    return err
-}
-defer sftp.Close(ctx)
-
-if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
@@ -378,6 +378,14 @@ if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
 ```go
 func (c *SSHClient) Close(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+defer client.Close(ctx)
+```
+
+</Accordion>
 
 Close this SSH client session. The handle is consumed; do not use it after closing.
 
@@ -399,14 +407,6 @@ Close this SSH client session. The handle is consumed; do not use it after closi
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-defer client.Close(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">srv.</span><span className="msb-hn">ServeConnection()</span>
@@ -415,6 +415,22 @@ defer client.Close(ctx)
 ```go
 func (srv *SSHServer) ServeConnection(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+srv, err := sb.SSH().PrepareServer(ctx)
+if err != nil {
+    return err
+}
+defer srv.Close(ctx)
+
+if err := srv.ServeConnection(ctx); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Serve one SSH transport over this process's stdin and stdout. Returns when the connection ends. Call again on the same [`SSHServer`](#sshserver) to serve another connection.
 
@@ -436,22 +452,6 @@ Serve one SSH transport over this process's stdin and stdout. Returns when the c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-srv, err := sb.SSH().PrepareServer(ctx)
-if err != nil {
-    return err
-}
-defer srv.Close(ctx)
-
-if err := srv.ServeConnection(ctx); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">srv.</span><span className="msb-hn">Close()</span>
@@ -460,6 +460,14 @@ if err := srv.ServeConnection(ctx); err != nil {
 ```go
 func (srv *SSHServer) Close(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+defer srv.Close(ctx)
+```
+
+</Accordion>
 
 Release this prepared server endpoint. The handle is consumed; do not use it after closing.
 
@@ -481,14 +489,6 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-defer srv.Close(ctx)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
@@ -497,17 +497,6 @@ defer srv.Close(ctx)
 ```go
 func (o SSHOutput) Success() bool
 ```
-
-Report whether the command exited with status `0`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>true</code> when <code>Status</code> is <code>0</code>.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -520,6 +509,17 @@ fmt.Println("present:", out.Success())
 ```
 
 </Accordion>
+
+Report whether the command exited with status `0`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> when <code>Status</code> is <code>0</code>.</div>
+  </div>
+</div>
 
 ---
 

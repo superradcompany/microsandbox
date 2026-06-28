@@ -69,6 +69,15 @@ The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk
 async def read(path: str) -> bytes
 ```
 
+<Accordion title="Example">
+
+```python
+raw = await sb.fs.read("/app/data.bin")
+print(len(raw))
+```
+
+</Accordion>
+
 Read the entire contents of a file as raw bytes.
 
 <p className="msb-label">Parameters</p>
@@ -89,15 +98,6 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-raw = await sb.fs.read("/app/data.bin")
-print(len(raw))
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
@@ -106,6 +106,14 @@ print(len(raw))
 ```python
 async def read_text(path: str) -> str
 ```
+
+<Accordion title="Example">
+
+```python
+config = await sb.fs.read_text("/app/config.json")
+```
+
+</Accordion>
 
 Read the entire contents of a file and decode it as UTF-8.
 
@@ -127,14 +135,6 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-config = await sb.fs.read_text("/app/config.json")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
@@ -143,6 +143,16 @@ config = await sb.fs.read_text("/app/config.json")
 ```python
 async def read_stream(path: str) -> FsReadStream
 ```
+
+<Accordion title="Example">
+
+```python
+stream = await sb.fs.read_stream("/app/large.log")
+async for chunk in stream:
+    process(chunk)
+```
+
+</Accordion>
 
 Open a streaming reader for a file. Use this for files too large to hold in memory. The returned [`FsReadStream`](#fsreadstream) is an async iterator that yields chunks of bytes, or call its `collect()` to gather everything into one `bytes`.
 
@@ -164,16 +174,6 @@ Open a streaming reader for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-stream = await sb.fs.read_stream("/app/large.log")
-async for chunk in stream:
-    process(chunk)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
@@ -182,6 +182,14 @@ async for chunk in stream:
 ```python
 async def write(path: str, data: bytes) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/app/hello.txt", b"hi\n")
+```
+
+</Accordion>
 
 Write content to a file, creating it if it doesn't exist and overwriting it if it does.
 
@@ -198,14 +206,6 @@ Write content to a file, creating it if it doesn't exist and overwriting it if i
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.write("/app/hello.txt", b"hi\n")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
@@ -214,6 +214,16 @@ await sb.fs.write("/app/hello.txt", b"hi\n")
 ```python
 async def write_stream(path: str) -> FsWriteSink
 ```
+
+<Accordion title="Example">
+
+```python
+async with await sb.fs.write_stream("/app/out.bin") as sink:
+    await sink.write(b"chunk one")
+    await sink.write(b"chunk two")
+```
+
+</Accordion>
 
 Open a streaming writer for a file. Use this for files too large to hold in memory. The returned [`FsWriteSink`](#fswritesink) supports the async context manager protocol, so `async with` closes and finalizes the file automatically.
 
@@ -235,16 +245,6 @@ Open a streaming writer for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-async with await sb.fs.write_stream("/app/out.bin") as sink:
-    await sink.write(b"chunk one")
-    await sink.write(b"chunk two")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
@@ -253,6 +253,15 @@ async with await sb.fs.write_stream("/app/out.bin") as sink:
 ```python
 async def list(path: str) -> list[FsEntry]
 ```
+
+<Accordion title="Example">
+
+```python
+for entry in await sb.fs.list("/app"):
+    print(entry.kind, entry.path)
+```
+
+</Accordion>
 
 List the entries in a directory.
 
@@ -274,15 +283,6 @@ List the entries in a directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for entry in await sb.fs.list("/app"):
-    print(entry.kind, entry.path)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
@@ -291,6 +291,14 @@ for entry in await sb.fs.list("/app"):
 ```python
 async def mkdir(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.mkdir("/app/data/cache")
+```
+
+</Accordion>
 
 Create a directory, including any missing parent directories.
 
@@ -303,14 +311,6 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.mkdir("/app/data/cache")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
@@ -319,6 +319,15 @@ await sb.fs.mkdir("/app/data/cache")
 ```python
 async def stat(path: str) -> FsMetadata
 ```
+
+<Accordion title="Example">
+
+```python
+meta = await sb.fs.stat("/app/config.json")
+print(meta.kind, meta.size, meta.readonly)
+```
+
+</Accordion>
 
 Get detailed metadata for a file or directory.
 
@@ -340,15 +349,6 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-meta = await sb.fs.stat("/app/config.json")
-print(meta.kind, meta.size, meta.readonly)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
@@ -357,6 +357,15 @@ print(meta.kind, meta.size, meta.readonly)
 ```python
 async def exists(path: str) -> bool
 ```
+
+<Accordion title="Example">
+
+```python
+if not await sb.fs.exists("/app/config.json"):
+    await sb.fs.write("/app/config.json", b"{}")
+```
+
+</Accordion>
 
 Check whether a path exists inside the sandbox.
 
@@ -378,15 +387,6 @@ Check whether a path exists inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-if not await sb.fs.exists("/app/config.json"):
-    await sb.fs.write("/app/config.json", b"{}")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
@@ -395,6 +395,14 @@ if not await sb.fs.exists("/app/config.json"):
 ```python
 async def remove_dir(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.remove_dir("/app/data/cache")
+```
+
+</Accordion>
 
 Remove a directory and its contents recursively.
 
@@ -407,14 +415,6 @@ Remove a directory and its contents recursively.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.remove_dir("/app/data/cache")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
@@ -423,6 +423,14 @@ await sb.fs.remove_dir("/app/data/cache")
 ```python
 async def copy(src: str, dst: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy("/app/config.json", "/app/config.bak.json")
+```
+
+</Accordion>
 
 Copy a file within the sandbox.
 
@@ -439,14 +447,6 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.copy("/app/config.json", "/app/config.bak.json")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
@@ -455,6 +455,14 @@ await sb.fs.copy("/app/config.json", "/app/config.bak.json")
 ```python
 async def rename(src: str, dst: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.rename("/app/tmp.txt", "/app/final.txt")
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -471,14 +479,6 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.rename("/app/tmp.txt", "/app/final.txt")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
@@ -487,6 +487,14 @@ await sb.fs.rename("/app/tmp.txt", "/app/final.txt")
 ```python
 async def remove(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.remove("/app/config.bak.json")
+```
+
+</Accordion>
 
 Remove a file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
@@ -499,14 +507,6 @@ Remove a file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.remove("/app/config.bak.json")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
@@ -515,6 +515,14 @@ await sb.fs.remove("/app/config.bak.json")
 ```python
 async def copy_from_host(host_path: str, guest_path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy_from_host("./local/seed.csv", "/app/seed.csv")
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sandboxes/volumes) instead.
 
@@ -531,14 +539,6 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.copy_from_host("./local/seed.csv", "/app/seed.csv")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
@@ -547,6 +547,14 @@ await sb.fs.copy_from_host("./local/seed.csv", "/app/seed.csv")
 ```python
 async def copy_to_host(guest_path: str, host_path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy_to_host("/app/report.pdf", "./report.pdf")
+```
+
+</Accordion>
 
 Copy a file from the sandbox out to the host machine.
 
@@ -562,14 +570,6 @@ Copy a file from the sandbox out to the host machine.
     <div className="msb-param-desc">Destination path on the host.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-await sb.fs.copy_to_host("/app/report.pdf", "./report.pdf")
-```
-
-</Accordion>
 
 ---
 

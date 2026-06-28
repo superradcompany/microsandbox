@@ -72,6 +72,18 @@ fmt.Println(report.LayersRemoved, "layers removed")
 func (imageFactory) Get(ctx context.Context, reference string) (*ImageHandle, error)
 ```
 
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+fmt.Println(img.ManifestDigest())
+```
+
+</Accordion>
+
 Fetch one cached image by reference. Returns `ErrImageNotFound` when no image with that reference is present in the local cache.
 
 <p className="msb-label">Parameters</p>
@@ -100,18 +112,6 @@ Fetch one cached image by reference. Returns `ErrImageNotFound` when no image wi
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-img, err := m.Image.Get(ctx, "python:3.12")
-if err != nil {
-    return err
-}
-fmt.Println(img.ManifestDigest())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">List()</span>
@@ -120,6 +120,20 @@ fmt.Println(img.ManifestDigest())
 ```go
 func (imageFactory) List(ctx context.Context) ([]*ImageHandle, error)
 ```
+
+<Accordion title="Example">
+
+```go
+images, err := m.Image.List(ctx)
+if err != nil {
+    return err
+}
+for _, img := range images {
+    fmt.Println(img.Reference(), img.LayerCount())
+}
+```
+
+</Accordion>
 
 Return every cached image, ordered by creation time (newest first).
 
@@ -145,20 +159,6 @@ Return every cached image, ordered by creation time (newest first).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-images, err := m.Image.List(ctx)
-if err != nil {
-    return err
-}
-for _, img := range images {
-    fmt.Println(img.Reference(), img.LayerCount())
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Inspect()</span>
@@ -167,6 +167,18 @@ for _, img := range images {
 ```go
 func (imageFactory) Inspect(ctx context.Context, reference string) (*ImageDetail, error)
 ```
+
+<Accordion title="Example">
+
+```go
+detail, err := m.Image.Inspect(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+fmt.Println(detail.Config.Entrypoint, len(detail.Layers), "layers")
+```
+
+</Accordion>
 
 Return the full detail for a cached image: the [`ImageHandle`](#imagehandle) plus the parsed OCI config and the layer list.
 
@@ -196,18 +208,6 @@ Return the full detail for a cached image: the [`ImageHandle`](#imagehandle) plu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-detail, err := m.Image.Inspect(ctx, "python:3.12")
-if err != nil {
-    return err
-}
-fmt.Println(detail.Config.Entrypoint, len(detail.Layers), "layers")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Remove()</span>
@@ -216,6 +216,16 @@ fmt.Println(detail.Config.Entrypoint, len(detail.Layers), "layers")
 ```go
 func (imageFactory) Remove(ctx context.Context, reference string, force bool) error
 ```
+
+<Accordion title="Example">
+
+```go
+if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Delete a cached image. When `force` is false, sandboxes that still reference the image cause the call to fail with `ErrImageInUse`.
 
@@ -245,16 +255,6 @@ Delete a cached image. When `force` is false, sandboxes that still reference the
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Prune()</span>
@@ -263,6 +263,18 @@ if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
 ```go
 func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error)
 ```
+
+<Accordion title="Example">
+
+```go
+report, err := m.Image.Prune(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(report.LayersRemoved, "layers removed")
+```
+
+</Accordion>
 
 Remove cached image data that is not used by any sandbox. Returns a report tallying the image refs, manifests, layers, fsmeta files, and VMDK files removed, plus bytes reclaimed.
 
@@ -287,18 +299,6 @@ Remove cached image data that is not used by any sandbox. Returns a report tally
     <div className="msb-param-desc">Non-nil on failure.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-report, err := m.Image.Prune(ctx)
-if err != nil {
-    return err
-}
-fmt.Println(report.LayersRemoved, "layers removed")
-```
-
-</Accordion>
 
 ---
 
@@ -475,6 +475,20 @@ When this image was last referenced. Returns the zero `time.Time` when unknown.
 func (h *ImageHandle) Remove(ctx context.Context, force bool) error
 ```
 
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "old:tag")
+if err != nil {
+    return err
+}
+if err := img.Remove(ctx, false); err != nil {
+    return err
+}
+```
+
+</Accordion>
+
 Delete this image. Equivalent to [`Image.Remove(ctx, h.Reference(), force)`](#image-remove). When `force` is false, sandboxes that still reference the image cause the call to fail with `ErrImageInUse`.
 
 <p className="msb-label">Parameters</p>
@@ -499,20 +513,6 @@ Delete this image. Equivalent to [`Image.Remove(ctx, h.Reference(), force)`](#im
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-img, err := m.Image.Get(ctx, "old:tag")
-if err != nil {
-    return err
-}
-if err := img.Remove(ctx, false); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Inspect()</span>
@@ -521,6 +521,22 @@ if err := img.Remove(ctx, false); err != nil {
 ```go
 func (h *ImageHandle) Inspect(ctx context.Context) (*ImageDetail, error)
 ```
+
+<Accordion title="Example">
+
+```go
+img, err := m.Image.Get(ctx, "python:3.12")
+if err != nil {
+    return err
+}
+detail, err := img.Inspect(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(detail.Config.WorkingDir)
+```
+
+</Accordion>
 
 Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Reference())`](#image-inspect).
 
@@ -545,22 +561,6 @@ Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Refe
     <div className="msb-param-desc">Non-nil on failure.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-img, err := m.Image.Get(ctx, "python:3.12")
-if err != nil {
-    return err
-}
-detail, err := img.Inspect(ctx)
-if err != nil {
-    return err
-}
-fmt.Println(detail.Config.WorkingDir)
-```
-
-</Accordion>
 
 ---
 

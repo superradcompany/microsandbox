@@ -67,6 +67,14 @@ await client.close()                                # 4. close
 async def connect_sandbox(cls, name: str, *, timeout: float | None = None) -> AgentClient
 ```
 
+<Accordion title="Example">
+
+```python
+client = await AgentClient.connect_sandbox("dev", timeout=5.0)
+```
+
+</Accordion>
+
 Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 bytes.
 
 <p className="msb-label">Parameters</p>
@@ -91,14 +99,6 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-client = await AgentClient.connect_sandbox("dev", timeout=5.0)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
@@ -108,6 +108,15 @@ client = await AgentClient.connect_sandbox("dev", timeout=5.0)
 @classmethod
 async def connect(cls, path: str, *, timeout: float | None = None) -> AgentClient
 ```
+
+<Accordion title="Example">
+
+```python
+path = AgentClient.socket_path("dev")
+client = await AgentClient.connect(path)
+```
+
+</Accordion>
 
 Connect to an agent relay socket by path. Use this when you already know the socket path, for example one returned by [`socket_path()`](#agentclient-socket_path).
 
@@ -133,15 +142,6 @@ Connect to an agent relay socket by path. Use this when you already know the soc
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-path = AgentClient.socket_path("dev")
-client = await AgentClient.connect(path)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socket_path()</span>
@@ -151,6 +151,14 @@ client = await AgentClient.connect(path)
 @staticmethod
 def socket_path(name: str) -> str
 ```
+
+<Accordion title="Example">
+
+```python
+path = AgentClient.socket_path("dev")
+```
+
+</Accordion>
 
 Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`connect_sandbox()`](#agentclient-connect_sandbox) would dial, so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
 
@@ -172,14 +180,6 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-path = AgentClient.socket_path("dev")
-```
-
-</Accordion>
-
 ---
 
 ## Instance methods
@@ -192,6 +192,15 @@ path = AgentClient.socket_path("dev")
 ```python
 async def request(self, flags: int, body: bytes) -> RawFrame
 ```
+
+<Accordion title="Example">
+
+```python
+frame = await client.request(0, body)
+print(frame["id"], frame["flags"])
+```
+
+</Accordion>
 
 Send one raw frame and wait for one response frame.
 
@@ -217,15 +226,6 @@ Send one raw frame and wait for one response frame.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-frame = await client.request(0, body)
-print(frame["id"], frame["flags"])
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">stream()</span>
@@ -234,6 +234,19 @@ print(frame["id"], frame["flags"])
 ```python
 async def stream(self, flags: int, body: bytes) -> AgentStream
 ```
+
+<Accordion title="Example">
+
+```python
+from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
+
+stream = await client.stream(FLAG_SESSION_START, body)
+async for frame in stream:
+    if frame["flags"] & FLAG_TERMINAL:
+        break
+```
+
+</Accordion>
 
 Open a raw streaming session. The returned [`AgentStream`](#agentstream) carries the protocol correlation id and is also an async iterator of raw frames.
 
@@ -259,19 +272,6 @@ Open a raw streaming session. The returned [`AgentStream`](#agentstream) carries
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
-
-stream = await client.stream(FLAG_SESSION_START, body)
-async for frame in stream:
-    if frame["flags"] & FLAG_TERMINAL:
-        break
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">send()</span>
@@ -280,6 +280,15 @@ async for frame in stream:
 ```python
 async def send(self, id: int, flags: int, body: bytes) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+stream = await client.stream(FLAG_SESSION_START, body)
+await client.send(stream.id, 0, follow_up_body)
+```
+
+</Accordion>
 
 Send a follow-up frame on an existing correlation id. Use the `id` from the [`AgentStream`](#agentstream) returned by [`stream()`](#client-stream).
 
@@ -300,15 +309,6 @@ Send a follow-up frame on an existing correlation id. Use the `id` from the [`Ag
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-stream = await client.stream(FLAG_SESSION_START, body)
-await client.send(stream.id, 0, follow_up_body)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">ready_bytes()</span>
@@ -317,6 +317,14 @@ await client.send(stream.id, 0, follow_up_body)
 ```python
 def ready_bytes(self) -> bytes
 ```
+
+<Accordion title="Example">
+
+```python
+ready = client.ready_bytes()
+```
+
+</Accordion>
 
 Return the cached handshake `core.ready` frame body as CBOR bytes.
 
@@ -329,14 +337,6 @@ Return the cached handshake `core.ready` frame body as CBOR bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-ready = client.ready_bytes()
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
@@ -346,8 +346,6 @@ ready = client.ready_bytes()
 async def close(self) -> None
 ```
 
-Close the client. Calling it more than once is safe.
-
 <Accordion title="Example">
 
 ```python
@@ -355,6 +353,8 @@ await client.close()
 ```
 
 </Accordion>
+
+Close the client. Calling it more than once is safe.
 
 ---
 

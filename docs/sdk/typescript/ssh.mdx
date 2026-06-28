@@ -76,6 +76,15 @@ The SSH namespace for a sandbox, returned by [`sb.ssh()`](#sb-ssh). It opens in-
 ssh(): SandboxSshOps
 ```
 
+<Accordion title="Example">
+
+```typescript
+const ssh = sandbox.ssh();
+const client = await ssh.openClient();
+```
+
+</Accordion>
+
 Return the SSH namespace for this sandbox. The returned object exposes [`openClient()`](#ssh-openclient) and [`prepareServer()`](#ssh-prepareserver).
 
 <p className="msb-label">Returns</p>
@@ -87,15 +96,6 @@ Return the SSH namespace for this sandbox. The returned object exposes [`openCli
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const ssh = sandbox.ssh();
-const client = await ssh.openClient();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">openClient()</span>
@@ -104,6 +104,14 @@ const client = await ssh.openClient();
 ```typescript
 openClient(opts?: SshClientOptions): Promise<SshClient>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const client = await sandbox.ssh().openClient({ user: "root" });
+```
+
+</Accordion>
 
 Open a native in-process SSH client connected to the sandbox.
 
@@ -125,14 +133,6 @@ Open a native in-process SSH client connected to the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const client = await sandbox.ssh().openClient({ user: "root" });
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepareServer()</span>
@@ -141,6 +141,15 @@ const client = await sandbox.ssh().openClient({ user: "root" });
 ```typescript
 prepareServer(opts?: SshServerOptions): Promise<SshServer>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const server = await sandbox.ssh().prepareServer({ user: "root" });
+await server.serveConnection();
+```
+
+</Accordion>
 
 Prepare a reusable SSH server endpoint backed by the sandbox.
 
@@ -162,15 +171,6 @@ Prepare a reusable SSH server endpoint backed by the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const server = await sandbox.ssh().prepareServer({ user: "root" });
-await server.serveConnection();
-```
-
-</Accordion>
-
 ## SshClient
 
 A native in-process SSH client session, returned by [`openClient()`](#ssh-openclient). Run commands, attach an interactive shell, or open an SFTP session over the same connection. Close it with [`close()`](#client-close) when done.
@@ -183,6 +183,15 @@ A native in-process SSH client session, returned by [`openClient()`](#ssh-opencl
 ```typescript
 exec(command: string, opts?: SshExecOptions): Promise<SshOutput>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const out = await client.exec("uname -a");
+console.log(out.status, out.stdout.toString());
+```
+
+</Accordion>
 
 Run an SSH exec request and collect stdout, stderr, and the exit status.
 
@@ -208,15 +217,6 @@ Run an SSH exec request and collect stdout, stderr, and the exit status.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const out = await client.exec("uname -a");
-console.log(out.status, out.stdout.toString());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">attach()</span>
@@ -225,6 +225,15 @@ console.log(out.status, out.stdout.toString());
 ```typescript
 attach(opts?: SshAttachOptions): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const code = await client.attach({ detachKeys: "ctrl-p,ctrl-q" });
+console.log(`shell exited with ${code}`);
+```
+
+</Accordion>
 
 Attach the local terminal to an interactive SSH shell. Resolves with the shell's exit code once the session ends.
 
@@ -246,15 +255,6 @@ Attach the local terminal to an interactive SSH shell. Resolves with the shell's
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const code = await client.attach({ detachKeys: "ctrl-p,ctrl-q" });
-console.log(`shell exited with ${code}`);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">sftp()</span>
@@ -263,6 +263,16 @@ console.log(`shell exited with ${code}`);
 ```typescript
 sftp(): Promise<SftpClient>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const sftp = await client.sftp();
+await sftp.write("/tmp/data.bin", Buffer.from([1, 2, 3]));
+await sftp.close();
+```
+
+</Accordion>
 
 Open an SFTP session over this SSH connection for file transfer and remote filesystem operations.
 
@@ -275,16 +285,6 @@ Open an SFTP session over this SSH connection for file transfer and remote files
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const sftp = await client.sftp();
-await sftp.write("/tmp/data.bin", Buffer.from([1, 2, 3]));
-await sftp.close();
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">close()</span>
@@ -294,8 +294,6 @@ await sftp.close();
 close(): Promise<void>
 ```
 
-Close the native SSH client session.
-
 <Accordion title="Example">
 
 ```typescript
@@ -303,6 +301,8 @@ await client.close();
 ```
 
 </Accordion>
+
+Close the native SSH client session.
 
 ## SftpClient
 
@@ -316,6 +316,15 @@ An SFTP session over an [`SshClient`](#sshclient) connection, returned by [`sftp
 ```typescript
 read(path: string): Promise<Buffer>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const data = await sftp.read("/etc/hostname");
+console.log(data.toString().trim());
+```
+
+</Accordion>
 
 Read a remote file into memory.
 
@@ -337,15 +346,6 @@ Read a remote file into memory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const data = await sftp.read("/etc/hostname");
-console.log(data.toString().trim());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">write()</span>
@@ -354,6 +354,14 @@ console.log(data.toString().trim());
 ```typescript
 write(path: string, data: Buffer): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.write("/tmp/config.json", Buffer.from(JSON.stringify({ ok: true })));
+```
+
+</Accordion>
 
 Create or truncate a remote file and write the given bytes.
 
@@ -370,14 +378,6 @@ Create or truncate a remote file and write the given bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.write("/tmp/config.json", Buffer.from(JSON.stringify({ ok: true })));
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">mkdir()</span>
@@ -386,6 +386,14 @@ await sftp.write("/tmp/config.json", Buffer.from(JSON.stringify({ ok: true })));
 ```typescript
 mkdir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.mkdir("/tmp/uploads");
+```
+
+</Accordion>
 
 Create a remote directory.
 
@@ -398,14 +406,6 @@ Create a remote directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.mkdir("/tmp/uploads");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">removeFile()</span>
@@ -414,6 +414,14 @@ await sftp.mkdir("/tmp/uploads");
 ```typescript
 removeFile(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.removeFile("/tmp/config.json");
+```
+
+</Accordion>
 
 Remove a remote file.
 
@@ -426,14 +434,6 @@ Remove a remote file.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.removeFile("/tmp/config.json");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">removeDir()</span>
@@ -442,6 +442,14 @@ await sftp.removeFile("/tmp/config.json");
 ```typescript
 removeDir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.removeDir("/tmp/uploads");
+```
+
+</Accordion>
 
 Remove an empty remote directory.
 
@@ -454,14 +462,6 @@ Remove an empty remote directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.removeDir("/tmp/uploads");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">rename()</span>
@@ -470,6 +470,14 @@ await sftp.removeDir("/tmp/uploads");
 ```typescript
 rename(oldPath: string, newPath: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.rename("/tmp/data.bin", "/tmp/data.old");
+```
+
+</Accordion>
 
 Rename or move a remote file or directory.
 
@@ -486,14 +494,6 @@ Rename or move a remote file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.rename("/tmp/data.bin", "/tmp/data.old");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">realPath()</span>
@@ -502,6 +502,15 @@ await sftp.rename("/tmp/data.bin", "/tmp/data.old");
 ```typescript
 realPath(path: string): Promise<string>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const abs = await sftp.realPath("./logs");
+console.log(abs);
+```
+
+</Accordion>
 
 Resolve a remote path to its canonical, absolute form.
 
@@ -523,15 +532,6 @@ Resolve a remote path to its canonical, absolute form.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const abs = await sftp.realPath("./logs");
-console.log(abs);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">readLink()</span>
@@ -540,6 +540,15 @@ console.log(abs);
 ```typescript
 readLink(path: string): Promise<string>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const target = await sftp.readLink("/etc/localtime");
+console.log(target);
+```
+
+</Accordion>
 
 Read the target of a remote symlink.
 
@@ -561,15 +570,6 @@ Read the target of a remote symlink.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const target = await sftp.readLink("/etc/localtime");
-console.log(target);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">symlink()</span>
@@ -578,6 +578,14 @@ console.log(target);
 ```typescript
 symlink(target: string, linkPath: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await sftp.symlink("/tmp/data.bin", "/tmp/latest");
+```
+
+</Accordion>
 
 Create a remote symlink at `linkPath` pointing to `target`.
 
@@ -594,14 +602,6 @@ Create a remote symlink at `linkPath` pointing to `target`.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await sftp.symlink("/tmp/data.bin", "/tmp/latest");
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">close()</span>
@@ -611,8 +611,6 @@ await sftp.symlink("/tmp/data.bin", "/tmp/latest");
 close(): Promise<void>
 ```
 
-Close the SFTP session.
-
 <Accordion title="Example">
 
 ```typescript
@@ -620,6 +618,8 @@ await sftp.close();
 ```
 
 </Accordion>
+
+Close the SFTP session.
 
 ## SshServer
 
@@ -634,8 +634,6 @@ A prepared SSH server endpoint, returned by [`prepareServer()`](#ssh-prepareserv
 serveConnection(): Promise<void>
 ```
 
-Serve one SSH transport over stdin/stdout. Resolves when the connection ends.
-
 <Accordion title="Example">
 
 ```typescript
@@ -646,6 +644,8 @@ await server.close();
 
 </Accordion>
 
+Serve one SSH transport over stdin/stdout. Resolves when the connection ends.
+
 ---
 
 #### <span className="msb-recv">server.</span><span className="msb-hn">close()</span>
@@ -655,8 +655,6 @@ await server.close();
 close(): Promise<void>
 ```
 
-Release the prepared server endpoint.
-
 <Accordion title="Example">
 
 ```typescript
@@ -664,6 +662,8 @@ await server.close();
 ```
 
 </Accordion>
+
+Release the prepared server endpoint.
 
 ## Types
 

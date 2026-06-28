@@ -158,6 +158,14 @@ sb.stop().await?;
 fn builder(name: impl Into<String>) -> VolumeBuilder
 ```
 
+<Accordion title="Example">
+
+```rust
+let vol = Volume::builder("pip-cache").create().await?;
+```
+
+</Accordion>
+
 Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#disk) then [`.size()`](#size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
 
 <p className="msb-label">Parameters</p>
@@ -178,14 +186,6 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let vol = Volume::builder("pip-cache").create().await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">create()</span>
@@ -194,6 +194,23 @@ let vol = Volume::builder("pip-cache").create().await?;
 ```rust
 async fn create(config: VolumeConfig) -> MicrosandboxResult<Volume>
 ```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::volume::{VolumeConfig, VolumeKind};
+
+let vol = Volume::create(VolumeConfig {
+    name: "cache".into(),
+    kind: VolumeKind::Directory,
+    quota_mib: Some(1024),
+    capacity_mib: None,
+    labels: vec![("team".into(), "ml".into())],
+})
+.await?;
+```
+
+</Accordion>
 
 Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the active backend. Locally this inserts a database record and creates the host directory (formatting a `disk.raw` for disk volumes). Fails with `VolumeAlreadyExists` if a volume of the same name already exists. Most callers use [`Volume::builder()`](#volumebuilder), which calls this internally.
 
@@ -215,23 +232,6 @@ Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the acti
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use microsandbox::volume::{VolumeConfig, VolumeKind};
-
-let vol = Volume::create(VolumeConfig {
-    name: "cache".into(),
-    kind: VolumeKind::Directory,
-    quota_mib: Some(1024),
-    capacity_mib: None,
-    labels: vec![("team".into(), "ml".into())],
-})
-.await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get()</span>
@@ -240,6 +240,15 @@ let vol = Volume::create(VolumeConfig {
 ```rust
 async fn get(name: &str) -> MicrosandboxResult<VolumeHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let h = Volume::get("pip-cache").await?;
+println!("{} — {} bytes used", h.name(), h.used_bytes());
+```
+
+</Accordion>
 
 Get a handle to an existing named volume. Use the handle to access the volume's filesystem from the host, read its metadata, or delete it. Fails with `VolumeNotFound` if no volume by that name exists.
 
@@ -261,15 +270,6 @@ Get a handle to an existing named volume. Use the handle to access the volume's 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let h = Volume::get("pip-cache").await?;
-println!("{} — {} bytes used", h.name(), h.used_bytes());
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">list()</span>
@@ -278,6 +278,16 @@ println!("{} — {} bytes used", h.name(), h.used_bytes());
 ```rust
 async fn list() -> MicrosandboxResult<Vec<VolumeHandle>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for h in Volume::list().await? {
+    println!("{} — {:?}", h.name(), h.kind());
+}
+```
+
+</Accordion>
 
 List all named volumes, newest first.
 
@@ -290,16 +300,6 @@ List all named volumes, newest first.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for h in Volume::list().await? {
-    println!("{} — {:?}", h.name(), h.kind());
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">remove()</span>
@@ -308,6 +308,14 @@ for h in Volume::list().await? {
 ```rust
 async fn remove(name: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+Volume::remove("pip-cache").await?;
+```
+
+</Accordion>
 
 Delete a named volume and its contents from disk. Locally the database record is deleted first, then the directory, so an orphaned directory is easier to detect than an orphaned record. Fails with `VolumeNotFound` if the volume does not exist.
 
@@ -319,14 +327,6 @@ Delete a named volume and its contents from disk. Locally the database record is
     <div className="msb-param-desc">Volume name.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-Volume::remove("pip-cache").await?;
-```
-
-</Accordion>
 
 ---
 
@@ -383,6 +383,14 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 fn fs(&self) -> VolumeFs<'_>
 ```
 
+<Accordion title="Example">
+
+```rust
+vol.fs().write("/seed.txt", "hello").await?;
+```
+
+</Accordion>
+
 Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. Local volumes route to `tokio::fs`. See [`VolumeFs`](#volumefs) for the operations.
 
 <p className="msb-label">Returns</p>
@@ -394,14 +402,6 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().write("/seed.txt", "hello").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">path()</span>
@@ -410,6 +410,14 @@ vol.fs().write("/seed.txt", "hello").await?;
 ```rust
 fn path(&self) -> MicrosandboxResult<&Path>
 ```
+
+<Accordion title="Example">
+
+```rust
+println!("{}", vol.path()?.display());
+```
+
+</Accordion>
 
 The host-side directory where this volume's data is stored (local backend only). Errors with `Unsupported` for cloud volumes, whose bytes live in the org's object storage rather than on the caller's host.
 
@@ -421,14 +429,6 @@ The host-side directory where this volume's data is stored (local backend only).
     <div className="msb-param-desc">Host data directory, e.g. <code>~/.microsandbox/volumes/pip-cache/</code>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-println!("{}", vol.path()?.display());
-```
-
-</Accordion>
 
 ---
 
@@ -625,6 +625,15 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 fn fs(&self) -> VolumeFs<'_>
 ```
 
+<Accordion title="Example">
+
+```rust
+let h = Volume::get("pip-cache").await?;
+let names = h.fs().list("/").await?;
+```
+
+</Accordion>
+
 Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. See [`VolumeFs`](#volumefs).
 
 <p className="msb-label">Returns</p>
@@ -636,15 +645,6 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let h = Volume::get("pip-cache").await?;
-let names = h.fs().list("/").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">remove()</span>
@@ -654,8 +654,6 @@ let names = h.fs().list("/").await?;
 async fn remove(&self) -> MicrosandboxResult<()>
 ```
 
-Delete this volume and its contents. Locally the database record is removed first, then the directory.
-
 <Accordion title="Example">
 
 ```rust
@@ -663,6 +661,8 @@ Volume::get("pip-cache").await?.remove().await?;
 ```
 
 </Accordion>
+
+Delete this volume and its contents. Locally the database record is removed first, then the directory.
 
 ---
 
@@ -899,6 +899,14 @@ Host-side filesystem operations on a named volume, obtained via [`Volume::fs()`]
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
 ```
 
+<Accordion title="Example">
+
+```rust
+let data = vol.fs().read("/seed.txt").await?;
+```
+
+</Accordion>
+
 Read an entire file into memory as raw bytes.
 
 <p className="msb-label">Parameters</p>
@@ -919,14 +927,6 @@ Read an entire file into memory as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let data = vol.fs().read("/seed.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
@@ -935,6 +935,14 @@ let data = vol.fs().read("/seed.txt").await?;
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let text = vol.fs().read_to_string("/seed.txt").await?;
+```
+
+</Accordion>
 
 Read an entire file into memory as a UTF-8 string.
 
@@ -956,14 +964,6 @@ Read an entire file into memory as a UTF-8 string.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let text = vol.fs().read_to_string("/seed.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
@@ -972,6 +972,17 @@ let text = vol.fs().read_to_string("/seed.txt").await?;
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut stream = vol.fs().read_stream("/model.bin").await?;
+while let Some(chunk) = stream.recv().await? {
+    // process chunk
+}
+```
+
+</Accordion>
 
 Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreadstream) that yields 64 KiB chunks, so large files don't have to be held in memory at once.
 
@@ -993,17 +1004,6 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut stream = vol.fs().read_stream("/model.bin").await?;
-while let Some(chunk) = stream.recv().await? {
-    // process chunk
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
@@ -1012,6 +1012,14 @@ while let Some(chunk) = stream.recv().await? {
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
+```
+
+</Accordion>
 
 Write data to a file, creating parent directories as needed. Overwrites if the file already exists.
 
@@ -1028,14 +1036,6 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
@@ -1044,6 +1044,16 @@ vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut sink = vol.fs().write_stream("/upload.bin").await?;
+sink.write(&chunk).await?;
+sink.close().await?;
+```
+
+</Accordion>
 
 Open a file for streaming writes. Returns a [`VolumeFsWriteSink`](#volumefswritesink) that accepts chunks of bytes. Creates parent directories as needed.
 
@@ -1065,16 +1075,6 @@ Open a file for streaming writes. Returns a [`VolumeFsWriteSink`](#volumefswrite
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut sink = vol.fs().write_stream("/upload.bin").await?;
-sink.write(&chunk).await?;
-sink.close().await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
@@ -1083,6 +1083,16 @@ sink.close().await?;
 ```rust
 async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for entry in vol.fs().list("/").await? {
+    println!("{} ({} bytes)", entry.path, entry.size);
+}
+```
+
+</Accordion>
 
 List the immediate children of a directory (non-recursive). Each entry includes the path, kind, size, permissions, and modification time.
 
@@ -1104,16 +1114,6 @@ List the immediate children of a directory (non-recursive). Each entry includes 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for entry in vol.fs().list("/").await? {
-    println!("{} ({} bytes)", entry.path, entry.size);
-}
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
@@ -1122,6 +1122,14 @@ for entry in vol.fs().list("/").await? {
 ```rust
 async fn mkdir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().mkdir("/data/incoming").await?;
+```
+
+</Accordion>
 
 Create a directory and any missing parents.
 
@@ -1134,14 +1142,6 @@ Create a directory and any missing parents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().mkdir("/data/incoming").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
@@ -1150,6 +1150,14 @@ vol.fs().mkdir("/data/incoming").await?;
 ```rust
 async fn remove(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().remove("/data/stale.tmp").await?;
+```
+
+</Accordion>
 
 Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
@@ -1162,14 +1170,6 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().remove("/data/stale.tmp").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
@@ -1178,6 +1178,14 @@ vol.fs().remove("/data/stale.tmp").await?;
 ```rust
 async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().remove_dir("/data/incoming").await?;
+```
+
+</Accordion>
 
 Remove a directory and its contents recursively. Targeting the volume root is rejected.
 
@@ -1190,14 +1198,6 @@ Remove a directory and its contents recursively. Targeting the volume root is re
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().remove_dir("/data/incoming").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
@@ -1206,6 +1206,14 @@ vol.fs().remove_dir("/data/incoming").await?;
 ```rust
 async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
+```
+
+</Accordion>
 
 Copy a file within the volume. Creates the destination's parent directories as needed.
 
@@ -1222,14 +1230,6 @@ Copy a file within the volume. Creates the destination's parent directories as n
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
@@ -1238,6 +1238,14 @@ vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
 ```rust
 async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
+```
+
+</Accordion>
 
 Rename or move a file or directory. Creates the destination's parent directories as needed.
 
@@ -1254,14 +1262,6 @@ Rename or move a file or directory. Creates the destination's parent directories
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
@@ -1270,6 +1270,15 @@ vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
 ```rust
 async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let meta = vol.fs().stat("/seed.txt").await?;
+println!("{} bytes", meta.size);
+```
+
+</Accordion>
 
 Get metadata for a file or directory: kind, size, permission bits, read-only flag, and timestamps.
 
@@ -1291,15 +1300,6 @@ Get metadata for a file or directory: kind, size, permission bits, read-only fla
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let meta = vol.fs().stat("/seed.txt").await?;
-println!("{} bytes", meta.size);
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
@@ -1308,6 +1308,16 @@ println!("{} bytes", meta.size);
 ```rust
 async fn exists(&self, path: &str) -> MicrosandboxResult<bool>
 ```
+
+<Accordion title="Example">
+
+```rust
+if !vol.fs().exists("/seed.txt").await? {
+    vol.fs().write("/seed.txt", "hello").await?;
+}
+```
+
+</Accordion>
 
 Check whether a file or directory exists at the given path. Returns `false` rather than an error if the path is absent.
 
@@ -1328,16 +1338,6 @@ Check whether a file or directory exists at the given path. Returns `false` rath
     <div className="msb-param-desc"><code>true</code> if the path exists.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-if !vol.fs().exists("/seed.txt").await? {
-    vol.fs().write("/seed.txt", "hello").await?;
-}
-```
-
-</Accordion>
 
 ---
 
@@ -1376,17 +1376,6 @@ Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires
 fn size(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Set the disk volume's capacity. Required for disk volumes; rejected for directory volumes. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `20.gib()`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
-    <div className="msb-param-desc">Capacity in MiB.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```rust
@@ -1400,6 +1389,17 @@ let vol = Volume::builder("docker-data")
 ```
 
 </Accordion>
+
+Set the disk volume's capacity. Required for disk volumes; rejected for directory volumes. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `20.gib()`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
+    <div className="msb-param-desc">Capacity in MiB.</div>
+  </div>
+</div>
 
 ---
 
@@ -1478,17 +1478,6 @@ Materialize the [`VolumeConfig`](#volumespec) without creating the volume. Pass 
 async fn create(self) -> MicrosandboxResult<Volume>
 ```
 
-Create the volume on the active backend. Equivalent to `Volume::create(self.build())`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
-    <div className="msb-param-desc">The created volume.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```rust
@@ -1500,6 +1489,17 @@ let vol = Volume::builder("pip-cache")
 ```
 
 </Accordion>
+
+Create the volume on the active backend. Equivalent to `Volume::create(self.build())`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
+    <div className="msb-param-desc">The created volume.</div>
+  </div>
+</div>
 
 ---
 
@@ -1560,21 +1560,6 @@ fn named_with(
 ) -> Self
 ```
 
-Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
-    <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```rust
@@ -1591,6 +1576,21 @@ let sb = Sandbox::builder("worker")
 ```
 
 </Accordion>
+
+Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
+    <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
+  </div>
+</div>
 
 ---
 

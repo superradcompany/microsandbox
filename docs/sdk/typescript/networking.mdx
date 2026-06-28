@@ -216,17 +216,6 @@ Policy literals constructed via `Rule.allowEgress(...)` etc. do not run through 
 builder(): NetworkPolicyBuilder
 ```
 
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces there.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
-    <div className="msb-param-desc">Empty builder.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```typescript
@@ -239,6 +228,17 @@ const policy = NetworkPolicy.builder()
 ```
 
 </Accordion>
+
+Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces there.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
+    <div className="msb-param-desc">Empty builder.</div>
+  </div>
+</div>
 
 ---
 
@@ -299,6 +299,16 @@ Factories for the building blocks of a policy literal. [`Rule`](#rule-2) values 
 allowEgress(destination: Destination): Rule
 ```
 
+<Accordion title="Example">
+
+```typescript
+import { Rule, Destination } from "microsandbox";
+
+const r = Rule.allowEgress(Destination.domain("api.example.com"));
+```
+
+</Accordion>
+
 Allow rule with direction `egress`. Empty protocols and ports mean "any".
 
 <p className="msb-label">Parameters</p>
@@ -309,16 +319,6 @@ Allow rule with direction `egress`. Empty protocols and ports mean "any".
     <div className="msb-param-desc">Target filter.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-import { Rule, Destination } from "microsandbox";
-
-const r = Rule.allowEgress(Destination.domain("api.example.com"));
-```
-
-</Accordion>
 
 ---
 
@@ -429,10 +429,6 @@ Deny rule with direction `any` (matches in either direction).
 allowDns(): Rule
 ```
 
-Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
-
-DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
-
 <Accordion title="Example">
 
 ```typescript
@@ -446,6 +442,10 @@ const policy: NetworkPolicy = {
 ```
 
 </Accordion>
+
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
 
 ---
 
@@ -597,17 +597,6 @@ Passed to the callback you give `SandboxBuilder.network(...)`. Every setter retu
 policy(policy: NetworkPolicy | NetworkPolicyBuilder): this
 ```
 
-Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy-2) literal or factory result, or a [`NetworkPolicyBuilder`](#networkpolicybuilder) (routed through the native bridge so lazy parse/validation errors surface at this call site).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#networkpolicy-2">NetworkPolicy</a></div>
-    <div className="msb-param-desc">Policy literal, factory result, or builder.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```typescript
@@ -620,6 +609,17 @@ const sb = await Sandbox.builder("api")
 ```
 
 </Accordion>
+
+Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy-2) literal or factory result, or a [`NetworkPolicyBuilder`](#networkpolicybuilder) (routed through the native bridge so lazy parse/validation errors surface at this call site).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#networkpolicy-2">NetworkPolicy</a></div>
+    <div className="msb-param-desc">Policy literal, factory result, or builder.</div>
+  </div>
+</div>
 
 ---
 
@@ -734,6 +734,14 @@ Publish a UDP port on a specific host bind address.
 dns(configure: (b: DnsBuilder) => DnsBuilder): this
 ```
 
+<Accordion title="Example">
+
+```typescript
+.network((n) => n.dns((d) => d.rebindProtection(true).queryTimeoutMs(2000)))
+```
+
+</Accordion>
+
 Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
 <p className="msb-label">Parameters</p>
@@ -744,14 +752,6 @@ Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
     <div className="msb-param-desc">Configure DNS.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-.network((n) => n.dns((d) => d.rebindProtection(true).queryTimeoutMs(2000)))
-```
-
-</Accordion>
 
 ---
 
@@ -862,6 +862,14 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
 interface(configure: (b: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
 ```
 
+<Accordion title="Example">
+
+```typescript
+.network((n) => n.interface((i) => i.mtu(1400).ipv4("172.16.0.2")))
+```
+
+</Accordion>
+
 Override per-sandbox interface attributes (MAC, MTU, fixed IPv4 / IPv6 address). The [`InterfaceOverridesBuilder`](#interfaceoverridesbuilder) exposes `.mac()`, `.mtu()`, `.ipv4()`, and `.ipv6()`.
 
 <p className="msb-label">Parameters</p>
@@ -872,14 +880,6 @@ Override per-sandbox interface attributes (MAC, MTU, fixed IPv4 / IPv6 address).
     <div className="msb-param-desc">Configure interface overrides.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-.network((n) => n.interface((i) => i.mtu(1400).ipv4("172.16.0.2")))
-```
-
-</Accordion>
 
 ---
 
@@ -910,17 +910,6 @@ Enable or disable networking entirely. When `false`, no network interface is cre
 onSecretViolation(configure: (b: ViolationActionBuilder) => ViolationActionBuilder): this
 ```
 
-Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
-    <div className="msb-param-desc">Configure the violation action.</div>
-  </div>
-</div>
-
 <Accordion title="Example">
 
 ```typescript
@@ -932,6 +921,17 @@ Configure the action taken when a secret reaches a disallowed host. See [`Violat
 ```
 
 </Accordion>
+
+Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
+    <div className="msb-param-desc">Configure the violation action.</div>
+  </div>
+</div>
 
 Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
 
@@ -996,6 +996,16 @@ Four-arg explicit-placeholder shorthand for adding a secret without opening a bu
 secretEnvSimple(envVar: string, value: string, allowedHost: string): this
 ```
 
+<Accordion title="Example">
+
+```typescript
+.network((n) =>
+  n.secretEnvSimple("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com"),
+)
+```
+
+</Accordion>
+
 Three-arg auto-placeholder shorthand. Auto-generates the placeholder as `$MSB_<envVar>`, so it is the terse counterpart to [`secretEnv()`](#secretenv) when you do not need a custom placeholder. The full secret API also lives on the [secrets page](/sdk/typescript/secrets#networkbuilder-secretenvsimple).
 
 <p className="msb-label">Parameters</p>
@@ -1014,16 +1024,6 @@ Three-arg auto-placeholder shorthand. Auto-generates the placeholder as `$MSB_<e
     <div className="msb-param-desc">Single hostname allowed to receive the real value.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```typescript
-.network((n) =>
-  n.secretEnvSimple("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com"),
-)
-```
-
-</Accordion>
 
 ---
 

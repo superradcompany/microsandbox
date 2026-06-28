@@ -79,6 +79,17 @@ sb, err = m.CreateSandbox(ctx, "ci-runner",
 func WithNetwork(net *NetworkConfig) SandboxOption
 ```
 
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+)
+```
+
+</Accordion>
+
 Set the network configuration for the sandbox. Pass a preset from the [`NetworkPolicy`](#networkpolicy) factory, or a custom [`NetworkConfig`](#networkconfig) value with your own rules, DNS, TLS, and port settings.
 
 <p className="msb-label">Parameters</p>
@@ -99,17 +110,6 @@ Set the network configuration for the sandbox. Pass a preset from the [`NetworkP
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("alpine"),
-    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPorts()</span>
@@ -118,6 +118,17 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```go
 func WithPorts(ports map[uint16]uint16) SandboxOption
 ```
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithPorts(map[uint16]uint16{8080: 8080}),
+)
+```
+
+</Accordion>
 
 Make TCP services running in the sandbox reachable on localhost ports on the host. Each map entry exposes the guest port (value) on the host port (key), bound to `127.0.0.1`. Called multiple times, the maps merge.
 
@@ -139,17 +150,6 @@ Make TCP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sb, err := m.CreateSandbox(ctx, "api",
-    m.WithImage("python:3.12"),
-    m.WithPorts(map[uint16]uint16{8080: 8080}),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPortsUDP()</span>
@@ -158,6 +158,17 @@ sb, err := m.CreateSandbox(ctx, "api",
 ```go
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption
 ```
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "dns",
+    m.WithImage("alpine"),
+    m.WithPortsUDP(map[uint16]uint16{5353: 53}),
+)
+```
+
+</Accordion>
 
 Make UDP services running in the sandbox reachable on localhost ports on the host. Each map entry exposes the guest port (value) on the host port (key), bound to `127.0.0.1`. Called multiple times, the maps merge.
 
@@ -179,17 +190,6 @@ Make UDP services running in the sandbox reachable on localhost ports on the hos
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sb, err := m.CreateSandbox(ctx, "dns",
-    m.WithImage("alpine"),
-    m.WithPortsUDP(map[uint16]uint16{5353: 53}),
-)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">WithPortBindings()</span>
@@ -198,6 +198,20 @@ sb, err := m.CreateSandbox(ctx, "dns",
 ```go
 func WithPortBindings(bindings ...PortBinding) SandboxOption
 ```
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithPortBindings(
+        m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001},
+        m.PortBinding{Bind: "127.0.0.1", HostPort: 5353, GuestPort: 53, Protocol: m.PortProtocolUDP},
+    ),
+)
+```
+
+</Accordion>
 
 Make services running in the sandbox reachable on explicit host addresses and ports. Use this when the default `127.0.0.1` bind is too restrictive, for example to expose a port on `0.0.0.0`. Accepts one or more [`PortBinding`](#portbinding) values.
 
@@ -219,20 +233,6 @@ Make services running in the sandbox reachable on explicit host addresses and po
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sb, err := m.CreateSandbox(ctx, "api",
-    m.WithImage("python:3.12"),
-    m.WithPortBindings(
-        m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001},
-        m.PortBinding{Bind: "127.0.0.1", HostPort: 5353, GuestPort: 53, Protocol: m.PortProtocolUDP},
-    ),
-)
-```
-
-</Accordion>
-
 ---
 
 ## NetworkPolicy
@@ -248,6 +248,14 @@ Factory namespace returning common preset [`*NetworkConfig`](#networkconfig) val
 func (networkPolicyFactory) PublicOnly() *NetworkConfig
 ```
 
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.PublicOnly())
+```
+
+</Accordion>
+
 Allow only public internet traffic; RFC-1918 private ranges are blocked. This is the **default** when no network configuration is supplied.
 
 <p className="msb-label">Returns</p>
@@ -259,14 +267,6 @@ Allow only public internet traffic; RFC-1918 private ranges are blocked. This is
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-m.WithNetwork(m.NetworkPolicy.PublicOnly())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">None()</span>
@@ -275,6 +275,14 @@ m.WithNetwork(m.NetworkPolicy.PublicOnly())
 ```go
 func (networkPolicyFactory) None() *NetworkConfig
 ```
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.None())
+```
+
+</Accordion>
 
 Block all network access. No network interface is created; the guest is fully offline. `Exec` and `FS` still work, since they use the host-guest channel rather than the network.
 
@@ -287,14 +295,6 @@ Block all network access. No network interface is created; the guest is fully of
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-m.WithNetwork(m.NetworkPolicy.None())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">AllowAll()</span>
@@ -303,6 +303,14 @@ m.WithNetwork(m.NetworkPolicy.None())
 ```go
 func (networkPolicyFactory) AllowAll() *NetworkConfig
 ```
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.AllowAll())
+```
+
+</Accordion>
 
 Permit all network traffic, including private addresses and the host machine.
 
@@ -315,14 +323,6 @@ Permit all network traffic, including private addresses and the host machine.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-m.WithNetwork(m.NetworkPolicy.AllowAll())
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">NonLocal()</span>
@@ -331,6 +331,14 @@ m.WithNetwork(m.NetworkPolicy.AllowAll())
 ```go
 func (networkPolicyFactory) NonLocal() *NetworkConfig
 ```
+
+<Accordion title="Example">
+
+```go
+m.WithNetwork(m.NetworkPolicy.NonLocal())
+```
+
+</Accordion>
 
 Allow public internet plus private/LAN egress; block loopback, link-local, and metadata.
 
@@ -342,14 +350,6 @@ Allow public internet plus private/LAN egress; block loopback, link-local, and m
     <div className="msb-param-desc">Preset config with <code>Policy: "non-local"</code>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```go
-m.WithNetwork(m.NetworkPolicy.NonLocal())
-```
-
-</Accordion>
 
 ---
 

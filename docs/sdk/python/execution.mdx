@@ -79,6 +79,22 @@ async def exec(
 ) -> ExecOutput
 ```
 
+<Accordion title="Example">
+
+```python
+out = await sandbox.exec(
+    "python3",
+    ["script.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
+print(out.stdout_text)
+print(out.exit_code)  # 0
+```
+
+</Accordion>
+
 Run a command inside the sandbox and wait for it to complete, buffering all stdout and stderr into memory. The keyword-only options apply to this call alone and don't change the sandbox's defaults. For long-running processes or large output, use [`exec_stream()`](#sandbox-exec_stream) instead. Raises [`ExecTimeoutError`](/sdk/python/sandbox) if `timeout` elapses and [`ExecFailedError`](/sdk/python/sandbox) if the process can't be spawned.
 
 <p className="msb-label">Parameters</p>
@@ -131,22 +147,6 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-out = await sandbox.exec(
-    "python3",
-    ["script.py"],
-    cwd="/app",
-    env={"PYTHONPATH": "/app/lib"},
-    timeout=30.0,
-)
-print(out.stdout_text)
-print(out.exit_code)  # 0
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
@@ -165,6 +165,15 @@ async def shell(
     rlimits: list[Rlimit] | None = None,
 ) -> ExecOutput
 ```
+
+<Accordion title="Example">
+
+```python
+out = await sandbox.shell("ls -la /app && echo done")
+print(out.stdout_text)
+```
+
+</Accordion>
 
 Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works. Accepts the same keyword-only options as [`exec()`](#sandbox-exec).
 
@@ -190,15 +199,6 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-out = await sandbox.shell("ls -la /app && echo done")
-print(out.stdout_text)
-```
-
-</Accordion>
-
 ---
 
 ## Stream
@@ -222,6 +222,21 @@ async def exec_stream(
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
 ```
+
+<Accordion title="Example">
+
+```python
+import sys
+
+handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
+async for event in handle:
+    if event.event_type == "stdout":
+        sys.stdout.buffer.write(event.data)
+    elif event.event_type == "exited":
+        break
+```
+
+</Accordion>
 
 Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, and exit events as they happen rather than buffering everything. Takes the same per-call options as [`exec()`](#sandbox-exec). Pass `stdin=Stdin.pipe()` to write to the process while it runs via [`take_stdin()`](#exechandle).
 
@@ -251,21 +266,6 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-import sys
-
-handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
-async for event in handle:
-    if event.event_type == "stdout":
-        sys.stdout.buffer.write(event.data)
-    elif event.event_type == "exited":
-        break
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell_stream()</span>
@@ -284,6 +284,19 @@ async def shell_stream(
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
 ```
+
+<Accordion title="Example">
+
+```python
+import sys
+
+handle = await sandbox.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done")
+async for event in handle:
+    if event.event_type == "stdout":
+        sys.stdout.buffer.write(event.data)
+```
+
+</Accordion>
 
 Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the configured shell but returns an [`ExecHandle`](#exechandle) instead of buffering output.
 
@@ -309,19 +322,6 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-import sys
-
-handle = await sandbox.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done")
-async for event in handle:
-    if event.event_type == "stdout":
-        sys.stdout.buffer.write(event.data)
-```
-
-</Accordion>
-
 ---
 
 ## Attach
@@ -342,6 +342,14 @@ async def attach(
     detach_keys: str | None = None,
 ) -> int
 ```
+
+<Accordion title="Example">
+
+```python
+code = await sandbox.attach("bash", cwd="/app", env={"EDITOR": "vim"})
+```
+
+</Accordion>
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press the configured detach key sequence (default `Ctrl+]`) to disconnect without stopping the process. Returns the process exit code.
 
@@ -383,14 +391,6 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-code = await sandbox.attach("bash", cwd="/app", env={"EDITOR": "vim"})
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach_shell()</span>
@@ -399,6 +399,14 @@ code = await sandbox.attach("bash", cwd="/app", env={"EDITOR": "vim"})
 ```python
 async def attach_shell() -> int
 ```
+
+<Accordion title="Example">
+
+```python
+code = await sandbox.attach_shell()
+```
+
+</Accordion>
 
 Bridge your terminal to the sandbox's default shell in a fully interactive PTY session. Returns the shell's exit code.
 
@@ -410,14 +418,6 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
     <div className="msb-param-desc">Exit code of the shell process.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-code = await sandbox.attach_shell()
-```
-
-</Accordion>
 
 ---
 
