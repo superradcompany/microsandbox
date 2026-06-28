@@ -61,7 +61,7 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 }
 .msb-param {
   display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; row-gap: 4px;
-  padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
+  padding: 11px 0;
 }
 .msb-param-key code { font-size: 13px; }
 .msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; margin-left: 6px; }
