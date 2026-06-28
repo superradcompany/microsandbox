@@ -78,7 +78,7 @@ details.accordion:has(.code-block) .code-block { margin: 0 !important; }
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
 .code-block:has(+ details.accordion) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block) { margin-top: 0.75rem !important; }
+details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
