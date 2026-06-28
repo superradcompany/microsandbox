@@ -55,13 +55,14 @@ h4:has(.msb-hn) { margin-top: 5rem !important; }
 .msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
 
 /* ----------------------------------------------------------------------------
- * Table columns — hand the slack to the column that needs it (content-driven
- * layout) instead of splitting width evenly, and keep name-ish first columns
- * on one line. Width is unchanged: tables stay within the prose column.
+ * Tables scroll horizontally rather than being crammed into the prose width,
+ * which forced ugly mid-token wraps (e.g. Vec<(String,\nString)>). The element
+ * directly wrapping each table becomes the scroll boundary, and cells stop
+ * wrapping, so a table sizes to its content and scrolls when it overflows.
  * -------------------------------------------------------------------------- */
+:has(> table) { overflow-x: auto; max-width: 100%; }
 table { table-layout: auto; }
-table th, table td { vertical-align: top; overflow-wrap: anywhere; }
-table td:first-child { white-space: nowrap; }
+table th, table td { vertical-align: top; white-space: nowrap; }
 
 /* ----------------------------------------------------------------------------
  * Example collapsibles — Mintlify wraps the code block in prose margins
