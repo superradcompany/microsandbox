@@ -12,7 +12,12 @@ body {
 /* our links shouldn't get Mintlify's prose underline-border */
 .msb-backref a, .msb-type { border-bottom: 0 !important; }
 
-/* method headings: monospace name with a muted receiver / path prefix */
+/* method headings: monospace name with a muted receiver / path prefix.
+ * With the rules between entries gone, lean on a generous top margin to
+ * separate one method from the previous one's body and keep the list
+ * scannable. Scoped to method headings so section/type headings are
+ * unaffected. */
+h4:has(.msb-hn) { margin-top: 3rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }
