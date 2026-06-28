@@ -885,12 +885,7 @@ pub(crate) async fn stop_local(
     }
 
     if model.status == SandboxStatus::Running {
-        update_sandbox_status(
-            local_backend.db().await?.write(),
-            model.id,
-            SandboxStatus::Draining,
-        )
-        .await?;
+        mark_sandbox_draining_if_running(local_backend.db().await?.write(), model.id).await?;
     }
 
     match request_agent_shutdown(local_backend, name).await {
@@ -986,12 +981,7 @@ pub(crate) async fn drain_local(
     }
 
     if model.status == SandboxStatus::Running {
-        update_sandbox_status(
-            local_backend.db().await?.write(),
-            model.id,
-            SandboxStatus::Draining,
-        )
-        .await?;
+        mark_sandbox_draining_if_running(local_backend.db().await?.write(), model.id).await?;
     }
 
     #[cfg(windows)]
@@ -1948,6 +1938,27 @@ pub(super) async fn update_sandbox_status(
     .await
 }
 
+async fn mark_sandbox_draining_if_running(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<()> {
+    sandbox_entity::Entity::update_many()
+        .col_expr(
+            sandbox_entity::Column::Status,
+            Expr::value(SandboxStatus::Draining),
+        )
+        .col_expr(
+            sandbox_entity::Column::UpdatedAt,
+            Expr::value(chrono::Utc::now().naive_utc()),
+        )
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .filter(sandbox_entity::Column::Status.eq(SandboxStatus::Running))
+        .exec(db)
+        .await?;
+
+    Ok(())
+}
+
 // Stale-sandbox reaping is no longer owned by the SDK/CLI. Host runtime
 // processes (`msb sandbox`) now perform lifecycle maintenance: stale active
 // reconciliation and terminal ephemeral cleanup, on startup under a
@@ -1980,10 +1991,22 @@ pub(super) async fn reconcile_sandbox_runtime_state(
 
     let run = load_active_run(pools.read(), sandbox.id).await?;
 
-    // No run record yet — the sandbox is still starting up (the child
-    // process has not inserted its PID). Skip reconciliation to avoid
-    // racing with create/start.
+    // No run record yet while Running means the sandbox is still starting up
+    // (the child process has not inserted its PID). A Draining row with no
+    // active run, however, has already completed shutdown from the DB's point
+    // of view and should not keep stop callers polling forever.
     let Some(run) = run else {
+        if sandbox.status == SandboxStatus::Draining {
+            let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
+            mark_sandbox_runtime_stale(pools.write(), sandbox.id, None, terminal_status, reason)
+                .await?;
+
+            return sandbox_entity::Entity::find_by_id(sandbox.id)
+                .one(pools.read())
+                .await?
+                .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name));
+        }
+
         return Ok(sandbox);
     };
 
@@ -3377,6 +3400,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_sandbox_runtime_state_marks_draining_without_run_stopped() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let config = test_config("draining-no-run");
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        super::update_sandbox_status(pools.write(), sandbox_id, SandboxStatus::Draining)
+            .await
+            .unwrap();
+
+        let sandbox = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        let reconciled = reconcile_sandbox_runtime_state(&pools, sandbox)
+            .await
+            .unwrap();
+
+        assert_eq!(reconciled.status, SandboxStatus::Stopped);
+    }
+
+    #[tokio::test]
     async fn test_prepare_create_target_force_replaces_stale_running_sandbox_state() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3560,6 +3607,13 @@ mod tests {
         .await
         .unwrap();
 
+        // --- Sandbox C2: Draining + no active run → should become Stopped ---
+        let cfg_c2 = test_config("draining-no-run");
+        let id_c2 = insert_sandbox_record(pools.write(), &cfg_c2).await.unwrap();
+        super::update_sandbox_status(pools.write(), id_c2, SandboxStatus::Draining)
+            .await
+            .unwrap();
+
         // --- Sandbox D: Stopped → should stay Stopped ---
         let cfg_d = test_config("stopped");
         let id_d = insert_sandbox_record(pools.write(), &cfg_d).await.unwrap();
@@ -3600,6 +3654,7 @@ mod tests {
         assert_eq!(load(id_a).await.status, SandboxStatus::Crashed);
         assert_eq!(load(id_b).await.status, SandboxStatus::Running);
         assert_eq!(load(id_c).await.status, SandboxStatus::Stopped);
+        assert_eq!(load(id_c2).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_d).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_e).await.status, SandboxStatus::Running);
 
