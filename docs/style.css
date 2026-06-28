@@ -43,10 +43,12 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-type { color: #6d4bc4; }
 .dark .msb-type { color: #c9a4ff; }
 
-/* small section labels (parameters / returns / example) */
+/* small section labels (parameters / returns / example). Underline just the
+ * label text (not a full-width rule) as a lightweight section marker. */
 .msb-label {
   font-size: 11px; font-weight: 600; letter-spacing: .05em;
   text-transform: uppercase; opacity: .55; margin: 16px 0 6px;
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px;
 }
 
 /* parameter + return rows
