@@ -2,19 +2,6 @@ body {
   font-size: 12px;
 }
 
-/* ----------------------------------------------------------------------------
- * Content width — on wide screens Mintlify pins the body to a fixed, narrow
- * column, leaving a large dead zone between the sidebar and the page content.
- * Let the content use 80% of the content area (≈10% gutter each side) instead.
- * #content-area is the region between the sidebar and the table of contents;
- * the floor keeps the readable width intact on mid-size screens (never
- * narrows), and lifting the prose cap lets it fill the widened column.
- * -------------------------------------------------------------------------- */
-@media (min-width: 1536px) {
-  #content-area #content { max-width: max(56rem, 80%) !important; margin-inline: auto !important; }
-  #content-area .mdx-content { max-width: none !important; }
-}
-
 /*
  * microsandbox SDK reference styles
  * Auto-loaded by Mintlify (any .css in the docs root). Class names are
