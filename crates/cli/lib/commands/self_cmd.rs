@@ -2,13 +2,13 @@
 
 use std::cmp::Ordering;
 use std::fmt;
-use std::fs;
-#[cfg(unix)]
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(windows)]
@@ -18,13 +18,16 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
 use microsandbox_migration::schema_metadata;
-#[cfg(not(windows))]
 use microsandbox_migration::{Migrator, MigratorTrait};
-#[cfg(not(windows))]
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use serde::Deserialize;
-#[cfg(not(windows))]
 use tokio::process::Command as TokioCommand;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, UnlockFileEx};
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::OVERLAPPED;
 
 use super::install::is_generated_alias;
 use crate::ui;
@@ -116,6 +119,39 @@ pub struct SchemaBaselineArgs {
     pub json: bool,
 }
 
+/// Arguments for the deferred Windows self-downgrade binary swap helper.
+#[cfg(windows)]
+#[derive(Debug, Args)]
+pub struct WindowsSelfDowngradeSwapArgs {
+    /// PID of the msb process that scheduled the swap.
+    #[arg(long)]
+    pub parent_pid: i32,
+
+    /// Microsandbox base directory to mutate.
+    #[arg(long)]
+    pub base_dir: PathBuf,
+
+    /// Temporary directory containing the staged target release.
+    #[arg(long)]
+    pub staged_dir: PathBuf,
+
+    /// Target release version.
+    #[arg(long)]
+    pub target_version: String,
+
+    /// Install-exclusive lease holder PID to clear after the swap.
+    #[arg(long)]
+    pub lease_holder_pid: Option<i32>,
+
+    /// Install-exclusive lease expiry timestamp to clear after the swap.
+    #[arg(long)]
+    pub lease_expires_at: Option<String>,
+
+    /// Log file for deferred swap diagnostics.
+    #[arg(long)]
+    pub log_path: PathBuf,
+}
+
 /// Arguments for `msb doctor` and `msb self doctor`.
 #[derive(Debug, Args, Clone, Copy)]
 pub struct DoctorArgs {
@@ -172,12 +208,18 @@ struct RollbackPlan<'a> {
     affects_user_data: bool,
 }
 
-#[cfg(unix)]
 struct MigrationLock {
     file: File,
 }
 
-#[cfg(not(windows))]
+#[derive(Debug)]
+enum DowngradeRunOutcome {
+    #[cfg(not(windows))]
+    Complete,
+    #[cfg(windows)]
+    WindowsSwapScheduled,
+}
+
 struct DowngradeRunContext<'a> {
     db: &'a microsandbox_db::connection::DbWriteConnection,
     base_dir: &'a Path,
@@ -283,7 +325,20 @@ impl RollbackPlan<'_> {
     }
 }
 
-#[cfg(unix)]
+impl DowngradeRunOutcome {
+    #[cfg(not(windows))]
+    fn clear_lease_in_parent(&self) -> bool {
+        let _ = self;
+        true
+    }
+
+    #[cfg(windows)]
+    fn clear_lease_in_parent(&self) -> bool {
+        let _ = self;
+        false
+    }
+}
+
 impl MigrationLock {
     fn acquire(path: PathBuf) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -297,23 +352,15 @@ impl MigrationLock {
             .truncate(false)
             .open(&path)?;
 
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(anyhow::anyhow!(
-                "failed to lock migration file {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
+        lock_migration_file(&file, &path)?;
 
         Ok(Self { file })
     }
 }
 
-#[cfg(unix)]
 impl Drop for MigrationLock {
     fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        let _ = unlock_migration_file(&self.file);
     }
 }
 
@@ -649,26 +696,10 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
 }
 
 async fn run_downgrade(args: SelfDowngradeArgs) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    {
-        let _ = args;
-        return refuse_static(
-            "downgrade is not supported on Windows yet",
-            &[
-                "no files or database state were changed",
-                "V1 support is limited to Unix platforms",
-            ],
-        );
-    }
-
-    #[cfg(not(windows))]
-    {
-        run_downgrade_unix(args).await
-    }
+    run_downgrade_local(args).await
 }
 
-#[cfg(not(windows))]
-async fn run_downgrade_unix(args: SelfDowngradeArgs) -> anyhow::Result<()> {
+async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     let current_version = Version::parse(CURRENT_VERSION)?;
     let target_version = Version::parse(&args.version)?;
 
@@ -762,7 +793,11 @@ async fn run_downgrade_unix(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     })
     .await;
 
-    if let Some(lease) = install_lease.as_ref() {
+    let clear_lease_in_parent = result
+        .as_ref()
+        .map(DowngradeRunOutcome::clear_lease_in_parent)
+        .unwrap_or(true);
+    if clear_lease_in_parent && let Some(lease) = install_lease.as_ref() {
         let clear_result =
             microsandbox_runtime::maintenance::clear_install_exclusive_lease(&db, lease).await;
         if let Err(err) = clear_result {
@@ -770,11 +805,12 @@ async fn run_downgrade_unix(args: SelfDowngradeArgs) -> anyhow::Result<()> {
         }
     }
 
-    result
+    result.map(|_| ())
 }
 
-#[cfg(not(windows))]
-async fn run_downgrade_with_db(mut ctx: DowngradeRunContext<'_>) -> anyhow::Result<()> {
+async fn run_downgrade_with_db(
+    mut ctx: DowngradeRunContext<'_>,
+) -> anyhow::Result<DowngradeRunOutcome> {
     let db_dir = ctx
         .db_path
         .parent()
@@ -790,13 +826,14 @@ async fn run_downgrade_with_db(mut ctx: DowngradeRunContext<'_>) -> anyhow::Resu
         renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
 
         if !maintenance_lease_available(&fresh_applied) && fresh_plan.steps() > 0 {
-            return refuse_static(
+            refuse_static(
                 "database schema rollback requires the maintenance lease table",
                 &["retry after starting msb once with the current version"],
-            );
+            )?;
+            unreachable!("refuse_static always returns an error");
         }
 
-        if fresh_plan.steps() > 0 {
+        if fresh_plan.steps() > 0 || (cfg!(windows) && !fresh_applied.is_empty()) {
             refuse_if_active_sandboxes(ctx.db.inner()).await?;
         }
 
@@ -852,6 +889,13 @@ async fn run_downgrade_with_db(mut ctx: DowngradeRunContext<'_>) -> anyhow::Resu
     }
     renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
 
+    install_target_release(&mut ctx).await
+}
+
+#[cfg(not(windows))]
+async fn install_target_release(
+    ctx: &mut DowngradeRunContext<'_>,
+) -> anyhow::Result<DowngradeRunOutcome> {
     let spinner = ui::Spinner::start("Installing", &format!("msb v{}", ctx.target_version));
     let result = run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async {
         microsandbox::setup::Setup::builder()
@@ -876,6 +920,331 @@ async fn run_downgrade_with_db(mut ctx: DowngradeRunContext<'_>) -> anyhow::Resu
     verify_installed_msb_version(ctx.base_dir, ctx.target_version).await?;
     link_public_commands(ctx.base_dir)?;
     done(&format!("Downgraded to v{}", ctx.target_version));
+    Ok(DowngradeRunOutcome::Complete)
+}
+
+#[cfg(windows)]
+async fn install_target_release(
+    ctx: &mut DowngradeRunContext<'_>,
+) -> anyhow::Result<DowngradeRunOutcome> {
+    let staged_dir = stage_windows_target_release(ctx).await?;
+    let log_path = schedule_windows_downgrade_swap(ctx, &staged_dir)?;
+
+    ui::success(
+        "Scheduled",
+        &format!(
+            "Windows swap after this msb process exits; log: {}",
+            log_path.display()
+        ),
+    );
+    done(&format!(
+        "Downgrade to v{} will complete after exit",
+        ctx.target_version
+    ));
+
+    Ok(DowngradeRunOutcome::WindowsSwapScheduled)
+}
+
+#[cfg(windows)]
+async fn stage_windows_target_release(
+    ctx: &mut DowngradeRunContext<'_>,
+) -> anyhow::Result<PathBuf> {
+    let temp = tempfile::Builder::new()
+        .prefix("msb-downgrade-stage-")
+        .tempdir()?;
+    let staged_dir = temp.keep();
+
+    let spinner = ui::Spinner::start("Staging", &format!("msb v{}", ctx.target_version));
+    let install_dir = staged_dir.clone();
+    let target_version = ctx.target_version;
+    let target_version_string = target_version.to_string();
+    let result = run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async move {
+        microsandbox::setup::Setup::builder()
+            .base_dir(install_dir)
+            .version(target_version_string)
+            .allow_ci_local_bundle(false)
+            .force(true)
+            .build()
+            .install()
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await;
+    match result {
+        Ok(()) => spinner.finish_success("Staged"),
+        Err(err) => {
+            spinner.finish_clear();
+            return Err(err);
+        }
+    }
+
+    verify_installed_msb_version(&staged_dir, target_version).await?;
+    Ok(staged_dir)
+}
+
+#[cfg(windows)]
+fn schedule_windows_downgrade_swap(
+    ctx: &DowngradeRunContext<'_>,
+    staged_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let helper_dir = tempfile::Builder::new()
+        .prefix("msb-downgrade-helper-")
+        .tempdir()?
+        .keep();
+    let helper_path = helper_dir.join(format!("msb-downgrade-helper-{}.exe", std::process::id()));
+    fs::copy(std::env::current_exe()?, &helper_path)?;
+
+    let log_dir = ctx.base_dir.join(microsandbox_utils::LOGS_SUBDIR);
+    fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join(format!(
+        "self-downgrade-{CURRENT_VERSION}-to-{}-{}.log",
+        ctx.target_version,
+        std::process::id()
+    ));
+
+    let mut command = Command::new(&helper_path);
+    command
+        .arg("__windows-self-downgrade-swap")
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .arg("--base-dir")
+        .arg(ctx.base_dir)
+        .arg("--staged-dir")
+        .arg(staged_dir)
+        .arg("--target-version")
+        .arg(ctx.target_version.to_string())
+        .arg("--log-path")
+        .arg(&log_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    if let Some(lease) = ctx.install_lease.as_ref() {
+        let lease = **lease;
+        command
+            .arg("--lease-holder-pid")
+            .arg(lease.holder_pid.to_string())
+            .arg("--lease-expires-at")
+            .arg(
+                lease
+                    .lease_expires_at
+                    .and_utc()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            );
+    }
+
+    command.spawn()?;
+    Ok(log_path)
+}
+
+/// Complete a deferred Windows self-downgrade after the original msb exits.
+#[cfg(windows)]
+pub async fn run_windows_self_downgrade_swap(
+    args: WindowsSelfDowngradeSwapArgs,
+) -> anyhow::Result<()> {
+    if let Some(parent) = args.log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&args.log_path)?;
+
+    writeln!(
+        log,
+        "starting deferred downgrade swap to v{}",
+        args.target_version
+    )?;
+    let swap_result = perform_windows_downgrade_swap(&args, &mut log).await;
+    if let Err(err) = &swap_result {
+        let _ = writeln!(log, "swap failed: {err:#}");
+    }
+
+    if let Err(err) = clear_windows_downgrade_lease(&args, &mut log).await {
+        let _ = writeln!(
+            log,
+            "warning: failed to clear install-exclusive lease: {err:#}"
+        );
+    }
+    if let Err(err) = remove_windows_swap_staging(&args.staged_dir, &mut log) {
+        let _ = writeln!(log, "warning: failed to remove staged release: {err:#}");
+    }
+    if let Err(err) = schedule_windows_helper_cleanup(&mut log) {
+        let _ = writeln!(log, "warning: failed to schedule helper cleanup: {err:#}");
+    }
+
+    if swap_result.is_ok() {
+        writeln!(log, "deferred downgrade swap completed")?;
+    }
+
+    swap_result
+}
+
+#[cfg(windows)]
+async fn perform_windows_downgrade_swap(
+    args: &WindowsSelfDowngradeSwapArgs,
+    log: &mut File,
+) -> anyhow::Result<()> {
+    wait_for_parent_process_exit(args.parent_pid, log)?;
+
+    let target_version = Version::parse(&args.target_version)?;
+    let msb_name = microsandbox_utils::msb_binary_filename("windows");
+    let libkrunfw_name = microsandbox_utils::libkrunfw_filename("windows");
+    let staged_bin = args.staged_dir.join(microsandbox_utils::BIN_SUBDIR);
+    let staged_lib = args.staged_dir.join(microsandbox_utils::LIB_SUBDIR);
+    let target_bin = args.base_dir.join(microsandbox_utils::BIN_SUBDIR);
+    let target_lib = args.base_dir.join(microsandbox_utils::LIB_SUBDIR);
+
+    // Copy the executable before the DLL. If the swap fails halfway, a target
+    // CLI with the newer current DLL is safer than a newer CLI against the
+    // rolled-back database and an older DLL.
+    copy_windows_swap_file_with_retries(
+        &staged_bin.join(&msb_name),
+        &target_bin.join(&msb_name),
+        "msb.exe",
+        log,
+    )?;
+    copy_windows_swap_file_with_retries(
+        &staged_lib.join(&libkrunfw_name),
+        &target_lib.join(&libkrunfw_name),
+        "libkrunfw.dll",
+        log,
+    )?;
+
+    verify_installed_msb_version(&args.base_dir, target_version).await?;
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn clear_windows_downgrade_lease(
+    args: &WindowsSelfDowngradeSwapArgs,
+    log: &mut File,
+) -> anyhow::Result<()> {
+    let (Some(holder_pid), Some(expires_at)) =
+        (args.lease_holder_pid, args.lease_expires_at.as_deref())
+    else {
+        writeln!(log, "no install-exclusive lease was passed to helper")?;
+        return Ok(());
+    };
+
+    let lease_expires_at = chrono::DateTime::parse_from_rfc3339(expires_at)?.naive_utc();
+    let lease = microsandbox_runtime::maintenance::InstallExclusiveLease {
+        holder_pid,
+        lease_expires_at,
+    };
+    let db_path = args
+        .base_dir
+        .join(microsandbox_utils::DB_SUBDIR)
+        .join(microsandbox_utils::DB_FILENAME);
+    let db = open_downgrade_db(&db_path).await?;
+    microsandbox_runtime::maintenance::clear_install_exclusive_lease(&db, &lease).await?;
+
+    writeln!(log, "cleared install-exclusive lease")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_for_parent_process_exit(parent_pid: i32, log: &mut File) -> anyhow::Result<()> {
+    writeln!(log, "waiting for parent process {parent_pid} to exit")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while microsandbox_utils::process::pid_is_alive(parent_pid)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_windows_swap_file_with_retries(
+    src: &Path,
+    dest: &Path,
+    label: &str,
+    log: &mut File,
+) -> anyhow::Result<()> {
+    let Some(parent) = dest.parent() else {
+        anyhow::bail!("target path has no parent: {}", dest.display());
+    };
+    fs::create_dir_all(parent)?;
+
+    let mut last_err = None;
+    for attempt in 1..=80 {
+        match fs::copy(src, dest) {
+            Ok(_) => {
+                writeln!(log, "replaced {label} on attempt {attempt}")?;
+                return Ok(());
+            }
+            Err(err) => {
+                last_err = Some(err);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+
+    let err = last_err
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown error".to_string());
+    anyhow::bail!("failed to replace {label} after waiting for file locks: {err}");
+}
+
+#[cfg(windows)]
+fn remove_windows_swap_staging(staged_dir: &Path, log: &mut File) -> anyhow::Result<()> {
+    match fs::remove_dir_all(staged_dir) {
+        Ok(()) => writeln!(log, "removed staged release {}", staged_dir.display())?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn schedule_windows_helper_cleanup(log: &mut File) -> anyhow::Result<()> {
+    let helper_exe = std::env::current_exe()?;
+    let Some(helper_dir) = helper_exe.parent() else {
+        return Ok(());
+    };
+
+    let helper_dir_script = powershell_single_quote(&helper_dir.display().to_string());
+    let parent_pid = std::process::id();
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$helper = {helper_dir_script}
+$parent = {parent_pid}
+Wait-Process -Id $parent -Timeout 30
+for ($i = 0; $i -lt 80; $i++) {{
+    if (-not (Test-Path -LiteralPath $helper)) {{
+        exit 0
+    }}
+    Remove-Item -LiteralPath $helper -Recurse -Force
+    if (-not (Test-Path -LiteralPath $helper)) {{
+        exit 0
+    }}
+    Start-Sleep -Milliseconds 250
+}}
+exit 1
+"#
+    );
+
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encode_powershell_command(&script),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    writeln!(
+        log,
+        "scheduled cleanup for helper directory {}",
+        helper_dir.display()
+    )?;
     Ok(())
 }
 
@@ -1170,7 +1539,6 @@ fn toggle_select(selected: &mut [bool], cursor: usize) {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(not(windows))]
 async fn load_target_schema_baseline(target: Version) -> anyhow::Result<SchemaBaseline> {
     let temp = tempfile::tempdir()?;
     microsandbox::setup::Setup::builder()
@@ -1228,7 +1596,6 @@ fn floor_0_6_0_baseline() -> SchemaBaseline {
     }
 }
 
-#[cfg(not(windows))]
 async fn open_downgrade_db(
     db_path: &Path,
 ) -> anyhow::Result<microsandbox_db::connection::DbWriteConnection> {
@@ -1246,7 +1613,6 @@ async fn open_downgrade_db(
     Ok(db)
 }
 
-#[cfg(not(windows))]
 async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
     let rows = match db
         .query_all(Statement::from_string(
@@ -1265,7 +1631,6 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
         .collect()
 }
 
-#[cfg(not(windows))]
 async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
     let snapshot_count = optional_count(db, "SELECT COUNT(*) FROM snapshot_index").await?;
     let disk_volume_count = optional_count(
@@ -1289,7 +1654,6 @@ async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
     Ok(lines)
 }
 
-#[cfg(not(windows))]
 async fn optional_count(db: &DatabaseConnection, sql: &str) -> anyhow::Result<i64> {
     let row = match db
         .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql))
@@ -1473,17 +1837,13 @@ fn warn_downgrade_plan(
         }
     }
 
-    let refs: Vec<ui::ErrorLine<'_>> = lines
-        .iter()
-        .map(|line| ui::ErrorLine::Hint(line))
-        .collect();
+    let refs: Vec<ui::ErrorLine<'_>> = lines.iter().map(|line| ui::ErrorLine::Hint(line)).collect();
     ui::warn_with_lines(
         &format!("Downgrade will roll back schema changes added after {target}"),
         &refs,
     );
 }
 
-#[cfg(not(windows))]
 async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<()> {
     let write = microsandbox_db::connection::DbWriteConnection::new(db.clone());
     let active =
@@ -1512,7 +1872,6 @@ async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<(
     )
 }
 
-#[cfg(not(windows))]
 async fn vacuum_into(db: &DatabaseConnection, backup_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent)?;
@@ -1527,7 +1886,6 @@ async fn vacuum_into(db: &DatabaseConnection, backup_path: &Path) -> anyhow::Res
     Ok(())
 }
 
-#[cfg(not(windows))]
 async fn rollback_schema(db: &DatabaseConnection, steps: usize) -> anyhow::Result<()> {
     db.execute_unprepared("BEGIN EXCLUSIVE").await?;
     let down_result = Migrator::down(db, Some(steps as u32)).await;
@@ -1544,19 +1902,16 @@ async fn rollback_schema(db: &DatabaseConnection, steps: usize) -> anyhow::Resul
     }
 }
 
-#[cfg(not(windows))]
 fn is_missing_migrations_table(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("no such table") && message.contains("seaql_migrations")
 }
 
-#[cfg(not(windows))]
 fn is_missing_table_or_column(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("no such table") || message.contains("no such column")
 }
 
-#[cfg(not(windows))]
 fn purge_cache(base_dir: &Path) -> anyhow::Result<()> {
     let path = base_dir.join(microsandbox_utils::CACHE_SUBDIR);
     match fs::remove_dir_all(&path) {
@@ -1566,7 +1921,6 @@ fn purge_cache(base_dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-#[cfg(not(windows))]
 async fn renew_install_lease_if_present(
     db: &microsandbox_db::connection::DbWriteConnection,
     install_lease: &mut Option<&mut microsandbox_runtime::maintenance::InstallExclusiveLease>,
@@ -1578,7 +1932,6 @@ async fn renew_install_lease_if_present(
     Ok(())
 }
 
-#[cfg(not(windows))]
 async fn run_with_install_lease_renewal<F, T>(
     db: &microsandbox_db::connection::DbWriteConnection,
     install_lease: &mut Option<&mut microsandbox_runtime::maintenance::InstallExclusiveLease>,
@@ -1608,7 +1961,6 @@ where
     }
 }
 
-#[cfg(not(windows))]
 async fn verify_installed_msb_version(base_dir: &Path, target: Version) -> anyhow::Result<()> {
     let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
     let msb_path = base_dir.join(microsandbox_utils::BIN_SUBDIR).join(msb_name);
@@ -1638,6 +1990,72 @@ async fn verify_installed_msb_version(base_dir: &Path, target: Version) -> anyho
 }
 
 #[cfg(unix)]
+fn lock_migration_file(file: &File, path: &Path) -> anyhow::Result<()> {
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(anyhow::anyhow!(
+            "failed to lock migration file {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn lock_migration_file(file: &File, path: &Path) -> anyhow::Result<()> {
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        LockFileEx(
+            file.as_raw_handle() as HANDLE,
+            LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if rc == 0 {
+        return Err(anyhow::anyhow!(
+            "failed to lock migration file {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlock_migration_file(file: &File) -> anyhow::Result<()> {
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unlock_migration_file(file: &File) -> anyhow::Result<()> {
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        UnlockFileEx(
+            file.as_raw_handle() as HANDLE,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if rc == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
+}
+
 fn acquire_migration_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
     MigrationLock::acquire(db_dir.join(format!(
         "{}.migration.lock",
@@ -1974,7 +2392,6 @@ fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn vacuum_into_writes_backup_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -2017,7 +2434,6 @@ mod tests {
         assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "wal-value");
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn rollback_schema_rolls_back_latest_migration() {
         let dir = tempfile::tempdir().unwrap();
@@ -2043,7 +2459,6 @@ mod tests {
         assert!(rows.is_empty());
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn user_data_warnings_list_snapshots_and_disk_volumes() {
         let dir = tempfile::tempdir().unwrap();
