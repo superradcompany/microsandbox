@@ -338,7 +338,7 @@ fn uninstall_all(base_dir: &Path) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        return uninstall_all_windows(base_dir);
+        uninstall_all_windows(base_dir)
     }
 
     #[cfg(not(windows))]
@@ -610,7 +610,7 @@ fn link_public_commands(base_dir: &Path) -> anyhow::Result<()> {
             "Add {} to PATH to run msb from any terminal.",
             base_dir.join(microsandbox_utils::BIN_SUBDIR).display()
         ));
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -654,7 +654,7 @@ fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = base_dir;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(unix)]

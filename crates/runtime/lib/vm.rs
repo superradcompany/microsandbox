@@ -9,7 +9,7 @@ use std::io::Write;
 use std::num::NonZero;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::OnceLock;
@@ -1053,24 +1053,8 @@ fn build_vm(
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        #[cfg(unix)]
-        {
-            let cfg = PassthroughConfig {
-                root_dir: rootfs_path.clone(),
-                ..Default::default()
-            };
-            let backend = PassthroughFs::new(cfg)
-                .map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
-            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = rootfs_path;
-            return Err(RuntimeError::Custom(
-                "host-directory rootfs is unsupported on Windows; use a disk-image rootfs".into(),
-            ));
-        }
+        let backend = bind_rootfs_backend(rootfs_path)?;
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
@@ -1340,6 +1324,15 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Build the host-directory rootfs backend used for `ImageSource::bind`.
+fn bind_rootfs_backend(rootfs_path: &Path) -> RuntimeResult<PassthroughFs> {
+    let cfg = PassthroughConfig {
+        root_dir: rootfs_path.to_path_buf(),
+        ..Default::default()
+    };
+    PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))
+}
 
 /// Open the shared-memory registry and promote the host-reserved slot to
 /// `Active`, returning a writer handle for the sampler.
@@ -1925,16 +1918,40 @@ mod tests {
     };
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        guest_shutdown_flush_timeout, parse_mount_spec, prepend_scripts_path,
+        bind_rootfs_backend, guest_shutdown_flush_timeout, parse_mount_spec, prepend_scripts_path,
         request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
     };
 
+    use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
     use microsandbox_protocol::{codec, message::MessageType};
     #[cfg(unix)]
     use std::io::Write;
     #[cfg(unix)]
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn fs_context() -> Context {
+        Context {
+            uid: 0,
+            gid: 0,
+            pid: 1,
+        }
+    }
+
+    #[test]
+    fn test_bind_rootfs_backend_exposes_host_file_and_init() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::write(rootfs.path().join("host.txt"), b"from host").unwrap();
+
+        let fs = bind_rootfs_backend(rootfs.path()).unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+
+        let host = fs.lookup(fs_context(), 1, c"host.txt").unwrap();
+        let init = fs.lookup(fs_context(), 1, c"init.krun").unwrap();
+
+        assert_ne!(host.inode, init.inode);
+        assert_eq!(init.inode, 2);
+    }
 
     #[test]
     fn test_parse_mount_spec_minimal() {

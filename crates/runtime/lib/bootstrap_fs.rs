@@ -133,9 +133,8 @@ impl DirState {
         Ok(self
             .children
             .iter()
-            .filter_map(|((parent, name), child)| {
-                (*parent == inode).then(|| (*child, name.clone()))
-            })
+            .filter(|((parent, _), _)| *parent == inode)
+            .map(|((_, name), child)| (*child, name.clone()))
             .collect())
     }
 }
@@ -359,15 +358,31 @@ impl DynFileSystem for AgentBootstrapFs {
     }
 
     fn statfs(&self, _ctx: Context, _inode: u64) -> io::Result<statvfs64> {
-        let mut stat = statvfs64::default();
-        stat.f_bsize = 4096;
-        stat.f_frsize = 4096;
-        stat.f_blocks = 1;
-        stat.f_bfree = 0;
-        stat.f_bavail = 0;
-        stat.f_files = 2;
-        stat.f_ffree = 0;
-        stat.f_namemax = 255;
+        #[cfg(windows)]
+        let stat = statvfs64 {
+            f_bsize: 4096,
+            f_frsize: 4096,
+            f_blocks: 1,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 2,
+            f_ffree: 0,
+            f_namemax: 255,
+        };
+
+        #[cfg(not(windows))]
+        let stat = statvfs64 {
+            f_bsize: 4096,
+            f_frsize: 4096,
+            f_blocks: 1,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 2,
+            f_ffree: 0,
+            f_namemax: 255,
+            ..Default::default()
+        };
+
         Ok(stat)
     }
 }

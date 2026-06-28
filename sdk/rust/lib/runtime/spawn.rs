@@ -564,14 +564,14 @@ pub async fn spawn_sandbox(
     tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
 
     #[cfg(windows)]
-    if let Some(job) = &child_job {
-        if let Err(err) = job.assign_pid(_pid) {
-            let status = terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
-            )));
-        }
+    if let Some(job) = &child_job
+        && let Err(err) = job.assign_pid(_pid)
+    {
+        let status = terminate_startup_process(&mut child).await;
+        release_metrics_reservation(config, metrics_reservation.as_ref());
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
+        )));
     }
 
     let line = match tokio::time::timeout(
@@ -1749,7 +1749,7 @@ async fn stage_file_mounts(
                     "file mount: hard-linked"
                 );
             }
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            Err(e) if is_cross_device_link_error(&e) => {
                 if !readonly {
                     tracing::warn!(
                         host = %host.display(),
@@ -1773,6 +1773,29 @@ async fn stage_file_mounts(
     }
 
     Ok((staged, Some(tempdir)))
+}
+
+/// Return whether a host hard-link failed because the target is on another device.
+fn is_cross_device_link_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::CrossesDevices || is_platform_cross_device_link_error(error)
+}
+
+#[cfg(unix)]
+fn is_platform_cross_device_link_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EXDEV)
+}
+
+#[cfg(windows)]
+fn is_platform_cross_device_link_error(error: &std::io::Error) -> bool {
+    // CreateHardLinkW reports cross-volume links as ERROR_NOT_SAME_DEVICE.
+    const ERROR_NOT_SAME_DEVICE: i32 = 17;
+
+    error.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_platform_cross_device_link_error(_error: &std::io::Error) -> bool {
+    false
 }
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
@@ -3403,6 +3426,70 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing override-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_sandbox_cli_args_windows_drive_bind_mount_preserves_drive_colon() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.bind(r"C:\Users\Stephen\data")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Relaxed)
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            r"{data_tag}:C:\Users\Stephen\data:ro,stat-virt=relaxed,host-perms=mirror,quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing Windows drive bind --mount arg in {rendered:?}"
+        );
+        assert!(rendered.contains(&format!("MSB_DIR_MOUNTS={data_tag}:/data:ro")));
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_sandbox_cli_args_windows_drive_file_mount_preserves_drive_colon() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/config.txt", |m| {
+                m.bind(r"C:\Users\Stephen\config.txt").readonly()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let mut staged_file_mounts = HashMap::new();
+        staged_file_mounts.insert(
+            "/guest/config.txt".to_string(),
+            (
+                PathBuf::from(r"C:\Users\Stephen\AppData\Local\Temp\msb\fm_deadbeef"),
+                "config.txt".to_string(),
+                "fm_deadbeef".to_string(),
+            ),
+        );
+
+        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
+
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == r"fm_deadbeef:C:\Users\Stephen\AppData\Local\Temp\msb\fm_deadbeef:ro"));
+        assert!(
+            rendered.contains(
+                &"MSB_FILE_MOUNTS=fm_deadbeef:config.txt:/guest/config.txt:ro".to_string()
+            )
         );
     }
 

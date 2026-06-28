@@ -340,10 +340,10 @@ fn open_icmp_socket_v4(dst: Ipv4Addr) -> std::io::Result<tokio::net::UdpSocket> 
     #[cfg(windows)]
     {
         let _ = dst;
-        return Err(std::io::Error::new(
+        Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "external ICMPv4 relay is not implemented on Windows",
-        ));
+        ))
     }
 
     #[cfg(unix)]
@@ -396,10 +396,10 @@ fn open_icmp_socket_v6(dst: Ipv6Addr) -> std::io::Result<tokio::net::UdpSocket> 
     #[cfg(windows)]
     {
         let _ = dst;
-        return Err(std::io::Error::new(
+        Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "external ICMPv6 relay is not implemented on Windows",
-        ));
+        ))
     }
 
     #[cfg(unix)]

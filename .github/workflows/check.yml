@@ -77,6 +77,39 @@ jobs:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
 
+  build-kernel-x86_64:
+    name: Build kernel.c (x86_64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - name: Cache kernel.c
+        id: cache-kernel
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: vendor/libkrunfw/kernel.c
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install kernel build deps
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build kernel.c
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+
+      - name: Upload kernel.c
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kernel-c-x86_64
+          path: vendor/libkrunfw/kernel.c
+
   # ---------------------------------------------------------------------------
   # Build agentd on Linux for macOS packaging
   # ---------------------------------------------------------------------------
@@ -110,6 +143,38 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  build-agentd-x86_64:
+    name: Build agentd (x86_64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
           path: build/agentd
 
   # ---------------------------------------------------------------------------
@@ -388,6 +453,112 @@ jobs:
           "
           npm install --no-package-lock --ignore-scripts
           npm run build
+
+  # ---------------------------------------------------------------------------
+  # Windows build/check only.
+  #
+  # These jobs verify the WHP host targets compile on both Windows architectures.
+  # VM smoke and integration coverage intentionally stays Linux/KVM-only below.
+  # ---------------------------------------------------------------------------
+  windows-check:
+    name: Check Windows (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-aarch64
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+          - target: windows-x86_64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Download kernel.c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.kernel_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+
+      - name: Format
+        shell: pwsh
+        run: cargo +stable fmt --all -- --check
+
+      - name: Check msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable check --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+
+      - name: Clippy msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable clippy --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }} -- -D warnings
+
+      - name: Test bind rootfs backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+
+      - name: Build msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
   # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
@@ -865,8 +1036,11 @@ jobs:
     needs:
       - changes
       - build-kernel
+      - build-kernel-x86_64
       - build-agentd-aarch64
+      - build-agentd-x86_64
       - check
+      - windows-check
       - cli-smoke-test
       - integration-test
       - node-sdk-test

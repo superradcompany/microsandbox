@@ -336,7 +336,6 @@ impl DynFileSystem for PassthroughFs {
             f_files: self.inodes.read().unwrap().by_inode.len() as u64,
             f_ffree: 0,
             f_namemax: 255,
-            ..Default::default()
         })
     }
 

@@ -200,7 +200,7 @@ fn is_reflink_unsupported(e: &io::Error) -> bool {
     #[cfg(windows)]
     {
         let win32_code = (code as u32 & 0xffff) as i32;
-        return aliases.contains(&code) || aliases.contains(&win32_code);
+        aliases.contains(&code) || aliases.contains(&win32_code)
     }
 
     #[cfg(unix)]
