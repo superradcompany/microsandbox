@@ -18,9 +18,9 @@ pub(super) fn verify_installation(bin_dir: &Path, lib_dir: &Path) -> Microsandbo
         (libkrunfw_name.as_str(), lib_dir),
     ] {
         let path = dir.join(name);
-        if !path.exists() {
+        if !path.is_file() {
             return Err(MicrosandboxError::Custom(format!(
-                "{name} not found in {}",
+                "{name} not found as a file in {}",
                 dir.display()
             )));
         }

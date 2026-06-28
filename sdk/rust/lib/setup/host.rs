@@ -221,8 +221,8 @@ fn runtime_section() -> (Section, Vec<Problem>) {
     let msb_name = microsandbox_utils::msb_binary_filename(os);
     let libkrunfw_name = microsandbox_utils::libkrunfw_filename(os);
 
-    let msb_ok = bin_dir.join(&msb_name).exists();
-    let libkrunfw_ok = lib_dir.join(&libkrunfw_name).exists();
+    let msb_ok = bin_dir.join(&msb_name).is_file();
+    let libkrunfw_ok = lib_dir.join(&libkrunfw_name).is_file();
 
     let checks = vec![
         Check::info("Install root", &base.display().to_string()),

@@ -19,6 +19,23 @@ use super::host::{Check, Fix, FixCommand, Problem, Section};
 const KVM_DEVICE: &str = "/dev/kvm";
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct DeviceGroup {
+    name: Option<String>,
+    gid: libc::gid_t,
+    grants_read_write: bool,
+}
+
+#[derive(Debug, Clone)]
+struct UserInfo {
+    name: String,
+    primary_gid: libc::gid_t,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -123,23 +140,45 @@ fn cpu_virt_flag() -> Option<&'static str> {
 /// Build the `/dev/kvm` permission failure, with a fix tailored to whether the
 /// user already belongs to the device's owning group.
 ///
-/// The fix pairs two safe, reversible commands: `setfacl` grants the running
-/// user access immediately (this boot), while `usermod -aG` makes it persist
-/// across reboots. We can only build them once we know the real username, so a
-/// missing username degrades to advisory hints.
+/// The fix always prefers the narrowest safe mutation: `setfacl` grants the
+/// running user access for this boot, and `usermod -aG` is offered only when the
+/// device is owned by the standard `kvm` group with group read/write bits.
+/// We can only build commands once we know the effective username, so a missing
+/// username degrades to advisory hints.
 fn kvm_permission_problem() -> Problem {
-    let group = device_group(KVM_DEVICE);
-    let group_label = group.clone().unwrap_or_else(|| "kvm".to_string());
-    let already_member = group.as_deref().map(user_in_group).unwrap_or(false);
-    let user = current_username();
+    let device_group = device_group(KVM_DEVICE);
+    let user = current_user();
+    let process_member = device_group
+        .as_ref()
+        .map(|group| process_has_group(group.gid))
+        .unwrap_or(false);
+    let persistent_member = match (&user, &device_group) {
+        (Some(user), Some(group)) => persistent_user_in_group(user, group.gid),
+        _ => false,
+    };
 
-    let cause = if already_member {
-        format!("you are in the '{group_label}' group, but this login session predates the change")
-    } else {
-        match &group {
-            Some(g) => format!("{KVM_DEVICE} is owned by group '{g}', which your user is not in"),
-            None => format!("your user lacks read/write access to {KVM_DEVICE}"),
+    let cause = match &device_group {
+        Some(group) if persistent_member && !process_member => {
+            let label = group_label(group);
+            format!("you are in the '{label}' group, but this login session predates the change")
         }
+        Some(group) if process_member => {
+            let label = group_label(group);
+            format!(
+                "your process belongs to the '{label}' group, but {KVM_DEVICE} still rejects read/write access"
+            )
+        }
+        Some(group) if group.grants_read_write => {
+            let label = group_label(group);
+            format!("{KVM_DEVICE} is owned by group '{label}', which your user is not in")
+        }
+        Some(group) => {
+            let label = group_label(group);
+            format!(
+                "{KVM_DEVICE} is owned by group '{label}', but group permissions do not grant read/write access"
+            )
+        }
+        None => format!("your user lacks read/write access to {KVM_DEVICE}"),
     };
 
     let mut problem = Problem::new(
@@ -150,12 +189,18 @@ fn kvm_permission_problem() -> Problem {
     let Some(user) = user else {
         return problem;
     };
-    let acl = format!("u:{user}:rw");
+    let acl = format!("u:{}:rw", user.name);
 
-    if already_member {
-        // Membership is set; just grant this session direct access.
+    if persistent_member || process_member || !can_offer_group_fix(device_group.as_ref()) {
+        // When persistent membership is already present, the direct ACL grants
+        // this login session access immediately. For non-standard device groups
+        // it is also the only safe automatic mutation; adding users to arbitrary
+        // groups can accidentally grant unrelated host privileges.
         problem = problem.with_fix(Fix::new(
-            format!("grant {user} access to {KVM_DEVICE} for the current session"),
+            format!(
+                "grant {} access to {KVM_DEVICE} for the current session",
+                user.name
+            ),
             vec![FixCommand::sudo(&[
                 "setfacl",
                 "-m",
@@ -164,11 +209,18 @@ fn kvm_permission_problem() -> Problem {
             ])],
         ));
     } else {
+        let group = device_group
+            .as_ref()
+            .and_then(|group| group.name.as_deref())
+            .expect("safe KVM group fixes require a named device group");
         problem = problem.with_fix(
             Fix::new(
-                format!("add {user} to the '{group_label}' group and grant access now"),
+                format!(
+                    "add {} to the '{group}' group and grant access now",
+                    user.name
+                ),
                 vec![
-                    FixCommand::sudo(&["usermod", "-aG", group_label.as_str(), user.as_str()]),
+                    FixCommand::sudo(&["usermod", "-aG", group, user.name.as_str()]),
                     FixCommand::sudo(&["setfacl", "-m", acl.as_str(), KVM_DEVICE]),
                 ],
             )
@@ -188,14 +240,8 @@ fn kvm_module() -> Option<&'static str> {
     }
 }
 
-/// Resolve the current effective user's login name.
-fn current_username() -> Option<String> {
-    if let Ok(user) = std::env::var("USER")
-        && !user.is_empty()
-    {
-        return Some(user);
-    }
-
+/// Resolve the current effective user's login name and primary group.
+fn current_user() -> Option<UserInfo> {
     // SAFETY: getpwuid returns a pointer into a shared static buffer; the doctor
     // command is single-threaded, and we copy the name out immediately.
     unsafe {
@@ -203,18 +249,24 @@ fn current_username() -> Option<String> {
         if entry.is_null() {
             return None;
         }
-        Some(
-            CStr::from_ptr((*entry).pw_name)
+        Some(UserInfo {
+            name: CStr::from_ptr((*entry).pw_name)
                 .to_string_lossy()
                 .into_owned(),
-        )
+            primary_gid: (*entry).pw_gid,
+        })
     }
 }
 
-/// Resolve the owning group name of a device path.
-fn device_group(path: &str) -> Option<String> {
-    let gid = std::fs::metadata(path).ok()?.gid();
-    group_name(gid)
+/// Resolve the owning group and group permission bits of a device path.
+fn device_group(path: &str) -> Option<DeviceGroup> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let gid = metadata.gid();
+    Some(DeviceGroup {
+        name: group_name(gid),
+        gid,
+        grants_read_write: metadata.mode() & 0o060 == 0o060,
+    })
 }
 
 /// Resolve a gid to its group name.
@@ -235,8 +287,12 @@ fn group_name(gid: libc::gid_t) -> Option<String> {
     }
 }
 
-/// Whether the current process belongs to the named group.
-fn user_in_group(name: &str) -> bool {
+/// Whether the current process belongs to the given group.
+fn process_has_group(gid: libc::gid_t) -> bool {
+    if unsafe { libc::getegid() } == gid {
+        return true;
+    }
+
     // SAFETY: the first call queries the count; the second fills the buffer.
     let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
     if count <= 0 {
@@ -250,5 +306,52 @@ fn user_in_group(name: &str) -> bool {
     }
     gids.truncate(filled as usize);
 
-    gids.into_iter().filter_map(group_name).any(|g| g == name)
+    gids.into_iter().any(|g| g == gid)
+}
+
+/// Whether the user's account is persistently a member of the target group.
+fn persistent_user_in_group(user: &UserInfo, gid: libc::gid_t) -> bool {
+    user.primary_gid == gid || group_has_member(gid, &user.name)
+}
+
+/// Whether a group database entry lists a user as a member.
+fn group_has_member(gid: libc::gid_t, user: &str) -> bool {
+    // SAFETY: getgrgid returns a pointer into a shared static buffer. We only
+    // read the null-terminated member list during this call and copy names into
+    // Rust strings before comparing.
+    unsafe {
+        let entry = libc::getgrgid(gid);
+        if entry.is_null() {
+            return false;
+        }
+
+        let mut member = (*entry).gr_mem;
+        while !member.is_null() && !(*member).is_null() {
+            if CStr::from_ptr(*member).to_string_lossy() == user {
+                return true;
+            }
+            member = member.add(1);
+        }
+    }
+
+    false
+}
+
+/// Whether it is safe to persist access by adding the user to the device group.
+fn can_offer_group_fix(group: Option<&DeviceGroup>) -> bool {
+    matches!(
+        group,
+        Some(DeviceGroup {
+            name: Some(name),
+            grants_read_write: true,
+            ..
+        }) if name == "kvm"
+    )
+}
+
+fn group_label(group: &DeviceGroup) -> String {
+    group
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("gid {}", group.gid))
 }

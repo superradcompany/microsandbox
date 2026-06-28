@@ -162,24 +162,30 @@ pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
     }
 
     let mut applied_any = false;
+    let mut offered_any_fix = false;
     let mut relogin_pending = false;
     for problem in &diagnosis.problems {
         render_problem(problem, !args.fix);
 
         if args.fix
             && let Some(fix) = &problem.fix
-            && apply_fix(fix, args.yes)?
         {
-            applied_any = true;
-            relogin_pending |= fix.requires_relogin;
+            offered_any_fix = true;
+            if apply_fix(fix, args.yes)? {
+                applied_any = true;
+                relogin_pending |= fix.requires_relogin;
+            }
         }
     }
 
     // Windows applies its fix through an elevated, UAC-gated PowerShell flow
     // rather than a `sudo` command, so it's handled out of band.
     #[cfg(windows)]
-    if args.fix {
-        return attempt_windows_fix();
+    if args.fix && has_windows_hypervisor_problem(&diagnosis) {
+        offered_any_fix = true;
+        if apply_windows_fix(args.yes)? {
+            applied_any = true;
+        }
     }
 
     if applied_any {
@@ -202,6 +208,8 @@ pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
                 )],
             );
         }
+    } else if args.fix && offered_any_fix {
+        ui::warn("no fixes were applied.");
     } else if args.fix {
         ui::warn("no automatic fixes are available for the problems above.");
     }
@@ -299,7 +307,13 @@ fn apply_fix(fix: &microsandbox::setup::Fix, assume_yes: bool) -> anyhow::Result
     // with the per-command spinner below. After this, the cached credential
     // lets the fix commands run without prompting.
     if fix.commands.iter().any(|command| command.program == "sudo") {
-        let _ = Command::new("sudo").arg("-v").status();
+        let status = Command::new("sudo")
+            .arg("-v")
+            .status()
+            .map_err(|e| anyhow::anyhow!("could not pre-authenticate sudo: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("sudo authentication failed ({status}); no fix commands were run");
+        }
     }
 
     for command in &fix.commands {
@@ -336,22 +350,26 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
-/// Attempt the elevated Windows Hypervisor Platform enable, then re-verify.
+/// Whether this diagnosis includes the WHP host prerequisite problem.
 #[cfg(windows)]
-fn attempt_windows_fix() -> anyhow::Result<()> {
+fn has_windows_hypervisor_problem(diagnosis: &microsandbox::setup::Diagnosis) -> bool {
+    diagnosis
+        .problems
+        .iter()
+        .any(|problem| problem.headline == "Windows Hypervisor Platform is not available")
+}
+
+/// Apply the elevated Windows Hypervisor Platform enable flow.
+#[cfg(windows)]
+fn apply_windows_fix(assume_yes: bool) -> anyhow::Result<bool> {
+    if !assume_yes && !confirm("Apply fix — enable Windows Hypervisor Platform? [y/N] ")? {
+        info("Skipped.");
+        return Ok(false);
+    }
+
     eprintln!();
     enable_windows_hypervisor_platform()?;
-
-    match microsandbox::setup::verify_windows_host_prerequisites() {
-        Ok(()) => {
-            done("Windows Hypervisor Platform is now available.");
-            Ok(())
-        }
-        Err(err) => {
-            ui::warn("Windows may require a reboot before WHP is available.");
-            Err(microsandbox::MicrosandboxError::WindowsHostSetup(err).into())
-        }
-    }
+    Ok(true)
 }
 
 #[cfg(windows)]
