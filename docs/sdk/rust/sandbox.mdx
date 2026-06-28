@@ -5,69 +5,6 @@ description: Rust SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static<span className="msb-ct">6</span></p>
-  <a className="msb-row" href="#sandboxbuilder"><span className="msb-rn">Sandbox::builder()</span><span className="msb-rg">configure a new sandbox</span></a>
-  <a className="msb-row" href="#sandboxget"><span className="msb-rn">Sandbox::get()</span><span className="msb-rg">handle to an existing one</span></a>
-  <a className="msb-row" href="#sandboxlist"><span className="msb-rn">Sandbox::list()</span><span className="msb-rg">all sandboxes</span></a>
-  <a className="msb-row" href="#sandboxstart"><span className="msb-rn">Sandbox::start()</span><span className="msb-rg">restart a stopped one</span></a>
-  <a className="msb-row" href="#sandboxstart_detached"><span className="msb-rn">Sandbox::start_detached()</span><span className="msb-rg">restart detached</span></a>
-  <a className="msb-row" href="#sandboxremove"><span className="msb-rn">Sandbox::remove()</span><span className="msb-rg">delete a stopped one</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">16</span></p>
-  <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run a command</span></a>
-  <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.shell()</span><span className="msb-rg">interactive shell</span></a>
-  <a className="msb-row" href="#sb-fs"><span className="msb-rn">sb.fs()</span><span className="msb-rg">read / write files</span></a>
-  <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.logs()</span><span className="msb-rg">captured output</span></a>
-  <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.metrics()</span><span className="msb-rg">resource snapshot</span></a>
-  <a className="msb-row" href="#sb-metrics_stream"><span className="msb-rn">sb.metrics_stream()</span><span className="msb-rg">stream metrics</span></a>
-  <a className="msb-row" href="#sb-stop"><span className="msb-rn">sb.stop()</span><span className="msb-rg">graceful shutdown</span></a>
-  <a className="msb-row" href="#sb-kill"><span className="msb-rn">sb.kill()</span><span className="msb-rg">force terminate</span></a>
-  <a className="msb-row" href="#sb-drain"><span className="msb-rn">sb.drain()</span><span className="msb-rg">graceful drain</span></a>
-  <a className="msb-row" href="#sb-detach"><span className="msb-rn">sb.detach()</span><span className="msb-rg">release, keep running</span></a>
-  <a className="msb-row" href="#sb-wait"><span className="msb-rn">sb.wait()</span><span className="msb-rg">block until it exits</span></a>
-  <a className="msb-row" href="#sb-stop_and_wait"><span className="msb-rn">sb.stop_and_wait()</span><span className="msb-rg">stop, then await exit</span></a>
-  <a className="msb-row" href="#sb-config"><span className="msb-rn">sb.config()</span><span className="msb-rg">full configuration</span></a>
-  <a className="msb-row" href="#sb-name"><span className="msb-rn">sb.name()</span><span className="msb-rg">sandbox name</span></a>
-  <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle()</span><span className="msb-rg">attached vs detached</span></a>
-  <a className="msb-row" href="#sb-remove_persisted"><span className="msb-rn">sb.remove_persisted()</span><span className="msb-rg">delete persisted state</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">32</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#image">.image()</a>
-    <a className="msb-chip" href="#memory">.memory()</a>
-    <a className="msb-chip" href="#cpus">.cpus()</a>
-    <a className="msb-chip" href="#port">.port()</a>
-    <a className="msb-chip" href="#volume">.volume()</a>
-    <a className="msb-chip" href="#env">.env()</a>
-    <a className="msb-chip" href="#secret">.secret()</a>
-    <a className="msb-chip" href="#network">.network()</a>
-    <a className="msb-chip" href="#init">.init()</a>
-    <a className="msb-chip" href="#patch">.patch()</a>
-    <a className="msb-chip" href="#create">.create()</a>
-    <a className="msb-chip" href="#build">.build()</a>
-    <a className="msb-more" href="#build">+ 20 more in the Builder section</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxconfig">SandboxConfig</a>
-    <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
-    <a className="msb-typepill" href="#sandboxmetrics">SandboxMetrics</a>
-    <a className="msb-typepill" href="#sandboxstatus">SandboxStatus</a>
-    <a className="msb-typepill" href="#logentry">LogEntry</a>
-    <a className="msb-typepill" href="#logoptions">LogOptions</a>
-    <a className="msb-typepill" href="#logsource">LogSource</a>
-    <a className="msb-typepill" href="#loglevel">LogLevel</a>
-    <a className="msb-typepill" href="#pullpolicy">PullPolicy</a>
-    <a className="msb-typepill" href="#registryauth">RegistryAuth</a>
-    <a className="msb-typepill" href="/sdk/rust/execution#exitstatus">ExitStatus</a>
-    <a className="msb-typepill" href="#patchbuilder">PatchBuilder</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust
@@ -87,14 +24,22 @@ sb.stop().await?;                            // 4. shut down
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```rust
 fn builder(name: impl Into<String>) -> SandboxBuilder
 ```
+
+<Accordion title="Example">
+
+```rust
+let sb = Sandbox::builder("api")
+    .image("python")
+    .create()
+    .await?;
+```
+
+</Accordion>
 
 Create a builder for configuring a new sandbox. The builder lets you set the image, resources, volumes, networking, secrets, and other options before booting the VM. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. See [`SandboxBuilder`](#sandboxbuilder) for all available options.
 
@@ -116,25 +61,20 @@ Create a builder for configuring a new sandbox. The builder lets you set the ima
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let sb = Sandbox::builder("api")
-    .image("python")
-    .create()
-    .await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn get(name: &str) -> MicrosandboxResult<SandboxHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let handle = Sandbox::get("api").await?;
+println!("{:?}", handle.status());
+```
+
+</Accordion>
 
 Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
 
@@ -156,23 +96,21 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let handle = Sandbox::get("api").await?;
-println!("{:?}", handle.status());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list() -> MicrosandboxResult<Vec<SandboxHandle>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for h in Sandbox::list().await? {
+    println!("{} — {:?}", h.name(), h.status());
+}
+```
+
+</Accordion>
 
 List all sandboxes (running, stopped, and crashed).
 
@@ -185,24 +123,19 @@ List all sandboxes (running, stopped, and crashed).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for h in Sandbox::list().await? {
-    println!("{} — {:?}", h.name(), h.status());
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(name: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+Sandbox::remove("api").await?;
+```
+
+</Accordion>
 
 Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running - stop it first.
 
@@ -215,22 +148,19 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-Sandbox::remove("api").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">start()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn start(name: &str) -> MicrosandboxResult<Sandbox>
 ```
+
+<Accordion title="Example">
+
+```rust
+let sb = Sandbox::start("api").await?;
+```
+
+</Accordion>
 
 Restart a previously stopped sandbox. The VM reboots using the persisted configuration. The sandbox enters attached mode - it stops when your process exits.
 
@@ -252,18 +182,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let sb = Sandbox::start("api").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">start_detached()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn start_detached(name: &str) -> MicrosandboxResult<Sandbox>
@@ -289,18 +208,21 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
   </div>
 </div>
 
----
-
 ## Instance methods
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn config(&self) -> &SandboxConfig
 ```
+
+<Accordion title="Example">
+
+```rust
+println!("{} MiB", sb.config().memory_mib);
+```
+
+</Accordion>
 
 Access the sandbox's full configuration.
 
@@ -313,24 +235,11 @@ Access the sandbox's full configuration.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-println!("{} MiB", sb.config().memory_mib);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn detach(self)
 ```
-
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandboxget).
 
 <Accordion title="Example">
 
@@ -340,16 +249,13 @@ sb.detach().await; // keeps running in the background
 
 </Accordion>
 
----
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandboxget).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">drain()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn drain(&self) -> MicrosandboxResult<()>
 ```
-
-Start a graceful drain. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `Stopped` when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes.
 
 <Accordion title="Example">
 
@@ -359,10 +265,9 @@ sb.drain().await?;
 
 </Accordion>
 
----
+Start a graceful drain. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `Stopped` when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn request_drain(&self) -> MicrosandboxResult<()>
@@ -370,14 +275,19 @@ async fn request_drain(&self) -> MicrosandboxResult<()>
 
 Request graceful drain and return once the request is sent. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs stopped-state observation.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">fs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn fs(&self) -> SandboxFs<'_>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().write("/tmp/hello.txt", "hi").await?;
+```
+
+</Accordion>
 
 Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/rust/filesystem) for API details.
 
@@ -390,24 +300,11 @@ Get a filesystem handle for reading and writing files inside the running sandbox
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().write("/tmp/hello.txt", "hi").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn kill(&self) -> MicrosandboxResult<()>
 ```
-
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
 <Accordion title="Example">
 
@@ -417,10 +314,9 @@ sb.kill().await?; // SIGKILL, no graceful shutdown
 
 </Accordion>
 
----
+Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown — use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill_with_timeout()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
@@ -428,10 +324,7 @@ async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 
 Force-terminate the sandbox and wait up to `timeout` for stopped-state observation.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn request_kill(&self) -> MicrosandboxResult<()>
@@ -439,14 +332,20 @@ async fn request_kill(&self) -> MicrosandboxResult<()>
 
 Request force termination and return once the request is sent, without waiting for stopped-state observation.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics>
 ```
+
+<Accordion title="Example">
+
+```rust
+let m = sb.metrics().await?;
+println!("cpu {:.1}% · mem {} MiB", m.cpu_percent, m.memory_bytes / 1_048_576);
+```
+
+</Accordion>
 
 Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, optional upper disk usage, and uptime.
 
@@ -459,23 +358,24 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let m = sb.metrics().await?;
-println!("cpu {:.1}% · mem {} MiB", m.cpu_percent, m.memory_bytes / 1_048_576);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn metrics_stream(&self, interval: Duration) -> impl Stream<Item = MicrosandboxResult<SandboxMetrics>>
 ```
+
+<Accordion title="Example">
+
+```rust
+use futures::StreamExt;
+
+let mut stream = sb.metrics_stream(Duration::from_secs(1));
+while let Some(snapshot) = stream.next().await {
+    println!("{:.1}%", snapshot?.cpu_percent);
+}
+```
+
+</Accordion>
 
 Stream resource metrics at a regular interval. Returns an async stream that yields a new snapshot every `interval` duration.
 
@@ -497,49 +397,11 @@ Stream resource metrics at a regular interval. Returns an async stream that yiel
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use futures::StreamExt;
-
-let mut stream = sb.metrics_stream(Duration::from_secs(1));
-while let Some(snapshot) = stream.next().await {
-    println!("{:.1}%", snapshot?.cpu_percent);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>>
 ```
-
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
-
-The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines. `logs()` is **synchronous** because it's a pure file read.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#logoptions">&amp;LogOptions</a></div>
-    <div className="msb-param-desc">Filters: <code>tail</code>, <code>since</code>, <code>until</code>, <code>sources</code>. <code>LogOptions::default()</code> returns everything for the default sources.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#logentry">Vec&lt;LogEntry&gt;</a></div>
-    <div className="msb-param-desc">Matching entries in chronological order.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -583,10 +445,29 @@ let recent = handle.logs(&LogOptions {
 
 </Accordion>
 
----
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines. `logs()` is **synchronous** because it's a pure file read.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#logoptions">&amp;LogOptions</a></div>
+    <div className="msb-param-desc">Filters: <code>tail</code>, <code>since</code>, <code>until</code>, <code>sources</code>. <code>LogOptions::default()</code> returns everything for the default sources.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#logentry">Vec&lt;LogEntry&gt;</a></div>
+    <div className="msb-param-desc">Matching entries in chronological order.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn name(&self) -> &str
@@ -603,10 +484,7 @@ Get the sandbox name.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn owns_lifecycle(&self) -> bool
@@ -623,16 +501,11 @@ Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">remove_persisted()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove_persisted(&self) -> MicrosandboxResult<()>
 ```
-
-Remove the sandbox and all its persisted state from disk.
 
 <Accordion title="Example">
 
@@ -642,10 +515,9 @@ sb.remove_persisted().await?;
 
 </Accordion>
 
----
+Remove the sandbox and all its persisted state from disk.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn request_stop(&self) -> MicrosandboxResult<()>
@@ -653,16 +525,11 @@ async fn request_stop(&self) -> MicrosandboxResult<()>
 
 Request graceful shutdown and return once the request is sent, without waiting for stopped-state observation. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs the terminal state.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stop(&self) -> MicrosandboxResult<()>
 ```
-
-Gracefully shut down the sandbox. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds for a clean exit; if the sandbox is still running after that, it is force-killed.
 
 <Accordion title="Example">
 
@@ -672,10 +539,9 @@ sb.stop().await?;
 
 </Accordion>
 
----
+Gracefully shut down the sandbox. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds for a clean exit; if the sandbox is still running after that, it is force-killed.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
@@ -683,14 +549,20 @@ async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 
 Gracefully shut down the sandbox with an explicit timeout before escalation. `Duration::ZERO` skips graceful shutdown and force-kills immediately.
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
 ```
+
+<Accordion title="Example">
+
+```rust
+let status = sb.stop_and_wait().await?;
+println!("exited: {}", status.success());
+```
+
+</Accordion>
 
 Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#stop) or [`stop_with_timeout()`](#stop_with_timeout) when the caller only needs stopped-state observation.
 
@@ -703,23 +575,19 @@ Stop the sandbox and wait for the exit status. This is a local-backend compatibi
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let status = sb.stop_and_wait().await?;
-println!("exited: {}", status.success());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn wait(&self) -> MicrosandboxResult<ExitStatus>
 ```
+
+<Accordion title="Example">
+
+```rust
+let status = sb.wait().await?;
+```
+
+</Accordion>
 
 Block until the sandbox exits on its own (without triggering a stop). Returns the exit status.
 
@@ -732,18 +600,7 @@ Block until the sandbox exits on its own (without triggering a stop). Returns th
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let status = sb.wait().await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_stopped()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult>
@@ -757,16 +614,11 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
 |------|-------------|
 | [`SandboxStopResult`](#sandboxstopresult) | Observed terminal sandbox state |
 
----
-
 ## SandboxBuilder
 
 Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious; simple setters are demonstrated by the [Typical flow](#typical-flow) above.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
@@ -783,10 +635,7 @@ Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. V
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">cpus()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn cpus(self, count: u8) -> Self
@@ -803,10 +652,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn create(self) -> MicrosandboxResult<Sandbox>
@@ -823,25 +669,11 @@ Boot the sandbox in attached mode. The sandbox stops when your process exits.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create_detached()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn create_detached(self) -> MicrosandboxResult<Sandbox>
 ```
-
-Boot the sandbox in detached mode. The sandbox survives after your process exits.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Sandbox</a></div>
-    <div className="msb-param-desc">Running sandbox.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -855,10 +687,18 @@ sb.detach().await;
 
 </Accordion>
 
----
+Boot the sandbox in detached mode. The sandbox survives after your process exits.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Sandbox</a></div>
+    <div className="msb-param-desc">Running sandbox.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">disable_network()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn disable_network(self) -> Self
@@ -866,10 +706,7 @@ fn disable_network(self) -> Self
 
 Fully disable networking. No network interface is created.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">entrypoint()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
@@ -886,10 +723,7 @@ Override the OCI image's stored ENTRYPOINT. The value is consulted by command-re
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">env()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -910,10 +744,7 @@ Set an environment variable visible to all commands. Can be called multiple time
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">hostname()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn hostname(self, hostname: impl Into<String>) -> Self
@@ -930,10 +761,7 @@ Set the guest hostname.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">idle_timeout()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn idle_timeout(self, secs: u64) -> Self
@@ -950,14 +778,23 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">init()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn init(self, cmd: impl Into<PathBuf>) -> Self
 ```
+
+<Accordion title="Example">
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init("auto")
+    .create()
+    .await?;
+```
+
+</Accordion>
 
 Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
@@ -972,22 +809,7 @@ Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time set
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let sb = Sandbox::builder("worker")
-    .image("jrei/systemd-debian:12")
-    .init("auto")
-    .create()
-    .await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">init_with()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn init_with(
@@ -996,6 +818,20 @@ fn init_with(
     f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
 ) -> Self
 ```
+
+<Accordion title="Example">
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+</Accordion>
 
 Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape. The builder exposes `arg`, `args`, `env`, and `envs`. Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
 
@@ -1012,24 +848,7 @@ Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let sb = Sandbox::builder("worker")
-    .image("jrei/systemd-debian:12")
-    .init_with("/lib/systemd/systemd", |i| i
-        .args(["--unit=multi-user.target"])
-        .env("container", "microsandbox"))
-    .create()
-    .await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">image()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn image(self, image: impl IntoImage) -> Self
@@ -1046,25 +865,11 @@ Set the root filesystem source. Accepts OCI image names, local directory paths, 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">image_with()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn image_with(self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self
 ```
-
-Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>f</code><span className="msb-type">FnOnce(ImageBuilder)</span></div>
-    <div className="msb-param-desc">Configure the rootfs source.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -1079,10 +884,18 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
----
+Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><span className="msb-type">FnOnce(ImageBuilder)</span></div>
+    <div className="msb-param-desc">Configure the rootfs source.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">log_level()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn log_level(self, level: LogLevel) -> Self
@@ -1099,10 +912,7 @@ Override the sandbox process's log verbosity.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">max_duration()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn max_duration(self, secs: u64) -> Self
@@ -1119,10 +929,7 @@ Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drain
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">memory()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn memory(self, size: impl Into<Mebibytes>) -> Self
@@ -1139,10 +946,7 @@ Set the guest memory size. Physical pages are only allocated as the guest touche
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">network()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn network(self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self
@@ -1159,10 +963,7 @@ Configure networking. See [Networking](/sdk/rust/networking) for the full builde
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">patch()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn patch(self, f: impl FnOnce(PatchBuilder) -> PatchBuilder) -> Self
@@ -1179,10 +980,7 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn port(self, host_port: u16, guest_port: u16) -> Self
@@ -1203,10 +1001,7 @@ Publish a TCP port from the sandbox to the host. The default host bind address i
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">port_bind()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn port_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self
@@ -1231,10 +1026,7 @@ Publish a TCP port on a specific host bind address, such as `0.0.0.0`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">port_udp()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn port_udp(self, host_port: u16, guest_port: u16) -> Self
@@ -1255,10 +1047,7 @@ Publish a UDP port. The default host bind address is `127.0.0.1`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">port_udp_bind()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn port_udp_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self
@@ -1283,10 +1072,7 @@ Publish a UDP port on a specific host bind address.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">pull_policy()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn pull_policy(self, policy: PullPolicy) -> Self
@@ -1303,10 +1089,7 @@ Control when the OCI image is pulled from the registry.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">registry_auth()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn registry_auth(self, auth: RegistryAuth) -> Self
@@ -1323,10 +1106,7 @@ Authenticate to a private container registry.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">replace()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn replace(self) -> Self
@@ -1334,10 +1114,7 @@ fn replace(self) -> Self
 
 If a sandbox with the same name already exists, stop it, remove it, and create a fresh one. Without this, creation fails on name conflict.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">script()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn script(self, name: impl Into<String>, content: impl Into<String>) -> Self
@@ -1358,10 +1135,7 @@ Add a named script at `/.msb/scripts/` inside the guest. Scripts are added to `P
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">secret()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self
@@ -1378,10 +1152,7 @@ Add a secret with full configuration. See [Secrets](/sdk/rust/secrets) for the b
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">secret_env()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowed_host: impl Into<String>) -> Self
@@ -1406,10 +1177,7 @@ Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">shell()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn shell(self, shell: impl Into<String>) -> Self
@@ -1426,10 +1194,7 @@ Set the shell used by [`Sandbox::shell()`](/sdk/rust/execution). Default: `/bin/
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">user()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn user(self, user: impl Into<String>) -> Self
@@ -1446,10 +1211,7 @@ Set the default guest user for all commands.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">volume()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn volume(self, guest_path: impl Into<String>, f: impl FnOnce(MountBuilder) -> MountBuilder) -> Self
@@ -1470,10 +1232,7 @@ Add a volume mount. See [Volumes](/sdk/rust/volumes) for mount types.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">workdir()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn workdir(self, path: impl Into<String>) -> Self
@@ -1490,16 +1249,11 @@ Set the default working directory for all commands.
   </div>
 </div>
 
----
-
 ## PatchBuilder
 
 Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">append()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn append(self, path: impl Into<String>, content: impl Into<String>) -> Self
@@ -1520,10 +1274,7 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">copy_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn copy_dir(self, src: impl Into<PathBuf>, dst: impl Into<String>, replace: bool) -> Self
@@ -1548,10 +1299,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">copy_file()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn copy_file(
@@ -1586,10 +1334,7 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">file()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn file(
@@ -1624,10 +1369,7 @@ Write raw bytes at `path`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn mkdir(self, path: impl Into<String>, mode: Option<u32>) -> Self
@@ -1648,10 +1390,7 @@ Create a directory at `path`. Idempotent: a no-op if the directory already exist
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn remove(self, path: impl Into<String>) -> Self
@@ -1668,10 +1407,7 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">symlink()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn symlink(self, target: impl Into<String>, link: impl Into<String>, replace: bool) -> Self
@@ -1696,10 +1432,7 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">text()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn text(
@@ -1734,13 +1467,10 @@ Write UTF-8 text content at `path`.
   </div>
 </div>
 
----
-
 ## Types
 
 ### LogEntry
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-logs">logs()</a></p>
 
@@ -1755,7 +1485,6 @@ A single captured log entry returned by [`logs()`](#sb-logs).
 
 ### LogLevel
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#log_level">log_level()</a></p>
 
@@ -1771,7 +1500,6 @@ Sandbox process log verbosity.
 
 ### LogOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#sb-logs">logs()</a></p>
 
@@ -1786,7 +1514,6 @@ Filters passed to [`logs()`](#sb-logs). All fields optional. `LogOptions::defaul
 
 ### LogSource
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#logentry">LogEntry.source</a> · <a href="#logoptions">LogOptions.sources</a></p>
 
@@ -1796,12 +1523,11 @@ Tag indicating where a captured log entry came from.
 |-------|-------------|
 | `Stdout` | Captured from a session's stdout (pipe mode — streams stayed separated) |
 | `Stderr` | Captured from a session's stderr (pipe mode) |
-| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
+| `Output` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
 | `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
 
 ### PullPolicy
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#pull_policy">pull_policy()</a></p>
 
@@ -1815,7 +1541,6 @@ Controls when the SDK fetches an OCI image from the registry.
 
 ### RegistryAuth
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#registry_auth">registry_auth()</a></p>
 
@@ -1827,7 +1552,6 @@ Credentials for authenticating to a private container registry.
 
 ### SandboxConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-config">config()</a> · <a href="#build">build()</a></p>
 
@@ -1850,7 +1574,6 @@ The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or bu
 
 ### SandboxHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
 
@@ -1895,7 +1618,6 @@ Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until
 
 ### SandboxMetrics
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
@@ -1918,7 +1640,6 @@ Point-in-time resource usage snapshot.
 
 ### SandboxStatus
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status()</a></p>
 

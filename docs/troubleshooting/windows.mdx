@@ -1,12 +1,10 @@
 ---
-title: Windows troubleshooting
+title: Windows
 description: Diagnose Windows Hypervisor Platform, runtime, terminal, and networking setup issues
-icon: "screwdriver-wrench"
+icon: "windows"
 ---
 
-<Note>
-  Windows support is currently in preview. A Windows MSI or winget package is not published yet; use the PowerShell installer from the latest GitHub release.
-</Note>
+Windows 10 or later is supported in preview. Local sandboxes require Windows Hypervisor Platform, and the PowerShell installer is the current Windows install path.
 
 ## Quick checks
 
@@ -53,7 +51,7 @@ For installer-specific overrides, use:
 | Environment variable | Effect |
 |----------------------|--------|
 | `MSB_HOME` | Install root; defaults to `%USERPROFILE%\.microsandbox` |
-| `MSB_INSTALL_VERSION` | Release tag to install, such as `v0.5.7` |
+| `MSB_INSTALL_VERSION` | Release tag to install, such as `v0.6.1` |
 | `MSB_INSTALL_BASE_URL` | Release asset base URL for mirrors or local testing |
 | `MSB_INSTALL_NO_PATH=1` | Skip user PATH update |
 | `MSB_INSTALL_NO_DOCTOR=1` | Skip the post-install doctor check |

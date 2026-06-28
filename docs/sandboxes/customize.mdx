@@ -174,7 +174,7 @@ By default the microsandbox agent runs as PID 1 inside the guest: small, fast, m
 
 Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
 
-Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI. When an OCI image declares a known init path as the first ENTRYPOINT token, such as `/init` in s6-overlay images, `auto` hands PID 1 to that path. For attached `msb run`, microsandbox preserves the OCI launch contract by passing the remaining ENTRYPOINT plus CMD or trailing command to that init instead of direct-executing the wrapper through agentd. Otherwise, `auto` falls back to probing common distro paths: `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd`.
+Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI. When an OCI image declares a known init path as the first ENTRYPOINT token (for example, `/init` in s6-overlay images), `auto` hands PID 1 to that path. For attached `msb run`, microsandbox preserves the OCI launch contract: it passes the remaining ENTRYPOINT plus CMD or trailing command to that init, instead of running the wrapper directly through agentd. Otherwise, `auto` falls back to probing common distro paths: `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd`.
 
 <CodeGroup>
 ```rust Rust
