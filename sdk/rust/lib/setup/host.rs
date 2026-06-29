@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 use crate::config::{self, LocalConfig};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -234,7 +240,10 @@ fn runtime_section_from_results(
     msb: Result<PathBuf, String>,
     libkrunfw: Result<PathBuf, String>,
 ) -> (Section, Vec<Problem>) {
-    let mut checks = vec![Check::info("MSB_HOME", &base.display().to_string())];
+    let mut checks = vec![
+        Check::info("Version", &format!("v{PACKAGE_VERSION}")),
+        Check::info("MSB_HOME", &base.display().to_string()),
+    ];
     if config_error.is_some() {
         checks.push(Check::fail("config", "invalid"));
     }
@@ -360,11 +369,13 @@ mod tests {
         );
 
         assert!(problems.is_empty());
-        assert_eq!(section.checks[0].label, "MSB_HOME");
-        assert_eq!(section.checks[1].state, CheckState::Pass);
-        assert_eq!(section.checks[1].value, msb.display().to_string());
+        assert_eq!(section.checks[0].label, "Version");
+        assert_eq!(section.checks[0].value, format!("v{PACKAGE_VERSION}"));
+        assert_eq!(section.checks[1].label, "MSB_HOME");
         assert_eq!(section.checks[2].state, CheckState::Pass);
-        assert_eq!(section.checks[2].value, libkrunfw.display().to_string());
+        assert_eq!(section.checks[2].value, msb.display().to_string());
+        assert_eq!(section.checks[3].state, CheckState::Pass);
+        assert_eq!(section.checks[3].value, libkrunfw.display().to_string());
     }
 
     #[test]
@@ -376,8 +387,8 @@ mod tests {
             Err("searched: /tmp/libkrunfw.so.5.2.1".to_string()),
         );
 
-        assert_eq!(section.checks[1].state, CheckState::Fail);
         assert_eq!(section.checks[2].state, CheckState::Fail);
+        assert_eq!(section.checks[3].state, CheckState::Fail);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].hints[0].contains("/tmp/msb"));
         assert!(problems[0].hints[1].contains("/tmp/libkrunfw.so.5.2.1"));
@@ -392,8 +403,8 @@ mod tests {
             Ok(PathBuf::from("/usr/lib/libkrunfw.so.5.2.1")),
         );
 
-        assert_eq!(section.checks[1].label, "config");
-        assert_eq!(section.checks[1].state, CheckState::Fail);
+        assert_eq!(section.checks[2].label, "config");
+        assert_eq!(section.checks[2].state, CheckState::Fail);
         assert_eq!(problems.len(), 1);
         assert_eq!(
             problems[0].headline,

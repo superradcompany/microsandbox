@@ -490,12 +490,20 @@ fn render_diagnosis(diagnosis: &microsandbox::setup::Diagnosis) {
         .into_iter()
         .partition(|check| matches!(check.state, CheckState::Info));
 
-    // Lead the metadata block with host identity (Platform) ahead of the
-    // install location; falls back to model order if that label changes.
-    facts.sort_by_key(|check| check.label != "Platform");
+    // Keep the pasteable support header stable while leaving any future facts
+    // in model order after these two identity lines.
+    facts.sort_by_key(|check| info_fact_rank(&check.label));
 
     for check in facts.into_iter().chain(rows) {
         render_check(check);
+    }
+}
+
+fn info_fact_rank(label: &str) -> u8 {
+    match label {
+        "Platform" => 0,
+        "Version" => 1,
+        _ => 2,
     }
 }
 
@@ -2391,6 +2399,13 @@ fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_fact_rank_keeps_support_header_first() {
+        assert_eq!(info_fact_rank("Platform"), 0);
+        assert_eq!(info_fact_rank("Version"), 1);
+        assert_eq!(info_fact_rank("MSB_HOME"), 2);
+    }
 
     #[tokio::test]
     async fn vacuum_into_writes_backup_file() {
