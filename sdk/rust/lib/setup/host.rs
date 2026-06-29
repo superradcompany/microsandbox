@@ -4,6 +4,10 @@
 //! can run local sandboxes. Rendering (colors, glyphs, hint formatting) lives
 //! in the CLI so this layer stays presentation-agnostic.
 
+use std::path::{Path, PathBuf};
+
+use crate::config::{self, LocalConfig};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -211,41 +215,62 @@ pub fn diagnose() -> Diagnosis {
     Diagnosis { sections, problems }
 }
 
-/// Build the "Runtime" section: install root and required runtime files.
+/// Build the "Runtime" section: install root and resolved runtime files.
 fn runtime_section() -> (Section, Vec<Problem>) {
-    let base = microsandbox_utils::resolve_home();
-    let bin_dir = base.join(microsandbox_utils::BIN_SUBDIR);
-    let lib_dir = base.join(microsandbox_utils::LIB_SUBDIR);
+    let (config, config_error) = match config::load_persisted_config_or_default() {
+        Ok(config) => (config, None),
+        Err(error) => (LocalConfig::default(), Some(error.to_string())),
+    };
+    let base = config.home();
+    let msb = resolve_msb_runtime_file(&config);
+    let libkrunfw = resolve_libkrunfw_runtime_file(&config);
 
-    let os = std::env::consts::OS;
-    let msb_name = microsandbox_utils::msb_binary_filename(os);
-    let libkrunfw_name = microsandbox_utils::libkrunfw_filename(os);
+    runtime_section_from_results(&base, config_error, msb, libkrunfw)
+}
 
-    let msb_ok = bin_dir.join(&msb_name).is_file();
-    let libkrunfw_ok = lib_dir.join(&libkrunfw_name).is_file();
-
-    let checks = vec![
-        Check::info("Install root", &base.display().to_string()),
-        if msb_ok {
-            Check::pass("msb", "present")
-        } else {
-            Check::fail("msb", "missing")
-        },
-        if libkrunfw_ok {
-            Check::pass("libkrunfw", "present")
-        } else {
-            Check::fail("libkrunfw", "missing")
-        },
-    ];
+fn runtime_section_from_results(
+    base: &Path,
+    config_error: Option<String>,
+    msb: Result<PathBuf, String>,
+    libkrunfw: Result<PathBuf, String>,
+) -> (Section, Vec<Problem>) {
+    let mut checks = vec![Check::info("MSB_HOME", &base.display().to_string())];
+    if config_error.is_some() {
+        checks.push(Check::fail("config", "invalid"));
+    }
+    checks.extend([
+        runtime_file_check("msb", &msb),
+        runtime_file_check("libkrunfw", &libkrunfw),
+    ]);
 
     let mut problems = Vec::new();
-    if !msb_ok || !libkrunfw_ok {
+    if let Some(error) = config_error {
         problems.push(Problem::new(
-            "microsandbox runtime is not fully installed",
+            "microsandbox config could not be read",
             vec![
-                format!("expected runtime files under {}", base.display()),
-                "install or repair them: msb self update".to_string(),
+                error,
+                "fix the config file or set MSB_CONFIG_PATH to a valid config".to_string(),
             ],
+        ));
+    }
+
+    if msb.is_err() || libkrunfw.is_err() {
+        let mut hints = Vec::new();
+        if let Err(error) = &msb {
+            hints.push(format!("msb: {error}"));
+        }
+        if let Err(error) = &libkrunfw {
+            hints.push(format!("libkrunfw: {error}"));
+        }
+        hints.push("libkrunfw may live beside the resolved msb binary or under ../lib".to_string());
+        hints.push("standalone install: repair with msb self update".to_string());
+        hints.push(
+            "package-manager install: reinstall or repair the microsandbox package".to_string(),
+        );
+
+        problems.push(Problem::new(
+            "microsandbox runtime could not be resolved",
+            hints,
         ));
     }
 
@@ -256,6 +281,26 @@ fn runtime_section() -> (Section, Vec<Problem>) {
         },
         problems,
     )
+}
+
+fn runtime_file_check(label: &str, result: &Result<PathBuf, String>) -> Check {
+    match result {
+        Ok(path) => Check::pass(label, &path.display().to_string()),
+        Err(_) => Check::fail(label, "not found"),
+    }
+}
+
+fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
+    let path = config::resolve_msb_path(config).map_err(|error| error.to_string())?;
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("resolved path is not a file: {}", path.display()))
+    }
+}
+
+fn resolve_libkrunfw_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
+    config::resolve_libkrunfw_path(config).map_err(|error| error.to_string())
 }
 
 /// Build the platform-specific "Host" section.
@@ -291,4 +336,68 @@ fn unsupported_host_section() -> (Section, Vec<Problem>) {
             vec!["local execution is supported on Linux, macOS (arm64), and Windows".to_string()],
         )],
     )
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_section_accepts_resolved_side_by_side_runtime() {
+        let dir = PathBuf::from("C:/Tools/microsandbox");
+        let msb = dir.join(microsandbox_utils::msb_binary_filename("windows"));
+        let libkrunfw = dir.join(microsandbox_utils::libkrunfw_filename("windows"));
+
+        let (section, problems) = runtime_section_from_results(
+            Path::new("C:/Users/me/.microsandbox"),
+            None,
+            Ok(msb.clone()),
+            Ok(libkrunfw.clone()),
+        );
+
+        assert!(problems.is_empty());
+        assert_eq!(section.checks[0].label, "MSB_HOME");
+        assert_eq!(section.checks[1].state, CheckState::Pass);
+        assert_eq!(section.checks[1].value, msb.display().to_string());
+        assert_eq!(section.checks[2].state, CheckState::Pass);
+        assert_eq!(section.checks[2].value, libkrunfw.display().to_string());
+    }
+
+    #[test]
+    fn runtime_section_reports_resolution_errors() {
+        let (section, problems) = runtime_section_from_results(
+            Path::new("/home/me/.microsandbox"),
+            None,
+            Err("resolved path is not a file: /tmp/msb".to_string()),
+            Err("searched: /tmp/libkrunfw.so.5.2.1".to_string()),
+        );
+
+        assert_eq!(section.checks[1].state, CheckState::Fail);
+        assert_eq!(section.checks[2].state, CheckState::Fail);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].hints[0].contains("/tmp/msb"));
+        assert!(problems[0].hints[1].contains("/tmp/libkrunfw.so.5.2.1"));
+    }
+
+    #[test]
+    fn runtime_section_reports_config_errors() {
+        let (section, problems) = runtime_section_from_results(
+            Path::new("/home/me/.microsandbox"),
+            Some("failed to parse config `/home/me/.microsandbox/config.json`".to_string()),
+            Ok(PathBuf::from("/usr/bin/msb")),
+            Ok(PathBuf::from("/usr/lib/libkrunfw.so.5.2.1")),
+        );
+
+        assert_eq!(section.checks[1].label, "config");
+        assert_eq!(section.checks[1].state, CheckState::Fail);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(
+            problems[0].headline,
+            "microsandbox config could not be read"
+        );
+    }
 }

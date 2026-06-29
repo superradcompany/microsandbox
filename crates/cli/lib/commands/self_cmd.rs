@@ -106,15 +106,15 @@ pub struct SelfDowngradeArgs {
     #[arg(long)]
     pub keep_cache: bool,
 
-    /// Skip the database backup before schema rollback.
+    /// Skip the database backup before rolling back local state.
     #[arg(long)]
     pub no_backup: bool,
 }
 
-/// Arguments for `msb __schema-baseline`.
+/// Arguments for the hidden downgrade compatibility metadata command.
 #[derive(Debug, Args)]
 pub struct SchemaBaselineArgs {
-    /// Print the schema baseline as JSON.
+    /// Print downgrade compatibility metadata as JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -378,7 +378,7 @@ pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Print this binary's schema baseline for downgrade planning.
+/// Print this binary's downgrade compatibility metadata.
 pub fn run_schema_baseline(args: SchemaBaselineArgs) -> anyhow::Result<()> {
     if !args.json {
         anyhow::bail!("__schema-baseline requires --json");
@@ -716,10 +716,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     if target_version < MIN_DOWNGRADE_VERSION {
         return refuse_static(
             &format!("v{target_version} is below the supported downgrade floor"),
-            &[
-                "minimum supported downgrade target: 0.6.0",
-                "V1 only supports forward-looking downgrades",
-            ],
+            &["minimum supported downgrade target: 0.6.0"],
         );
     }
 
@@ -827,8 +824,8 @@ async fn run_downgrade_with_db(
 
         if !maintenance_lease_available(&fresh_applied) && fresh_plan.steps() > 0 {
             refuse_static(
-                "database schema rollback requires the maintenance lease table",
-                &["retry after starting msb once with the current version"],
+                "downgrade needs the local-state lock table",
+                &["run msb once with the current version, then retry"],
             )?;
             unreachable!("refuse_static always returns an error");
         }
@@ -855,7 +852,7 @@ async fn run_downgrade_with_db(
         }
 
         if fresh_plan.steps() > 0 {
-            let spinner = ui::Spinner::start("Rolling back", "schema changes");
+            let spinner = ui::Spinner::start("Rolling back", "local database changes");
             match run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async {
                 rollback_schema(ctx.db.inner(), fresh_plan.steps()).await
             })
@@ -1573,12 +1570,12 @@ async fn load_target_schema_baseline(target: Version) -> anyhow::Result<SchemaBa
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!(
-                "target v{target} did not report a schema baseline: {}",
+                "target v{target} cannot report downgrade compatibility metadata: {}",
                 stderr.trim()
             );
         }
         Err(err) if target == MIN_DOWNGRADE_VERSION => {
-            tracing::debug!(error = %err, "using built-in 0.6.0 schema baseline");
+            tracing::debug!(error = %err, "using built-in 0.6.0 downgrade metadata");
             Ok(floor_0_6_0_baseline())
         }
         Err(err) => Err(err.into()),
@@ -1681,7 +1678,7 @@ fn build_rollback_plan(
 
     if baseline.migrations.len() > current.len() {
         anyhow::bail!(
-            "target schema baseline has {} migrations, but this binary only knows {}",
+            "target release metadata lists {} database change(s), but this binary only knows {}",
             baseline.migrations.len(),
             current.len()
         );
@@ -1689,11 +1686,11 @@ fn build_rollback_plan(
 
     for (index, migration) in baseline.migrations.iter().enumerate() {
         let Some(current_metadata) = current.get(index) else {
-            anyhow::bail!("target schema baseline is longer than the current migration list");
+            anyhow::bail!("target release metadata is longer than this binary understands");
         };
         if current_metadata.id != migration {
             anyhow::bail!(
-                "target schema baseline is not a prefix of the current schema: expected {}, got {} at index {}",
+                "target release is not compatible with this downgrade path: expected database change {}, got {} at index {}",
                 current_metadata.id,
                 migration,
                 index,
@@ -1703,7 +1700,7 @@ fn build_rollback_plan(
 
     if applied.len() > current.len() {
         anyhow::bail!(
-            "database has {} applied migrations, but this binary only knows {}",
+            "local database lists {} applied change(s), but this binary only knows {}",
             applied.len(),
             current.len()
         );
@@ -1711,11 +1708,11 @@ fn build_rollback_plan(
 
     for (index, migration) in applied.iter().enumerate() {
         let Some(current_metadata) = current.get(index) else {
-            anyhow::bail!("database migration list is longer than the current migration list");
+            anyhow::bail!("local database was updated by a newer msb");
         };
         if current_metadata.id != migration {
             anyhow::bail!(
-                "database schema is newer than this msb binary: expected {}, got {} at index {}",
+                "local database was updated by a newer msb: expected database change {}, got {} at index {}",
                 current_metadata.id,
                 migration,
                 index,
@@ -1743,7 +1740,7 @@ fn build_rollback_plan(
 fn validate_schema_baseline(baseline: &SchemaBaseline) -> anyhow::Result<()> {
     if baseline.schema_baseline_version != schema_metadata::SCHEMA_BASELINE_FORMAT_VERSION {
         anyhow::bail!(
-            "unsupported schema baseline format version {}; expected {}",
+            "unsupported downgrade metadata format version {}; expected {}",
             baseline.schema_baseline_version,
             schema_metadata::SCHEMA_BASELINE_FORMAT_VERSION
         );
@@ -1766,7 +1763,10 @@ fn refuse_irreversible_rollback(plan: &RollbackPlan<'_>) -> anyhow::Result<()> {
         .iter()
         .map(|metadata| metadata.summary.to_string())
         .collect();
-    refuse_owned("downgrade crosses irreversible schema changes", lines)
+    refuse_owned(
+        "downgrade would cross irreversible local-state changes",
+        lines,
+    )
 }
 
 fn ensure_plan_unchanged(
@@ -1788,7 +1788,7 @@ fn ensure_plan_unchanged(
     }
 
     refuse_static(
-        "database schema changed while downgrade was waiting",
+        "local database changed while downgrade was waiting",
         &["retry the downgrade so msb can show the updated rollback plan"],
     )
 }
@@ -1799,7 +1799,7 @@ fn ensure_applied_unchanged(expected: &[String], actual: &[String]) -> anyhow::R
     }
 
     refuse_static(
-        "database migrations changed while downgrade was waiting",
+        "local database changed while downgrade was waiting",
         &["retry the downgrade so msb can show the updated rollback plan"],
     )
 }
@@ -1839,7 +1839,7 @@ fn warn_downgrade_plan(
 
     let refs: Vec<ui::ErrorLine<'_>> = lines.iter().map(|line| ui::ErrorLine::Hint(line)).collect();
     ui::warn_with_lines(
-        &format!("Downgrade will roll back schema changes added after {target}"),
+        &format!("Downgrade will roll back local database changes added after {target}"),
         &refs,
     );
 }
@@ -1864,7 +1864,7 @@ async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<(
 
     refuse_owned(
         &format!(
-            "this downgrade rolls back schema while {} sandbox{} active",
+            "this downgrade updates local state while {} sandbox{} active",
             active.len(),
             if active.len() == 1 { " is" } else { "es are" },
         ),
@@ -2556,6 +2556,6 @@ mod tests {
         let applied = Vec::new();
 
         let err = build_rollback_plan(&baseline, &applied).unwrap_err();
-        assert!(err.to_string().contains("not a prefix"));
+        assert!(err.to_string().contains("not compatible"));
     }
 }
