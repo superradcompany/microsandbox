@@ -91,10 +91,6 @@
 > ```
 >
 > ```sh
-> winget install SuperRadCompany.Microsandbox
-> ```
->
-> ```sh
 > npm i -g microsandbox
 > ```
 >
