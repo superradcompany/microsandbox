@@ -166,7 +166,9 @@ msb create python --name api -p 8080:80
 ```
 </CodeGroup>
 
-Use an explicit bind address, such as `0.0.0.0`, only when you intentionally want to listen beyond localhost.
+Use an explicit bind address, such as `0.0.0.0`, only when you intentionally want to listen beyond localhost. `-p 8080:80` and SDK helpers like `.port(8080, 80)` bind to `127.0.0.1`; `-p 127.0.0.1:8080:80` is the same local-only shape. `-p 0.0.0.0:8080:80` or a specific LAN interface address makes the host listener reachable outside the machine, subject to your OS firewall and network policy.
+
+On Windows, the first published port may trigger a Windows Defender Firewall prompt for `msb.exe` because the runtime opens a host listening socket. For local development, keep the bind address on `127.0.0.1`. Only allow private/public network access in the firewall prompt when you intentionally bind a published port beyond loopback.
 
 ## Reaching the host
 

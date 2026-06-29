@@ -44,7 +44,7 @@ pub async fn connect_sandbox_with_timeout(
 
     let mut last_error = None;
     for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
-        if !sock_path.exists() {
+        if !agent_endpoint_may_exist(&sock_path) {
             continue;
         }
 
@@ -58,6 +58,16 @@ pub async fn connect_sandbox_with_timeout(
         Some(error) => Err(error),
         None => Err(AgentClientError::SandboxNotFound(name.to_string())),
     }
+}
+
+#[cfg(unix)]
+fn agent_endpoint_may_exist(path: &Path) -> bool {
+    path.exists()
+}
+
+#[cfg(windows)]
+fn agent_endpoint_may_exist(_path: &Path) -> bool {
+    true
 }
 
 //--------------------------------------------------------------------------------------------------

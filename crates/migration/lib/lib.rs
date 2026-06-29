@@ -13,6 +13,7 @@ mod m20260531_000002_index_sandbox_labels_key_value;
 mod m20260606_000001_named_volume_kinds;
 mod m20260621_000001_add_sandbox_ephemeral;
 mod m20260621_000002_create_maintenance_lease;
+pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
 

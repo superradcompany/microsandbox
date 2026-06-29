@@ -62,6 +62,7 @@ pub struct MountBuilder {
     mount: MountKind,
     options: MountOptions,
     size_mib: Option<u32>,
+    quota_mib: Option<u32>,
     disk_format: Option<DiskImageFormat>,
     disk_fstype: Option<String>,
     stat_virtualization: Option<StatVirtualization>,
@@ -178,6 +179,7 @@ impl MountBuilder {
             mount: MountKind::Unset,
             options: MountOptions::default(),
             size_mib: None,
+            quota_mib: None,
             disk_format: None,
             disk_fstype: None,
             stat_virtualization: None,
@@ -329,6 +331,21 @@ impl MountBuilder {
         self
     }
 
+    /// Set a guest-write quota for a bind mount.
+    ///
+    /// Bounds how much the guest may add beyond the directory's existing
+    /// contents. Without this, a protective default is applied. Valid only for
+    /// bind mounts; for named volumes use
+    /// [`named_with`](Self::named_with) with the named builder's `quota`.
+    ///
+    /// ```ignore
+    /// .bind("./data").quota(2.gib())   // guest may add up to 2 GiB
+    /// ```
+    pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
     /// Build the volume mount.
     pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         if let Some(err) = self.error {
@@ -363,6 +380,14 @@ impl MountBuilder {
                 ".size() is only valid for tmpfs mounts".into(),
             ));
         }
+        let is_bind = matches!(self.mount, MountKind::Bind(_));
+        if self.quota_mib.is_some() && !is_bind {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".quota() is only valid for bind mounts; for named volumes use \
+                 .named_with(|v| v.quota(..))"
+                    .into(),
+            ));
+        }
         if self.disk_format.is_some() && !is_disk {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".format() is only valid for disk image mounts".into(),
@@ -375,13 +400,35 @@ impl MountBuilder {
         }
         if self.stat_virtualization.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".stat_virtualization() is only valid for bind and named volume mounts".into(),
+                ".stat_virtualization() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
         }
         if self.host_permissions.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".host_permissions() is only valid for bind and named volume mounts".into(),
+                ".host_permissions() is only valid for bind and directory-backed named volume mounts"
+                    .into(),
             ));
+        }
+        if let MountKind::Named {
+            name,
+            create: Some(create),
+        } = &self.mount
+            && create.kind() == VolumeKind::Disk
+        {
+            // Disk-backed named volumes are passed to the VMM as block
+            // devices, so virtiofs-only policies are invalid even when the
+            // caller explicitly sets the same values as the defaults.
+            if self.stat_virtualization.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "stat_virtualization is only valid for directory named volumes: {name}"
+                )));
+            }
+            if self.host_permissions.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "host_permissions is only valid for directory named volumes: {name}"
+                )));
+            }
         }
 
         // `Off + Mirror` is a contradiction. With xattr disabled there is no
@@ -411,35 +458,16 @@ impl MountBuilder {
                 // `tag:host[:opts]`. Embedded separators in the host
                 // path would collide with that grammar and could
                 // silently inject policy options. Reject at the SDK
-                // boundary so callers get a clear error rather than a
-                // confusing parse failure later.
-                if let Some(s) = host.to_str() {
-                    if s.contains(',') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ',': {s}"
-                        )));
-                    }
-                    if s.contains(':') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ':': {s}"
-                        )));
-                    }
-                    if s.contains(';') {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                            "bind host path must not contain ';': {s}"
-                        )));
-                    }
-                } else {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "bind host path must be valid UTF-8".into(),
-                    ));
-                }
+                // boundary so callers get a clear error. Windows drive
+                // prefixes are the one allowed colon shape.
+                validate_host_path_wire_safe(&host, "bind host path")?;
                 VolumeMount::Bind {
                     host,
                     guest: self.guest,
                     options: self.options,
                     stat_virtualization,
                     host_permissions,
+                    quota_mib: self.quota_mib,
                 }
             }
             MountKind::Named { name, create } => {
@@ -755,6 +783,20 @@ impl ImageBuilder {
         self
     }
 
+    /// Use a host directory directly as the root filesystem (bind rootfs).
+    ///
+    /// The directory's contents become the guest root filesystem as-is — no
+    /// OCI pull and no overlay. Mutually exclusive with [`oci`](Self::oci) and
+    /// [`disk`](Self::disk).
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.bind("/srv/rootfs"))
+    /// ```
+    pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
+        self.source = Some(RootfsSource::Bind(host.into()));
+        self
+    }
+
     /// Consume the builder and return the resolved [`RootfsSource`].
     pub fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
         if let Some(e) = self.error {
@@ -762,7 +804,7 @@ impl ImageBuilder {
         }
         self.source.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "ImageBuilder: no image source set (call .oci() or .disk())".into(),
+                "ImageBuilder: no image source set (call .oci(), .disk(), or .bind())".into(),
             )
         })
     }
@@ -805,11 +847,19 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             guest,
             stat_virtualization,
             host_permissions,
+            create,
             ..
         } => {
             validate_guest_mount_path(guest)?;
             crate::volume::validate_volume_name(name)?;
-            validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            if create
+                .as_ref()
+                .is_some_and(|create| create.kind() == VolumeKind::Disk)
+            {
+                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+            } else {
+                validate_virtiofs_policies(*stat_virtualization, *host_permissions)?;
+            }
         }
         VolumeMount::Tmpfs { guest, .. } => {
             validate_guest_mount_path(guest)?;
@@ -856,12 +906,28 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
         )));
     };
 
-    if path.contains(',') || path.contains(':') || path.contains(';') {
+    if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
         )));
     }
     Ok(())
+}
+
+fn has_forbidden_host_path_colon(path: &str) -> bool {
+    path.char_indices().any(|(index, c)| {
+        c == ':' && {
+            #[cfg(windows)]
+            {
+                !microsandbox_utils::is_windows_drive_separator_at(path, index)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = index;
+                true
+            }
+        }
+    })
 }
 
 fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {
@@ -891,6 +957,24 @@ fn validate_virtiofs_policies(
              Drop one or the other."
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_named_disk_mount_options(
+    name: &str,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) -> crate::MicrosandboxResult<()> {
+    if stat_virtualization != StatVirtualization::Strict {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "stat_virtualization is only valid for directory named volumes: {name}"
+        )));
+    }
+    if host_permissions != HostPermissions::Private {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "host_permissions is only valid for directory named volumes: {name}"
+        )));
     }
     Ok(())
 }
@@ -1008,6 +1092,29 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_quota_on_bind() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .quota(2048u32)
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::Bind { quota_mib, .. } => assert_eq!(quota_mib, Some(2048)),
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_quota_rejected_on_tmpfs() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .quota(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".quota() is only valid for bind"));
+    }
+
+    #[test]
     fn test_mount_builder_format_rejected_on_non_disk() {
         let err = MountBuilder::new("/data")
             .bind("/host/data")
@@ -1043,6 +1150,51 @@ mod tests {
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_virtiofs_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_stat_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .stat_virtualization(StatVirtualization::Strict)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_named_disk_explicit_default_host_policy() {
+        let err = MountBuilder::new("/data")
+            .named_with("cache-disk", |v| v.disk().size(1024u32).ensure_exists())
+            .host_permissions(HostPermissions::Private)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only valid for directory named volumes"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1103,6 +1255,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn test_validate_volume_mounts_accepts_windows_drive_host_paths() {
+        let mounts = vec![
+            VolumeMount::Bind {
+                host: PathBuf::from(r"C:\Users\Stephen\data"),
+                guest: "/data".to_string(),
+                options: MountOptions::default(),
+                stat_virtualization: StatVirtualization::Strict,
+                host_permissions: HostPermissions::Private,
+                quota_mib: None,
+            },
+            VolumeMount::DiskImage {
+                host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
+                guest: "/disk".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        validate_volume_mounts(&mounts).unwrap();
+    }
+
+    #[test]
     fn test_validate_volume_mounts_rejects_direct_empty_fstype() {
         let mount = VolumeMount::DiskImage {
             host: PathBuf::from("/host/data.raw"),
@@ -1124,6 +1300,7 @@ mod tests {
             options: MountOptions::default(),
             stat_virtualization: StatVirtualization::Off,
             host_permissions: HostPermissions::Mirror,
+            quota_mib: None,
         };
 
         let err = validate_volume_mounts(&[mount]).unwrap_err();
@@ -1142,6 +1319,7 @@ mod tests {
             },
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            quota_mib: None,
         };
 
         let value = serde_json::to_value(&mount).unwrap();
@@ -1395,6 +1573,17 @@ mod tests {
             .fstype("key=value")
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_builder_bind() {
+        let rootfs = ImageBuilder::new().bind("/srv/rootfs").build().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/srv/rootfs"))
+            }
+            _ => panic!("expected Bind"),
+        }
     }
 }
 

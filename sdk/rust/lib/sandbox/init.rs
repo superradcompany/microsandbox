@@ -132,9 +132,10 @@ fn validate_cmd(cmd: &Path) -> MicrosandboxResult<()> {
             "init cmd path must not contain a NUL byte: {s:?}"
         )));
     }
-    // The sentinel `auto` is resolved guest-side; everything else must
-    // be an absolute path so the eventual `execve` knows where to look.
-    if s != HANDOFF_INIT_AUTO && !cmd.is_absolute() {
+    // The sentinel `auto` is resolved guest-side; everything else must be a
+    // Linux guest absolute path. Do not use `Path::is_absolute` here because it
+    // follows host semantics and treats `/sbin/init` as relative on Windows.
+    if s != HANDOFF_INIT_AUTO && !s.starts_with('/') {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "init cmd must be an absolute path or `{HANDOFF_INIT_AUTO}`, got: {s:?}"
         )));

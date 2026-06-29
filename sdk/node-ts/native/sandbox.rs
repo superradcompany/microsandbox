@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -117,16 +118,19 @@ impl Sandbox {
 
     /// List all sandboxes.
     #[napi]
-    pub async fn list() -> Result<Vec<SandboxInfo>> {
+    pub async fn list() -> Result<Vec<JsSandboxHandle>> {
         let handles = microsandbox::sandbox::Sandbox::list()
             .await
             .map_err(to_napi_error)?;
-        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+        Ok(handles
+            .into_iter()
+            .map(JsSandboxHandle::from_rust)
+            .collect())
     }
 
     /// List sandboxes matching a filter.
     #[napi(js_name = "listWith")]
-    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<SandboxInfo>> {
+    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<JsSandboxHandle>> {
         let handles = match filter.labels {
             Some(labels) if !labels.is_empty() => {
                 let filter = labels.into_iter().fold(
@@ -141,7 +145,10 @@ impl Sandbox {
                 .await
                 .map_err(to_napi_error)?,
         };
-        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+        Ok(handles
+            .into_iter()
+            .map(JsSandboxHandle::from_rust)
+            .collect())
     }
 
     /// Remove a stopped sandbox from the database.
@@ -391,7 +398,7 @@ impl Sandbox {
     // Lifecycle
     //----------------------------------------------------------------------------------------------
 
-    /// Stop the sandbox gracefully (SIGTERM).
+    /// Stop the sandbox gracefully and wait for it to exit.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         let guard = self.inner.lock().await;
@@ -408,12 +415,46 @@ impl Sandbox {
         Ok(exit_status_to_js(status))
     }
 
-    /// Kill the sandbox immediately (SIGKILL).
+    /// Request graceful shutdown without waiting for observed exit.
+    #[napi]
+    pub async fn request_stop(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_stop().await.map_err(to_napi_error)
+    }
+
+    /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
+    #[napi]
+    pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let timeout = Duration::from_millis(timeout_ms.into());
+        sb.stop_with_timeout(timeout).await.map_err(to_napi_error)
+    }
+
+    /// Kill the sandbox immediately and wait for observed exit.
     #[napi]
     pub async fn kill(&self) -> Result<()> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.kill().await.map_err(to_napi_error)
+    }
+
+    /// Request force termination without waiting for observed exit.
+    #[napi]
+    pub async fn request_kill(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_kill().await.map_err(to_napi_error)
+    }
+
+    /// Force-kill the sandbox with an explicit observation timeout.
+    #[napi]
+    pub async fn kill_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let timeout = Duration::from_millis(timeout_ms.into());
+        sb.kill_with_timeout(timeout).await.map_err(to_napi_error)
     }
 
     /// Graceful drain (SIGUSR1 — for load balancing).
@@ -422,6 +463,23 @@ impl Sandbox {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.drain().await.map_err(to_napi_error)
+    }
+
+    /// Request graceful drain without waiting for observed exit.
+    #[napi]
+    pub async fn request_drain(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.request_drain().await.map_err(to_napi_error)
+    }
+
+    /// Wait until the sandbox is observed in a terminal non-running state.
+    #[napi]
+    pub async fn wait_until_stopped(&self) -> Result<SandboxStopResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.wait_until_stopped().await.map_err(to_napi_error)?;
+        Ok(sandbox_stop_result_to_js(result))
     }
 
     /// Wait for the sandbox process to exit.
@@ -460,11 +518,8 @@ impl Sandbox {
     pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let name = sb.name().to_string();
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries = microsandbox::logs::read_logs(&name, &rust_opts)
-            .await
-            .map_err(to_napi_error)?;
+        let entries = sb.logs(&rust_opts).await.map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
     }
 
@@ -478,9 +533,9 @@ impl Sandbox {
     pub async fn log_stream(&self, opts: Option<LogStreamOptions>) -> Result<JsLogStream> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let name = sb.name().to_string();
         let rust_opts = log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        spawn_log_stream(&name, rust_opts).await
+        let stream = sb.log_stream(&rust_opts).await.map_err(to_napi_error)?;
+        spawn_log_stream_from_stream(stream).await
     }
 }
 
@@ -561,15 +616,16 @@ impl AsyncGenerator for JsLogStream {
 /// Open a log stream against the given sandbox name and bridge it
 /// onto a JS-side mpsc channel. Shared between `Sandbox::log_stream`
 /// and `SandboxHandle::log_stream`.
-pub async fn spawn_log_stream(
-    name: &str,
-    opts: microsandbox::logs::LogStreamOptions,
+pub async fn spawn_log_stream_from_stream(
+    mut stream: Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = microsandbox::MicrosandboxResult<microsandbox::logs::LogEntry>,
+                > + Send
+                + 'static,
+        >,
+    >,
 ) -> Result<JsLogStream> {
-    let mut stream = Box::pin(
-        microsandbox::logs::log_stream(name, &opts)
-            .await
-            .map_err(to_napi_error)?,
-    );
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         while let Some(result) = stream.next().await {
@@ -724,22 +780,20 @@ pub fn sandbox_stop_result_to_js(
     }
 }
 
-fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> SandboxInfo {
-    SandboxInfo {
-        name: handle.name().to_string(),
-        status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
-        config_json: handle.config_json().to_string(),
-        created_at: opt_datetime_to_ms(&handle.created_at()),
-        updated_at: opt_datetime_to_ms(&handle.updated_at()),
-    }
-}
-
 pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    let code = status.code().unwrap_or_else(|| {
-        // If no code, the process was killed by a signal.
-        status.signal().map(|s| 128 + s).unwrap_or(-1)
-    });
+    #[cfg(unix)]
+    let code = {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.code().unwrap_or_else(|| {
+            // If no code exists on Unix, the process was killed by a signal.
+            status.signal().map(|s| 128 + s).unwrap_or(-1)
+        })
+    };
+
+    #[cfg(not(unix))]
+    let code = status.code().unwrap_or(-1);
+
     ExitStatus {
         code,
         success: status.success(),

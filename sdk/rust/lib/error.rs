@@ -86,8 +86,14 @@ pub enum MicrosandboxError {
     AgentClient(#[from] crate::agent::AgentClientError),
 
     /// A nix/errno error occurred.
+    #[cfg(unix)]
     #[error("nix error: {0}")]
     Nix(#[from] nix::errno::Errno),
+
+    /// A Windows host prerequisite is missing for local sandbox execution.
+    #[cfg(windows)]
+    #[error("{0}")]
+    WindowsHostSetup(#[from] crate::setup::WindowsHostSetupError),
 
     /// Command execution timed out.
     #[error("exec timed out after {0:?}")]

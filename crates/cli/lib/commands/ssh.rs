@@ -299,11 +299,11 @@ fn create_secure_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
+fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

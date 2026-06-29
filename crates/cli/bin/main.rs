@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
+use console::style;
 use microsandbox_cli::{
     commands::{
         copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
@@ -34,7 +35,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         heading: "Installation",
-        commands: &["install", "uninstall", "self"],
+        commands: &["install", "uninstall", "doctor", "self"],
     },
 ];
 
@@ -68,6 +69,15 @@ enum Commands {
     /// Run the sandbox process (internal).
     #[command(hide = true)]
     Sandbox(Box<SandboxArgs>),
+
+    /// Print the schema baseline owned by this binary (internal).
+    #[command(name = "__schema-baseline", hide = true)]
+    SchemaBaseline(self_cmd::SchemaBaselineArgs),
+
+    /// Complete a deferred Windows self-downgrade binary swap (internal).
+    #[cfg(windows)]
+    #[command(name = "__windows-self-downgrade-swap", hide = true)]
+    WindowsSelfDowngradeSwap(self_cmd::WindowsSelfDowngradeSwapArgs),
 
     /// Create a sandbox from an image and run a command in it.
     Run(run::RunArgs),
@@ -150,6 +160,9 @@ enum Commands {
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
+    /// Check local runtime and host virtualization prerequisites.
+    Doctor(self_cmd::DoctorArgs),
+
     /// Manage the msb installation.
     #[command(name = "self")]
     Self_(self_cmd::SelfArgs),
@@ -169,9 +182,7 @@ struct CommandHelpLine {
 }
 
 /// ANSI styling state for custom top-level help.
-struct HelpStyles {
-    enabled: bool,
-}
+struct HelpStyles {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -180,44 +191,26 @@ struct HelpStyles {
 impl HelpStyles {
     /// Detect whether custom help should include ANSI styling.
     fn detect() -> Self {
-        Self {
-            enabled: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
-        }
+        Self {}
     }
 
     /// Style a help heading like clap's configured header style.
     fn header(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
-        format!("\x1b[1;33m{value}\x1b[0m")
+        style(value).yellow().bold().to_string()
     }
 
     /// Style a command or flag literal like clap's configured literal style.
     fn literal(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
-        format!("\x1b[1;34m{value}\x1b[0m")
+        style(value).blue().bold().to_string()
     }
 
     /// Add light styling to the default clap help fragments we preserve.
     fn style_default_help_fragment(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
         value.replacen("Usage:", &self.header("Usage:"), 1)
     }
 
     /// Style alias annotations in the same literal color as command names.
     fn style_aliases(&self, value: &str) -> String {
-        if !self.enabled {
-            return value.to_string();
-        }
-
         let Some((help, aliases)) = value.split_once(" [aliases: ") else {
             return value.to_string();
         };
@@ -283,7 +276,7 @@ fn main() {
             // Honor TTY detection + NO_COLOR; we set `ansi` explicitly
             // since with_ansi(true) overrides tracing-subscriber's
             // built-in detection.
-            let ansi = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
             match run_async_command_anyhow(command, log_level) {
                 Ok(()) => 0,
@@ -447,8 +440,27 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if err.chain().any(|cause| {
+        cause
+            .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
+            .is_some()
+    }) {
+        return 1;
+    }
     if let Some((name, boot_err)) = find_boot_start_in_chain(err) {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
+        return 1;
+    }
+    #[cfg(windows)]
+    if let Some(setup_err) = find_windows_host_setup_in_chain(err) {
+        let cause = setup_err.cause();
+        let hints = setup_err.hints();
+        let mut lines = Vec::with_capacity(hints.len() + 1);
+        lines.push(microsandbox_cli::ui::ErrorLine::Cause(&cause));
+        for hint in &hints {
+            lines.push(microsandbox_cli::ui::ErrorLine::Hint(hint));
+        }
+        microsandbox_cli::ui::error_with_lines(setup_err.title(), &lines);
         return 1;
     }
     if find_unsupported_feature_in_chain(err) {
@@ -478,6 +490,25 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
     }
     microsandbox_cli::ui::error(&err.to_string());
     1
+}
+
+/// Walk the chain looking for a Windows host setup failure.
+#[cfg(windows)]
+fn find_windows_host_setup_in_chain(
+    err: &anyhow::Error,
+) -> Option<microsandbox::setup::WindowsHostSetupError> {
+    for cause in err.chain() {
+        if let Some(microsandbox::MicrosandboxError::WindowsHostSetup(setup_err)) =
+            cause.downcast_ref::<microsandbox::MicrosandboxError>()
+        {
+            return Some(setup_err.clone());
+        }
+        if let Some(setup_err) = cause.downcast_ref::<microsandbox::setup::WindowsHostSetupError>()
+        {
+            return Some(setup_err.clone());
+        }
+    }
+    None
 }
 
 /// Walk the anyhow chain looking for a `MicrosandboxError::BootStart`.
@@ -562,6 +593,11 @@ fn run_async_command_anyhow(
         // reaper here.
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
+            Commands::SchemaBaseline(args) => self_cmd::run_schema_baseline(args),
+            #[cfg(windows)]
+            Commands::WindowsSelfDowngradeSwap(args) => {
+                self_cmd::run_windows_self_downgrade_swap(args).await
+            }
 
             Commands::Run(args) => run::run(args, log_level).await,
             Commands::Create(args) => create::run(args, log_level).await,
@@ -588,7 +624,27 @@ fn run_async_command_anyhow(
             Commands::Snapshot(args) => snapshot::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
+            Commands::Doctor(args) => self_cmd::run_doctor(args),
             Commands::Self_(args) => self_cmd::run(args).await,
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_windows_host_setup_error_in_anyhow_chain() {
+        let source = microsandbox::setup::WindowsHostSetupError::HypervisorNotPresent;
+        let err = anyhow::Error::new(microsandbox::MicrosandboxError::WindowsHostSetup(
+            source.clone(),
+        ))
+        .context("starting sandbox");
+
+        let found =
+            find_windows_host_setup_in_chain(&err).expect("setup error should be in the chain");
+
+        assert_eq!(found, source);
+    }
 }

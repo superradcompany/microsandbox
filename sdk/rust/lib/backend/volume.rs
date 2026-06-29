@@ -73,6 +73,7 @@ pub struct VolumeCloudState {
 }
 
 /// Backend-private state behind [`VolumeHandle`] — the lightweight DB-row view.
+#[derive(Clone)]
 pub enum VolumeHandleInner {
     /// Local persisted volume handle.
     Local(VolumeHandleLocalState),
@@ -81,6 +82,7 @@ pub enum VolumeHandleInner {
 }
 
 /// Local handle state. Snapshot of the database row.
+#[derive(Clone)]
 pub struct VolumeHandleLocalState {
     /// SQLite row id for this volume.
     pub db_id: i32,
@@ -107,6 +109,7 @@ pub struct VolumeHandleLocalState {
 /// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
 ///
 /// Placeholder shape — populated when cloud volumes ship in Phase 6.
+#[derive(Clone)]
 pub struct VolumeHandleCloudState {
     /// Server-side UUID.
     pub id: String,

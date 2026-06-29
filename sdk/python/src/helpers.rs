@@ -460,6 +460,7 @@ fn apply_mount(
         .transpose()?;
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
         Ok(builder.volume(&guest_path, |v| {
             let mut m = v.bind(&bind_path);
             if readonly {
@@ -479,6 +480,9 @@ fn apply_mount(
             }
             if let Some(p) = host_perms {
                 m = m.host_permissions(p);
+            }
+            if let Some(quota_mib) = quota_mib {
+                m = m.quota(quota_mib);
             }
             m
         }))

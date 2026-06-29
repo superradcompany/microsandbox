@@ -4,9 +4,10 @@
 //! detail views, and styled messages. All ephemeral output goes to stderr;
 //! final data output goes to stdout.
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     io::IsTerminal,
-    os::fd::AsRawFd,
     time::{Duration, Instant},
 };
 
@@ -37,16 +38,24 @@ pub struct Spinner {
 ///
 /// Prevents stray keypresses (e.g. Enter) from injecting newlines that
 /// desync indicatif's cursor tracking, which causes ghost lines.
+#[cfg(unix)]
 struct EchoGuard {
     original: libc::termios,
     fd: i32,
 }
+
+#[cfg(windows)]
+struct EchoGuard;
 
 /// Minimal table renderer with column alignment.
 pub struct Table {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
 }
+
+/// Marker error for commands that already rendered a styled error block.
+#[derive(Debug)]
+pub struct AlreadyRenderedError;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -119,6 +128,18 @@ impl Spinner {
         }
     }
 
+    /// Finish with failure. Shows `✗ <label> <target>` in the same completion
+    /// format as [`finish_success`](Self::finish_success), in red.
+    pub fn finish_fail(self, label: &str) {
+        if let Some(pb) = self.pb {
+            pb.finish_and_clear();
+        }
+
+        if !self.quiet {
+            eprintln!("   {} {:<12} {}", style("✗").red(), label, self.target);
+        }
+    }
+
     /// Finish and clear entirely — no output remains on screen.
     ///
     /// Used on both success and failure paths: errors are presented by
@@ -133,6 +154,7 @@ impl Spinner {
 
 impl EchoGuard {
     /// Disable terminal echo on stdin. Returns `None` if stdin is not a TTY.
+    #[cfg(unix)]
     fn acquire() -> Option<Self> {
         if !std::io::stdin().is_terminal() {
             return None;
@@ -153,8 +175,15 @@ impl EchoGuard {
 
         Some(Self { original, fd })
     }
+
+    /// Disable terminal echo on stdin. Returns `None` if stdin is not a TTY.
+    #[cfg(windows)]
+    fn acquire() -> Option<Self> {
+        None
+    }
 }
 
+#[cfg(unix)]
 impl Drop for EchoGuard {
     fn drop(&mut self) {
         // Flush any keypresses that accumulated while echo was off,
@@ -236,6 +265,18 @@ impl Table {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Display for AlreadyRenderedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("command failed")
+    }
+}
+
+impl std::error::Error for AlreadyRenderedError {}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -248,6 +289,7 @@ pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort: restore echo on stdin if it's a TTY.
+        #[cfg(unix)]
         if std::io::stdin().is_terminal() {
             let fd = std::io::stdin().as_raw_fd();
             let mut termios: libc::termios = unsafe { std::mem::zeroed() };
@@ -315,12 +357,33 @@ pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());
 }
 
+/// Print a warning message with `→`-prefixed context lines.
+///
+/// Mirrors [`error_with_lines`] but with a yellow `warn:` label. As there, the
+/// message and body text render uncolored; only the `→` bullet is dim.
+pub fn warn_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
+    eprintln!("{} {msg}", style("warn:").yellow().bold());
+    for line in lines {
+        let text = match line {
+            ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
+        };
+        eprintln!("  {} {}", style("→").dim(), text);
+    }
+}
+
 /// Print a one-shot success action to stderr.
 ///
 /// Follows the same format as spinner completions:
 /// `   ✓ {verb:<12} {target}`
 pub fn success(verb: &str, target: &str) {
     eprintln!("   {} {:<12} {}", style("✓").green(), verb, target);
+}
+
+/// Print a one-shot failure action to stderr, mirroring [`success`].
+///
+/// Same `   ✗ {label:<12} {detail}` shape as a spinner failure completion.
+pub fn failure(label: &str, detail: &str) {
+    eprintln!("   {} {:<12} {}", style("✗").red(), label, detail);
 }
 
 /// Format a sandbox status with appropriate color.

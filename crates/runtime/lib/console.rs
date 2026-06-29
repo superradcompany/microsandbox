@@ -7,14 +7,28 @@
 //!
 //! [`SharedState`]: microsandbox_network::shared::SharedState
 
+#[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(windows)]
+use std::time::Duration;
 
 use crossbeam_queue::ArrayQueue;
 use microsandbox_utils::wake_pipe::WakePipe;
+#[cfg(unix)]
 use msb_krun::ConsolePortBackend;
+#[cfg(windows)]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -22,6 +36,12 @@ use msb_krun::ConsolePortBackend;
 
 /// Default ring buffer capacity (number of byte-chunk entries).
 const DEFAULT_QUEUE_CAPACITY: usize = 2048;
+
+#[cfg(windows)]
+const NAMED_PIPE_BRIDGE_BUFFER_SIZE: usize = 8192;
+
+#[cfg(windows)]
+const NAMED_PIPE_BRIDGE_TX_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -55,11 +75,18 @@ pub struct ConsoleSharedState {
 /// both via `&self`, so all operations are lock-free through the underlying
 /// `ArrayQueue`.
 pub struct AgentConsoleBackend {
+    #[cfg(unix)]
     shared: Arc<ConsoleSharedState>,
     /// Leftover bytes from a previous read that didn't fit in the caller's
     /// buffer. Protected by a Mutex because `read(&self)` takes `&self`.
     /// Only the RX thread calls `read`, so contention is zero.
+    #[cfg(unix)]
     pending: Mutex<VecDeque<u8>>,
+}
+
+#[cfg(windows)]
+pub(crate) struct AgentConsolePipeBridge {
+    task: tokio::task::JoinHandle<()>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -86,10 +113,45 @@ impl ConsoleSharedState {
 impl AgentConsoleBackend {
     /// Create a new backend from shared state.
     pub fn new(shared: Arc<ConsoleSharedState>) -> Self {
-        Self {
-            shared,
-            pending: Mutex::new(VecDeque::new()),
+        #[cfg(unix)]
+        {
+            Self {
+                shared,
+                pending: Mutex::new(VecDeque::new()),
+            }
         }
+
+        #[cfg(windows)]
+        {
+            let _ = shared;
+            Self {}
+        }
+    }
+}
+
+#[cfg(windows)]
+impl AgentConsolePipeBridge {
+    pub(crate) fn spawn(
+        pipe_name: impl Into<OsString>,
+        shared: Arc<ConsoleSharedState>,
+        handle: &tokio::runtime::Handle,
+    ) -> std::io::Result<Self> {
+        let pipe_name = pipe_name.into();
+        let server = {
+            let _guard = handle.enter();
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .pipe_mode(PipeMode::Byte)
+                .create(&pipe_name)?
+        };
+
+        let task = handle.spawn(async move {
+            if let Err(error) = run_agent_console_pipe_bridge(server, shared).await {
+                tracing::warn!(error = %error, "agent console named-pipe bridge stopped");
+            }
+        });
+
+        Ok(Self { task })
     }
 }
 
@@ -103,6 +165,14 @@ impl Default for ConsoleSharedState {
     }
 }
 
+#[cfg(windows)]
+impl Drop for AgentConsolePipeBridge {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(unix)]
 impl ConsolePortBackend for AgentConsoleBackend {
     /// Read bytes destined for the guest (host → guest).
     ///
@@ -165,6 +235,85 @@ impl ConsolePortBackend for AgentConsoleBackend {
     }
 }
 
+#[cfg(windows)]
+async fn run_agent_console_pipe_bridge(
+    server: NamedPipeServer,
+    shared: Arc<ConsoleSharedState>,
+) -> std::io::Result<()> {
+    server.connect().await?;
+    tracing::debug!("agent console named-pipe bridge connected");
+
+    let (reader, writer) = tokio::io::split(server);
+    let reader_shared = Arc::clone(&shared);
+    let mut reader_task =
+        tokio::spawn(async move { bridge_guest_to_host(reader, reader_shared).await });
+    let mut writer_task = tokio::spawn(async move { bridge_host_to_guest(writer, shared).await });
+
+    tokio::select! {
+        result = &mut reader_task => {
+            writer_task.abort();
+            result.map_err(std::io::Error::other)?
+        }
+        result = &mut writer_task => {
+            reader_task.abort();
+            result.map_err(std::io::Error::other)?
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn bridge_guest_to_host(
+    mut reader: tokio::io::ReadHalf<NamedPipeServer>,
+    shared: Arc<ConsoleSharedState>,
+) -> std::io::Result<()> {
+    let mut buf = vec![0u8; NAMED_PIPE_BRIDGE_BUFFER_SIZE];
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        push_queue_lossless(&shared.tx_ring, buf[..n].to_vec()).await;
+        shared.tx_wake.wake();
+    }
+}
+
+#[cfg(windows)]
+async fn bridge_host_to_guest(
+    mut writer: tokio::io::WriteHalf<NamedPipeServer>,
+    shared: Arc<ConsoleSharedState>,
+) -> std::io::Result<()> {
+    loop {
+        let mut wrote = false;
+        while let Some(chunk) = shared.rx_ring.pop() {
+            writer.write_all(&chunk).await?;
+            wrote = true;
+        }
+
+        if wrote {
+            writer.flush().await?;
+            continue;
+        }
+
+        shared.rx_wake.drain();
+        tokio::time::sleep(NAMED_PIPE_BRIDGE_TX_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(windows)]
+async fn push_queue_lossless(queue: &ArrayQueue<Vec<u8>>, mut chunk: Vec<u8>) {
+    loop {
+        match queue.push(chunk) {
+            Ok(()) => return,
+            Err(returned) => {
+                chunk = returned;
+                tokio::time::sleep(NAMED_PIPE_BRIDGE_TX_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -173,6 +322,7 @@ impl ConsolePortBackend for AgentConsoleBackend {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn backend_write_and_read_roundtrip() {
         let shared = Arc::new(ConsoleSharedState::new());
@@ -195,6 +345,7 @@ mod tests {
         assert_eq!(&buf[..n], b"world");
     }
 
+    #[cfg(unix)]
     #[test]
     fn backend_read_empty_returns_would_block() {
         let shared = Arc::new(ConsoleSharedState::new());
@@ -205,6 +356,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
     }
 
+    #[cfg(unix)]
     #[test]
     fn backend_write_full_returns_would_block() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(1));
@@ -217,6 +369,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
     }
 
+    #[cfg(unix)]
     #[test]
     fn backend_read_drains_rx_wake_pipe() {
         let shared = Arc::new(ConsoleSharedState::new());
@@ -241,5 +394,52 @@ mod tests {
         pollfd.revents = 0;
         let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
         assert_eq!(ret, 0, "wake pipe should be drained by read()");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn named_pipe_bridge_exchanges_agent_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let pipe_name = unique_named_pipe("console-bridge");
+        let shared = Arc::new(ConsoleSharedState::new());
+        let _bridge = AgentConsolePipeBridge::spawn(
+            &pipe_name,
+            Arc::clone(&shared),
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let mut client = ClientOptions::new().open(&pipe_name).unwrap();
+
+        client.write_all(b"guest-ready").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(bytes) = shared.tx_ring.pop() {
+                    assert_eq!(bytes, b"guest-ready");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shared.rx_ring.push(b"host-ack".to_vec()).unwrap();
+        shared.rx_wake.wake();
+
+        let mut buf = [0u8; 8];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"host-ack");
+    }
+
+    #[cfg(windows)]
+    fn unique_named_pipe(name: &str) -> String {
+        let id =
+            std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!(r"\\.\pipe\msb-runtime-{name}-{}-{id}", std::process::id())
     }
 }

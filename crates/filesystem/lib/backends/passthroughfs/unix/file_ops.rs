@@ -50,6 +50,13 @@ pub(crate) fn do_open(
         return Err(platform::erofs());
     }
 
+    // Snapshot the quota baseline before any write-intent open (which may carry
+    // O_TRUNC). This precedes the file's first write, so the baseline reflects
+    // pre-guest-write state. Read-only opens never trigger the walk.
+    if open_flags_mutate(open_flags) {
+        fs.quota_ensure_baseline();
+    }
+
     // Writeback cache: kernel may issue reads on O_WRONLY fds for cache coherency,
     // so widen to O_RDWR. Strip O_APPEND because it races with the kernel's cached
     // write position.
@@ -138,9 +145,14 @@ pub(crate) fn do_write(
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
     let f = data.file.read().unwrap();
-    let written = r.read_to(&f, size as usize, offset)?;
 
     let fd = f.as_raw_fd();
+    // Charge the quota for any growth past EOF before writing, so an
+    // over-budget write is refused with ENOSPC rather than hitting the disk.
+    fs.quota_charge_to(fd, offset.saturating_add(size as u64))?;
+
+    let written = r.read_to(&f, size as usize, offset)?;
+
     if kill_priv {
         if fs.cfg.xattr_enabled() {
             if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {

@@ -37,8 +37,12 @@ pub struct RunArgs {
     pub detach: bool,
 
     /// Allocate a pseudo-terminal (enables colors, line editing).
-    #[arg(short = 't', long)]
+    #[arg(short = 't', long, conflicts_with = "no_tty")]
     pub tty: bool,
+
+    /// Disable pseudo-terminal allocation and run non-interactively.
+    #[arg(long = "no-tty", conflicts_with = "tty")]
+    pub no_tty: bool,
 
     /// Kill the command after this duration (e.g. 30s, 5m, 1h).
     #[arg(long)]
@@ -130,7 +134,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = std::io::stdin().is_terminal();
+    let interactive =
+        super::common::use_interactive_tty(std::io::stdin().is_terminal(), args.no_tty);
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) =
@@ -219,7 +224,8 @@ async fn run_new(
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = std::io::stdin().is_terminal();
+    let interactive =
+        super::common::use_interactive_tty(std::io::stdin().is_terminal(), args.no_tty);
 
     let (cmd, cmd_args) =
         super::common::resolve_command(sandbox.config(), args.command, interactive)?;
@@ -357,10 +363,11 @@ fn warn_detached_command_ignored(name: &str, args: &RunArgs) {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     use super::*;
 
-    #[derive(Parser)]
+    #[derive(Debug, Parser)]
     struct TestCli {
         #[command(flatten)]
         args: RunArgs,
@@ -368,6 +375,38 @@ mod tests {
 
     fn parse_run_args(args: &[&str]) -> RunArgs {
         TestCli::parse_from(std::iter::once("msb").chain(args.iter().copied())).args
+    }
+
+    #[test]
+    fn no_tty_parses_after_image_before_command_delimiter() {
+        let args = parse_run_args(&[
+            "-q",
+            "python:3-alpine",
+            "--no-tty",
+            "--",
+            "python3",
+            "-c",
+            "print('ok')",
+        ]);
+
+        assert!(args.no_tty);
+        assert_eq!(args.image.as_deref(), Some("python:3-alpine"));
+        assert_eq!(
+            args.command,
+            vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "print('ok')".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn no_tty_conflicts_with_tty() {
+        let err =
+            TestCli::try_parse_from(["msb", "--tty", "--no-tty", "python:3-alpine"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

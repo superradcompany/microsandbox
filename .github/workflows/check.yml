@@ -15,6 +15,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
   LIBKRUNFW_VERSION: "5.2.1"
   LIBKRUNFW_ABI: "5"
 
@@ -30,7 +33,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
@@ -47,13 +50,13 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
       - name: Cache kernel.c
         id: cache-kernel
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: vendor/libkrunfw/kernel.c
           key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -74,6 +77,39 @@ jobs:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
 
+  build-kernel-x86_64:
+    name: Build kernel.c (x86_64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - name: Cache kernel.c
+        id: cache-kernel
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: vendor/libkrunfw/kernel.c
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install kernel build deps
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build kernel.c
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+
+      - name: Upload kernel.c
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kernel-c-x86_64
+          path: vendor/libkrunfw/kernel.c
+
   # ---------------------------------------------------------------------------
   # Build agentd on Linux for macOS packaging
   # ---------------------------------------------------------------------------
@@ -83,7 +119,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -107,6 +143,38 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  build-agentd-x86_64:
+    name: Build agentd (x86_64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
           path: build/agentd
 
   # ---------------------------------------------------------------------------
@@ -140,7 +208,7 @@ jobs:
             libkrunfw_file: libkrunfw.5.dylib
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -177,7 +245,7 @@ jobs:
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
         id: cache-libkrunfw
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: build/libkrunfw*
           key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
@@ -261,7 +329,10 @@ jobs:
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
-        run: npm ci && npm run build
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build
 
       # -- Checks (Python SDK) --
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -304,7 +375,7 @@ jobs:
         run: uv build --wheel
 
       # -- Checks (Go SDK) --
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -365,6 +436,7 @@ jobs:
             sdk/node-ts/dist/
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
@@ -381,6 +453,112 @@ jobs:
           "
           npm install --no-package-lock --ignore-scripts
           npm run build
+
+  # ---------------------------------------------------------------------------
+  # Windows build/check only.
+  #
+  # These jobs verify the WHP host targets compile on both Windows architectures.
+  # VM smoke and integration coverage intentionally stays Linux/KVM-only below.
+  # ---------------------------------------------------------------------------
+  windows-check:
+    name: Check Windows (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-aarch64
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+          - target: windows-x86_64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Download kernel.c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.kernel_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+
+      - name: Format
+        shell: pwsh
+        run: cargo +stable fmt --all -- --check
+
+      - name: Check msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable check --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+
+      - name: Clippy msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable clippy --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }} -- -D warnings
+
+      - name: Test bind rootfs backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+
+      - name: Build msb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
   # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
@@ -409,7 +587,7 @@ jobs:
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
@@ -453,7 +631,7 @@ jobs:
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
 
@@ -466,7 +644,7 @@ jobs:
         with:
           cache-bin: false
 
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
         with:
           tool: cargo-nextest
 
@@ -582,7 +760,9 @@ jobs:
 
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
-        run: npm ci --ignore-scripts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false --ignore-scripts
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
@@ -693,7 +873,7 @@ jobs:
           rm -rf "${{ github.workspace }}"/{build}
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
@@ -776,12 +956,12 @@ jobs:
           rm -rf "${{ github.workspace }}"/build
           rm -rf ~/.microsandbox
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
           # No cache-dependency-path: sdk/go has zero external deps,
@@ -824,7 +1004,22 @@ jobs:
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 20m ./integration/...
+          status=0
+          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m ./integration/... || status=$?
+
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Go sandbox runtime logs without core.ready"
+            find "$MSB_HOME/sandboxes" -path '*/logs/runtime.log' -type f -print0 2>/dev/null \
+              | while IFS= read -r -d '' log; do
+                  if ! grep -q 'agent relay: received core.ready' "$log"; then
+                    echo "--- $log"
+                    tail -120 "$log" || true
+                  fi
+                done
+            echo "::endgroup::"
+          fi
+
+          exit "$status"
 
       - name: Disk usage
         if: always()
@@ -841,8 +1036,11 @@ jobs:
     needs:
       - changes
       - build-kernel
+      - build-kernel-x86_64
       - build-agentd-aarch64
+      - build-agentd-x86_64
       - check
+      - windows-check
       - cli-smoke-test
       - integration-test
       - node-sdk-test

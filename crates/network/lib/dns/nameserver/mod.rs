@@ -10,25 +10,34 @@
 //!    `SystemConfiguration` dynamic store (`configd`'s view), falling
 //!    back to `/etc/resolv.conf` only if the store is unavailable or
 //!    empty; VPN + split-DNS setups leave the file stale. On Linux
-//!    `/etc/resolv.conf` is authoritative.
+//!    `/etc/resolv.conf` is authoritative. On Windows this is the IP
+//!    Helper adapter DNS server list.
 
 pub mod parse;
 #[cfg(target_os = "macos")]
 pub(crate) mod scdynamicstore;
+#[cfg(windows)]
+pub(crate) mod windows;
 
 pub use parse::{Nameserver, ParseNameserverError};
 
-use std::net::{IpAddr, SocketAddr};
+#[cfg(not(windows))]
+use std::net::IpAddr;
+use std::net::SocketAddr;
+#[cfg(not(windows))]
 use std::path::Path;
 
+#[cfg(not(windows))]
 use resolv_conf::Config as ResolvConfig;
 
 /// DNS port.
+#[cfg(not(windows))]
 const DNS_PORT: u16 = 53;
 
 /// Path to the host resolver configuration. Used as a fallback when
 /// explicit nameservers are not configured and — on macOS — when
 /// SCDynamicStore is unavailable.
+#[cfg(not(windows))]
 const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 /// Resolve a list of [`Nameserver`]s to concrete `SocketAddr`s.
@@ -67,12 +76,22 @@ pub(super) async fn resolve_nameservers(
 /// the dynamic store is unavailable or reports no servers.
 ///
 /// On Linux the file is authoritative.
+///
+/// On Windows the IP Helper API is authoritative.
 pub(super) async fn read_host_dns_servers() -> std::io::Result<Vec<SocketAddr>> {
-    #[cfg(target_os = "macos")]
-    if let Some(servers) = try_read_scdynamicstore() {
-        return Ok(servers);
+    #[cfg(windows)]
+    {
+        self::windows::read_dns_servers()
     }
-    read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await
+
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(servers) = try_read_scdynamicstore() {
+            return Ok(servers);
+        }
+        read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await
+    }
 }
 
 /// Try to read nameservers from the macOS SystemConfiguration dynamic
@@ -109,6 +128,7 @@ fn try_read_scdynamicstore() -> Option<Vec<SocketAddr>> {
 /// as `SocketAddr`s on port 53. Uses the same parser as hickory-resolver
 /// does internally (`resolv-conf` crate), but without pulling hickory's
 /// stub-resolver machinery along with it.
+#[cfg(not(windows))]
 async fn read_resolv_conf(path: &Path) -> std::io::Result<Vec<SocketAddr>> {
     let bytes = tokio::fs::read(path).await?;
     let cfg = ResolvConfig::parse(&bytes)
@@ -124,7 +144,7 @@ async fn read_resolv_conf(path: &Path) -> std::io::Result<Vec<SocketAddr>> {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 

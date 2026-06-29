@@ -1,0 +1,17 @@
+{
+  "name": "@superradcompany/microsandbox-win32-arm64-msvc",
+  "version": "0.6.1",
+  "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Windows arm64.",
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "main": "microsandbox.win32-arm64-msvc.node",
+  "files": [
+    "microsandbox.win32-arm64-msvc.node",
+    "bin/msb.exe",
+    "lib/libkrunfw.dll"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 22"
+  }
+}

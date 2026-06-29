@@ -129,6 +129,49 @@ pub fn convert_entry(entry: microsandbox::logs::LogEntry) -> PyLogEntry {
     }
 }
 
+/// Build a [`microsandbox::logs::LogOptions`] from the keyword args the
+/// Python snapshot-log methods accept.
+pub fn parse_log_options(
+    tail: Option<usize>,
+    since_ms: Option<f64>,
+    until_ms: Option<f64>,
+    sources: Option<Vec<String>>,
+) -> PyResult<microsandbox::logs::LogOptions> {
+    use microsandbox::logs::{LogOptions, LogSource};
+
+    let mut opts = LogOptions {
+        tail,
+        since: since_ms.and_then(ms_to_datetime),
+        until: until_ms.and_then(ms_to_datetime),
+        sources: Vec::new(),
+    };
+    if let Some(src) = sources {
+        for s in src {
+            match s.as_str() {
+                "stdout" => opts.sources.push(LogSource::Stdout),
+                "stderr" => opts.sources.push(LogSource::Stderr),
+                "output" => opts.sources.push(LogSource::Output),
+                "system" => opts.sources.push(LogSource::System),
+                "all" => {
+                    opts.sources = vec![
+                        LogSource::Stdout,
+                        LogSource::Stderr,
+                        LogSource::Output,
+                        LogSource::System,
+                    ];
+                }
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown log source {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(opts)
+}
+
 /// Build a [`microsandbox::logs::LogStreamOptions`] from the keyword
 /// args the Python method accepts. `since_ms` and `from_cursor` are
 /// mutually exclusive.
@@ -189,66 +232,6 @@ pub fn parse_log_stream_options(
         until: until_ms.and_then(ms_to_datetime),
         follow,
     })
-}
-
-/// Open a log stream against the named sandbox and wrap it as a
-/// `PyLogStream`. Shared between `Sandbox.log_stream` and
-/// `SandboxHandle.log_stream`.
-pub async fn open_log_stream(
-    name: &str,
-    opts: microsandbox::logs::LogStreamOptions,
-) -> PyResult<PyLogStream> {
-    let stream = microsandbox::logs::log_stream(name, &opts)
-        .await
-        .map_err(to_py_err)?;
-    Ok(PyLogStream::new(stream))
-}
-
-/// Read captured logs for a sandbox by name. Filters are encoded as a
-/// `LogOptions` Rust struct on the caller's side.
-pub fn read_logs_blocking(
-    name: &str,
-    tail: Option<usize>,
-    since_ms: Option<f64>,
-    until_ms: Option<f64>,
-    sources: Option<Vec<String>>,
-) -> PyResult<Vec<PyLogEntry>> {
-    use microsandbox::logs::{LogOptions, LogSource};
-
-    let mut opts = LogOptions {
-        tail,
-        since: since_ms.and_then(ms_to_datetime),
-        until: until_ms.and_then(ms_to_datetime),
-        sources: Vec::new(),
-    };
-    if let Some(src) = sources {
-        for s in src {
-            match s.as_str() {
-                "stdout" => opts.sources.push(LogSource::Stdout),
-                "stderr" => opts.sources.push(LogSource::Stderr),
-                "output" => opts.sources.push(LogSource::Output),
-                "system" => opts.sources.push(LogSource::System),
-                "all" => {
-                    opts.sources = vec![
-                        LogSource::Stdout,
-                        LogSource::Stderr,
-                        LogSource::Output,
-                        LogSource::System,
-                    ];
-                }
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown log source {other:?}"
-                    )));
-                }
-            }
-        }
-    }
-
-    let entries = tokio::runtime::Handle::current()
-        .block_on(microsandbox::logs::read_logs(name, &opts))
-        .map_err(to_py_err)?;
-    Ok(entries.into_iter().map(convert_entry).collect())
 }
 
 fn ms_to_datetime(ms: f64) -> Option<chrono::DateTime<chrono::Utc>> {

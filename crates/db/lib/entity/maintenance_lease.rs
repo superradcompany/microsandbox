@@ -15,6 +15,9 @@ use sea_orm::entity::prelude::*;
 /// Primary-key value of the single lifecycle-maintenance lease row.
 pub const SANDBOX_LIFECYCLE_MAINTENANCE: &str = "sandbox_lifecycle_maintenance";
 
+/// Primary-key value of the install-exclusive lease row.
+pub const INSTALL_EXCLUSIVE: &str = "install_exclusive";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -24,7 +27,8 @@ pub const SANDBOX_LIFECYCLE_MAINTENANCE: &str = "sandbox_lifecycle_maintenance";
 #[sea_orm(table_name = "maintenance_lease")]
 pub struct Model {
     /// Lease name. Acts as the primary key; there is one row per kind of
-    /// maintenance work (today only [`SANDBOX_LIFECYCLE_MAINTENANCE`]).
+    /// maintenance work (for example [`SANDBOX_LIFECYCLE_MAINTENANCE`] or
+    /// [`INSTALL_EXCLUSIVE`]).
     #[sea_orm(primary_key, auto_increment = false)]
     pub name: String,
 

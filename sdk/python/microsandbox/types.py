@@ -347,6 +347,8 @@ class MountConfig:
             if self.bind is None:
                 raise ValueError("MountConfig kind=BIND requires bind=...")
             d["bind"] = self.bind
+            if self.quota_mib is not None:
+                d["quota_mib"] = self.quota_mib
         elif self.kind == MountKind.NAMED:
             if self.named is None:
                 raise ValueError("MountConfig kind=NAMED requires named=...")

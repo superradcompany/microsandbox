@@ -1,6 +1,7 @@
 //! `msb install` command — create an executable alias for `msb run`.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -129,12 +130,8 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
         validate_mount_named_spec(mount)?;
     }
 
-    let alias_path = bin_dir.join(alias_name);
-
-    // Check for conflicts.
-    if alias_path.exists() && !args.force {
-        anyhow::bail!("alias '{alias_name}' already exists (use --force to overwrite)");
-    }
+    let alias_path = alias_path(&bin_dir, alias_name);
+    prepare_alias_path(&bin_dir, alias_name, args.force)?;
 
     // Pre-pull the image so the alias is ready to use immediately.
     if !no_pull {
@@ -149,12 +146,16 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // Write and make executable.
     fs::write(&alias_path, &script)?;
+    #[cfg(unix)]
     fs::set_permissions(&alias_path, fs::Permissions::from_mode(0o755))?;
 
     ui::success("Installed", alias_name);
 
     // PATH hint.
     if !is_in_path(&bin_dir) {
+        #[cfg(windows)]
+        eprintln!("  Add to your user PATH:\n    {}", bin_dir.display());
+        #[cfg(not(windows))]
         eprintln!(
             "  Add to your shell profile:\n    export PATH=\"{}:$PATH\"",
             bin_dir.display()
@@ -179,8 +180,8 @@ fn validate_alias_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         anyhow::bail!("alias name cannot be empty");
     }
-    if name.contains('/') || name.contains("..") {
-        anyhow::bail!("alias name must not contain '/' or '..'");
+    if name.contains('/') || name.contains('\\') || name.contains(':') || name.contains("..") {
+        anyhow::bail!("alias name must not contain '/', '\\', ':', or '..'");
     }
 
     const RESERVED: &[&str] = &["msb", "agentd"];
@@ -205,6 +206,7 @@ fn derive_name(image: &str) -> &str {
 }
 
 /// Shell-quote a string, using single quotes only when necessary.
+#[cfg(not(windows))]
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -218,6 +220,19 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// Quote an argument for the generated Windows command shim.
+#[cfg(windows)]
+fn cmd_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    // Batch files expand `%...%` before invoking the command. Doubling
+    // percent signs preserves literal env values and command arguments.
+    let escaped = s.replace('%', "%%").replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
 /// Strip control characters for safe embedding in shell comments.
 fn sanitize_comment(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
@@ -225,20 +240,28 @@ fn sanitize_comment(s: &str) -> String {
 
 /// Build the shell script content for an alias.
 fn build_script(image: &str, alias_name: &str, args: &InstallArgs) -> String {
-    if args.tmp {
-        build_tmp_script(image, args)
-    } else {
-        build_persisted_script(image, alias_name, args)
+    #[cfg(windows)]
+    {
+        build_cmd_script(image, alias_name, args)
+    }
+    #[cfg(not(windows))]
+    {
+        if args.tmp {
+            build_tmp_script(image, args)
+        } else {
+            build_persisted_script(image, alias_name, args)
+        }
     }
 }
 
 /// Build an ephemeral (--tmp) alias script.
 ///
 /// Each invocation creates a fresh sandbox that is removed on exit.
+#[cfg(not(windows))]
 fn build_tmp_script(image: &str, args: &InstallArgs) -> String {
     let mut parts = vec!["exec".to_string(), "msb".to_string(), "run".to_string()];
     parts.push(shell_quote(image));
-    append_resource_options(&mut parts, args);
+    append_resource_options(&mut parts, args, shell_quote);
 
     if !args.command.is_empty() {
         parts.push("--".into());
@@ -265,6 +288,7 @@ fn build_tmp_script(image: &str, args: &InstallArgs) -> String {
 ///
 /// Uses `msb run -n` which creates on first use and reuses on subsequent
 /// invocations. State (installed packages, files, etc.) persists across calls.
+#[cfg(not(windows))]
 fn build_persisted_script(image: &str, sandbox_name: &str, args: &InstallArgs) -> String {
     let mut parts = vec![
         "exec".to_string(),
@@ -274,7 +298,7 @@ fn build_persisted_script(image: &str, sandbox_name: &str, args: &InstallArgs) -
         shell_quote(sandbox_name),
         shell_quote(image),
     ];
-    append_resource_options(&mut parts, args);
+    append_resource_options(&mut parts, args, shell_quote);
 
     if !args.command.is_empty() {
         parts.push("--".into());
@@ -297,47 +321,84 @@ fn build_persisted_script(image: &str, sandbox_name: &str, args: &InstallArgs) -
     script
 }
 
+/// Build a Windows `.cmd` alias shim.
+#[cfg(windows)]
+fn build_cmd_script(image: &str, alias_name: &str, args: &InstallArgs) -> String {
+    let mut parts = vec!["\"%~dp0msb.exe\"".to_string(), "run".to_string()];
+    if !args.tmp {
+        parts.push("-n".to_string());
+        parts.push(cmd_quote(alias_name));
+    }
+    parts.push(cmd_quote(image));
+    append_resource_options(&mut parts, args, cmd_quote);
+
+    if !args.command.is_empty() {
+        parts.push("--".into());
+        for c in &args.command {
+            parts.push(cmd_quote(c));
+        }
+    }
+
+    let mut script = "@echo off\r\n".to_string();
+    script.push_str(&format!("rem {MARKER}\r\n"));
+    script.push_str(&format!("rem # image: {}\r\n", sanitize_comment(image)));
+    script.push_str(if args.tmp {
+        "rem # mode: tmp\r\n"
+    } else {
+        "rem # mode: persisted\r\n"
+    });
+    if !args.command.is_empty() {
+        script.push_str(&format!(
+            "rem # command: {}\r\n",
+            sanitize_comment(&args.command.join(" "))
+        ));
+    }
+    script.push_str(&parts.join(" "));
+    script.push_str("\r\nexit /b %ERRORLEVEL%\r\n");
+    script
+}
+
 /// Append resource/environment options to a command parts list.
-fn append_resource_options(parts: &mut Vec<String>, args: &InstallArgs) {
+fn append_resource_options(parts: &mut Vec<String>, args: &InstallArgs, quote: fn(&str) -> String) {
     if let Some(cpus) = args.cpus {
         parts.push("-c".into());
         parts.push(cpus.to_string());
     }
     if let Some(ref mem) = args.memory {
         parts.push("-m".into());
-        parts.push(shell_quote(mem));
+        parts.push(quote(mem));
     }
     for vol in &args.volume {
         parts.push("-v".into());
-        parts.push(shell_quote(vol));
+        parts.push(quote(vol));
     }
     for mount in &args.mount_dir {
         parts.push("--mount-dir".into());
-        parts.push(shell_quote(mount));
+        parts.push(quote(mount));
     }
     for mount in &args.mount_file {
         parts.push("--mount-file".into());
-        parts.push(shell_quote(mount));
+        parts.push(quote(mount));
     }
     for mount in &args.mount_disk {
         parts.push("--mount-disk".into());
-        parts.push(shell_quote(mount));
+        parts.push(quote(mount));
     }
     for mount in &args.mount_named {
         parts.push("--mount-named".into());
-        parts.push(shell_quote(mount));
+        parts.push(quote(mount));
     }
     if let Some(ref workdir) = args.workdir {
         parts.push("-w".into());
-        parts.push(shell_quote(workdir));
+        parts.push(quote(workdir));
     }
     if let Some(ref shell) = args.shell {
         parts.push("--shell".into());
-        parts.push(shell_quote(shell));
+        parts.push(quote(shell));
     }
     for env_str in &args.env {
         parts.push("-e".into());
-        parts.push(shell_quote(env_str));
+        parts.push(quote(env_str));
     }
 }
 
@@ -359,24 +420,18 @@ fn list_aliases(bin_dir: &Path) -> anyhow::Result<()> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if content.lines().nth(1) != Some(MARKER) {
+            if !is_generated_alias(&content) {
                 continue;
             }
 
-            let name = entry.file_name().to_string_lossy().to_string();
-            let image = content
-                .lines()
-                .find_map(|l| l.strip_prefix("# image: "))
+            let name = display_alias_name(&entry.file_name().to_string_lossy());
+            let image = alias_comment_value(&content, "image: ")
                 .unwrap_or("-")
                 .to_string();
-            let mode = content
-                .lines()
-                .find_map(|l| l.strip_prefix("# mode: "))
+            let mode = alias_comment_value(&content, "mode: ")
                 .unwrap_or("-")
                 .to_string();
-            let command = content
-                .lines()
-                .find_map(|l| l.strip_prefix("# command: "))
+            let command = alias_comment_value(&content, "command: ")
                 .unwrap_or("")
                 .to_string();
 
@@ -394,4 +449,156 @@ fn is_in_path(dir: &Path) -> bool {
     std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).any(|p| p == dir))
         .unwrap_or(false)
+}
+
+/// Return the primary alias path for the current platform.
+pub(super) fn alias_path(bin_dir: &Path, alias_name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        bin_dir.join(format!("{alias_name}.cmd"))
+    }
+    #[cfg(not(windows))]
+    {
+        bin_dir.join(alias_name)
+    }
+}
+
+/// Return every filename that may represent a single alias.
+pub(super) fn alias_candidates(bin_dir: &Path, alias_name: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        vec![
+            bin_dir.join(format!("{alias_name}.cmd")),
+            bin_dir.join(format!("{alias_name}.ps1")),
+            bin_dir.join(alias_name),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![bin_dir.join(alias_name)]
+    }
+}
+
+/// Remove or reject existing files for an alias before writing the new shim.
+fn prepare_alias_path(bin_dir: &Path, alias_name: &str, force: bool) -> anyhow::Result<()> {
+    for path in alias_candidates(bin_dir, alias_name) {
+        if !path.exists() {
+            continue;
+        }
+        if !force {
+            anyhow::bail!("alias '{alias_name}' already exists (use --force to overwrite)");
+        }
+
+        let content = fs::read_to_string(&path)?;
+        if !is_generated_alias(&content) {
+            anyhow::bail!("refusing to overwrite non-msb alias {}", path.display());
+        }
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Return true if a script/shim was generated by `msb install`.
+pub(super) fn is_generated_alias(content: &str) -> bool {
+    content.lines().nth(1).is_some_and(is_marker_line)
+}
+
+/// Extract a generated alias metadata value.
+fn alias_comment_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    content.lines().find_map(|line| {
+        let comment = line
+            .strip_prefix("# ")
+            .or_else(|| line.strip_prefix("rem # "))
+            .or_else(|| line.strip_prefix("REM # "))?;
+        comment.strip_prefix(key)
+    })
+}
+
+/// Return true if a line is the platform marker line.
+fn is_marker_line(line: &str) -> bool {
+    line == MARKER
+        || line
+            .strip_prefix("rem ")
+            .or_else(|| line.strip_prefix("REM "))
+            .is_some_and(|line| line == MARKER)
+}
+
+/// Convert the alias filename shown by the filesystem into the user-facing name.
+fn display_alias_name(file_name: &str) -> String {
+    #[cfg(windows)]
+    {
+        file_name
+            .strip_suffix(".cmd")
+            .or_else(|| file_name.strip_suffix(".ps1"))
+            .unwrap_or(file_name)
+            .to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        file_name.to_string()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    fn args(tmp: bool) -> InstallArgs {
+        InstallArgs {
+            image: Some("alpine".to_string()),
+            name: Some("hello".to_string()),
+            cpus: None,
+            memory: None,
+            volume: Vec::new(),
+            mount_dir: Vec::new(),
+            mount_file: Vec::new(),
+            mount_disk: Vec::new(),
+            mount_named: Vec::new(),
+            workdir: None,
+            shell: None,
+            env: Vec::new(),
+            force: false,
+            no_pull: true,
+            tmp,
+            list: false,
+            command: vec!["echo".to_string(), "alias-ok".to_string()],
+        }
+    }
+
+    #[test]
+    fn detects_posix_generated_alias_marker() {
+        let script = "#!/bin/sh\n# generated by msb install\n# image: alpine\n";
+        assert!(is_generated_alias(script));
+    }
+
+    #[test]
+    fn detects_windows_generated_alias_marker() {
+        let script = "@echo off\r\nrem # generated by msb install\r\nrem # image: alpine\r\n";
+        assert!(is_generated_alias(script));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_alias_path_uses_cmd_extension() {
+        let path = alias_path(Path::new(r"C:\Users\Stephen\.microsandbox\bin"), "hello");
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\Stephen\.microsandbox\bin\hello.cmd")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_build_script_invokes_adjacent_msb_exe() {
+        let args = args(true);
+        let script = build_script("alpine", "hello", &args);
+        assert!(is_generated_alias(&script));
+        assert!(script.contains(r#""%~dp0msb.exe" run "alpine" -- "echo" "alias-ok""#));
+        assert!(script.contains("rem # mode: tmp"));
+    }
 }

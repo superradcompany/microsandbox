@@ -5,12 +5,17 @@
 //! guest sends a frame and [`read_frame()`](NetBackend::read_frame) to deliver
 //! frames back to the guest. Frames flow through [`SharedState`]'s
 //! `tx_ring`/`rx_ring` queues with [`WakePipe`](crate::shared::WakePipe)
-//! notifications. libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
-//! in edge-triggered mode, so reads must drain the wake pipe before returning.
+//! notifications. Unix libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
+//! in edge-triggered mode, while Windows libkrun waits on an event source. Reads
+//! must drain the wake primitive before returning.
 
-use std::{os::fd::RawFd, sync::Arc};
+#[cfg(unix)]
+use std::os::fd::RawFd;
+use std::sync::Arc;
 
 use msb_krun::backends::net::{NetBackend, ReadError, WriteError};
+#[cfg(windows)]
+use msb_krun_utils::event::{EventSource, EventToken};
 
 use crate::shared::SharedState;
 
@@ -36,8 +41,8 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 ///   ethernet frame to `tx_ring`, wakes the smoltcp poll thread.
 /// - **RX path** (`read_frame`): pops a frame from `rx_ring`, prepends a
 ///   zeroed virtio-net header for the guest.
-/// - **Wake fd** (`raw_socket_fd`): returns `rx_wake`'s read end so the
-///   NetWorker's epoll can detect new frames.
+/// - **Wake source**: returns `rx_wake`'s pollable fd on Unix or waitable
+///   event handle on Windows so the NetWorker can detect new frames.
 pub struct SmoltcpBackend {
     shared: Arc<SharedState>,
 }
@@ -62,11 +67,19 @@ impl NetBackend for SmoltcpBackend {
     /// the raw ethernet frame for smoltcp.
     fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
         let ethernet_frame = buf[hdr_len..].to_vec();
-        self.shared.add_tx_bytes(ethernet_frame.len());
-        self.shared
-            .tx_ring
-            .push(ethernet_frame)
-            .map_err(|_| WriteError::NothingWritten)?;
+        let frame_len = ethernet_frame.len();
+
+        if self.shared.tx_ring.push(ethernet_frame).is_err() {
+            // This backend exposes a wake pipe to libkrun, not a real writable
+            // socket. Returning NothingWritten would make the virtio worker
+            // undo the TX pop and wait for write readiness that cannot signal
+            // tx_ring capacity. Treat overflow like a lossy NIC queue instead:
+            // drop the frame and let upper layers retransmit if needed.
+            tracing::debug!("dropping guest network frame because tx_ring is full");
+            return Ok(());
+        }
+
+        self.shared.add_tx_bytes(frame_len);
         self.shared.tx_wake.wake();
         Ok(())
     }
@@ -109,8 +122,15 @@ impl NetBackend for SmoltcpBackend {
     /// File descriptor for NetWorker's epoll. Becomes readable when
     /// `rx_ring` has frames for the guest (i.e. when smoltcp's
     /// `SmoltcpDevice::transmit()` pushes a frame and wakes `rx_wake`).
+    #[cfg(unix)]
     fn raw_socket_fd(&self) -> RawFd {
         self.shared.rx_wake.as_raw_fd()
+    }
+
+    /// Waitable event source for NetWorker on Windows.
+    #[cfg(windows)]
+    fn event_source(&self, token: EventToken) -> EventSource {
+        EventSource::waitable_handle(self.shared.rx_wake.as_raw_handle(), token)
     }
 }
 
@@ -118,7 +138,7 @@ impl NetBackend for SmoltcpBackend {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::Arc;
 
@@ -140,6 +160,39 @@ mod tests {
 
         assert!(shared.push_rx_frame_and_wake(vec![0xcc]));
         assert!(fd_is_readable(backend.raw_socket_fd()));
+    }
+
+    #[test]
+    fn write_frame_enqueues_guest_frame_and_wakes_poll_loop() {
+        let shared = Arc::new(SharedState::new(1));
+        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 3];
+        buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+        backend
+            .write_frame(VIRTIO_NET_HDR_LEN, &mut buf)
+            .expect("accepted frame should be queued");
+
+        assert_eq!(shared.tx_bytes(), 3);
+        assert!(fd_is_readable(shared.tx_wake.as_raw_fd()));
+        assert_eq!(shared.tx_ring.pop(), Some(vec![0xaa, 0xbb, 0xcc]));
+    }
+
+    #[test]
+    fn write_frame_drops_guest_frame_when_tx_ring_is_full() {
+        let shared = Arc::new(SharedState::new(1));
+        shared.tx_ring.push(vec![0x11]).unwrap();
+        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 2];
+        buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb]);
+
+        backend
+            .write_frame(VIRTIO_NET_HDR_LEN, &mut buf)
+            .expect("overflow should not stall the virtio TX queue");
+
+        assert_eq!(shared.tx_bytes(), 0);
+        assert_eq!(shared.tx_ring.pop(), Some(vec![0x11]));
+        assert_eq!(shared.tx_ring.pop(), None);
     }
 
     fn fd_is_readable(fd: RawFd) -> bool {

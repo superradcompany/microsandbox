@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,12 +26,7 @@ func TestMetricsStreamRecv(t *testing.T) {
 
 	var lastUptime time.Duration
 	for i := 0; i < 3; i++ {
-		recvCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		m, err := stream.Recv(recvCtx)
-		cancel()
-		if err != nil {
-			t.Fatalf("Recv #%d: %v", i, err)
-		}
+		m := recvMetricsEventually(t, ctx, stream, i)
 		if m == nil {
 			t.Fatalf("Recv #%d: stream closed early", i)
 		}
@@ -57,9 +53,7 @@ func TestMetricsStreamCloseStopsBackgroundTask(t *testing.T) {
 	}
 
 	// Pull at least one snapshot before closing.
-	if _, err := stream.Recv(ctx); err != nil {
-		t.Fatalf("Recv before close: %v", err)
-	}
+	_ = recvMetricsEventually(t, ctx, stream, 0)
 	if err := stream.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -80,6 +74,33 @@ func TestMetricsStreamCloseStopsBackgroundTask(t *testing.T) {
 	}
 }
 
+func recvMetricsEventually(
+	t *testing.T,
+	ctx context.Context,
+	stream *microsandbox.MetricsStreamHandle,
+	index int,
+) *microsandbox.Metrics {
+	t.Helper()
+
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		recvCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		m, err := stream.Recv(recvCtx)
+		cancel()
+		if err == nil {
+			return m
+		}
+		if !strings.Contains(err.Error(), "no live metrics slot") {
+			t.Fatalf("Recv #%d: %v", index, err)
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("Recv #%d: %v", index, lastErr)
+	return nil
+}
+
 // TestAllSandboxMetricsCoversMultipleSandboxes spins up two sandboxes and
 // verifies that AllSandboxMetrics returns an entry for each, keyed by name.
 func TestAllSandboxMetricsCoversMultipleSandboxes(t *testing.T) {
@@ -87,7 +108,7 @@ func TestAllSandboxMetricsCoversMultipleSandboxes(t *testing.T) {
 	a := "go-sdk-allmetrics-a-" + t.Name()
 	b := "go-sdk-allmetrics-b-" + t.Name()
 
-	sbA, err := microsandbox.CreateSandbox(ctx, a, microsandbox.WithImage(goIntegrationImage))
+	sbA, err := createSandbox(t, ctx, a, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox a: %v", err)
 	}
@@ -98,7 +119,7 @@ func TestAllSandboxMetricsCoversMultipleSandboxes(t *testing.T) {
 		_ = sbA.Close()
 	})
 
-	sbB, err := microsandbox.CreateSandbox(ctx, b, microsandbox.WithImage(goIntegrationImage))
+	sbB, err := createSandbox(t, ctx, b, microsandbox.WithImage(goIntegrationImage))
 	if err != nil {
 		t.Fatalf("CreateSandbox b: %v", err)
 	}

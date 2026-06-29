@@ -13,6 +13,7 @@ mod test_lookup_inode;
 mod test_metadata;
 mod test_name_validation;
 mod test_open_after_unlink;
+mod test_quota;
 mod test_readonly;
 mod test_remove_ops;
 mod test_special_ops;

@@ -262,6 +262,12 @@ pub enum VolumeMount {
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
         host_permissions: HostPermissions,
+        /// Guest-write byte budget in MiB.
+        ///
+        /// Bounds how much the guest may add beyond the directory's existing
+        /// contents. `None` applies the protective default at spawn time; set a
+        /// value to override it.
+        quota_mib: Option<u32>,
     },
 
     /// Mount a named volume into the guest.
@@ -1581,14 +1587,16 @@ impl Serialize for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                quota_mib,
             } => {
-                let mut map = serializer.serialize_map(Some(6))?;
+                let mut map = serializer.serialize_map(Some(7))?;
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
+                map.serialize_entry("quota_mib", quota_mib)?;
                 map.end()
             }
             Self::Named {
@@ -1664,6 +1672,8 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
                 host_permissions: HostPermissions,
+                #[serde(default)]
+                quota_mib: Option<u32>,
             },
             Named {
                 name: String,
@@ -1708,12 +1718,14 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 readonly,
                 stat_virtualization,
                 host_permissions,
+                quota_mib,
             } => Self::Bind {
                 host,
                 guest,
                 options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
+                quota_mib,
             },
             VolumeMountHelper::Named {
                 name,
@@ -1767,6 +1779,7 @@ impl fmt::Debug for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                quota_mib,
             } => f
                 .debug_struct("Bind")
                 .field("host", host)
@@ -1774,6 +1787,7 @@ impl fmt::Debug for VolumeMount {
                 .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
+                .field("quota_mib", quota_mib)
                 .finish(),
             Self::Named {
                 name,

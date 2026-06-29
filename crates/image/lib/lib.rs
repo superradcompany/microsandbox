@@ -26,6 +26,7 @@ pub mod erofs;
 mod error;
 pub mod ext4;
 pub(crate) mod layer;
+pub(crate) mod path_bytes;
 mod platform;
 mod progress;
 mod pull;

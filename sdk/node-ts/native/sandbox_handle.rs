@@ -210,7 +210,12 @@ impl JsSandboxHandle {
     ) -> Result<crate::sandbox::JsLogStream> {
         let rust_opts =
             crate::sandbox::log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        crate::sandbox::spawn_log_stream(self.inner.name(), rust_opts).await
+        let stream = self
+            .inner
+            .log_stream(&rust_opts)
+            .await
+            .map_err(to_napi_error)?;
+        crate::sandbox::spawn_log_stream_from_stream(stream).await
     }
 
     /// Snapshot this (stopped) sandbox under a bare name.

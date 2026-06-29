@@ -43,11 +43,12 @@ Common flags:
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
-| `-p`, `--port` | Publish a port, such as `8000:8000` or `0.0.0.0:8000:8000` |
+| `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
 | `-d`, `--detach` | Boot in the background. Run work later with `msb exec` |
+| `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
 | `--net-rule` | Add a network policy rule |
@@ -56,6 +57,8 @@ Common flags:
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
 
 Use `msb run --help` for the full flag list.
+
+Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
 
 ### Network rule syntax
 
@@ -164,6 +167,7 @@ msb exec devbox -- ls -la /app
 | Flag | Description |
 |------|-------------|
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
+| `--no-tty` | Disable PTY allocation and run non-interactively |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Override working directory |
 | `-u`, `--user` | Run the command as the specified guest user |
@@ -172,7 +176,7 @@ msb exec devbox -- ls -la /app
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
-  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
 </Tip>
 
 ## msb copy
@@ -375,18 +379,35 @@ msb uninstall ubuntu alpine   # Remove multiple
 Manage the msb installation itself.
 
 ```bash
+msb doctor                   # Alias for msb self doctor
+msb doctor --fix             # Try supported host setup fixes
+msb self doctor              # Check runtime and host virtualization prerequisites
+msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
+msb self downgrade 0.6.0      # Downgrade to a supported older release
+msb self downgrade 0.6.0 -y   # Skip downgrade confirmations
 msb self uninstall            # Remove msb (with confirmation prompt)
 msb self uninstall --yes      # Skip confirmation
 ```
 
 | Subcommand | Description |
 |------------|-------------|
+| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
+| `downgrade <version>` | Downgrade msb and compatible local state to an older release. V1 supports targets at or above 0.6.0 and refuses on Windows before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
+
+`msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Before a downgrade rolls back schema, `msb` checks the target release, reads that release's schema baseline, refuses targets below 0.6.0, refuses irreversible migration paths, and blocks the rollback while matching running sandboxes are active. When rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless `--no-backup` is passed. If rollback metadata marks the image cache affected, `msb` purges the cache after schema rollback unless `--keep-cache` is passed. The target binary is always installed fresh and checked with `msb --version` before command links are refreshed.
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
+| `--fix` | `doctor` | Try supported host setup fixes; on Windows this opens an elevated PowerShell prompt to enable Windows Hypervisor Platform without forcing an immediate reboot |
 | `-f`, `--force` | `update` | Re-download even if already on the latest version |
+| `-f`, `--force` | `downgrade` | Accepted for an explicit reinstall request; downgrade always reinstalls the target and this flag does not bypass safety checks |
+| `-y`, `--yes` | `downgrade` | Skip destructive-step confirmations |
+| `--keep-cache` | `downgrade` | Keep the image cache even when rollback metadata marks it affected |
+| `--no-backup` | `downgrade` | Skip the database backup before schema rollback |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |

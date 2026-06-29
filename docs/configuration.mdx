@@ -90,10 +90,12 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 
 All path fields are optional. When `null`, they resolve relative to `home`.
 
+On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings can use escaped backslashes such as `"C:\\Users\\you\\.microsandbox\\lib\\libkrunfw.dll"` or forward slashes such as `"C:/Users/you/.microsandbox/lib/libkrunfw.dll"`.
+
 | Field | Default | Description |
 |-------|---------|-------------|
 | `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |
-| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS) |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows) |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |

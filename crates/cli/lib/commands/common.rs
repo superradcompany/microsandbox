@@ -689,9 +689,7 @@ fn parse_copy_arg(context: &str, spec: &str, kind: CopyKind) -> anyhow::Result<P
 
 /// Parse `SRC:DST` into a host path and guest destination.
 fn parse_patch_src_dst(context: &str, spec: &str) -> anyhow::Result<(PathBuf, String)> {
-    let (src, dst) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{context} must use SRC:DST"))?;
+    let (src, dst) = split_source_guest_spec(context, spec)?;
     if src.is_empty() {
         anyhow::bail!("{context} source path cannot be empty");
     }
@@ -755,6 +753,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -764,10 +763,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     let guest = parsed.guest.to_string();
     let options = parsed.options;
     Ok(builder.volume(guest, move |mut m| {
+        let quota_mib = options.quota_mib;
         m = if is_path {
-            m.bind(&source)
+            let mut b = m.bind(&source);
+            if let Some(q) = quota_mib {
+                b = b.quota(q);
+            }
+            b
         } else {
-            m.named_with(&source, |v| v.ensure_exists())
+            // A named volume routes its quota through the named sub-builder
+            // rather than the bind-only `.quota()`.
+            m.named_with(&source, move |mut v| {
+                v = v.ensure_exists();
+                if let Some(q) = quota_mib {
+                    v = v.quota(q);
+                }
+                v
+            })
         };
         if options.readonly {
             m = m.readonly();
@@ -829,6 +841,7 @@ pub fn apply_explicit_dir_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -932,6 +945,12 @@ pub fn apply_explicit_named_mount(
     {
         anyhow::bail!("mount-named kind=disk does not support quota=...");
     }
+    if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
+        && (parsed.options.stat_virtualization.is_some()
+            || parsed.options.host_permissions.is_some())
+    {
+        anyhow::bail!("mount-named kind=disk does not support stat-virt=... or host-perms=...");
+    }
 
     let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
@@ -953,7 +972,9 @@ pub fn apply_explicit_named_mount(
             }
             v
         });
-        apply_common_mount_options(mount, options)
+        let mut common_options = options;
+        common_options.quota_mib = None;
+        apply_common_mount_options(mount, common_options)
     }))
 }
 
@@ -977,6 +998,9 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     if let Some(hp) = options.host_permissions {
         mount = mount.host_permissions(hp);
     }
+    if let Some(quota) = options.quota_mib {
+        mount = mount.quota(quota);
+    }
     mount
 }
 
@@ -986,9 +1010,7 @@ fn parse_cli_mount_spec<'a>(
     spec: &'a str,
     support: CliMountOptionSupport,
 ) -> anyhow::Result<ParsedCliMountSpec<'a>> {
-    let (source, guest_and_opts) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{context} must be in format source:guest[:options]"))?;
+    let (source, guest_and_opts) = split_source_guest_spec(context, spec)?;
 
     if source.is_empty() {
         anyhow::bail!("{context} source must not be empty");
@@ -1020,6 +1042,42 @@ fn parse_cli_mount_spec<'a>(
         guest,
         options: parse_cli_mount_options(opts, support)?,
     })
+}
+
+/// Split a `SOURCE:/guest[:options]` value without mistaking `C:\...` for the separator.
+fn split_source_guest_spec<'a>(context: &str, spec: &'a str) -> anyhow::Result<(&'a str, &'a str)> {
+    let separator = find_guest_path_separator(spec)
+        .ok_or_else(|| anyhow::anyhow!("{context} must be in format source:/guest[:options]"))?;
+    Ok((&spec[..separator], &spec[separator + 1..]))
+}
+
+/// Find the separator colon immediately before an absolute guest path.
+fn find_guest_path_separator(spec: &str) -> Option<usize> {
+    for (index, byte) in spec.bytes().enumerate() {
+        if byte != b':' {
+            continue;
+        }
+        if is_windows_drive_separator(spec, index) {
+            continue;
+        }
+        if spec[index + 1..].starts_with('/') {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Return true when `index` is the drive colon in a Windows path.
+fn is_windows_drive_separator(spec: &str, index: usize) -> bool {
+    #[cfg(windows)]
+    {
+        microsandbox_utils::is_windows_drive_separator_at(spec, index)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (spec, index);
+        false
+    }
 }
 
 /// Parse public comma-separated mount options.
@@ -1814,7 +1872,7 @@ fn parse_pull_policy(s: &str) -> anyhow::Result<microsandbox::sandbox::PullPolic
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Functions: Command resolution
 //--------------------------------------------------------------------------------------------------
 
 /// Parse a log level string.
@@ -1828,6 +1886,11 @@ fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
         "trace" => Ok(LogLevel::Trace),
         _ => anyhow::bail!("invalid log level: {s} (expected: error, warn, info, debug, trace)"),
     }
+}
+
+/// Return whether this invocation should use the terminal-attached PTY path.
+pub(crate) fn use_interactive_tty(stdin_is_terminal: bool, no_tty: bool) -> bool {
+    stdin_is_terminal && !no_tty
 }
 
 /// Resolve the command to run following OCI semantics.
@@ -1874,6 +1937,26 @@ pub fn resolve_command(
     // Non-interactive with nothing to run.
     ui::warn("no command provided and stdin is not a terminal");
     Ok((None, vec![]))
+}
+
+/// Resolve the command for `msb exec`.
+///
+/// Unlike `msb run`, an explicit `msb exec SANDBOX -- CMD ...` should execute
+/// `CMD` directly. The sandbox's persisted entrypoint describes the original
+/// workload start shape; reapplying it here would turn ordinary maintenance
+/// commands like `msb exec app -- date` into `entrypoint date`.
+pub fn resolve_exec_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+    user_command: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    if !user_command.is_empty() {
+        let mut parts = user_command;
+        let cmd = parts.remove(0);
+        return Ok((Some(cmd), parts));
+    }
+
+    resolve_command(config, user_command, interactive)
 }
 
 /// Resolve the default process from OCI image config.
@@ -1989,7 +2072,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use microsandbox::sandbox::{
-        HostPermissions, MountOptions, Patch, RootfsSource, StatVirtualization, VolumeMount,
+        HostPermissions, MountOptions, Patch, RootfsSource, SandboxConfig, StatVirtualization,
+        VolumeMount,
     };
 
     use super::*;
@@ -2357,6 +2441,37 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(windows)]
+    async fn test_apply_explicit_dir_mount_with_windows_drive_path() {
+        let dir = make_temp_dir("msb-mount-dir-drive");
+        let spec = format!("{}:/work:ro", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                ..
+            } => {
+                assert_eq!(host, dir);
+                assert_eq!(guest, "/work");
+                assert!(options.readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_copy_patch_with_windows_drive_path() {
+        let file = write_temp("fixture");
+        let spec = format!("{}:/guest/fixture", file.display());
+        let (src, dst) = parse_patch_src_dst("--copy-file", &spec).unwrap();
+        assert_eq!(src, file);
+        assert_eq!(dst, "/guest/fixture");
+    }
+
+    #[tokio::test]
     async fn test_apply_explicit_disk_mount() {
         let disk = write_temp("not a real filesystem, just validating config");
         let spec = format!(
@@ -2426,6 +2541,44 @@ mod tests {
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_named_mount_directory_quota() {
+        let mount = build_explicit("cache:/data:quota=1G", apply_explicit_named_mount).await;
+        match mount {
+            VolumeMount::Named { create, .. } => {
+                let create = create.expect("mount-named should ensure the named volume");
+                assert_eq!(
+                    create.mode(),
+                    microsandbox::sandbox::NamedVolumeMode::EnsureExists
+                );
+                assert_eq!(create.kind(), VolumeKind::Directory);
+                assert_eq!(create.quota_mib(), Some(1024));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_explicit_named_mount_disk_rejects_policy_options() {
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,stat-virt=relaxed",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject stat-virt"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not support stat-virt"));
+
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,host-perms=mirror",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject host-perms"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not support stat-virt"));
     }
 
     #[test]
@@ -2563,6 +2716,69 @@ mod tests {
         let builder = SandboxBuilder::new("test").image("alpine");
         let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
         config.spec.mounts.into_iter().next().unwrap()
+    }
+
+    fn command_config(entrypoint: Option<&[&str]>, cmd: Option<&[&str]>) -> SandboxConfig {
+        let mut config = SandboxConfig::default();
+        config.spec.runtime.entrypoint = entrypoint.map(|items| {
+            items
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect::<Vec<_>>()
+        });
+        config.spec.runtime.cmd = cmd.map(|items| {
+            items
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect::<Vec<_>>()
+        });
+        config
+    }
+
+    // --- resolve_command / resolve_exec_command ---
+
+    #[test]
+    fn resolve_command_prepends_entrypoint_to_explicit_run_command() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) =
+            resolve_command(&config, vec!["date".to_string()], false).expect("resolve command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(args, vec!["date".to_string()]);
+    }
+
+    #[test]
+    fn resolve_exec_command_runs_explicit_command_directly() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) = resolve_exec_command(&config, vec!["date".to_string()], false)
+            .expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("date"));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_exec_command_keeps_explicit_command_args() {
+        let config = command_config(Some(&["start"]), None);
+        let (cmd, args) = resolve_exec_command(
+            &config,
+            vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
+            false,
+        )
+        .expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("sh"));
+        assert_eq!(args, vec!["-lc".to_string(), "echo ok".to_string()]);
+    }
+
+    #[test]
+    fn resolve_exec_command_without_explicit_command_uses_image_defaults() {
+        let config = command_config(Some(&["start"]), Some(&["default"]));
+        let (cmd, args) =
+            resolve_exec_command(&config, Vec::new(), false).expect("resolve exec command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(args, vec!["default".to_string()]);
     }
 
     // --- apply_volume ---
@@ -2742,6 +2958,16 @@ mod tests {
     #[test]
     fn port_without_bind_defaults_to_loopback() {
         let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_explicit_loopback_stays_loopback() {
+        let (bind, host, guest, udp) = parse_port_mapping("127.0.0.1:8080:80").unwrap();
         assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         assert_eq!(host, 8080);
         assert_eq!(guest, 80);

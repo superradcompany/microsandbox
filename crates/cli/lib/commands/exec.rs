@@ -33,8 +33,12 @@ pub struct ExecArgs {
     pub user: Option<String>,
 
     /// Allocate a pseudo-terminal (enables colors, line editing).
-    #[arg(short = 't', long)]
+    #[arg(short = 't', long, conflicts_with = "no_tty")]
     pub tty: bool,
+
+    /// Disable pseudo-terminal allocation and run non-interactively.
+    #[arg(long = "no-tty", conflicts_with = "tty")]
+    pub no_tty: bool,
 
     /// Kill the command after this duration (e.g. 30s, 5m, 1h).
     #[arg(long)]
@@ -89,22 +93,28 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let workdir = args.workdir;
-    let interactive = std::io::stdin().is_terminal();
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let interactive = super::common::use_interactive_tty(stdin_is_terminal, args.no_tty);
 
     // Read piped stdin upfront so it can be forwarded into the sandbox.
     // Skipped in `--stream` mode, where stdin is forwarded incrementally.
-    let piped_stdin = if !interactive && !args.stream {
+    let piped_stdin = if should_read_buffered_stdin(stdin_is_terminal, interactive, args.stream) {
         let mut buf = Vec::new();
         tokio::io::stdin().read_to_end(&mut buf).await.ok();
         Some(buf)
+    } else if !interactive && !args.stream {
+        // `--no-tty` with terminal stdin means "non-interactive", so give the
+        // guest EOF instead of blocking on the host terminal.
+        Some(Vec::new())
     } else {
         None
     };
 
-    // Resolve the command using the same OCI-aware logic as `msb run`:
-    // user command > entrypoint [+ cmd] > cmd > config.spec.runtime.shell > /bin/sh.
+    // Resolve the command with exec semantics: an explicit command runs
+    // directly, while omitted commands can still fall back to the sandbox's
+    // configured image command/default shell.
     let (cmd, cmd_args) =
-        match super::common::resolve_command(sandbox.config(), args.command, interactive)? {
+        match super::common::resolve_exec_command(sandbox.config(), args.command, interactive)? {
             (Some(cmd), cmd_args) => (cmd, cmd_args),
             (None, _) => {
                 super::maybe_stop(&sandbox).await;
@@ -222,6 +232,11 @@ fn apply_common_exec_opts(
         e = e.rlimit_range(resource, soft, hard);
     }
     e
+}
+
+/// Return whether buffered exec should consume host stdin before starting.
+fn should_read_buffered_stdin(stdin_is_terminal: bool, interactive: bool, stream: bool) -> bool {
+    !stdin_is_terminal && !interactive && !stream
 }
 
 /// Drive a non-PTY bidirectional streaming exec session (`--stream`).
@@ -362,4 +377,54 @@ async fn write_chunk<W: tokio::io::AsyncWrite + Unpin>(
     w.write_all(data).await?;
     w.flush().await?;
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    use super::*;
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: ExecArgs,
+    }
+
+    fn parse_exec_args(args: &[&str]) -> ExecArgs {
+        TestCli::parse_from(std::iter::once("msb").chain(args.iter().copied())).args
+    }
+
+    #[test]
+    fn no_tty_parses_before_command_delimiter() {
+        let args = parse_exec_args(&["box", "--no-tty", "--", "python3", "-c", "print('ok')"]);
+
+        assert!(args.no_tty);
+        assert_eq!(args.name, "box");
+        assert_eq!(
+            args.command,
+            vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "print('ok')".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn no_tty_conflicts_with_tty() {
+        let err = TestCli::try_parse_from(["msb", "--tty", "--no-tty", "box"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn no_tty_with_terminal_stdin_does_not_buffer_stdin() {
+        assert!(!should_read_buffered_stdin(true, false, false));
+    }
 }

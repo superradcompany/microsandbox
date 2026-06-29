@@ -15,6 +15,7 @@ type SandboxConfig struct {
 	Name            string
 	Image           string
 	ImageFstype     string
+	ImageBind       string
 	OCIUpperSizeMiB uint32
 	ociUpperSizeSet bool
 	Snapshot        string
@@ -263,6 +264,14 @@ func WithImageDisk(path string, fstype string) SandboxOption {
 		o.Image = path
 		o.ImageFstype = fstype
 	}
+}
+
+// WithBindRootfs uses a host directory directly as the sandbox root filesystem
+// (a bind rootfs): the directory's contents become the guest root filesystem
+// as-is, with no OCI pull and no overlay. Mutually exclusive with WithImage,
+// WithImageDisk, and WithSnapshot.
+func WithBindRootfs(path string) SandboxOption {
+	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
 // WithSnapshot boots from a snapshot artifact by bare name or filesystem path.

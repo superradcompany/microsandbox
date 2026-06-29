@@ -1,5 +1,9 @@
 use std::io::{self, BufWriter, SeekFrom, Write};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
+#[cfg(windows)]
+use std::ptr;
 
 use super::format::{
     EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
@@ -14,6 +18,12 @@ use super::format::{
 };
 use crate::crc32c;
 use crate::tree::{DirectoryNode, FileTree, TreeNode};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::DeviceIoControl;
+#[cfg(windows)]
+use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -547,6 +557,7 @@ pub fn format_ext4_with_tree(
     let stats = compute_fs_stats(&layout, &bitmap_plan);
 
     let raw_file = std::fs::File::create(path)?;
+    mark_sparse(&raw_file)?;
     raw_file.set_len(options.size_bytes)?;
     let mut file = BufWriter::new(raw_file);
 
@@ -572,6 +583,33 @@ pub fn format_ext4_with_tree(
     file.flush()?;
     // No sync_all() — the image is read from page cache by the VM on the
     // same host. Fsync would add 1-10ms for no benefit.
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn mark_sparse(_file: &std::fs::File) -> Result<(), Ext4Error> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn mark_sparse(file: &std::fs::File) -> Result<(), Ext4Error> {
+    let mut bytes_returned = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_SPARSE,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(Ext4Error::Io(io::Error::last_os_error()));
+    }
 
     Ok(())
 }
@@ -1848,6 +1886,11 @@ pub use super::format::sparse_super_group;
 mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
+    #[cfg(windows)]
+    use std::os::windows::fs::MetadataExt;
+
+    #[cfg(windows)]
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
 
     fn le_u16(bytes: &[u8], offset: usize) -> u16 {
         u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
@@ -2118,6 +2161,23 @@ mod tests {
 
         assert_eq!(block_bitmap, layout.group_block_bitmap_block(63));
         assert_eq!(inode_bitmap, layout.group_inode_bitmap_block(63));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_format_marks_image_sparse_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sparse.ext4");
+        let opts = Ext4FormatOptions {
+            size_bytes: 256 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+
+        format_ext4(&path, &opts).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), opts.size_bytes);
+        assert_ne!(meta.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE, 0);
     }
 
     #[test]

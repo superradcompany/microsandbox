@@ -634,6 +634,26 @@ mod tests {
     }
 
     #[test]
+    fn port_helpers_default_to_loopback() {
+        let cfg = NetworkBuilder::new()
+            .port(8080, 80)
+            .port_udp(5353, 53)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            cfg.ports[0].host_bind,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(cfg.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(
+            cfg.ports[1].host_bind,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
+    }
+
+    #[test]
     fn network_builder_sets_global_passthrough_action() {
         let cfg = NetworkBuilder::new()
             .on_secret_violation(|v| {

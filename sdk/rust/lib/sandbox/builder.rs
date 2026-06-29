@@ -977,8 +977,18 @@ impl SandboxBuilder {
                 "sandbox name is required".into(),
             ));
         }
-        super::validate_sandbox_name_for_runtime(&self.config.spec.name)?;
+        super::validate_sandbox_name(&self.config.spec.name)?;
         super::validate_hostname(self.config.spec.runtime.hostname.as_deref())?;
+        if self.config.spec.resources.cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cpus must be greater than 0".into(),
+            ));
+        }
+        if self.config.spec.resources.memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "memory must be greater than 0".into(),
+            ));
+        }
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.spec.image {
@@ -1082,7 +1092,6 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
-    use crate::backend::{LocalBackend, with_backend};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
@@ -1091,7 +1100,6 @@ mod tests {
     use microsandbox_types::SandboxLogLevel;
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
-    use tempfile::Builder as TempDirBuilder;
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
@@ -1131,27 +1139,14 @@ mod tests {
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(60));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_builder_accepts_128_byte_sandbox_name() {
-        let temp = TempDirBuilder::new()
-            .prefix("msb")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let backend = LocalBackend::builder()
-            .home(temp.path())
+        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
+        let config = SandboxBuilder::new(name.clone())
+            .image("alpine")
             .build()
             .await
             .unwrap();
-        let name = "x".repeat(MAX_SANDBOX_NAME_BYTES);
-        let config = with_backend(backend, async {
-            SandboxBuilder::new(name.clone())
-                .image("alpine")
-                .build()
-                .await
-                .unwrap()
-        })
-        .await;
 
         assert_eq!(config.spec.name, name);
     }
@@ -1169,6 +1164,30 @@ mod tests {
             err.to_string(),
             "invalid config: sandbox name must be at most 128 characters: got 129"
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_cpus() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(0)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cpus must be greater than 0"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_memory() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(0)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("memory must be greater than 0"));
     }
 
     #[tokio::test]

@@ -473,7 +473,7 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
-        Self::new_inner(config, sni, tls_intercepted, None, false)
+        Self::new_inner(config, sni, tls_intercepted, None, false, false)
     }
 
     /// Create a handler for a TLS-intercepted connection.
@@ -491,8 +491,17 @@ impl SecretsHandler {
             sni,
             true,
             Some(SecretHostIdentity { guest_ip, shared }),
+            true,
             false,
         )
+    }
+
+    /// TLS-intercepted handler for connections tunnelled via HTTP CONNECT.
+    ///
+    /// The SNI is authoritative: the proxy already verified it against the
+    /// CONNECT authority, so no DNS-cache pin is required.
+    pub(crate) fn new_tls_intercepted_via_connect(config: &SecretsConfig, sni: &str) -> Self {
+        Self::new_inner(config, sni, true, None, true, false)
     }
 
     /// Create a handler for a plain-HTTP (non-TLS) connection.
@@ -510,6 +519,7 @@ impl SecretsHandler {
             host,
             false,
             Some(SecretHostIdentity { guest_ip, shared }),
+            true,
             false,
         )
     }
@@ -524,7 +534,7 @@ impl SecretsHandler {
             .iter()
             .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any));
 
-        Self::new_inner(config, "", false, None, host_scoped)
+        Self::new_inner(config, "", false, None, false, host_scoped)
     }
 
     /// Handler for HTTP metadata that must never receive substituted secrets.
@@ -533,7 +543,7 @@ impl SecretsHandler {
     /// treated as violations according to their configured action unless a
     /// passthrough policy explicitly allows forwarding the placeholder.
     pub(crate) fn new_plain_http_untrusted_metadata(config: &SecretsConfig) -> Self {
-        Self::new_inner(config, "", false, None, true)
+        Self::new_inner(config, "", false, None, false, true)
     }
 
     fn new_inner(
@@ -541,9 +551,9 @@ impl SecretsHandler {
         sni: &str,
         tls_intercepted: bool,
         identity: Option<SecretHostIdentity<'_>>,
+        enforce_http_authority: bool,
         force_ineligible: bool,
     ) -> Self {
-        let enforce_http_authority = identity.is_some();
         let mut eligible_for_substitution = Vec::new();
         let mut ineligible_for_substitution = Vec::new();
         let mut max_detection_window_len = 0;
@@ -4507,6 +4517,19 @@ mod tests {
     }
 
     #[test]
+    fn connect_tls_intercepted_http_host_must_match_sni() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted_via_connect(&config, "api.openai.com");
+
+        let input = b"GET / HTTP/1.1\r\nHost: evil.com\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn tls_intercepted_http_host_validation_buffers_split_headers() {
         let ip = Ipv4Addr::new(203, 0, 113, 31);
         let shared = SharedState::new(16);
@@ -4556,6 +4579,29 @@ mod tests {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
         let mut handler =
             SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"evil.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn connect_tls_intercepted_http2_authority_must_match_sni() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted_via_connect(&config, "api.openai.com");
 
         let request = h2_request(
             &[

@@ -1,21 +1,21 @@
 //! Agent relay for the sandbox process.
 //!
 //! The [`AgentRelay`] reads from the console backend's ring buffers (data
-//! written by agentd in the guest via virtio-console), listens on a Unix
-//! domain socket (`agent.sock`) for SDK client connections, and transparently
-//! relays protocol frames between clients and the guest agent.
+//! written by agentd in the guest via virtio-console), listens on the local
+//! platform IPC endpoint for SDK client connections, and transparently relays
+//! protocol frames between clients and the guest agent.
 //!
 //! Each client is assigned a non-overlapping correlation ID range during
 //! handshake so that the relay can route agent responses back to the correct
 //! client without rewriting frame headers.
 
 use std::collections::{HashMap, HashSet};
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
+#[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{InitAck, InitResolved, RelayClientDisconnected};
@@ -24,9 +24,13 @@ use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
 use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
+#[cfg(unix)]
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::net::unix::OwnedReadHalf;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::clock::spawn_clock_sync_task;
@@ -93,20 +97,38 @@ struct ClientState {
 pub struct AgentRelay {
     /// Shared ring buffers + wake pipes for console backend communication.
     shared: Arc<ConsoleSharedState>,
-    /// Unix domain socket listener for client connections.
-    listener: UnixListener,
-    /// Path to the Unix domain socket.
-    sock_path: PathBuf,
+    /// Local IPC listener for client connections.
+    listener: AgentListener,
+    /// Local IPC endpoint address.
+    endpoint: PathBuf,
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
     /// Shared user-volume bind identity map to install before `core.ready`.
+    #[cfg(unix)]
     bind_identity_map: Option<BindIdentityMapHandle>,
     /// Number of user-volume mounts that use the shared bind identity map.
+    #[cfg(unix)]
     bind_identity_map_mount_count: usize,
 }
+
+/// Platform-specific listener for SDK client connections.
+struct AgentListener {
+    #[cfg(unix)]
+    inner: UnixListener,
+    #[cfg(windows)]
+    pipe_name: PathBuf,
+    #[cfg(windows)]
+    first_pipe_instance: bool,
+}
+
+#[cfg(unix)]
+type AgentConnection = tokio::net::UnixStream;
+
+#[cfg(windows)]
+type AgentConnection = NamedPipeServer;
 
 /// A frame extracted from the byte stream, kept as raw bytes for transparent
 /// forwarding.
@@ -124,35 +146,92 @@ struct RawFrame {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl AgentListener {
+    fn bind(endpoint: &Path) -> RuntimeResult<Self> {
+        #[cfg(unix)]
+        {
+            // Remove stale socket file if it exists.
+            if endpoint.exists() {
+                let _ = std::fs::remove_file(endpoint);
+            }
+
+            // Ensure the parent directory exists.
+            if let Some(parent) = endpoint.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let inner = UnixListener::bind(endpoint)?;
+            Ok(Self { inner })
+        }
+
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                pipe_name: endpoint.to_path_buf(),
+                first_pipe_instance: true,
+            })
+        }
+    }
+
+    async fn accept(&mut self) -> std::io::Result<AgentConnection> {
+        #[cfg(unix)]
+        {
+            let (stream, _addr) = self.inner.accept().await?;
+            Ok(stream)
+        }
+
+        #[cfg(windows)]
+        {
+            let mut options = ServerOptions::new();
+            options.pipe_mode(PipeMode::Byte);
+            let first_pipe_instance = self.first_pipe_instance;
+            if first_pipe_instance {
+                options.first_pipe_instance(true);
+            }
+
+            let server = options.create(&self.pipe_name)?;
+            if first_pipe_instance {
+                self.first_pipe_instance = false;
+            }
+            server.connect().await?;
+            Ok(server)
+        }
+    }
+
+    fn cleanup(&self, endpoint: &Path) {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(endpoint);
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = endpoint;
+        }
+    }
+}
+
 impl AgentRelay {
     /// Create a new agent relay.
     ///
-    /// Takes the shared console state (ring buffers) and a path where the
-    /// Unix domain socket will be bound for client connections.
+    /// Takes the shared console state (ring buffers) and the local IPC endpoint
+    /// where client connections will be accepted.
     pub async fn new(
         agent_sock_path: &Path,
         shared: Arc<ConsoleSharedState>,
     ) -> RuntimeResult<Self> {
-        // Remove stale socket file if it exists.
-        if agent_sock_path.exists() {
-            let _ = std::fs::remove_file(agent_sock_path);
-        }
-
-        // Ensure the parent directory exists.
-        if let Some(parent) = agent_sock_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let listener = UnixListener::bind(agent_sock_path)?;
+        let listener = AgentListener::bind(agent_sock_path)?;
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
             shared,
             listener,
-            sock_path: agent_sock_path.to_path_buf(),
+            endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             log_writer: None,
+            #[cfg(unix)]
             bind_identity_map: None,
+            #[cfg(unix)]
             bind_identity_map_mount_count: 0,
         })
     }
@@ -173,6 +252,7 @@ impl AgentRelay {
     }
 
     /// Attach a pending bind identity map for the early init handshake.
+    #[cfg(unix)]
     pub fn with_bind_identity_map(
         mut self,
         handle: Option<BindIdentityMapHandle>,
@@ -183,6 +263,7 @@ impl AgentRelay {
         self
     }
 
+    #[cfg(unix)]
     fn install_bind_identity_map(&self, resolved: InitResolved) -> RuntimeResult<()> {
         let Some(handle) = &self.bind_identity_map else {
             return Ok(());
@@ -229,6 +310,7 @@ impl AgentRelay {
         const READY_TIMEOUT_SECS: i32 = 180;
 
         let mut buf = BytesMut::new();
+        #[cfg(unix)]
         let mut init_resolved = false;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(READY_TIMEOUT_SECS as u64);
@@ -245,6 +327,7 @@ impl AgentRelay {
                 let msg = decode_frame(frame.data.as_ref())?;
 
                 if msg.t == MessageType::Ready {
+                    #[cfg(unix)]
                     if self.bind_identity_map.is_some() && !init_resolved {
                         return Err(RuntimeError::Custom(
                             "agent relay: received core.ready before init context resolution"
@@ -269,8 +352,14 @@ impl AgentRelay {
                     let resolved: InitResolved = msg.payload().map_err(|e| {
                         RuntimeError::Custom(format!("decode init context payload: {e}"))
                     })?;
+                    #[cfg(unix)]
                     self.install_bind_identity_map(resolved)?;
-                    init_resolved = true;
+                    #[cfg(windows)]
+                    let _ = resolved;
+                    #[cfg(unix)]
+                    {
+                        init_resolved = true;
+                    }
                     self.send_init_ack()?;
                     continue;
                 }
@@ -290,9 +379,8 @@ impl AgentRelay {
                 ));
             }
 
-            // Block until the wake pipe is readable or timeout expires.
-            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-            poll_fd_readable_timeout(self.shared.tx_wake.as_raw_fd(), timeout_ms);
+            // Block until the wake primitive is readable or timeout expires.
+            let _ = self.shared.tx_wake.wait_timeout(remaining);
         }
     }
 
@@ -308,7 +396,7 @@ impl AgentRelay {
     /// expected to give agentd a flush window before forcing host-side
     /// teardown.
     pub async fn run(
-        self,
+        mut self,
         mut shutdown: watch::Receiver<bool>,
         drain_tx: mpsc::Sender<()>,
     ) -> RuntimeResult<()> {
@@ -364,7 +452,7 @@ impl AgentRelay {
             tokio::select! {
                 accept_result = self.listener.accept() => {
                     match accept_result {
-                        Ok((stream, _addr)) => {
+                        Ok(stream) => {
                             // Allocate a client slot.
                             let slot = {
                                 let mut slots = used_slots.lock().await;
@@ -397,7 +485,7 @@ impl AgentRelay {
 
                             // Perform handshake: send
                             // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...].
-                            let (reader_half, mut writer_half) = stream.into_split();
+                            let (reader_half, mut writer_half) = tokio::io::split(stream);
 
                             let mut handshake = Vec::with_capacity(8 + ready_frame.len());
                             handshake.extend_from_slice(&id_start.to_be_bytes());
@@ -475,8 +563,8 @@ impl AgentRelay {
         // `on_exit` observer (runs before `_exit()`), so we don't
         // double-write it here.
 
-        // Clean up the socket file.
-        let _ = std::fs::remove_file(&self.sock_path);
+        // Clean up the local IPC endpoint.
+        self.listener.cleanup(&self.endpoint);
 
         // Abort background tasks.
         clock_sync_handle.abort();
@@ -490,31 +578,6 @@ impl AgentRelay {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-/// Block until a file descriptor becomes readable or timeout expires.
-///
-/// `timeout_ms` is in milliseconds. Use `-1` for infinite.
-fn poll_fd_readable_timeout(fd: RawFd, timeout_ms: i32) {
-    loop {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: pfd is a valid stack-allocated pollfd.
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if ret >= 0 {
-            return; // Success — fd is readable, or timeout expired (ret == 0).
-        }
-        // ret == -1: error. Retry on EINTR, give up on other errors.
-        let errno = std::io::Error::last_os_error();
-        if errno.raw_os_error() != Some(libc::EINTR) {
-            tracing::error!("agent relay: poll() failed: {errno}");
-            return;
-        }
-        // EINTR — retry.
-    }
-}
 
 pub(crate) fn push_guest_frame_blocking(
     shared: &ConsoleSharedState,
@@ -704,7 +767,9 @@ async fn ring_reader_task(
     session_registry: Arc<SessionRegistry>,
 ) {
     // Wrap the tx_wake read fd in AsyncFd for tokio-driven notification.
+    #[cfg(unix)]
     let wake_fd = shared.tx_wake.as_raw_fd();
+    #[cfg(unix)]
     let async_fd = match AsyncFd::new(wake_fd) {
         Ok(fd) => fd,
         Err(e) => {
@@ -718,14 +783,32 @@ async fn ring_reader_task(
 
     loop {
         // Wait for the wake pipe to become readable.
-        let mut guard = match async_fd.readable().await {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("agent relay: AsyncFd readable error: {e}");
-                break;
+        #[cfg(unix)]
+        {
+            let mut guard = match async_fd.readable().await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("agent relay: AsyncFd readable error: {e}");
+                    break;
+                }
+            };
+            guard.clear_ready();
+        }
+
+        #[cfg(windows)]
+        {
+            let shared_for_wait = Arc::clone(&shared);
+            let woke = tokio::task::spawn_blocking(move || {
+                shared_for_wait
+                    .tx_wake
+                    .wait_timeout(std::time::Duration::from_millis(100))
+            })
+            .await
+            .unwrap_or(false);
+            if !woke {
+                continue;
             }
-        };
-        guard.clear_ready();
+        }
 
         // Drain the wake pipe and pop all available chunks.
         shared.tx_wake.drain();
@@ -781,7 +864,6 @@ async fn ring_reader_task(
             }
         }
     }
-    tracing::debug!("agent relay: ring reader task exiting");
 }
 
 /// Read a single raw frame from an async reader (used for client connections).
@@ -845,7 +927,7 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 #[allow(clippy::too_many_arguments)]
 async fn client_reader_task(
     slot: u32,
-    mut reader: OwnedReadHalf,
+    mut reader: impl AsyncRead + Unpin + Send + 'static,
     agent_tx: mpsc::Sender<Vec<u8>>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
@@ -1036,6 +1118,34 @@ mod tests {
 
     use microsandbox_protocol::core::Ready;
 
+    fn test_agent_endpoint(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        #[cfg(unix)]
+        {
+            // These tests instantiate the relay directly, bypassing the SDK's
+            // hashed runtime socket resolver. Keep the synthetic socket short
+            // enough for macOS sockaddr_un limits.
+            PathBuf::from("/tmp")
+                .join(format!(
+                    "msb-runtime-relay-{name}-{}-{nanos}",
+                    std::process::id()
+                ))
+                .join("agent.sock")
+        }
+
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(
+                r"\\.\pipe\msb-runtime-relay-{name}-{}-{nanos}",
+                std::process::id()
+            ))
+        }
+    }
+
     fn encoded_message<T: serde::Serialize>(t: MessageType, payload: &T) -> Vec<u8> {
         let msg = Message::with_payload(t, 0, payload).unwrap();
         let mut frame = Vec::new();
@@ -1062,11 +1172,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn wait_ready_rejects_ready_before_init_when_maps_are_pending() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(8));
         let handle = Arc::new(std::sync::OnceLock::new());
-        let sock_dir = tempfile::tempdir().unwrap();
-        let sock_path = sock_dir.path().join("agent.sock");
+        let sock_path = test_agent_endpoint("ready-before-init");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
             .unwrap()
@@ -1095,11 +1205,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn wait_ready_installs_init_map_before_ready() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(8));
         let handle = Arc::new(std::sync::OnceLock::new());
-        let sock_dir = tempfile::tempdir().unwrap();
-        let sock_path = sock_dir.path().join("agent.sock");
+        let sock_path = test_agent_endpoint("init-map");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
             .unwrap()
@@ -1147,12 +1257,14 @@ mod tests {
     #[tokio::test]
     async fn wait_ready_skips_init_requirement_when_no_bind_map_pending() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(8));
-        let sock_dir = tempfile::tempdir().unwrap();
-        let sock_path = sock_dir.path().join("agent.sock");
+        let sock_path = test_agent_endpoint("no-bind-map");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
-            .unwrap()
-            .with_bind_identity_map(None, 0);
+            .unwrap();
+        #[cfg(unix)]
+        {
+            relay = relay.with_bind_identity_map(None, 0);
+        }
 
         let ready = encoded_message(
             MessageType::Ready,
