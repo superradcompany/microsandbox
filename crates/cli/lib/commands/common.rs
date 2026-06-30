@@ -205,9 +205,9 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
-    /// Writable overlay upper size for OCI images (e.g. 4G, 8192M).
-    #[arg(long = "oci-upper-size", value_name = "SIZE")]
-    pub oci_upper_size: Option<String>,
+    /// Writable disk size for OCI images (e.g. 4G, 8192M).
+    #[arg(long = "disk-size", value_name = "SIZE")]
+    pub disk_size: Option<String>,
 
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long)]
@@ -452,7 +452,7 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
-            || self.oci_upper_size.is_some()
+            || self.disk_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some()
@@ -597,9 +597,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
     }
-    if let Some(ref size) = opts.oci_upper_size {
+    if let Some(ref size) = opts.disk_size {
         let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
-        builder = builder.oci_upper_size(size_mib);
+        builder = builder.disk_size(size_mib);
     }
     if let Some(ref security) = opts.security {
         builder = builder.security(parse_security_profile(security)?);
@@ -2178,9 +2178,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_sandbox_opts_sets_oci_upper_size() {
+    async fn apply_sandbox_opts_sets_disk_size() {
         let opts = SandboxOpts {
-            oci_upper_size: Some("8G".to_string()),
+            disk_size: Some("8G".to_string()),
             ..Default::default()
         };
         let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)

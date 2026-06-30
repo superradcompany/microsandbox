@@ -104,8 +104,8 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
-        if let Some(upper_size_mib) = config.spec.image.oci_upper_size_mib() {
-            ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
+        if let Some(disk_size_mib) = config.spec.image.oci_upper_size_mib() {
+            ui::detail_kv("Disk", &format!("{disk_size_mib} MiB"));
         }
 
         ui::detail_header("Resources");

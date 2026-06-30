@@ -1137,7 +1137,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| `[`ImageSource`](/sdk/python/snapshots) | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| image | `str \| `[`ImageSource`](/sdk/python/snapshots) | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Pass `disk_size_mib=` to set the writable disk size for an OCI image |
 | snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |

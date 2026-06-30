@@ -185,6 +185,7 @@ jobs:
     needs: [build-kernel, build-agentd-aarch64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

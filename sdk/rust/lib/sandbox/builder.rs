@@ -115,9 +115,12 @@ impl SandboxBuilder {
     /// Set the root filesystem image using a builder closure.
     ///
     /// ```ignore
-    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// .image_with(|i| i.oci("python:3.12"))
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
+    ///
+    /// The writable disk size is set separately at the sandbox level via
+    /// [`disk_size`](Self::disk_size).
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
         match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.spec.image = rootfs,
@@ -130,12 +133,15 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the writable overlay upper size for an OCI rootfs.
+    /// Set the writable disk size (the OCI `upper.ext4` overlay) for the
+    /// sandbox.
     ///
-    /// Prefer [`image_with`](Self::image_with) when configuring the image and
-    /// upper together. This method exists for call sites, such as CLIs, where
-    /// the image reference and its options are parsed separately.
-    pub fn oci_upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+    /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt)
+    /// helper, mirroring [`memory`](Self::memory). The writable overlay exists only
+    /// for an OCI-image rootfs, so a bind or disk-image rootfs has nothing to size:
+    /// the value is ignored with a logged warning rather than rejected. Set the OCI
+    /// image before calling this — calling it beforehand is still an error.
+    pub fn disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
         let size_mib = size.into().as_u32();
         match &mut self.config.spec.image {
             RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
@@ -144,16 +150,18 @@ impl SandboxBuilder {
             RootfsSource::Oci(_) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "oci_upper_size() requires an OCI image to be set first".into(),
+                        "disk_size() requires an OCI image to be set first".into(),
                     ));
                 }
             }
             _ => {
-                if self.build_error.is_none() {
-                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "oci_upper_size() is only valid for OCI images".into(),
-                    ));
-                }
+                // The writable overlay this sizes exists only for an OCI rootfs; a
+                // bind/disk-image rootfs has nothing to size. Warn and ignore rather
+                // than fail — the sandbox is still valid, the knob just does nothing.
+                tracing::warn!(
+                    "disk_size() ignored: a writable-overlay size applies only to an \
+                     OCI-image rootfs, not a bind or disk-image rootfs"
+                );
             }
         }
         self
@@ -999,7 +1007,7 @@ impl SandboxBuilder {
             }
             RootfsSource::Oci(oci) if oci.upper_size_mib == Some(0) => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
-                    "oci upper_size must be greater than 0".into(),
+                    "disk_size must be greater than 0".into(),
                 ));
             }
             RootfsSource::DiskImage { .. } if !self.config.spec.patches.is_empty() => {
@@ -1237,9 +1245,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_image_with_oci_upper_size() {
+    async fn test_builder_disk_size() {
         let config = SandboxBuilder::new("test")
-            .image_with(|i| i.oci("alpine").upper_size(8192u32))
+            .image("alpine")
+            .disk_size(8192u32)
             .build()
             .await
             .unwrap();
@@ -1265,15 +1274,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_oci_upper_size_rejects_bind_rootfs() {
-        let err = SandboxBuilder::new("test")
+    async fn test_builder_disk_size_ignored_for_bind_rootfs() {
+        // disk_size on a non-OCI rootfs is ignored with a logged warning, not
+        // rejected — the sandbox is still valid, the overlay size just doesn't apply.
+        let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .oci_upper_size(8192u32)
+            .disk_size(8192u32)
             .build()
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.to_string().contains("only valid for OCI images"));
+        assert!(matches!(config.spec.image, super::RootfsSource::Bind(_)));
+        assert_eq!(config.spec.image.oci_upper_size_mib(), None);
     }
 
     #[tokio::test]
@@ -1292,9 +1304,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_from_snapshot_rejects_explicit_oci_upper_size() {
+    async fn test_builder_from_snapshot_rejects_explicit_disk_size() {
         let err = SandboxBuilder::new("test")
-            .image_with(|i| i.oci("").upper_size(8192u32))
+            .image("alpine")
+            .disk_size(8192u32)
             .from_snapshot("/tmp/missing-snapshot")
             .build()
             .await

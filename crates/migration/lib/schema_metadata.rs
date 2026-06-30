@@ -12,7 +12,7 @@
 /// Version of the hidden schema-baseline JSON shape emitted by the CLI.
 pub const SCHEMA_BASELINE_FORMAT_VERSION: u32 = 1;
 
-/// Oldest release V1 will downgrade to.
+/// Oldest release supported by the downgrade flow.
 pub const DOWNGRADE_FLOOR: &str = "0.6.0";
 
 /// Migration that introduced the DB-backed maintenance lease table.

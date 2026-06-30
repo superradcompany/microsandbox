@@ -1056,14 +1056,14 @@ Set the root filesystem source: an OCI image name, local directory path, or disk
 
 ---
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithOCIUpperSize()</span>
+#### <span className="msb-recv"></span><span className="msb-hn">WithDiskSize()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
-func WithOCIUpperSize(mebibytes uint32) SandboxOption
+func WithDiskSize(mebibytes uint32) SandboxOption
 ```
 
-Set the writable overlay upper size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
+Set the writable disk size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
 
 <p className="msb-label">Parameters</p>
 
@@ -2116,7 +2116,7 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Name | `string` | Sandbox name, up to 128 UTF-8 bytes |
 | Image | `string` | OCI image, local path, or disk image |
 | ImageFstype | `string` | Optional inner filesystem type for disk-image roots |
-| OCIUpperSizeMiB | `uint32` | Writable overlay upper size for OCI image roots |
+| DiskSizeMiB | `uint32` | Writable disk size for OCI image roots |
 | Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |

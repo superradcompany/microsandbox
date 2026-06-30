@@ -60,8 +60,8 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	if cfg.Image != "mirror.gcr.io/library/alpine" {
 		t.Fatalf("Image = %q", cfg.Image)
 	}
-	if cfg.OCIUpperSizeMiB != 4096 || !cfg.ociUpperSizeSet {
-		t.Fatalf("OCI upper = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
+	if cfg.DiskSizeMiB != 4096 || !cfg.diskSizeSet {
+		t.Fatalf("OCI upper = %d, set = %v", cfg.DiskSizeMiB, cfg.diskSizeSet)
 	}
 	if cfg.CPUs != 1 || cfg.MemoryMiB != 512 || cfg.Workdir != "/" {
 		t.Fatalf("scalar config mismatch: %#v", cfg)
@@ -91,15 +91,15 @@ func TestFFIWireShape_WithBindRootfs(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
-	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
+func TestFFIWireShape_WithDiskSize(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithDiskSize(8192))
 	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {
 		t.Fatalf("oci_upper_size_mib = %v, want 8192", v)
 	}
 }
 
-func TestFFIWireShape_WithOCIUpperSizeZero(t *testing.T) {
-	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(0))
+func TestFFIWireShape_WithDiskSizeZero(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithDiskSize(0))
 	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(0) {
 		t.Fatalf("oci_upper_size_mib = %v, want 0", v)
 	}

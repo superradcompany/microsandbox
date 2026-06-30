@@ -112,41 +112,11 @@ pub fn sandbox_builder_from_args(
         } else {
             None
         };
-        let upper_size_mib = if let Ok(upper_size_attr) = image_obj.getattr("_upper_size_mib") {
-            if upper_size_attr.is_none() {
-                None
-            } else {
-                Some(upper_size_attr.extract::<u32>()?)
-            }
-        } else {
-            None
-        };
-
-        if upper_size_mib.is_some() {
-            let image_type = image_obj
-                .getattr("_type")
-                .ok()
-                .and_then(|attr| attr.extract::<String>().ok());
-            if image_type.as_deref() != Some("oci") {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "upper_size_mib is only valid for Image.oci(...)",
-                ));
-            }
-        }
-
-        match (fstype, upper_size_mib) {
-            (Some(_), Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "fstype and upper_size_mib cannot be set on the same ImageSource",
-                ));
-            }
-            (Some(fstype), None) => {
+        match fstype {
+            Some(fstype) => {
                 builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
             }
-            (None, Some(size_mib)) => {
-                builder = builder.image_with(|i| i.oci(image_str.as_str()).upper_size(size_mib));
-            }
-            (None, None) => {
+            None => {
                 builder = builder.image(image_str.as_str());
             }
         };
@@ -157,6 +127,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
         builder = builder.cpus(cpus);
+    }
+    if let Some(disk_size_mib) = extract_opt::<u32>(kwargs, "disk_size_mib")? {
+        builder = builder.disk_size(disk_size_mib);
     }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
