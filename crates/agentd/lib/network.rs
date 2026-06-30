@@ -128,12 +128,19 @@ fn hosts_file_contents(
 
 mod linux {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::unix::fs::PermissionsExt;
     use std::{fs, io, mem, ptr};
 
     use nix::unistd;
 
     use crate::config::{NetIpv4Spec, NetIpv6Spec, NetSpec};
     use crate::error::{AgentdError, AgentdResult};
+
+    //----------------------------------------------------------------------------------------------
+    // Constants
+    //----------------------------------------------------------------------------------------------
+
+    const ETC_NETWORK_FILE_MODE: u32 = 0o644;
 
     //----------------------------------------------------------------------------------------------
     // Types
@@ -550,6 +557,11 @@ mod linux {
             super::hosts_file_contents(hostname, host_alias, gateway_ipv4, gateway_ipv6),
         )
         .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
+        fs::set_permissions(
+            "/etc/hosts",
+            fs::Permissions::from_mode(ETC_NETWORK_FILE_MODE),
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to chmod /etc/hosts: {e}")))?;
         Ok(())
     }
 
@@ -569,6 +581,11 @@ mod linux {
 
         fs::write("/etc/resolv.conf", &content)
             .map_err(|e| AgentdError::Init(format!("failed to write /etc/resolv.conf: {e}")))?;
+        fs::set_permissions(
+            "/etc/resolv.conf",
+            fs::Permissions::from_mode(ETC_NETWORK_FILE_MODE),
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to chmod /etc/resolv.conf: {e}")))?;
 
         Ok(())
     }
