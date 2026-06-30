@@ -3465,6 +3465,7 @@ name = "microsandbox-types"
 version = "0.6.1"
 dependencies = [
  "chrono",
+ "ipnetwork",
  "serde",
  "serde_json",
  "sha2 0.11.0",

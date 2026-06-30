@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -845,12 +846,247 @@ fn default_cert_validity_hours() -> u64 {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Networking
+// Types: Networking — policy
+//--------------------------------------------------------------------------------------------------
+
+/// Action to take on traffic matched by a [`Rule`] (or a policy default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "kebab-case")]
+pub enum Action {
+    /// Allow the traffic.
+    Allow,
+    /// Silently drop the traffic.
+    Deny,
+}
+
+/// Direction a [`Rule`] applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    /// Outbound: guest → destination.
+    Egress,
+    /// Inbound: peer → guest.
+    Ingress,
+    /// Either direction.
+    Any,
+}
+
+/// Protocol filter for a [`Rule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    /// TCP.
+    Tcp,
+    /// UDP.
+    Udp,
+    /// ICMPv4.
+    Icmpv4,
+    /// ICMPv6.
+    Icmpv6,
+}
+
+/// Pre-defined destination category for a [`Destination::Group`] match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "kebab-case")]
+pub enum DestinationGroup {
+    /// Public internet — any address not in another category.
+    Public,
+    /// Loopback addresses (`127.0.0.0/8`, `::1`).
+    Loopback,
+    /// Private ranges (RFC 1918 / RFC 4193 ULA / CGN).
+    Private,
+    /// Link-local addresses, excluding the metadata IP.
+    #[serde(alias = "link_local")]
+    LinkLocal,
+    /// Cloud metadata endpoint (`169.254.169.254`).
+    Metadata,
+    /// Multicast addresses (`224.0.0.0/4`, `ff00::/8`).
+    Multicast,
+    /// The sandbox host, reachable via the gateway IP.
+    Host,
+}
+
+/// Traffic destination filter for a [`Rule`].
+///
+/// The `Cidr`, `Domain`, and `DomainSuffix` leaves carry their canonical
+/// string form (e.g. `"10.0.0.0/8"`, `"example.com"`); the local network
+/// engine re-parses and validates them into its richer internal types at
+/// load time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "kebab-case")]
+pub enum Destination {
+    /// Match any destination.
+    Any,
+    /// IP address or CIDR block (e.g. `"1.2.3.4"`, `"10.0.0.0/8"`).
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    Cidr(
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        IpNetwork,
+    ),
+    /// Exact domain name (e.g. `"example.com"`).
+    Domain(String),
+    /// Domain suffix — the apex and any subdomain of it.
+    #[serde(alias = "domain_suffix")]
+    DomainSuffix(String),
+    /// A pre-defined destination group.
+    Group(DestinationGroup),
+}
+
+/// Inclusive guest-side port range for a [`Rule`] match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct PortRange {
+    /// Start port (inclusive).
+    pub start: u16,
+    /// End port (inclusive).
+    pub end: u16,
+}
+
+/// A single egress/ingress policy rule. Evaluated first-match-wins per
+/// direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct Rule {
+    /// Direction this rule applies to.
+    pub direction: Direction,
+    /// Destination filter (direction-dependent interpretation).
+    pub destination: Destination,
+    /// Protocol set; empty matches any protocol.
+    #[serde(default)]
+    pub protocols: Vec<Protocol>,
+    /// Guest-side port-range set; empty matches any port.
+    #[serde(default)]
+    pub ports: Vec<PortRange>,
+    /// Action to take on a match.
+    pub action: Action,
+}
+
+/// Egress/ingress network policy: an ordered [`Rule`] list plus a
+/// per-direction default [`Action`]. Carried in [`NetworkSpec::policy`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct NetworkPolicy {
+    /// Default action for egress traffic matching no rule. Default: `Deny`.
+    #[serde(default = "action_deny")]
+    pub default_egress: Action,
+    /// Default action for ingress traffic matching no rule. Default: `Deny`.
+    #[serde(default = "action_deny")]
+    pub default_ingress: Action,
+    /// Ordered rules, evaluated first-match-wins per direction.
+    #[serde(default)]
+    pub rules: Vec<Rule>,
+}
+
+/// Default [`Action`] (`Deny`) for a policy's per-direction defaults, so a
+/// partially-specified policy fails closed.
+fn action_deny() -> Action {
+    Action::Deny
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Networking — DNS & interface
+//--------------------------------------------------------------------------------------------------
+
+/// DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(default)]
+pub struct DnsConfig {
+    /// Whether DNS-rebinding protection is enabled. Default: true.
+    pub rebind_protection: bool,
+    /// Upstream nameservers as `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`
+    /// strings. Empty falls back to the host's `/etc/resolv.conf`.
+    pub nameservers: Vec<String>,
+    /// Per-query timeout in milliseconds. Default: 5000.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
+    pub query_timeout_ms: u64,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            rebind_protection: true,
+            nameservers: Vec::new(),
+            query_timeout_ms: 5000,
+        }
+    }
+}
+
+/// Optional guest interface overrides. Unset fields are derived from the
+/// sandbox slot by the local network engine. Carried in
+/// [`NetworkSpec::interface`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(default)]
+pub struct InterfaceOverrides {
+    /// Guest MAC address as six octets. Default: derived from slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<[u8; 6]>,
+    /// Interface MTU. Default: 1500.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+    /// Guest IPv4 address (e.g. `172.16.0.2`). Default: derived from slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub ipv4_address: Option<Ipv4Addr>,
+    /// Guest IPv4 pool CIDR (e.g. `"172.16.0.0/12"`). Default: derived from slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub ipv4_pool: Option<Ipv4Network>,
+    /// Guest IPv6 address. Default: derived from slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub ipv6_address: Option<Ipv6Addr>,
+    /// Guest IPv6 pool CIDR. Default: derived from slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    pub ipv6_pool: Option<Ipv6Network>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Networking — spec
 //--------------------------------------------------------------------------------------------------
 
 /// Complete network specification for a sandbox.
 ///
-/// Common, backend-visible fields are typed directly, as are the secret-injection (`secrets`) and TLS-interception (`tls`) subdocuments. The remaining rich local-engine subdocuments such as policy, DNS, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
+/// All subdocuments are typed. The local-engine `policy`, `dns`, and
+/// `interface` configs are mirrored here as wire types whose leaf values
+/// (CIDRs, domain names, nameservers) are carried in their canonical string
+/// form; the network engine re-parses these into its richer internal types at
+/// load time, which keeps that engine's validation crates out of this shared
+/// contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -861,18 +1097,18 @@ pub struct NetworkSpec {
 
     /// Guest interface overrides for the local network engine.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub interface: Option<Value>,
+    pub interface: Option<InterfaceOverrides>,
 
     /// Host-to-guest port mappings.
     pub ports: Vec<PublishedPortSpec>,
 
-    /// Egress and ingress policy subdocument.
+    /// Egress and ingress policy.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy: Option<Value>,
+    pub policy: Option<NetworkPolicy>,
 
-    /// DNS interception and filtering subdocument.
+    /// DNS interception and filtering.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dns: Option<Value>,
+    pub dns: Option<DnsConfig>,
 
     /// TLS-interception subdocument (see [`TlsConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -988,11 +1224,14 @@ pub struct SandboxPolicy {
 /// Where to place a new snapshot artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
 pub enum SnapshotDestination {
     /// Bare name resolved under the default snapshots directory.
+    #[serde(alias = "Name")]
     Name(String),
 
     /// Explicit absolute or relative path to the artifact directory.
+    #[serde(alias = "Path")]
     Path(
         /// Destination path.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
@@ -1185,38 +1424,55 @@ pub enum SandboxLogLevel {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "lowercase")]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
+    #[serde(alias = "Cpu")]
     Cpu,
     /// Max file size in bytes (`RLIMIT_FSIZE`).
+    #[serde(alias = "Fsize")]
     Fsize,
     /// Max data segment size (`RLIMIT_DATA`).
+    #[serde(alias = "Data")]
     Data,
     /// Max stack size (`RLIMIT_STACK`).
+    #[serde(alias = "Stack")]
     Stack,
     /// Max core file size (`RLIMIT_CORE`).
+    #[serde(alias = "Core")]
     Core,
     /// Max resident set size (`RLIMIT_RSS`).
+    #[serde(alias = "Rss")]
     Rss,
     /// Max number of processes (`RLIMIT_NPROC`).
+    #[serde(alias = "Nproc")]
     Nproc,
     /// Max open file descriptors (`RLIMIT_NOFILE`).
+    #[serde(alias = "Nofile")]
     Nofile,
     /// Max locked memory (`RLIMIT_MEMLOCK`).
+    #[serde(alias = "Memlock")]
     Memlock,
     /// Max address space size (`RLIMIT_AS`).
+    #[serde(alias = "As")]
     As,
     /// Max file locks (`RLIMIT_LOCKS`).
+    #[serde(alias = "Locks")]
     Locks,
     /// Max pending signals (`RLIMIT_SIGPENDING`).
+    #[serde(alias = "Sigpending")]
     Sigpending,
     /// Max bytes in POSIX message queues (`RLIMIT_MSGQUEUE`).
+    #[serde(alias = "Msgqueue")]
     Msgqueue,
     /// Max nice priority (`RLIMIT_NICE`).
+    #[serde(alias = "Nice")]
     Nice,
     /// Max real-time priority (`RLIMIT_RTPRIO`).
+    #[serde(alias = "Rtprio")]
     Rtprio,
     /// Max real-time timeout (`RLIMIT_RTTIME`).
+    #[serde(alias = "Rttime")]
     Rttime,
 }
 
@@ -1878,6 +2134,33 @@ fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountO
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn casing_is_canonical_with_legacy_aliases() {
+        // RlimitResource: canonical lowercase; legacy PascalCase still deserializes.
+        assert_eq!(
+            serde_json::to_string(&RlimitResource::Nofile).unwrap(),
+            r#""nofile""#
+        );
+        assert_eq!(
+            serde_json::from_str::<RlimitResource>(r#""Nofile""#).unwrap(),
+            RlimitResource::Nofile
+        );
+
+        // SnapshotDestination: canonical lowercase tag; legacy PascalCase accepted.
+        assert_eq!(
+            serde_json::to_string(&SnapshotDestination::Name("snap".into())).unwrap(),
+            r#"{"name":"snap"}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<SnapshotDestination>(r#"{"Name":"snap"}"#).unwrap(),
+            SnapshotDestination::Name(_)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<SnapshotDestination>(r#"{"path":"/tmp/x"}"#).unwrap(),
+            SnapshotDestination::Path(_)
+        ));
+    }
 
     #[test]
     fn disk_image_format_from_extension() {

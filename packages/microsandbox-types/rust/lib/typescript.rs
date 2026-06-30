@@ -3,14 +3,16 @@
 use ts_rs::TS;
 
 use crate::{
-    CertCacheConfig, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody,
-    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus, DiskImageFormat,
-    EnvVar, HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, LogSource, MountOptions,
-    NamedVolumeCreate, NamedVolumeMode, NetworkSpec, OciRootfsSource, Patch, PortProtocol,
-    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, SandboxLogLevel,
-    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry,
-    SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination, SnapshotSpec,
-    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
+    Action, CertCacheConfig, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus, Destination,
+    DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, HandoffInit, HostPattern,
+    HostPermissions, InterceptCaConfig, InterfaceOverrides, LogSource, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch,
+    PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
+    RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
+    SandboxSpec, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination,
+    SnapshotSpec, StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount,
+    VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -43,7 +45,6 @@ pub fn declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
 
     vec![
-        serde_json::Value::decl(&cfg),
         DiskImageFormat::decl(&cfg),
         OciRootfsSource::decl(&cfg),
         RootfsSource::decl(&cfg),
@@ -66,6 +67,16 @@ pub fn declarations() -> Vec<String> {
         InterceptCaConfig::decl(&cfg),
         CertCacheConfig::decl(&cfg),
         TlsConfig::decl(&cfg),
+        Action::decl(&cfg),
+        Direction::decl(&cfg),
+        Protocol::decl(&cfg),
+        DestinationGroup::decl(&cfg),
+        Destination::decl(&cfg),
+        PortRange::decl(&cfg),
+        Rule::decl(&cfg),
+        NetworkPolicy::decl(&cfg),
+        DnsConfig::decl(&cfg),
+        InterfaceOverrides::decl(&cfg),
         NetworkSpec::decl(&cfg),
         PublishedPortSpec::decl(&cfg),
         PortProtocol::decl(&cfg),
@@ -143,7 +154,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 45);
+        assert_eq!(declarations.len(), 54);
         assert!(
             declarations
                 .iter()

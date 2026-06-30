@@ -61,7 +61,7 @@ pub struct NetworkPolicy {
 
 /// Action to take on matched traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Action {
     /// Allow the traffic.
     Allow,
@@ -101,7 +101,7 @@ pub struct Rule {
 
 /// Direction a rule applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Direction {
     /// Outbound: guest → destination. Evaluated by `evaluate_egress`.
     Egress,
@@ -122,7 +122,7 @@ pub enum Direction {
 /// can then rely on byte equality against the DNS cache's own
 /// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Destination {
     /// Match any destination.
     Any,
@@ -137,6 +137,7 @@ pub enum Destination {
     /// Domain suffix. Matches the apex domain itself and any subdomain
     /// of it (e.g. suffix `example.com` matches `example.com` and
     /// `foo.example.com` but not `evilexample.com`).
+    #[serde(alias = "domain_suffix")]
     DomainSuffix(DomainName),
 
     /// Pre-defined destination group.
@@ -152,7 +153,7 @@ pub enum Destination {
 /// categories are disjoint; [`Public`](Self::Public) is defined as the
 /// complement of the other five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum DestinationGroup {
     /// Public internet — any address not in one of the other categories.
     Public,
@@ -165,6 +166,7 @@ pub enum DestinationGroup {
 
     /// Link-local addresses (`169.254.0.0/16`, `fe80::/10`), excluding
     /// the metadata IP which is categorized as [`Metadata`](Self::Metadata).
+    #[serde(alias = "link_local")]
     LinkLocal,
 
     /// Cloud metadata endpoints (`169.254.169.254`).
@@ -181,7 +183,7 @@ pub enum DestinationGroup {
 
 /// Protocol filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Protocol {
     /// TCP.
     Tcp,
@@ -1316,7 +1318,7 @@ mod tests {
     /// in snake_case, and the serializer's output must round-trip back to
     /// an equivalent value.
     #[test]
-    fn serde_round_trip_uses_snake_case() {
+    fn serde_round_trip_uses_kebab_case() {
         let policy = NetworkPolicy {
             default_egress: Action::Deny,
             default_ingress: Action::Allow,
@@ -1342,15 +1344,18 @@ mod tests {
         // Field names: snake_case directly from Rust source (no rename needed).
         assert!(json.contains("\"default_egress\""), "JSON: {json}");
         assert!(json.contains("\"default_ingress\""), "JSON: {json}");
-        // Enum tags: snake_case via rename_all on each enum.
+        // Enum tags: kebab-case via rename_all on each enum.
         assert!(json.contains("\"egress\""), "JSON: {json}");
         assert!(json.contains("\"any\""), "JSON: {json}");
         assert!(json.contains("\"allow\""), "JSON: {json}");
         assert!(json.contains("\"deny\""), "JSON: {json}");
-        assert!(json.contains("\"link_local\""), "JSON: {json}");
-        assert!(json.contains("\"domain_suffix\""), "JSON: {json}");
+        assert!(json.contains("\"link-local\""), "JSON: {json}");
+        assert!(json.contains("\"domain-suffix\""), "JSON: {json}");
         assert!(json.contains("\"icmpv4\""), "JSON: {json}");
         assert!(json.contains("\"tcp\""), "JSON: {json}");
+        // Legacy snake_case is no longer the canonical serialized form.
+        assert!(!json.contains("\"link_local\""), "JSON: {json}");
+        assert!(!json.contains("\"domain_suffix\""), "JSON: {json}");
         // No PascalCase residue.
         assert!(!json.contains("\"Egress\""), "JSON: {json}");
         assert!(!json.contains("\"Allow\""), "JSON: {json}");
@@ -1368,6 +1373,13 @@ mod tests {
         assert!(matches!(back.default_ingress, Action::Allow));
         assert!(matches!(back.rules[0].direction, Direction::Egress));
         assert!(matches!(back.rules[1].direction, Direction::Any));
+
+        // Back-compat: legacy snake_case tags still deserialize via #[serde(alias)].
+        let legacy: Destination =
+            serde_json::from_str(r#"{"domain_suffix":"legacy.example.com"}"#).unwrap();
+        assert!(matches!(legacy, Destination::DomainSuffix(_)));
+        let legacy_group: DestinationGroup = serde_json::from_str(r#""link_local""#).unwrap();
+        assert!(matches!(legacy_group, DestinationGroup::LinkLocal));
     }
 
     /// Multi-protocol rule: TCP-or-UDP both match.
