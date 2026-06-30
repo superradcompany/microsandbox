@@ -11,6 +11,8 @@
     clippy::manual_c_str_literals
 )]
 
+mod addr;
+
 pub mod backend;
 pub mod builder;
 pub mod config;

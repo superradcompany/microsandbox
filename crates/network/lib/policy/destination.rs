@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use ipnetwork::IpNetwork;
 
 use super::DestinationGroup;
+use crate::addr::normalize_ip_addr;
 use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
@@ -36,6 +37,8 @@ pub fn matches_group(group: DestinationGroup, addr: IpAddr, shared: &SharedState
 /// `Metadata` before `LinkLocal` because `169.254.169.254` is in the
 /// link-local CIDR.
 fn addr_classify(addr: IpAddr, shared: &SharedState) -> DestinationGroup {
+    let addr = normalize_ip_addr(addr);
+
     if matches_host(addr, shared) {
         DestinationGroup::Host
     } else if is_metadata(addr) {
@@ -125,6 +128,8 @@ fn is_multicast(addr: IpAddr) -> bool {
 
 /// Returns `true` if `addr` matches a CIDR network.
 pub fn matches_cidr(network: &IpNetwork, addr: IpAddr) -> bool {
+    let addr = normalize_ip_addr(addr);
+
     network.contains(addr)
 }
 
@@ -222,6 +227,32 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_mapped_ipv6_uses_embedded_ipv4_group() {
+        let s = no_host();
+
+        assert!(matches_group(
+            DestinationGroup::Metadata,
+            IpAddr::V6("::ffff:169.254.169.254".parse().unwrap()),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Loopback,
+            IpAddr::V6("::ffff:127.0.0.1".parse().unwrap()),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Private,
+            IpAddr::V6("::ffff:10.0.0.1".parse().unwrap()),
+            &s,
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("::ffff:10.0.0.1".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
     fn link_local() {
         let s = no_host();
         assert!(matches_group(
@@ -292,6 +323,16 @@ mod tests {
         let net: IpNetwork = "10.0.0.0/8".parse().unwrap();
         assert!(matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
         assert!(!matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1))));
+    }
+
+    #[test]
+    fn cidr_match_uses_embedded_ipv4_for_ipv4_mapped_ipv6() {
+        let net: IpNetwork = "169.254.0.0/16".parse().unwrap();
+
+        assert!(matches_cidr(
+            &net,
+            IpAddr::V6("::ffff:169.254.169.254".parse().unwrap()),
+        ));
     }
 
     #[test]
