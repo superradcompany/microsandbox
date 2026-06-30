@@ -251,14 +251,30 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	if n.TLS != nil {
+		scopedUpstreamCACerts := make([]ffi.ScopedUpstreamCACert, 0, len(n.TLS.ScopedUpstreamCACerts))
+		for _, scoped := range n.TLS.ScopedUpstreamCACerts {
+			scopedUpstreamCACerts = append(scopedUpstreamCACerts, ffi.ScopedUpstreamCACert{
+				Pattern: scoped.Pattern,
+				Path:    scoped.Path,
+			})
+		}
+		scopedVerifyUpstream := make([]ffi.ScopedVerifyUpstream, 0, len(n.TLS.ScopedVerifyUpstream))
+		for _, scoped := range n.TLS.ScopedVerifyUpstream {
+			scopedVerifyUpstream = append(scopedVerifyUpstream, ffi.ScopedVerifyUpstream{
+				Pattern: scoped.Pattern,
+				Verify:  scoped.Verify,
+			})
+		}
 		out.TLS = &ffi.TLSOptions{
-			Bypass:           n.TLS.Bypass,
-			VerifyUpstream:   n.TLS.VerifyUpstream,
-			InterceptedPorts: n.TLS.InterceptedPorts,
-			BlockQUIC:        n.TLS.BlockQUIC,
-			CACert:           n.TLS.CACert,
-			CAKey:            n.TLS.CAKey,
-			UpstreamCACerts:  append([]string(nil), n.TLS.UpstreamCACerts...),
+			Bypass:                n.TLS.Bypass,
+			VerifyUpstream:        n.TLS.VerifyUpstream,
+			InterceptedPorts:      n.TLS.InterceptedPorts,
+			BlockQUIC:             n.TLS.BlockQUIC,
+			CACert:                n.TLS.CACert,
+			CAKey:                 n.TLS.CAKey,
+			UpstreamCACerts:       append([]string(nil), n.TLS.UpstreamCACerts...),
+			ScopedUpstreamCACerts: scopedUpstreamCACerts,
+			ScopedVerifyUpstream:  scopedVerifyUpstream,
 		}
 	}
 

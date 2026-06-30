@@ -325,7 +325,10 @@ await using sandbox = await Sandbox.builder("tls-inspect")
   .network((n) => n.tls((t) =>
     t.bypass("*.googleapis.com")
       .verifyUpstream(true)
-      .interceptedPorts([443]),
+      .interceptedPorts([443])
+      .upstreamCaCert("/etc/ssl/corp-root.pem")
+      .upstreamCaCertFor("api.internal", "./certs/api-ca.pem")
+      .verifyUpstreamFor("*.preview.internal", false),
   ))
   .create();
 ```

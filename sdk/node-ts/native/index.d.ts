@@ -1375,12 +1375,16 @@ export declare class TlsBuilder {
   bypass(pattern: string): this
   /** Verify upstream server certificates (default: true). */
   verifyUpstream(verify: boolean): this
+  /** Verify upstream server certificates for matching hosts. */
+  verifyUpstreamFor(pattern: string, verify: boolean): this
   /** Set the ports to intercept (default: 443). */
   interceptedPorts(ports: Array<number>): this
   /** Block QUIC on intercepted ports (default: true). */
   blockQuic(block: boolean): this
   /** Add an upstream CA certificate PEM path. May be called repeatedly. */
   upstreamCaCert(path: string): this
+  /** Add an upstream CA certificate PEM path for matching hosts. */
+  upstreamCaCertFor(pattern: string, path: string): this
   /** Set a custom interception CA certificate PEM path. */
   interceptCaCert(path: string): this
   /** Set a custom interception CA private key PEM path. */
@@ -2100,8 +2104,22 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
+  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
+}
+
+/** Host-scoped upstream CA certificate path. */
+export interface ScopedUpstreamCaCert {
+  pattern: string
+  path: string
+}
+
+/** Host-scoped upstream certificate verification override. */
+export interface ScopedVerifyUpstream {
+  pattern: string
+  verify: boolean
 }
 
 /** Built volume configuration produced by `VolumeBuilder.build()`. */

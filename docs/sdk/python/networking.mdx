@@ -770,9 +770,24 @@ TlsConfig(
     verify_upstream: bool = True,
     intercepted_ports: tuple[int, ...] = (443,),
     block_quic: bool = False,
+    upstream_ca_certs: tuple[str, ...] = (),
+    scoped_upstream_ca_certs: tuple[ScopedUpstreamCACert, ...] = (),
+    scoped_verify_upstream: tuple[ScopedVerifyUpstream, ...] = (),
     ca_cert: str | None = None,
     ca_key: str | None = None,
     ca_cn: str | None = None,
+)
+```
+
+```python
+ScopedUpstreamCACert(
+    pattern: str,
+    path: str,
+)
+
+ScopedVerifyUpstream(
+    pattern: str,
+    verify: bool,
 )
 ```
 
@@ -782,6 +797,9 @@ TlsConfig(
 | verify_upstream | `bool` | `True` | Verify upstream server certificates. Set to `False` only for self-signed servers |
 | intercepted_ports | `tuple[int, ...]` | `(443,)` | TCP ports where TLS interception is active |
 | block_quic | `bool` | `False` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| upstream_ca_certs | `tuple[str, ...]` | `()` | Paths to additional CA bundles trusted for every upstream host |
+| scoped_upstream_ca_certs | `tuple[ScopedUpstreamCACert, ...]` | `()` | Host-pattern-scoped CA bundles trusted only for matching upstream hosts |
+| scoped_verify_upstream | `tuple[ScopedVerifyUpstream, ...]` | `()` | Host-pattern-scoped upstream certificate verification overrides |
 | ca_cert | `str \| None` | `None` | Path to a custom interception CA certificate PEM file |
 | ca_key | `str \| None` | `None` | Path to a custom interception CA private key PEM file |
 | ca_cn | `str \| None` | `None` | Common name for the generated interception CA |

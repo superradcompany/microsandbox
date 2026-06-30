@@ -662,6 +662,24 @@ type PolicyRule struct {
 	Ports []string
 }
 
+// ScopedUpstreamCACert configures an upstream CA bundle for a host pattern.
+type ScopedUpstreamCACert struct {
+	// Pattern is an exact host or "*.suffix" wildcard.
+	Pattern string
+
+	// Path is the path to a CA bundle trusted for matching upstream hosts.
+	Path string
+}
+
+// ScopedVerifyUpstream configures upstream certificate verification for a host pattern.
+type ScopedVerifyUpstream struct {
+	// Pattern is an exact host or "*.suffix" wildcard.
+	Pattern string
+
+	// Verify controls upstream certificate verification for matching hosts.
+	Verify bool
+}
+
 // TLSConfig configures the transparent HTTPS inspection proxy.
 type TLSConfig struct {
 	// Bypass is a list of domain patterns (supports "*.suffix") to skip MITM.
@@ -685,6 +703,14 @@ type TLSConfig struct {
 	// UpstreamCACerts is a list of paths to additional CA bundles trusted
 	// for upstream verification.
 	UpstreamCACerts []string
+
+	// ScopedUpstreamCACerts is a list of host-scoped CA bundles trusted
+	// only for matching upstream hosts.
+	ScopedUpstreamCACerts []ScopedUpstreamCACert
+
+	// ScopedVerifyUpstream is a list of host-scoped upstream verification
+	// overrides.
+	ScopedVerifyUpstream []ScopedVerifyUpstream
 }
 
 // networkPolicyFactory is the static-method surface matching the Node

@@ -16,6 +16,18 @@ export interface DnsConfig {
   readonly queryTimeoutMs: number | null;
 }
 
+/** Host-scoped upstream CA certificate path. */
+export interface ScopedUpstreamCaCert {
+  readonly pattern: string;
+  readonly path: string;
+}
+
+/** Host-scoped upstream certificate verification override. */
+export interface ScopedVerifyUpstream {
+  readonly pattern: string;
+  readonly verify: boolean;
+}
+
 /** TLS interception configuration. */
 export interface TlsConfig {
   readonly bypass: readonly string[];
@@ -23,6 +35,8 @@ export interface TlsConfig {
   readonly interceptedPorts: readonly number[];
   readonly blockQuic: boolean | null;
   readonly upstreamCaCertPaths: readonly string[];
+  readonly scopedUpstreamCaCerts: readonly ScopedUpstreamCaCert[];
+  readonly scopedVerifyUpstream: readonly ScopedVerifyUpstream[];
   readonly interceptCaCertPath: string | null;
   readonly interceptCaKeyPath: string | null;
 }

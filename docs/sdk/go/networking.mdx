@@ -455,7 +455,9 @@ Transparent HTTPS inspection proxy configuration.
 | BlockQUIC | `*bool` | Block QUIC on intercepted ports to force TLS fallback |
 | CACert | `string` | Path to a custom interception CA certificate PEM file |
 | CAKey | `string` | Path to a custom interception CA private key PEM file |
-| UpstreamCACerts | `[]string` | Paths to additional CA bundles trusted for upstream verification |
+| UpstreamCACerts | `[]string` | Paths to additional CA bundles trusted for every upstream host |
+| ScopedUpstreamCACerts | `[]ScopedUpstreamCACert` | Host-pattern-scoped CA bundles trusted only for matching upstream hosts |
+| ScopedVerifyUpstream | `[]ScopedVerifyUpstream` | Host-pattern-scoped upstream certificate verification overrides |
 
 ```go
 sb, err := m.CreateSandbox(ctx, "inspect",
@@ -468,6 +470,32 @@ sb, err := m.CreateSandbox(ctx, "inspect",
     }),
 )
 ```
+
+### ScopedUpstreamCACert
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#tlsconfig">TLSConfig.ScopedUpstreamCACerts</a></p>
+
+Host-scoped upstream CA bundle configuration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Pattern | `string` | Exact host or `*.suffix` wildcard |
+| Path | `string` | CA bundle path trusted for matching upstream hosts |
+
+### ScopedVerifyUpstream
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#tlsconfig">TLSConfig.ScopedVerifyUpstream</a></p>
+
+Host-scoped upstream certificate verification override.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Pattern | `string` | Exact host or `*.suffix` wildcard |
+| Verify | `bool` | Whether to verify certificates for matching upstream hosts |
 
 ### PortBinding
 

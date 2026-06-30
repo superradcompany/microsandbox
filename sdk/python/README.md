@@ -360,7 +360,13 @@ except SandboxAlreadyExistsError:
 ### TLS Interception
 
 ```python
-from microsandbox import Network, Sandbox, TlsConfig
+from microsandbox import (
+    Network,
+    Sandbox,
+    ScopedUpstreamCACert,
+    ScopedVerifyUpstream,
+    TlsConfig,
+)
 
 sandbox = await Sandbox.create(
     "tls-inspect",
@@ -370,6 +376,13 @@ sandbox = await Sandbox.create(
             bypass=("*.googleapis.com",),
             verify_upstream=True,
             intercepted_ports=(443,),
+            upstream_ca_certs=("/etc/ssl/corp-root.pem",),
+            scoped_upstream_ca_certs=(
+                ScopedUpstreamCACert("api.internal", "./certs/api-ca.pem"),
+            ),
+            scoped_verify_upstream=(
+                ScopedVerifyUpstream("*.preview.internal", False),
+            ),
         ),
     ),
 )

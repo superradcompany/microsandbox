@@ -448,6 +448,13 @@ func TestTlsConfigFields(t *testing.T) {
 		BlockQUIC:        &boolTrue,
 		CACert:           "/ca.pem",
 		CAKey:            "/ca.key",
+		UpstreamCACerts:  []string{"/corp.pem"},
+		ScopedUpstreamCACerts: []ScopedUpstreamCACert{
+			{Pattern: "*.internal", Path: "/internal.pem"},
+		},
+		ScopedVerifyUpstream: []ScopedVerifyUpstream{
+			{Pattern: "*.preview.internal", Verify: false},
+		},
 	}
 	if tls.Bypass[0] != "*.internal" {
 		t.Errorf("Bypass[0]: got %q", tls.Bypass[0])
@@ -460,6 +467,15 @@ func TestTlsConfigFields(t *testing.T) {
 	}
 	if tls.CACert != "/ca.pem" {
 		t.Errorf("CACert: got %q", tls.CACert)
+	}
+	if tls.UpstreamCACerts[0] != "/corp.pem" {
+		t.Errorf("UpstreamCACerts[0]: got %q", tls.UpstreamCACerts[0])
+	}
+	if tls.ScopedUpstreamCACerts[0].Pattern != "*.internal" {
+		t.Errorf("ScopedUpstreamCACerts[0]: got %+v", tls.ScopedUpstreamCACerts[0])
+	}
+	if tls.ScopedVerifyUpstream[0].Pattern != "*.preview.internal" {
+		t.Errorf("ScopedVerifyUpstream[0]: got %+v", tls.ScopedVerifyUpstream[0])
 	}
 }
 

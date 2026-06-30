@@ -11,7 +11,7 @@ use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, 
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
-use crate::tls::TlsConfig;
+use crate::tls::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -337,6 +337,21 @@ impl TlsBuilder {
         self
     }
 
+    /// Enable or disable upstream server certificate verification only
+    /// when the upstream SNI matches `pattern`.
+    ///
+    /// Pattern syntax matches [`Self::bypass`]: exact hosts and `*.suffix`
+    /// wildcards are supported.
+    pub fn verify_upstream_for(mut self, pattern: impl Into<String>, verify: bool) -> Self {
+        self.config
+            .scoped_verify_upstream
+            .push(ScopedVerifyUpstream {
+                pattern: pattern.into(),
+                verify,
+            });
+        self
+    }
+
     /// Set the ports to intercept.
     pub fn intercepted_ports(mut self, ports: Vec<u16>) -> Self {
         self.config.intercepted_ports = ports;
@@ -355,6 +370,26 @@ impl TlsBuilder {
     /// Can be called multiple times to add several CAs.
     pub fn upstream_ca_cert(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.upstream_ca_cert.push(path.into());
+        self
+    }
+
+    /// Add a CA certificate PEM file to trust for upstream server verification
+    /// only when the upstream SNI matches `pattern`.
+    ///
+    /// Pattern syntax matches [`Self::bypass`]: exact hosts and `*.suffix`
+    /// wildcards are supported. Can be called multiple times to add several
+    /// CAs for the same host pattern.
+    pub fn upstream_ca_cert_for(
+        mut self,
+        pattern: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.config
+            .scoped_upstream_ca_cert
+            .push(ScopedUpstreamCaCert {
+                pattern: pattern.into(),
+                path: path.into(),
+            });
         self
     }
 

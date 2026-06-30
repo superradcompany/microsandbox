@@ -737,12 +737,33 @@ class NetworkPolicy:
         return d
 
 @dataclass(frozen=True, slots=True)
+class ScopedUpstreamCACert:
+    """Host-scoped upstream CA certificate path."""
+    pattern: str
+    path: str
+
+    def _to_dict(self) -> dict:
+        return {"pattern": self.pattern, "path": self.path}
+
+@dataclass(frozen=True, slots=True)
+class ScopedVerifyUpstream:
+    """Host-scoped upstream certificate verification override."""
+    pattern: str
+    verify: bool
+
+    def _to_dict(self) -> dict:
+        return {"pattern": self.pattern, "verify": self.verify}
+
+@dataclass(frozen=True, slots=True)
 class TlsConfig:
     """TLS interception configuration."""
     bypass: tuple[str, ...] = ()
     verify_upstream: bool = True
     intercepted_ports: tuple[int, ...] = (443,)
     block_quic: bool = False
+    upstream_ca_certs: tuple[str, ...] = ()
+    scoped_upstream_ca_certs: tuple[ScopedUpstreamCACert, ...] = ()
+    scoped_verify_upstream: tuple[ScopedVerifyUpstream, ...] = ()
     ca_cert: str | None = None
     ca_key: str | None = None
     ca_cn: str | None = None
@@ -757,6 +778,16 @@ class TlsConfig:
             d["intercepted_ports"] = list(self.intercepted_ports)
         if self.block_quic:
             d["block_quic"] = True
+        if self.upstream_ca_certs:
+            d["upstream_ca_certs"] = list(self.upstream_ca_certs)
+        if self.scoped_upstream_ca_certs:
+            d["scoped_upstream_ca_certs"] = [
+                scoped._to_dict() for scoped in self.scoped_upstream_ca_certs
+            ]
+        if self.scoped_verify_upstream:
+            d["scoped_verify_upstream"] = [
+                scoped._to_dict() for scoped in self.scoped_verify_upstream
+            ]
         if self.ca_cert is not None:
             d["ca_cert"] = self.ca_cert
         if self.ca_key is not None:

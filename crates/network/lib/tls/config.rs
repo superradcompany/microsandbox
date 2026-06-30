@@ -40,6 +40,14 @@ pub struct TlsConfig {
     #[serde(default)]
     pub upstream_ca_cert: Vec<PathBuf>,
 
+    /// Host-scoped CA certificate PEM files to trust for upstream server verification.
+    #[serde(default, alias = "scoped_upstream_ca_certs")]
+    pub scoped_upstream_ca_cert: Vec<ScopedUpstreamCaCert>,
+
+    /// Host-scoped upstream verification overrides.
+    #[serde(default)]
+    pub scoped_verify_upstream: Vec<ScopedVerifyUpstream>,
+
     /// Interception CA configuration. The TLS proxy uses this CA to sign
     /// per-domain certs that it presents to the guest during interception.
     #[serde(default, alias = "ca")]
@@ -48,6 +56,26 @@ pub struct TlsConfig {
     /// Per-domain certificate cache configuration.
     #[serde(default)]
     pub cache: CertCacheConfig,
+}
+
+/// A CA certificate PEM file trusted only for matching upstream hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedUpstreamCaCert {
+    /// Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards.
+    pub pattern: String,
+
+    /// Path to the CA certificate PEM file.
+    pub path: PathBuf,
+}
+
+/// An upstream certificate verification override for matching hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedVerifyUpstream {
+    /// Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards.
+    pub pattern: String,
+
+    /// Whether to verify matching upstream server certificates.
+    pub verify: bool,
 }
 
 /// Certificate authority configuration for TLS interception.
@@ -89,6 +117,8 @@ impl Default for TlsConfig {
             verify_upstream: true,
             block_quic_on_intercept: true,
             upstream_ca_cert: Vec::new(),
+            scoped_upstream_ca_cert: Vec::new(),
+            scoped_verify_upstream: Vec::new(),
             intercept_ca: InterceptCaConfig::default(),
             cache: CertCacheConfig::default(),
         }

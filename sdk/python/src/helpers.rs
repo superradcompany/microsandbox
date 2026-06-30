@@ -953,6 +953,12 @@ fn apply_network(
         let verify_upstream: Option<bool> = extract_opt(&tls_dict, "verify_upstream")?;
         let intercepted_ports: Option<Vec<u16>> = extract_opt(&tls_dict, "intercepted_ports")?;
         let block_quic: Option<bool> = extract_opt(&tls_dict, "block_quic")?;
+        let upstream_ca_certs: Vec<String> =
+            extract_opt(&tls_dict, "upstream_ca_certs")?.unwrap_or_default();
+        let scoped_upstream_ca_certs =
+            parse_scoped_upstream_ca_certs(&tls_dict, "scoped_upstream_ca_certs")?;
+        let scoped_verify_upstream =
+            parse_scoped_verify_upstream(&tls_dict, "scoped_verify_upstream")?;
         let ca_cert: Option<String> = extract_opt(&tls_dict, "ca_cert")?;
         let ca_key: Option<String> = extract_opt(&tls_dict, "ca_key")?;
 
@@ -969,6 +975,15 @@ fn apply_network(
                 }
                 if let Some(b) = block_quic {
                     t = t.block_quic(b);
+                }
+                for path in &upstream_ca_certs {
+                    t = t.upstream_ca_cert(path);
+                }
+                for (pattern, path) in &scoped_upstream_ca_certs {
+                    t = t.upstream_ca_cert_for(pattern, path);
+                }
+                for (pattern, verify) in &scoped_verify_upstream {
+                    t = t.verify_upstream_for(pattern, *verify);
                 }
                 if let Some(ref cert) = ca_cert {
                     t = t.intercept_ca_cert(cert);
@@ -1135,6 +1150,52 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
         "expected dict or object with _to_dict(), got {}",
         obj.get_type().name()?
     )))
+}
+
+fn parse_scoped_upstream_ca_certs(
+    dict: &Bound<'_, PyDict>,
+    key: &str,
+) -> PyResult<Vec<(String, String)>> {
+    let Some(obj) = dict.get_item(key)? else {
+        return Ok(Vec::new());
+    };
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let entries: &Bound<'_, PyList> = obj.downcast()?;
+    let mut scoped = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let entry_dict = as_dict(&entry)?;
+        scoped.push((
+            extract_required(&entry_dict, "pattern")?,
+            extract_required(&entry_dict, "path")?,
+        ));
+    }
+    Ok(scoped)
+}
+
+fn parse_scoped_verify_upstream(
+    dict: &Bound<'_, PyDict>,
+    key: &str,
+) -> PyResult<Vec<(String, bool)>> {
+    let Some(obj) = dict.get_item(key)? else {
+        return Ok(Vec::new());
+    };
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let entries: &Bound<'_, PyList> = obj.downcast()?;
+    let mut scoped = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let entry_dict = as_dict(&entry)?;
+        scoped.push((
+            extract_required(&entry_dict, "pattern")?,
+            extract_required(&entry_dict, "verify")?,
+        ));
+    }
+    Ok(scoped)
 }
 
 fn parse_network_destination(

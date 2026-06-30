@@ -20,8 +20,26 @@ pub struct JsTlsConfig {
     pub intercepted_ports: Vec<u32>,
     pub block_quic: bool,
     pub upstream_ca_cert_paths: Vec<String>,
+    pub scoped_upstream_ca_certs: Vec<JsScopedUpstreamCaCert>,
+    pub scoped_verify_upstream: Vec<JsScopedVerifyUpstream>,
     pub intercept_ca_cert_path: Option<String>,
     pub intercept_ca_key_path: Option<String>,
+}
+
+/// Host-scoped upstream CA certificate path.
+#[derive(Clone)]
+#[napi(object, js_name = "ScopedUpstreamCaCert")]
+pub struct JsScopedUpstreamCaCert {
+    pub pattern: String,
+    pub path: String,
+}
+
+/// Host-scoped upstream certificate verification override.
+#[derive(Clone)]
+#[napi(object, js_name = "ScopedVerifyUpstream")]
+pub struct JsScopedVerifyUpstream {
+    pub pattern: String,
+    pub verify: bool,
 }
 
 /// Fluent builder for TLS interception settings.
@@ -59,6 +77,14 @@ impl JsTlsBuilder {
         self
     }
 
+    /// Verify upstream server certificates for matching hosts.
+    #[napi(js_name = "verifyUpstreamFor")]
+    pub fn verify_upstream_for(&mut self, pattern: String, verify: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.verify_upstream_for(pattern, verify));
+        self
+    }
+
     /// Set the ports to intercept (default: 443).
     #[napi(js_name = "interceptedPorts")]
     pub fn intercepted_ports(&mut self, ports: Vec<u32>) -> Result<&Self> {
@@ -84,6 +110,14 @@ impl JsTlsBuilder {
     pub fn upstream_ca_cert(&mut self, path: String) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.upstream_ca_cert(PathBuf::from(path)));
+        self
+    }
+
+    /// Add an upstream CA certificate PEM path for matching hosts.
+    #[napi(js_name = "upstreamCaCertFor")]
+    pub fn upstream_ca_cert_for(&mut self, pattern: String, path: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.upstream_ca_cert_for(pattern, PathBuf::from(path)));
         self
     }
 
@@ -153,6 +187,22 @@ pub(crate) fn to_js_tls_config(cfg: RustTlsConfig) -> JsTlsConfig {
             .upstream_ca_cert
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        scoped_upstream_ca_certs: cfg
+            .scoped_upstream_ca_cert
+            .iter()
+            .map(|scoped| JsScopedUpstreamCaCert {
+                pattern: scoped.pattern.clone(),
+                path: scoped.path.to_string_lossy().into_owned(),
+            })
+            .collect(),
+        scoped_verify_upstream: cfg
+            .scoped_verify_upstream
+            .iter()
+            .map(|scoped| JsScopedVerifyUpstream {
+                pattern: scoped.pattern.clone(),
+                verify: scoped.verify,
+            })
             .collect(),
         intercept_ca_cert_path: cfg
             .intercept_ca
