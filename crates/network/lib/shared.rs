@@ -16,6 +16,8 @@ use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
 
+use crate::addr::normalize_ip_addr;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -167,6 +169,7 @@ impl SharedState {
     ) {
         let hostname = normalize_hostname(domain);
         let key = ResolvedHostnameKey { hostname, family };
+        let addrs = addrs.into_iter().map(normalize_ip_addr);
         self.resolved_hostnames
             .write()
             .insert(key, addrs, ttl, Instant::now());
@@ -185,6 +188,8 @@ impl SharedState {
         addr: IpAddr,
         mut predicate: impl FnMut(&str) -> bool,
     ) -> bool {
+        let addr = normalize_ip_addr(addr);
+
         self.resolved_hostnames
             .read()
             .member_matches(&addr, Instant::now(), |key| predicate(&key.hostname))
@@ -324,5 +329,22 @@ mod tests {
         assert!(state.any_resolved_hostname(v4, |h| h == "example.com"));
         assert!(state.any_resolved_hostname(v6, |h| h == "example.com"));
         assert!(!state.any_resolved_hostname(v4, |h| h == "other.example"));
+    }
+
+    #[test]
+    fn resolved_hostnames_normalize_ipv4_mapped_ipv6() {
+        let state = SharedState::new(4);
+        let mapped: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        let embedded: IpAddr = "169.254.169.254".parse().unwrap();
+
+        state.cache_resolved_hostname(
+            "metadata.example",
+            ResolvedHostnameFamily::Ipv6,
+            [mapped],
+            Duration::from_secs(30),
+        );
+
+        assert!(state.any_resolved_hostname(embedded, |h| h == "metadata.example"));
+        assert!(state.any_resolved_hostname(mapped, |h| h == "metadata.example"));
     }
 }
