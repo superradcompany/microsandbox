@@ -45,6 +45,8 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct ImageLoadOptions {
     /// Extra tags to apply to the first image in the archive.
     pub tags: Vec<String>,
+    /// Optional sink for materialization progress events. `None` stays silent.
+    pub progress: Option<crate::progress::PullProgressSender>,
 }
 
 /// Archive format to use when saving images.
@@ -254,6 +256,7 @@ pub async fn load_archive(
 ) -> ImageResult<Vec<LoadedImage>> {
     let cache_dir_for_blocking = cache_dir.to_path_buf();
     let input = input.to_path_buf();
+    let progress = options.progress.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         load_archive_blocking(&cache_dir_for_blocking, &input, options)
     })
@@ -284,6 +287,7 @@ pub async fn load_archive(
                     &image.metadata,
                     false,
                     Arc::clone(&staged_layers),
+                    progress.clone(),
                 )
                 .await?;
 
