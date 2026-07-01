@@ -546,19 +546,18 @@ fn load_archive_blocking(
     input: &Path,
     options: ImageLoadOptions,
 ) -> ImageResult<PreparedArchiveLoad> {
-    // A modern `docker save` (containerd snapshotter, OrbStack, buildkit) writes an
-    // OCI layout *and* a legacy `manifest.json` compatibility shim. Route those to
-    // the OCI path: it is authoritative — layer digests and sizes come straight from
-    // the manifest descriptors — and it carries the early cache gate. Only a genuine
-    // legacy archive (`manifest.json` with no `oci-layout`) uses the Docker path.
-    if read_archive_entry(input, "oci-layout")?.is_some() {
-        return load_oci_archive_blocking(cache_dir, input, options);
-    }
-
+    // A `docker save` archive carries a `manifest.json` (and often an `oci-layout`
+    // compat shim). Prefer the Docker path when `manifest.json` is present: it derives
+    // the image name from `RepoTags` and handles the layer layout that `docker save`
+    // actually writes. The OCI path is for archives that ship only an OCI layout.
     if let Some(manifest_json) = read_archive_entry(input, "manifest.json")? {
         let manifest: Vec<DockerManifestEntry> = serde_json::from_slice(&manifest_json)
             .map_err(|e| ImageError::ManifestParse(format!("docker manifest.json: {e}")))?;
         return load_docker_archive_blocking(cache_dir, input, options, manifest);
+    }
+
+    if read_archive_entry(input, "oci-layout")?.is_some() {
+        return load_oci_archive_blocking(cache_dir, input, options);
     }
 
     Err(ImageError::ManifestParse(
