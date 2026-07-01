@@ -74,8 +74,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		PortsUDP:        o.PortsUDP,
 		PortBindings:    buildFFIPortBindings(o.PortBindings),
 	}
-	if o.diskSizeSet || o.DiskSizeMiB != 0 {
-		ffiOpts.DiskSizeMiB = &o.DiskSizeMiB
+	if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
+		ffiOpts.OCIUpperSizeMiB = &o.OCIUpperSizeMiB
 	}
 	if o.ReplaceWithTimeout != nil {
 		var ms uint64
