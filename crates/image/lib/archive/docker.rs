@@ -600,6 +600,7 @@ fn load_docker_archive_blocking(
             if diff_ids.len() != image.layers.len() {
                 break 'early_gate;
             }
+            let config_digest = format!("sha256:{}", sha256_hex(config_bytes));
 
             let mut refs = image
                 .repo_tags
@@ -629,7 +630,7 @@ fn load_docker_archive_blocking(
                         .iter()
                         .map(|layer| layer.diff_id.clone())
                         .collect::<Vec<_>>();
-                    if cached_diff_ids == diff_ids {
+                    if metadata.config_digest == config_digest && cached_diff_ids == diff_ids {
                         cached = Some(metadata);
                         break;
                     }
@@ -668,6 +669,9 @@ fn load_docker_archive_blocking(
                     metadata: metadata.clone(),
                 });
             }
+        }
+        if !archive_contains_entries(input, &required_layers)? {
+            break 'early_gate;
         }
         return Ok(PreparedArchiveLoad {
             images: early_images,
@@ -868,6 +872,7 @@ fn load_oci_archive_blocking(
             let Some(config_bytes) = config_blobs.get(&config_path) else {
                 break 'early_gate;
             };
+            verify_descriptor_blob(manifest.config(), config_bytes)?;
             let (config, diff_ids) = ImageConfig::parse(config_bytes)?;
             if diff_ids.len() != manifest.layers().len() {
                 break 'early_gate;
@@ -932,6 +937,9 @@ fn load_oci_archive_blocking(
                     metadata: metadata.clone(),
                 });
             }
+        }
+        if !archive_contains_entries(input, &required_layers)? {
+            break 'early_gate;
         }
         return Ok(PreparedArchiveLoad {
             images: early_images,
@@ -1108,6 +1116,38 @@ fn read_archive_entries(
     }
 
     Ok(entries)
+}
+
+fn archive_contains_entries(input: &Path, wanted_paths: &HashSet<String>) -> ImageResult<bool> {
+    if wanted_paths.is_empty() {
+        return Ok(true);
+    }
+
+    let file = File::open(input).map_err(|e| ImageError::Cache {
+        path: input.to_path_buf(),
+        source: e,
+    })?;
+    let mut archive = tar::Archive::new(file);
+    let mut entries = HashSet::new();
+    let mut entry_count = 0u64;
+
+    // The warm gate trusts cached layer EROFS contents, but the archive still needs
+    // to contain the layer members it advertises. Header-only scanning preserves the
+    // warm path's main win: layer bytes are seeked over, not read or re-hashed.
+    for entry in archive.entries_with_seek().map_err(ImageError::Io)? {
+        let entry = entry.map_err(ImageError::Io)?;
+        entry_count += 1;
+        enforce_archive_entry_count(entry_count)?;
+        let path = normalized_archive_path(&entry)?;
+        if wanted_paths.contains(&path) {
+            entries.insert(path);
+            if entries.len() == wanted_paths.len() {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 fn selectable_oci_manifests(
@@ -2118,6 +2158,135 @@ mod tests {
         );
     }
 
+    #[test]
+    fn docker_load_misses_gate_after_config_change() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let layer_bytes = simple_layer_tar();
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+
+        // Materialize the first image under `app:latest`.
+        let first = temp.path().join("first.tar");
+        write_test_docker_archive_from_layer(&first, "app:latest", layer_bytes.clone());
+        runtime
+            .block_on(load_archive(&cache, &first, ImageLoadOptions::default()))
+            .unwrap();
+
+        // Rebuild the same filesystem layer with a different image config. Diff IDs
+        // alone would hit the old gate, but the config digest must force a miss.
+        let second = temp.path().join("second.tar");
+        let config_bytes = test_config_bytes_with_cmd(&diff_id, &["sh", "-c", "echo changed"]);
+        write_test_docker_archive_entries(
+            &second,
+            "app:latest",
+            format!("{}.json", sha256_hex(&config_bytes)),
+            "layer/layer.tar".into(),
+            config_bytes,
+            layer_bytes,
+        );
+
+        let prepared = load_archive_blocking(&cache, &second, ImageLoadOptions::default()).unwrap();
+        assert!(
+            !prepared.staged_layers.is_empty(),
+            "a config-only rebuild must not reuse stale cached metadata"
+        );
+        let expected_cmd = vec!["sh".into(), "-c".into(), "echo changed".into()];
+        assert_eq!(
+            prepared.images[0].metadata.config.cmd.as_ref(),
+            Some(&expected_cmd)
+        );
+    }
+
+    #[test]
+    fn docker_load_rejects_warm_archive_missing_layer_entry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let layer_bytes = simple_layer_tar();
+
+        let valid = temp.path().join("valid.tar");
+        write_test_docker_archive_from_layer(&valid, "app:latest", layer_bytes.clone());
+        runtime
+            .block_on(load_archive(&cache, &valid, ImageLoadOptions::default()))
+            .unwrap();
+
+        let missing_layer = temp.path().join("missing-layer.tar");
+        write_test_docker_archive_without_layer(&missing_layer, "app:latest", layer_bytes);
+        let err =
+            load_archive_blocking(&cache, &missing_layer, ImageLoadOptions::default()).unwrap_err();
+        match err {
+            ImageError::ManifestParse(message) => {
+                assert!(message.contains("docker archive missing layer layer/layer.tar"));
+            }
+            other => panic!("expected missing layer error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oci_load_rejects_warm_archive_missing_layer_entry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let layer_bytes = simple_layer_tar();
+
+        let valid = temp.path().join("valid.tar");
+        write_test_oci_archive_from_layer(&valid, "app:latest", layer_bytes.clone());
+        runtime
+            .block_on(load_archive(&cache, &valid, ImageLoadOptions::default()))
+            .unwrap();
+
+        let missing_layer = temp.path().join("missing-layer.tar");
+        write_test_oci_archive_without_layer(&missing_layer, "app:latest", layer_bytes);
+        let err = load_oci_archive_blocking(&cache, &missing_layer, ImageLoadOptions::default())
+            .unwrap_err();
+        match err {
+            ImageError::ManifestParse(message) => {
+                assert!(message.contains("OCI layout missing layer blob"));
+            }
+            other => panic!("expected missing layer error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oci_load_rejects_warm_archive_with_mismatched_config_blob() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let layer_bytes = simple_layer_tar();
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+
+        let valid = temp.path().join("valid.tar");
+        write_test_oci_archive_from_layer(&valid, "app:latest", layer_bytes.clone());
+        runtime
+            .block_on(load_archive(&cache, &valid, ImageLoadOptions::default()))
+            .unwrap();
+
+        let bad_config = test_config_bytes_with_cmd(&diff_id, &["sh", "-c", "echo changed"]);
+        let corrupt = temp.path().join("corrupt-config.tar");
+        write_test_oci_archive_with_config_blob(&corrupt, "app:latest", layer_bytes, bad_config);
+        let err =
+            load_oci_archive_blocking(&cache, &corrupt, ImageLoadOptions::default()).unwrap_err();
+        match err {
+            ImageError::ManifestParse(message) => {
+                assert!(message.contains("OCI blob sha256:"));
+            }
+            other => panic!("expected config descriptor error, got {other:?}"),
+        }
+    }
+
     fn write_test_docker_archive(path: &Path, reference: &str) {
         write_test_docker_archive_from_layer(path, reference, simple_layer_tar());
     }
@@ -2135,6 +2304,25 @@ mod tests {
             config_bytes,
             layer_bytes,
         );
+    }
+
+    fn write_test_docker_archive_without_layer(path: &Path, reference: &str, layer_bytes: Vec<u8>) {
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let config_bytes = test_config_bytes(&diff_id);
+        let config_name = format!("{}.json", sha256_hex(&config_bytes));
+        let layer_name = "layer/layer.tar".to_string();
+        let manifest_bytes = serde_json::to_vec(&vec![DockerManifestOut {
+            config: config_name.clone(),
+            repo_tags: vec![reference.into()],
+            layers: vec![layer_name],
+        }])
+        .unwrap();
+
+        let file = File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        append_bytes(&mut archive, &config_name, &config_bytes).unwrap();
+        append_bytes(&mut archive, "manifest.json", &manifest_bytes).unwrap();
+        archive.finish().unwrap();
     }
 
     fn write_test_docker_blob_archive_from_layer(
@@ -2227,6 +2415,111 @@ mod tests {
         archive.finish().unwrap();
     }
 
+    fn write_test_oci_archive_without_layer(path: &Path, reference: &str, layer_bytes: Vec<u8>) {
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let config_bytes = test_config_bytes(&diff_id);
+        let config_hex = sha256_hex(&config_bytes);
+        let layer_hex = sha256_hex(&layer_bytes);
+        let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "config": {
+                "mediaType": OCI_CONFIG_MEDIA_TYPE,
+                "digest": format!("sha256:{config_hex}"),
+                "size": config_bytes.len(),
+            },
+            "layers": [{
+                "mediaType": OCI_LAYER_MEDIA_TYPE,
+                "digest": format!("sha256:{layer_hex}"),
+                "size": layer_bytes.len(),
+            }],
+        }))
+        .unwrap();
+        let manifest_hex = sha256_hex(&manifest_bytes);
+        let index_bytes = test_oci_index_bytes(reference, &manifest_hex, manifest_bytes.len());
+
+        let file = File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        append_bytes(
+            &mut archive,
+            "oci-layout",
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        append_bytes(&mut archive, "index.json", &index_bytes).unwrap();
+        append_bytes(
+            &mut archive,
+            &format!("blobs/sha256/{config_hex}"),
+            &config_bytes,
+        )
+        .unwrap();
+        append_bytes(
+            &mut archive,
+            &format!("blobs/sha256/{manifest_hex}"),
+            &manifest_bytes,
+        )
+        .unwrap();
+        archive.finish().unwrap();
+    }
+
+    fn write_test_oci_archive_with_config_blob(
+        path: &Path,
+        reference: &str,
+        layer_bytes: Vec<u8>,
+        stored_config_bytes: Vec<u8>,
+    ) {
+        let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let manifest_config_bytes = test_config_bytes(&diff_id);
+        let config_hex = sha256_hex(&manifest_config_bytes);
+        let layer_hex = sha256_hex(&layer_bytes);
+        let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "config": {
+                "mediaType": OCI_CONFIG_MEDIA_TYPE,
+                "digest": format!("sha256:{config_hex}"),
+                "size": manifest_config_bytes.len(),
+            },
+            "layers": [{
+                "mediaType": OCI_LAYER_MEDIA_TYPE,
+                "digest": format!("sha256:{layer_hex}"),
+                "size": layer_bytes.len(),
+            }],
+        }))
+        .unwrap();
+        let manifest_hex = sha256_hex(&manifest_bytes);
+        let index_bytes = test_oci_index_bytes(reference, &manifest_hex, manifest_bytes.len());
+
+        let file = File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        append_bytes(
+            &mut archive,
+            "oci-layout",
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        append_bytes(&mut archive, "index.json", &index_bytes).unwrap();
+        append_bytes(
+            &mut archive,
+            &format!("blobs/sha256/{config_hex}"),
+            &stored_config_bytes,
+        )
+        .unwrap();
+        append_bytes(
+            &mut archive,
+            &format!("blobs/sha256/{manifest_hex}"),
+            &manifest_bytes,
+        )
+        .unwrap();
+        append_bytes(
+            &mut archive,
+            &format!("blobs/sha256/{layer_hex}"),
+            &layer_bytes,
+        )
+        .unwrap();
+        archive.finish().unwrap();
+    }
+
     fn simple_layer_tar() -> Vec<u8> {
         let mut layer_bytes = Vec::new();
         {
@@ -2250,17 +2543,42 @@ mod tests {
     }
 
     fn test_config_bytes(diff_id: &str) -> Vec<u8> {
+        test_config_bytes_with_cmd(diff_id, &["cat", "/hello.txt"])
+    }
+
+    fn test_config_bytes_with_cmd(diff_id: &str, cmd: &[&str]) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "architecture": "arm64",
             "os": "linux",
             "config": {
                 "Env": ["PATH=/usr/bin"],
-                "Cmd": ["cat", "/hello.txt"],
+                "Cmd": cmd,
             },
             "rootfs": {
                 "type": "layers",
                 "diff_ids": [diff_id],
             },
+        }))
+        .unwrap()
+    }
+
+    fn test_oci_index_bytes(reference: &str, manifest_hex: &str, manifest_len: usize) -> Vec<u8> {
+        let host = Platform::host_linux();
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_INDEX_MEDIA_TYPE,
+            "manifests": [{
+                "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                "digest": format!("sha256:{manifest_hex}"),
+                "size": manifest_len,
+                "platform": {
+                    "architecture": host.arch.to_string(),
+                    "os": host.os.to_string(),
+                },
+                "annotations": {
+                    (OCI_REF_NAME_ANNOTATION): reference,
+                },
+            }],
         }))
         .unwrap()
     }
