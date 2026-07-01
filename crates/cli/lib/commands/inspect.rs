@@ -109,7 +109,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         }
 
         ui::detail_header("Resources");
-        ui::detail_kv_indent("CPUs", &config.spec.resources.cpus.to_string());
+        ui::detail_kv_indent("CPUs", &config.spec.resources.vcpus.to_string());
         ui::detail_kv_indent(
             "Memory",
             &format!("{} MiB", config.spec.resources.memory_mib),

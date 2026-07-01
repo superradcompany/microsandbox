@@ -133,6 +133,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "remove maintenance lease table",
     },
+    MigrationMetadata {
+        id: "m20260701_000001_migrate_sandbox_config_wire",
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "rewrite sandbox config JSON back to the pre-harmonization wire format",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------

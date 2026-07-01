@@ -304,7 +304,12 @@ jobs:
         run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
 
       - name: Check generated microsandbox types
-        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+        run: |
+          cargo +stable install typeshare-cli --version 1.13.4 --locked
+          typeshare packages/microsandbox-types/rust/lib \
+            --lang=typescript \
+            --output-file=packages/microsandbox-types/typescript/src/index.ts
+          git diff --exit-code -- packages/microsandbox-types/typescript/src/index.ts
 
       # -- Checks (agentd — Linux-only) --
       - name: Format agentd

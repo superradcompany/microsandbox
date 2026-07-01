@@ -61,7 +61,7 @@ pub struct NetworkPolicy {
 
 /// Action to take on matched traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Action {
     /// Allow the traffic.
     Allow,
@@ -101,7 +101,7 @@ pub struct Rule {
 
 /// Direction a rule applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Direction {
     /// Outbound: guest → destination. Evaluated by `evaluate_egress`.
     Egress,
@@ -122,6 +122,7 @@ pub enum Direction {
 /// can then rely on byte equality against the DNS cache's own
 /// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
@@ -137,6 +138,7 @@ pub enum Destination {
     /// Domain suffix. Matches the apex domain itself and any subdomain
     /// of it (e.g. suffix `example.com` matches `example.com` and
     /// `foo.example.com` but not `evilexample.com`).
+    #[serde(alias = "domain-suffix")]
     DomainSuffix(DomainName),
 
     /// Pre-defined destination group.
@@ -165,6 +167,7 @@ pub enum DestinationGroup {
 
     /// Link-local addresses (`169.254.0.0/16`, `fe80::/10`), excluding
     /// the metadata IP which is categorized as [`Metadata`](Self::Metadata).
+    #[serde(alias = "link-local")]
     LinkLocal,
 
     /// Cloud metadata endpoints (`169.254.169.254`).
@@ -181,7 +184,7 @@ pub enum DestinationGroup {
 
 /// Protocol filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Protocol {
     /// TCP.
     Tcp,
@@ -987,7 +990,7 @@ mod tests {
                 "rules": [
                     {
                         "direction": "egress",
-                        "destination": { "domain": "PyPI.Org." },
+                        "destination": { "type": "domain", "data": "PyPI.Org." },
                         "action": "allow"
                     }
                 ]
@@ -1351,6 +1354,9 @@ mod tests {
         assert!(json.contains("\"domain_suffix\""), "JSON: {json}");
         assert!(json.contains("\"icmpv4\""), "JSON: {json}");
         assert!(json.contains("\"tcp\""), "JSON: {json}");
+        // Legacy kebab-case is no longer the canonical serialized form.
+        assert!(!json.contains("\"link-local\""), "JSON: {json}");
+        assert!(!json.contains("\"domain-suffix\""), "JSON: {json}");
         // No PascalCase residue.
         assert!(!json.contains("\"Egress\""), "JSON: {json}");
         assert!(!json.contains("\"Allow\""), "JSON: {json}");
@@ -1368,6 +1374,14 @@ mod tests {
         assert!(matches!(back.default_ingress, Action::Allow));
         assert!(matches!(back.rules[0].direction, Direction::Egress));
         assert!(matches!(back.rules[1].direction, Direction::Any));
+
+        // Back-compat: legacy kebab-case tags still deserialize via #[serde(alias)].
+        let legacy: Destination =
+            serde_json::from_str(r#"{"type":"domain-suffix","data":"legacy.example.com"}"#)
+                .unwrap();
+        assert!(matches!(legacy, Destination::DomainSuffix(_)));
+        let legacy_group: DestinationGroup = serde_json::from_str(r#""link-local""#).unwrap();
+        assert!(matches!(legacy_group, DestinationGroup::LinkLocal));
     }
 
     /// Multi-protocol rule: TCP-or-UDP both match.

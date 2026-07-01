@@ -40,7 +40,6 @@ sha2 = "0.11.0"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
-ts-rs = "12.0.1"
 EOF
 
 RUN cargo build --release --manifest-path crates/agentd/Cargo.toml
