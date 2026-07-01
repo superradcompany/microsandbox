@@ -542,14 +542,19 @@ fn load_archive_blocking(
     input: &Path,
     options: ImageLoadOptions,
 ) -> ImageResult<PreparedArchiveLoad> {
+    // A modern `docker save` (containerd snapshotter, OrbStack, buildkit) writes an
+    // OCI layout *and* a legacy `manifest.json` compatibility shim. Route those to
+    // the OCI path: it is authoritative — layer digests and sizes come straight from
+    // the manifest descriptors — and it carries the early cache gate. Only a genuine
+    // legacy archive (`manifest.json` with no `oci-layout`) uses the Docker path.
+    if read_archive_entry(input, "oci-layout")?.is_some() {
+        return load_oci_archive_blocking(cache_dir, input, options);
+    }
+
     if let Some(manifest_json) = read_archive_entry(input, "manifest.json")? {
         let manifest: Vec<DockerManifestEntry> = serde_json::from_slice(&manifest_json)
             .map_err(|e| ImageError::ManifestParse(format!("docker manifest.json: {e}")))?;
         return load_docker_archive_blocking(cache_dir, input, options, manifest);
-    }
-
-    if read_archive_entry(input, "oci-layout")?.is_some() {
-        return load_oci_archive_blocking(cache_dir, input, options);
     }
 
     Err(ImageError::ManifestParse(
@@ -754,6 +759,101 @@ fn load_oci_archive_blocking(
         manifests.push((descriptor.clone(), manifest, manifest_bytes.clone()));
     }
 
+    // Fast path: skip re-importing an image that is already fully materialized.
+    //
+    // A `CachedImageMetadata` is fully determined by the small manifest and config
+    // blobs — `manifest_digest` is `sha256(manifest_bytes)`; each layer's digest,
+    // media type, and size come from the manifest descriptors; the diff_ids come from
+    // the config. So the whole record can be built without opening a single layer
+    // blob. When the fsmeta, VMDK, and every layer EROFS are already cached, return
+    // here and never stage (and re-SHA-256) the layer blobs — the work that otherwise
+    // dominates a warm-cache load. Any miss breaks out to the full staging path below.
+    //
+    // Gotcha: `read_archive_entries` walks the archive with `tar::entries`, which
+    // reads *past* the layer data rather than seeking, so a hit is I/O- not CPU-bound
+    // (the ~16 s of hashing is gone, but the blob bytes are still streamed). Switching
+    // to `entries_with_seek` would make a hit seek-cheap and truly sub-second.
+    'early_gate: {
+        let config_blobs = read_archive_entries(input, &required_configs)?;
+        let mut early_images = Vec::new();
+        for (image_index, (descriptor, manifest, manifest_bytes)) in manifests.iter().enumerate() {
+            let config_path = blob_path_from_digest(manifest.config().digest().as_ref())?;
+            let Some(config_bytes) = config_blobs.get(&config_path) else {
+                break 'early_gate;
+            };
+            let (config, diff_ids) = ImageConfig::parse(config_bytes)?;
+            if diff_ids.len() != manifest.layers().len() {
+                break 'early_gate;
+            }
+            let manifest_digest_str = format!("sha256:{}", sha256_hex(manifest_bytes));
+            let Ok(manifest_digest) = manifest_digest_str.parse::<crate::Digest>() else {
+                break 'early_gate;
+            };
+            if !crate::cache::is_valid_erofs_artifact(&cache.fsmeta_erofs_path(&manifest_digest))
+                || !cache.vmdk_path(&manifest_digest).exists()
+            {
+                break 'early_gate;
+            }
+
+            let mut layer_metadata = Vec::with_capacity(manifest.layers().len());
+            for (position, layer_descriptor) in manifest.layers().iter().enumerate() {
+                let diff_id_str = diff_ids[position].clone();
+                let Ok(diff_id) = diff_id_str.parse::<crate::Digest>() else {
+                    break 'early_gate;
+                };
+                if !crate::cache::is_valid_erofs_artifact(&cache.layer_erofs_path(&diff_id)) {
+                    break 'early_gate;
+                }
+                layer_metadata.push(CachedLayerMetadata {
+                    digest: layer_descriptor.digest().to_string(),
+                    media_type: Some(layer_descriptor.media_type().to_string()),
+                    size_bytes: Some(layer_descriptor.size()),
+                    diff_id: diff_id_str,
+                });
+            }
+
+            let metadata = CachedImageMetadata {
+                manifest_digest: manifest_digest_str,
+                config_digest: manifest.config().digest().to_string(),
+                raw_manifest_json: json_bytes_to_string(manifest_bytes, "OCI manifest")?,
+                raw_config_json: json_bytes_to_string(config_bytes, "OCI config")?,
+                config,
+                layers: layer_metadata,
+            };
+
+            let mut refs = descriptor
+                .annotations()
+                .as_ref()
+                .and_then(|annotations| annotations.get(OCI_REF_NAME_ANNOTATION))
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if image_index == 0 {
+                refs.extend(options.tags.iter().cloned());
+            }
+            refs.sort();
+            refs.dedup();
+            if refs.is_empty() {
+                break 'early_gate;
+            }
+            for reference in refs {
+                if reference.parse::<Reference>().is_err() {
+                    break 'early_gate;
+                }
+                early_images.push(PreparedLoadedImage {
+                    reference,
+                    metadata: metadata.clone(),
+                });
+            }
+        }
+        return Ok(PreparedArchiveLoad {
+            images: early_images,
+            staged_layers: HashMap::new(),
+        });
+    }
+
+    // Full path: some layer (or fsmeta/VMDK) is missing — stage every layer blob so
+    // the materialize step can build what isn't cached.
     let file = File::open(input).map_err(|e| ImageError::Cache {
         path: input.to_path_buf(),
         source: e,
@@ -873,7 +973,11 @@ fn read_archive_entry(input: &Path, wanted_path: &str) -> ImageResult<Option<Vec
     let mut archive = tar::Archive::new(file);
     let mut entry_count = 0u64;
 
-    for entry in archive.entries().map_err(ImageError::Io)? {
+    // `entries_with_seek` skips over each entry's data via the header size field
+    // instead of reading through it. In an OCI `docker save` tar the metadata sits
+    // at the tail (after the blobs), so this reaches it in O(headers) rather than a
+    // full read of every layer blob.
+    for entry in archive.entries_with_seek().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
         entry_count += 1;
         enforce_archive_entry_count(entry_count)?;
@@ -901,7 +1005,8 @@ fn read_archive_entries(
     let mut entries = HashMap::new();
     let mut entry_count = 0u64;
 
-    for entry in archive.entries().map_err(ImageError::Io)? {
+    // Seek past unwanted entry data (see `read_archive_entry`).
+    for entry in archive.entries_with_seek().map_err(ImageError::Io)? {
         let mut entry = entry.map_err(ImageError::Io)?;
         entry_count += 1;
         enforce_archive_entry_count(entry_count)?;
@@ -1836,6 +1941,39 @@ mod tests {
 
         assert_eq!(saved_config["author"], "microsandbox-test");
         assert_eq!(saved_config["history"][0]["comment"], "keep me");
+    }
+
+    #[test]
+    fn oci_load_hits_early_cache_gate_when_materialized() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("gate.tar");
+        write_test_oci_archive_from_layer(&input, "gate:latest", simple_layer_tar());
+        let cache = temp.path().join("cache");
+
+        // First load materializes the image (layer EROFS + fsmeta + VMDK).
+        let loaded = runtime
+            .block_on(load_archive(&cache, &input, ImageLoadOptions::default()))
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        // A second load must take the early cache gate: the metadata is rebuilt from
+        // the manifest + config blobs alone, and no layer blob is staged.
+        let prepared =
+            load_oci_archive_blocking(&cache, &input, ImageLoadOptions::default()).unwrap();
+        assert!(
+            prepared.staged_layers.is_empty(),
+            "early cache gate should skip staging layer blobs on a warm cache"
+        );
+        assert_eq!(prepared.images.len(), 1);
+        assert_eq!(prepared.images[0].reference, "gate:latest");
+        assert_eq!(
+            prepared.images[0].metadata.manifest_digest,
+            loaded[0].metadata.manifest_digest,
+        );
     }
 
     fn write_test_docker_archive(path: &Path, reference: &str) {
