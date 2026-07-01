@@ -173,7 +173,7 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
     ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(reference, metadata, force, None)
+        self.materialize_cached_layers_inner(reference, metadata, force, None, None)
             .await
     }
 
@@ -183,9 +183,16 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
         staged_layers: Arc<HashMap<String, PathBuf>>,
+        progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(reference, metadata, force, Some(staged_layers))
-            .await
+        self.materialize_cached_layers_inner(
+            reference,
+            metadata,
+            force,
+            Some(staged_layers),
+            progress,
+        )
+        .await
     }
 
     async fn materialize_cached_layers_inner(
@@ -194,6 +201,7 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
         staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
+        progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
         let manifest_digest: Digest = metadata.manifest_digest.parse()?;
         let layer_descriptors = metadata
@@ -219,7 +227,7 @@ impl Registry {
             layer_descriptors: &layer_descriptors,
             diff_ids: &diff_ids,
             force,
-            progress: None,
+            progress,
             staged_layers,
         })
         .await?;
