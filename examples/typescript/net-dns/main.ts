@@ -1,13 +1,19 @@
-import { Sandbox } from "microsandbox";
+import { NetworkPolicy, Sandbox } from "microsandbox";
 
 await using sandbox = await Sandbox.builder("net-dns")
   .image("alpine")
   .cpus(1)
   .memory(512)
   .network((n) =>
-    n
-      .denyDomains("blocked.example.com")
-      .denyDomainSuffixes(".evil.com"),
+    n.policy(
+      NetworkPolicy.builder()
+        .defaultAllow()
+        .egress((e) =>
+          e
+            .denyDomain("blocked.example.com")
+            .denyDomainSuffix(".evil.com"),
+        ),
+    ),
   )
   .replace()
   .create();
@@ -31,7 +37,6 @@ const unrelated = await sandbox.shell(
   "nslookup cloudflare.com 2>&1 | grep -c Address || echo 0",
 );
 console.log(`cloudflare.com: ${unrelated.stdout().trim()} address(es)`);
-
 
 function lastLine(s: string): string {
   const lines = s.split("\n");

@@ -543,6 +543,7 @@ pub struct PullProgressDisplay {
     download_style: ProgressStyle,
     materialize_style: ProgressStyle,
     done_style: ProgressStyle,
+    verb: &'static str,
     _echo_guard: Option<EchoGuard>,
 }
 
@@ -553,15 +554,20 @@ pub struct PullProgressDisplay {
 impl PullProgressDisplay {
     /// Create a new pull progress display for the given image reference.
     pub fn new(reference: &str) -> Self {
-        Self::new_inner(reference, false)
+        Self::new_inner(reference, false, "Pulling")
     }
 
     /// Create a no-op pull progress display that produces no output.
     pub fn quiet(reference: &str) -> Self {
-        Self::new_inner(reference, true)
+        Self::new_inner(reference, true, "Pulling")
     }
 
-    fn new_inner(reference: &str, quiet: bool) -> Self {
+    /// Create a progress display for `msb image load` (header reads "Loading").
+    pub fn load(reference: &str, quiet: bool) -> Self {
+        Self::new_inner(reference, quiet, "Loading")
+    }
+
+    fn new_inner(reference: &str, quiet: bool, verb: &'static str) -> Self {
         let is_tty = !quiet && std::io::stderr().is_terminal();
 
         let mp = MultiProgress::new();
@@ -578,7 +584,7 @@ impl PullProgressDisplay {
                 .template("   {spinner} {msg}")
                 .unwrap(),
         );
-        header.set_message(format!("{:<12} {}", "Pulling", reference));
+        header.set_message(format!("{:<12} {}", verb, reference));
         header.enable_steady_tick(Duration::from_millis(80));
 
         Self {
@@ -586,6 +592,7 @@ impl PullProgressDisplay {
             header,
             layer_bars: Vec::new(),
             reference: reference.to_string(),
+            verb,
             _echo_guard: if is_tty { EchoGuard::acquire() } else { None },
             download_style: ProgressStyle::default_bar()
                 .template(
@@ -603,6 +610,21 @@ impl PullProgressDisplay {
         }
     }
 
+    /// Ensure a materialize-styled bar exists for `index`, creating any missing
+    /// bars up to it. No-op when the bar already exists (pull pre-creates them on
+    /// its `Resolved` event); load has no such event, so bars are made lazily as
+    /// each layer starts materializing.
+    fn ensure_layer_bar(&mut self, index: usize) {
+        while self.layer_bars.len() <= index {
+            let n = self.layer_bars.len() + 1;
+            let pb = self.mp.add(ProgressBar::new(1));
+            pb.set_style(self.materialize_style.clone());
+            pb.set_prefix(format!("layer {n}"));
+            pb.set_message("materializing");
+            self.layer_bars.push(pb);
+        }
+    }
+
     /// Process a single pull progress event, updating the display.
     pub fn handle_event(&mut self, event: PullProgress) {
         match event {
@@ -613,7 +635,7 @@ impl PullProgressDisplay {
             PullProgress::Resolved { layer_count, .. } => {
                 self.header.set_message(format!(
                     "{:<12} {} ({} layer{})",
-                    "Pulling",
+                    self.verb,
                     self.reference,
                     layer_count,
                     if layer_count == 1 { "" } else { "s" }
@@ -657,6 +679,7 @@ impl PullProgressDisplay {
                 }
             }
             PullProgress::LayerMaterializeStarted { layer_index, .. } => {
+                self.ensure_layer_bar(layer_index);
                 if let Some(pb) = self.layer_bars.get(layer_index) {
                     pb.set_style(self.materialize_style.clone());
                     pb.set_position(0);
@@ -669,18 +692,21 @@ impl PullProgressDisplay {
                 bytes_read,
                 total_bytes,
             } => {
+                self.ensure_layer_bar(layer_index);
                 if let Some(pb) = self.layer_bars.get(layer_index) {
                     pb.set_length(total_bytes);
                     pb.set_position(bytes_read);
                 }
             }
             PullProgress::LayerMaterializeWriting { layer_index } => {
+                self.ensure_layer_bar(layer_index);
                 if let Some(pb) = self.layer_bars.get(layer_index) {
                     pb.set_position(pb.length().unwrap_or(0));
                     pb.set_message("writing image");
                 }
             }
             PullProgress::LayerMaterializeComplete { layer_index, .. } => {
+                self.ensure_layer_bar(layer_index);
                 if let Some(pb) = self.layer_bars.get(layer_index) {
                     pb.set_position(pb.length().unwrap_or(0));
                     pb.set_style(self.done_style.clone());

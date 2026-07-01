@@ -5,6 +5,8 @@ description: Go SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management. Examples assume the package is imported as `m "github.com/superradcompany/microsandbox/sdk/go"`.
 
+For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at process startup. It installs the `msb` + `libkrunfw` runtime into `~/.microsandbox/` when needed, is idempotent, and surfaces runtime setup failures before the first sandbox operation. Use [`IsInstalled`](#m-isinstalled) when you only need to check whether the runtime is already present.
+
 <div className="msb-glance">
 
   <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">13</span></p>
@@ -98,20 +100,24 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-sb, err := m.CreateSandbox(ctx, "api",              // 1. configure + boot
+if err := m.EnsureInstalled(ctx); err != nil {      // 1. prepare local runtime
+    return err
+}
+
+sb, err := m.CreateSandbox(ctx, "api",              // 2. configure + boot
     m.WithImage("python"),
     m.WithMemory(1024),
 )
 if err != nil {
     return err
 }
-defer sb.Close()                                    // 4. shut down
+defer sb.Close()                                    // 5. release handle
 
-out, err := sb.Exec(ctx, "python", []string{"-V"})  // 2. run
+out, err := sb.Exec(ctx, "python", []string{"-V"})  // 3. run
 if err != nil {
     return err
 }
-fmt.Println(out.Stdout())                           // 3. read output
+fmt.Println(out.Stdout())                           // 4. read output
 ```
 
 ## Functions
@@ -444,7 +450,7 @@ for name, metrics := range all {
 func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
 ```
 
-Optional. Ensure msb + libkrunfw are present under `~/.microsandbox/`, downloading them from the matching GitHub release if not. Call at startup to surface install errors up front; otherwise the first sandbox call handles it. The FFI library is embedded in the Go binary and loads automatically, `EnsureInstalled` does not govern it. Idempotent; options apply only to the first call.
+Ensure `msb` + `libkrunfw` are present under `~/.microsandbox/`, downloading them from the matching GitHub release if needed. Call this at process startup when the program will create local sandboxes so runtime download/setup failures surface before the first sandbox operation. The Go FFI library is embedded in the Go binary and loads automatically on first use; `EnsureInstalled` only governs the `msb` + `libkrunfw` runtime install. Idempotent; options apply only to the first call.
 
 <p className="msb-label">Parameters</p>
 
@@ -463,7 +469,7 @@ Optional. Ensure msb + libkrunfw are present under `~/.microsandbox/`, downloadi
 
 ```go
 if err := m.EnsureInstalled(ctx); err != nil {
-    log.Fatal(err)
+    log.Fatalf("microsandbox setup: %v", err)
 }
 ```
 
@@ -478,7 +484,7 @@ if err := m.EnsureInstalled(ctx); err != nil {
 func IsInstalled() bool
 ```
 
-Report whether msb + libkrunfw are present on disk at the SDK's pinned version. Does **not** dlopen the FFI library (which ships embedded).
+Report whether `msb` + `libkrunfw` are present on disk at the SDK's pinned version. Use this when you only need to check whether the runtime is already available at the SDK install location. Does **not** dlopen the FFI library, which ships embedded.
 
 <p className="msb-label">Returns</p>
 
@@ -505,7 +511,7 @@ Return the microsandbox release version this SDK was compiled against.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Pinned release version, e.g. <code>"0.5.8"</code>.</div>
+    <div className="msb-param-desc">Pinned release version for this SDK build.</div>
   </div>
 </div>
 
