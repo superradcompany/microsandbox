@@ -586,6 +586,103 @@ fn load_docker_archive_blocking(
         .iter()
         .flat_map(|image| image.layers.iter().cloned())
         .collect::<HashSet<_>>();
+
+    // Early cache gate: when this exact image is already materialized, skip staging
+    // (and re-hashing) every layer blob. `docker save` names images via RepoTags, so
+    // we look up the cached metadata by reference, confirm the archive's content still
+    // matches it (diff_ids -- guards against a rebuilt tag reusing the name), and verify
+    // the EROFS/VMDK artifacts survive. On a hit the cached metadata is reused verbatim,
+    // which also keys fsmeta/VMDK by the manifest digest recorded at materialization
+    // time -- so a `pull` followed by a `load` of the same image still hits. Only the
+    // small config blob is read (seekably, via `read_archive_entries`); layer bytes are
+    // never touched.
+    'early_gate: {
+        let config_blobs = read_archive_entries(input, &required_configs)?;
+        let mut early_images = Vec::new();
+        for (image_index, image) in manifest.iter().enumerate() {
+            let Some(config_bytes) = config_blobs.get(&image.config) else {
+                break 'early_gate;
+            };
+            let (_, diff_ids) = ImageConfig::parse(config_bytes)?;
+            if diff_ids.len() != image.layers.len() {
+                break 'early_gate;
+            }
+
+            let mut refs = image
+                .repo_tags
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|tag| tag != "<none>:<none>")
+                .collect::<Vec<_>>();
+            if image_index == 0 {
+                refs.extend(options.tags.iter().cloned());
+            }
+            refs.sort();
+            refs.dedup();
+            if refs.is_empty() {
+                break 'early_gate;
+            }
+
+            // Cached metadata under any of this image's refs whose recorded content
+            // (diff_ids) still equals the archive's.
+            let mut cached = None;
+            for reference in &refs {
+                let Ok(parsed) = reference.parse::<Reference>() else {
+                    break 'early_gate;
+                };
+                if let Some(metadata) = cache.read_image_metadata(&parsed)? {
+                    let cached_diff_ids = metadata
+                        .layers
+                        .iter()
+                        .map(|layer| layer.diff_id.clone())
+                        .collect::<Vec<_>>();
+                    if cached_diff_ids == diff_ids {
+                        cached = Some(metadata);
+                        break;
+                    }
+                }
+            }
+            let Some(metadata) = cached else {
+                break 'early_gate;
+            };
+
+            let Ok(manifest_digest) = metadata.manifest_digest.parse::<crate::Digest>() else {
+                break 'early_gate;
+            };
+            if !crate::cache::is_valid_erofs_artifact(&cache.fsmeta_erofs_path(&manifest_digest))
+                || !cache.vmdk_path(&manifest_digest).exists()
+            {
+                break 'early_gate;
+            }
+            let mut layers_present = true;
+            for diff_id_str in &diff_ids {
+                let Ok(diff_id) = diff_id_str.parse::<crate::Digest>() else {
+                    layers_present = false;
+                    break;
+                };
+                if !crate::cache::is_valid_erofs_artifact(&cache.layer_erofs_path(&diff_id)) {
+                    layers_present = false;
+                    break;
+                }
+            }
+            if !layers_present {
+                break 'early_gate;
+            }
+
+            for reference in refs {
+                early_images.push(PreparedLoadedImage {
+                    reference,
+                    metadata: metadata.clone(),
+                });
+            }
+        }
+        return Ok(PreparedArchiveLoad {
+            images: early_images,
+            staged_layers: HashMap::new(),
+        });
+    }
+
     let file = File::open(input).map_err(|e| ImageError::Cache {
         path: input.to_path_buf(),
         source: e,
@@ -772,10 +869,9 @@ fn load_oci_archive_blocking(
     // here and never stage (and re-SHA-256) the layer blobs — the work that otherwise
     // dominates a warm-cache load. Any miss breaks out to the full staging path below.
     //
-    // Gotcha: `read_archive_entries` walks the archive with `tar::entries`, which
-    // reads *past* the layer data rather than seeking, so a hit is I/O- not CPU-bound
-    // (the ~16 s of hashing is gone, but the blob bytes are still streamed). Switching
-    // to `entries_with_seek` would make a hit seek-cheap and truly sub-second.
+    // Only the small config/manifest blobs are read, seekably (`read_archive_entries`
+    // uses `entries_with_seek`), so a hit skips both the ~16 s of layer hashing and the
+    // streaming of layer bytes -- it is truly sub-second.
     'early_gate: {
         let config_blobs = read_archive_entries(input, &required_configs)?;
         let mut early_images = Vec::new();
@@ -1976,6 +2072,66 @@ mod tests {
         assert_eq!(
             prepared.images[0].metadata.manifest_digest,
             loaded[0].metadata.manifest_digest,
+        );
+    }
+
+    #[test]
+    fn docker_load_hits_early_cache_gate_when_materialized() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("gate.tar");
+        write_test_docker_archive(&input, "gate-docker:latest");
+        let cache = temp.path().join("cache");
+
+        // First load materializes the image and records its metadata by reference.
+        let loaded = runtime
+            .block_on(load_archive(&cache, &input, ImageLoadOptions::default()))
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        // A second load must take the early cache gate: the cached metadata is found
+        // by reference (RepoTags) and no layer blob is staged.
+        let prepared = load_archive_blocking(&cache, &input, ImageLoadOptions::default()).unwrap();
+        assert!(
+            prepared.staged_layers.is_empty(),
+            "early cache gate should skip staging layer blobs on a warm cache"
+        );
+        assert_eq!(prepared.images.len(), 1);
+        assert_eq!(prepared.images[0].reference, "gate-docker:latest");
+        assert_eq!(
+            prepared.images[0].metadata.manifest_digest,
+            loaded[0].metadata.manifest_digest,
+        );
+    }
+
+    #[test]
+    fn docker_load_misses_gate_after_content_change() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let cache = temp.path().join("cache");
+
+        // Materialize `app:latest` from one layer, recording metadata under that ref.
+        let first = temp.path().join("first.tar");
+        write_test_docker_archive_from_layer(&first, "app:latest", simple_layer_tar());
+        runtime
+            .block_on(load_archive(&cache, &first, ImageLoadOptions::default()))
+            .unwrap();
+
+        // Rebuild `app:latest` with different content (a new layer) and reload. The
+        // diff_ids no longer match the cached metadata, so the gate must fall through
+        // to staging rather than reuse the stale image.
+        let second = temp.path().join("second.tar");
+        write_test_docker_archive_from_layer(&second, "app:latest", complex_layer_tar());
+        let prepared = load_archive_blocking(&cache, &second, ImageLoadOptions::default()).unwrap();
+        assert!(
+            !prepared.staged_layers.is_empty(),
+            "a rebuilt tag with new content must not hit the gate"
         );
     }
 
