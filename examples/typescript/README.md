@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Node.js >= 18
-- `msb` + `libkrunfw` installed (auto-downloaded by the npm postinstall script)
+- Node.js >= 22
+- `msb` + `libkrunfw` available from the `microsandbox` platform package installed through optional dependencies, or `MSB_PATH` pointing at a working `msb` binary
 - For `root-bind` and `root-block`: `git submodule update --init --recursive`
 
 ## Setup

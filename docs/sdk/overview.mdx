@@ -91,12 +91,17 @@ import (
 
 func main() {
     ctx := context.Background()
+
+    if err := m.EnsureInstalled(ctx); err != nil {
+        log.Fatal(err)
+    }
+
     sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
     if err != nil {
         log.Fatal(err)
     }
     defer func() {
-        _, _ = sb.Stop(context.Background())
+        _ = sb.Stop(context.Background())
         _ = sb.Close()
     }()
 
