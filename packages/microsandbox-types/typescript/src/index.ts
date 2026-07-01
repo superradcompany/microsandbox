@@ -28,22 +28,22 @@ export enum CloudSandboxStatus {
 
 /**
  * Cloud root filesystem source.
- *
+ * 
  * Mirrors the domain [`RootfsSource`] JSON shape, but keeps writable-disk
  * sizing out of the image payload. Cloud callers express that intent through
  * [`CloudSandboxResources::disk_size_mib`]; conversion to the domain spec
  * attaches it to OCI rootfs.
  */
-export type CloudRootfsSource =
+export type CloudRootfsSource = 
 	/** Use a host directory directly as the root filesystem. */
-	| { type: "bind", content: string }
+	| { type: "bind", data: string }
 	/** Use an OCI image reference with an EROFS lower and ext4 overlay upper. */
-	| { type: "oci", content: {
+	| { type: "oci", data: {
 	/** OCI image reference (e.g. `python`). */
 	reference: string;
 }}
 	/** Use a disk image file as the root filesystem via virtio-blk. */
-	| { type: "disk_image", content: {
+	| { type: "disk_image", data: {
 	/** Path to the disk image file on the host. */
 	path: string;
 	/** Disk image format. */
@@ -155,9 +155,9 @@ export interface Rlimit {
 }
 
 /** A volume mount specification for a sandbox. */
-export type VolumeMount =
+export type VolumeMount = 
 	/** Bind mount a host directory into the guest. */
-	| { type: "bind", content: {
+	| { type: "bind", data: {
 	/** Host path to bind mount. */
 	host: string;
 	/** Guest mount path. */
@@ -170,7 +170,7 @@ export type VolumeMount =
 	host_permissions: HostPermissions;
 	/**
 	 * Guest-write byte budget in MiB.
-	 *
+	 * 
 	 * Bounds how much the guest may add beyond the directory's existing
 	 * contents. `None` applies the protective default at spawn time; set a
 	 * value to override it.
@@ -178,7 +178,7 @@ export type VolumeMount =
 	quota_mib?: number;
 }}
 	/** Mount a named volume into the guest. */
-	| { type: "named", content: {
+	| { type: "named", data: {
 	/** Volume name. */
 	name: string;
 	/** Guest mount path. */
@@ -191,7 +191,7 @@ export type VolumeMount =
 	host_permissions: HostPermissions;
 }}
 	/** Temporary filesystem backed by guest memory. */
-	| { type: "tmpfs", content: {
+	| { type: "tmpfs", data: {
 	/** Guest mount path. */
 	guest: string;
 	/** Size limit in MiB. */
@@ -200,7 +200,7 @@ export type VolumeMount =
 	options?: MountOptions;
 }}
 	/** Mount a disk image file as a virtio-blk device at a guest path. */
-	| { type: "disk_image", content: {
+	| { type: "disk_image", data: {
 	/** Host path to the disk image file. */
 	host: string;
 	/** Guest mount path. */
@@ -214,9 +214,9 @@ export type VolumeMount =
 }};
 
 /** Rootfs patch applied before VM startup. */
-export type Patch =
+export type Patch = 
 	/** Write text content to a file. */
-	| { type: "text", content: {
+	| { type: "text", data: {
 	/** Absolute guest path, such as `/etc/app.conf`. */
 	path: string;
 	/** Text content to write. */
@@ -227,7 +227,7 @@ export type Patch =
 	replace: boolean;
 }}
 	/** Write raw bytes to a file. */
-	| { type: "file", content: {
+	| { type: "file", data: {
 	/** Absolute guest path. */
 	path: string;
 	/** Raw byte content to write. */
@@ -238,7 +238,7 @@ export type Patch =
 	replace: boolean;
 }}
 	/** Copy a file from the host into the rootfs. */
-	| { type: "copy_file", content: {
+	| { type: "copy_file", data: {
 	/** Host path to copy from. */
 	src: string;
 	/** Absolute guest destination path. */
@@ -249,7 +249,7 @@ export type Patch =
 	replace: boolean;
 }}
 	/** Copy a directory from the host into the rootfs. */
-	| { type: "copy_dir", content: {
+	| { type: "copy_dir", data: {
 	/** Host directory to copy from. */
 	src: string;
 	/** Absolute guest destination path. */
@@ -258,7 +258,7 @@ export type Patch =
 	replace: boolean;
 }}
 	/** Create a symlink. */
-	| { type: "symlink", content: {
+	| { type: "symlink", data: {
 	/** Symlink target path. */
 	target: string;
 	/** Absolute guest path where the symlink is created. */
@@ -267,19 +267,19 @@ export type Patch =
 	replace: boolean;
 }}
 	/** Create a directory. */
-	| { type: "mkdir", content: {
+	| { type: "mkdir", data: {
 	/** Absolute guest path. */
 	path: string;
 	/** Directory permissions, such as `0o755`. `None` uses the default. */
 	mode?: number;
 }}
 	/** Remove a file or directory. */
-	| { type: "remove", content: {
+	| { type: "remove", data: {
 	/** Absolute guest path to remove. */
 	path: string;
 }}
 	/** Append content to an existing file. */
-	| { type: "append", content: {
+	| { type: "append", data: {
 	/** Absolute guest path of the file to append to. */
 	path: string;
 	/** Content to append. */
@@ -346,23 +346,23 @@ export enum Direction {
 
 /**
  * Traffic destination filter for a [`Rule`].
- *
+ * 
  * The `Cidr`, `Domain`, and `DomainSuffix` leaves carry their canonical
  * string form (e.g. `"10.0.0.0/8"`, `"example.com"`); the local network
  * engine re-parses and validates them into its richer internal types at
  * load time.
  */
-export type Destination =
+export type Destination = 
 	/** Match any destination. */
-	| { type: "any", content?: undefined }
+	| { type: "any", data?: undefined }
 	/** IP address or CIDR block (e.g. `"1.2.3.4"`, `"10.0.0.0/8"`). */
-	| { type: "cidr", content: string }
+	| { type: "cidr", data: string }
 	/** Exact domain name (e.g. `"example.com"`). */
-	| { type: "domain", content: string }
+	| { type: "domain", data: string }
 	/** Domain suffix — the apex and any subdomain of it. */
-	| { type: "domain_suffix", content: string }
+	| { type: "domain_suffix", data: string }
 	/** A pre-defined destination group. */
-	| { type: "group", content: DestinationGroup };
+	| { type: "group", data: DestinationGroup };
 
 /** Protocol filter for a [`Rule`]. */
 export enum Protocol {
@@ -443,7 +443,7 @@ export interface InterceptCaConfig {
 
 /**
  * TLS interception configuration. Carried in [`NetworkSpec::tls`](NetworkSpec).
- *
+ * 
  * The local network engine terminates TCP at its in-process stack, so TLS MITM
  * is handled by proxy tasks — these fields configure which ports/domains are
  * intercepted and how the interception CA is sourced.
@@ -474,13 +474,13 @@ export interface TlsConfig {
 }
 
 /** Host pattern for a secret allowlist. */
-export type HostPattern =
+export type HostPattern = 
 	/** Exact hostname match. */
-	| { type: "exact", content: string }
+	| { type: "exact", data: string }
 	/** Wildcard match (e.g., `*.openai.com`). */
-	| { type: "wildcard", content: string }
+	| { type: "wildcard", data: string }
 	/** Any host (dangerous — secret can be exfiltrated). */
-	| { type: "any", content?: undefined };
+	| { type: "any", data?: undefined };
 
 /** Where in the HTTP request a secret can be injected. */
 export interface SecretInjection {
@@ -492,7 +492,7 @@ export interface SecretInjection {
 	query_params?: boolean;
 	/**
 	 * Substitute in request body (default: false).
-	 *
+	 * 
 	 * Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
 	 * larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
 	 * decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
@@ -503,26 +503,26 @@ export interface SecretInjection {
 }
 
 /** Action when a secret placeholder is detected going to a disallowed host. */
-export type ViolationAction =
+export type ViolationAction = 
 	/** Block the request silently. */
-	| { type: "block", content?: undefined }
+	| { type: "block", data?: undefined }
 	/** Block and log (default). */
-	| { type: "block_and_log", content?: undefined }
+	| { type: "block_and_log", data?: undefined }
 	/** Block and terminate the sandbox. */
-	| { type: "block_and_terminate", content?: undefined }
+	| { type: "block_and_terminate", data?: undefined }
 	/** Forward the request with the placeholder unchanged for matching hosts. */
-	| { type: "passthrough", content: HostPattern[] };
+	| { type: "passthrough", data: HostPattern[] };
 
 /**
  * A single secret entry.
- *
+ * 
  * `value` is the sensitive material — it never enters the sandbox and is
  * redacted by the [`Debug`](fmt::Debug) impl.
  */
 export interface SecretEntry {
 	/**
 	 * Environment variable name exposed to the sandbox (holds the placeholder).
-	 *
+	 * 
 	 * Must be non-empty and must not contain `=` or NUL. microsandbox does
 	 * not require shell-identifier syntax because Linux environment entries
 	 * only require a `NAME=value` shape.
@@ -532,7 +532,7 @@ export interface SecretEntry {
 	value: string;
 	/**
 	 * Placeholder string the sandbox sees instead of the real value.
-	 *
+	 * 
 	 * Must be non-empty, no longer than [`MAX_SECRET_PLACEHOLDER_BYTES`], and
 	 * must not contain NUL, CR, or LF.
 	 */
@@ -545,7 +545,7 @@ export interface SecretEntry {
 	on_violation?: ViolationAction;
 	/**
 	 * Require verified TLS identity before substituting (default: true).
-	 *
+	 * 
 	 * When true, the secret is only substituted if the connection uses TLS
 	 * interception (not bypass) and the SNI matches an allowed host.
 	 */
@@ -554,7 +554,7 @@ export interface SecretEntry {
 
 /**
  * Placeholder-based secret injection for a sandbox's TLS-intercepted egress.
- *
+ * 
  * The sandbox only ever sees each secret's `placeholder`; the local network
  * engine substitutes the real `value` into outbound requests bound for an
  * allowed host (and blocks/forwards per [`ViolationAction`] otherwise). Carried
@@ -569,7 +569,7 @@ export interface SecretsConfig {
 
 /**
  * Complete network specification for a sandbox.
- *
+ * 
  * All subdocuments are typed. The local-engine `policy`, `dns`, and
  * `interface` configs are mirrored here as wire types whose leaf values
  * (CIDRs, domain names, nameservers) are carried in their canonical string
@@ -622,13 +622,13 @@ export enum PullPolicy {
 export enum SecurityProfile {
 	/**
 	 * Preserve normal guest-root semantics.
-	 *
+	 * 
 	 * Exec sessions do not set `no_new_privs` and keep `CAP_SYS_ADMIN`, so workflows such as `sudo`, package managers, and Docker-in-Docker work as they would in a regular VM.
 	 */
 	Default = "default",
 	/**
 	 * Harden guest exec sessions.
-	 *
+	 * 
 	 * Agentd sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces `nosuid,nodev` on user mounts. Workloads that need privilege elevation or guest mount administration, such as `sudo` and Docker-in-Docker, are intentionally incompatible with this profile.
 	 */
 	Restricted = "restricted",
@@ -638,7 +638,7 @@ export enum SecurityProfile {
 export interface SandboxPolicy {
 	/**
 	 * Whether the sandbox is ephemeral.
-	 *
+	 * 
 	 * Ephemeral sandboxes are one-off: the host runtime that owns the
 	 * process removes the persisted DB row and on-disk state when the VM
 	 * reaches a terminal status, and other host runtimes opportunistically
@@ -747,13 +747,13 @@ export interface CloudPaginated<T> {
 export interface MountOptions {
 	/**
 	 * Whether the mount is read-only.
-	 *
+	 * 
 	 * Guest writes fail with the kernel's read-only filesystem behavior. Virtiofs-backed mounts also reject writes on the host-side filesystem server as defense in depth.
 	 */
 	readonly: boolean;
 	/**
 	 * Whether direct execution from the mount is disabled.
-	 *
+	 * 
 	 * This prevents `execve` of binaries or scripts located on the mount. Interpreters can still read files from the mount, for example `sh /mnt/script.sh`, because the interpreter itself executes from a different filesystem.
 	 */
 	noexec: boolean;
@@ -814,13 +814,13 @@ export interface SandboxResources {
 }
 
 /** Root filesystem source for a sandbox. */
-export type RootfsSource =
+export type RootfsSource = 
 	/** Use a host directory directly as the root filesystem. */
-	| { type: "bind", content: string }
+	| { type: "bind", data: string }
 	/** Use an OCI image reference with an EROFS lower and ext4 overlay upper. */
-	| { type: "oci", content: OciRootfsSource }
+	| { type: "oci", data: OciRootfsSource }
 	/** Use a disk image file as the root filesystem via virtio-blk. */
-	| { type: "disk_image", content: {
+	| { type: "disk_image", data: {
 	/** Path to the disk image file on the host. */
 	path: string;
 	/** Disk image format. */
@@ -831,7 +831,7 @@ export type RootfsSource =
 
 /**
  * Backend-neutral sandbox task description.
- *
+ * 
  * This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
  */
 export interface SandboxSpec {
@@ -909,7 +909,7 @@ export enum DiskImageFormat {
 
 /**
  * Host permission propagation policy for a virtiofs-backed volume mount.
- *
+ * 
  * Serializes/deserializes as the lowercase variant name (`"private"`, `"mirror"`) to align with the CLI and NAPI spellings.
  */
 export enum HostPermissions {
@@ -921,7 +921,7 @@ export enum HostPermissions {
 
 /**
  * Stat virtualization policy for a virtiofs-backed volume mount.
- *
+ * 
  * Serializes/deserializes as the lowercase variant name (`"strict"`, `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
  */
 export enum StatVirtualization {
@@ -932,3 +932,4 @@ export enum StatVirtualization {
 	/** Literal host metadata: do not read or apply the override xattr. */
 	Off = "off",
 }
+

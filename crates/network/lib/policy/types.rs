@@ -122,7 +122,7 @@ pub enum Direction {
 /// can then rely on byte equality against the DNS cache's own
 /// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
@@ -990,7 +990,7 @@ mod tests {
                 "rules": [
                     {
                         "direction": "egress",
-                        "destination": { "type": "domain", "content": "PyPI.Org." },
+                        "destination": { "type": "domain", "data": "PyPI.Org." },
                         "action": "allow"
                     }
                 ]
@@ -1377,7 +1377,7 @@ mod tests {
 
         // Back-compat: legacy kebab-case tags still deserialize via #[serde(alias)].
         let legacy: Destination =
-            serde_json::from_str(r#"{"type":"domain-suffix","content":"legacy.example.com"}"#)
+            serde_json::from_str(r#"{"type":"domain-suffix","data":"legacy.example.com"}"#)
                 .unwrap();
         assert!(matches!(legacy, Destination::DomainSuffix(_)));
         let legacy_group: DestinationGroup = serde_json::from_str(r#""link-local""#).unwrap();

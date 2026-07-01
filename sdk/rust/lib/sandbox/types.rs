@@ -1308,9 +1308,9 @@ mod tests {
         let value = serde_json::to_value(&mount).unwrap();
         assert!(value.get("readonly").is_none());
         assert!(value.get("noexec").is_none());
-        // Adjacently tagged: payload fields live under `content`.
-        assert_eq!(value["content"]["options"]["readonly"], true);
-        assert_eq!(value["content"]["options"]["noexec"], true);
+        // Adjacently tagged: payload fields live under `data`.
+        assert_eq!(value["data"]["options"]["readonly"], true);
+        assert_eq!(value["data"]["options"]["noexec"], true);
 
         let decoded: VolumeMount = serde_json::from_value(value).unwrap();
         match decoded {
@@ -1327,7 +1327,7 @@ mod tests {
         // Adjacently tagged; the legacy PascalCase tag still deserializes via
         // `#[serde(alias)]`, and an omitted `options` falls back to the default.
         let bind: VolumeMount = serde_json::from_str(
-            r#"{"type":"Bind","content":{"host":"/host/data","guest":"/data"}}"#,
+            r#"{"type":"Bind","data":{"host":"/host/data","guest":"/data"}}"#,
         )
         .unwrap();
         match bind {
@@ -1336,7 +1336,7 @@ mod tests {
         }
 
         let named: VolumeMount =
-            serde_json::from_str(r#"{"type":"named","content":{"name":"cache","guest":"/cache"}}"#)
+            serde_json::from_str(r#"{"type":"named","data":{"name":"cache","guest":"/cache"}}"#)
                 .unwrap();
         match named {
             VolumeMount::Named { options, .. } => assert_eq!(options, MountOptions::default()),
@@ -1344,14 +1344,14 @@ mod tests {
         }
 
         let tmpfs: VolumeMount =
-            serde_json::from_str(r#"{"type":"Tmpfs","content":{"guest":"/tmp"}}"#).unwrap();
+            serde_json::from_str(r#"{"type":"Tmpfs","data":{"guest":"/tmp"}}"#).unwrap();
         match tmpfs {
             VolumeMount::Tmpfs { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Tmpfs, got {other:?}"),
         }
 
         let disk: VolumeMount = serde_json::from_str(
-            r#"{"type":"DiskImage","content":{"host":"/host/data.raw","guest":"/data","format":"raw"}}"#,
+            r#"{"type":"DiskImage","data":{"host":"/host/data.raw","guest":"/data","format":"raw"}}"#,
         )
         .unwrap();
         match disk {

@@ -115,7 +115,7 @@ pub struct CloudSandboxResources {
 /// attaches it to OCI rootfs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum CloudRootfsSource {
     /// Use a host directory directly as the root filesystem.

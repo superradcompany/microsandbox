@@ -46,7 +46,7 @@ pub enum DiskImageFormat {
 /// Root filesystem source for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
@@ -281,7 +281,7 @@ fn default_private() -> HostPermissions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
@@ -371,7 +371,7 @@ pub enum VolumeMount {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum Patch {
     /// Write text content to a file.
@@ -539,7 +539,7 @@ pub struct SecretEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum HostPattern {
     /// Exact hostname match.
@@ -585,7 +585,7 @@ pub struct SecretInjection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum ViolationAction {
     /// Block the request silently.
@@ -983,7 +983,7 @@ pub enum DestinationGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "content")]
+#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
@@ -2105,7 +2105,7 @@ mod secret_tests {
     #[test]
     fn default_require_tls_identity_when_deserialized() {
         let entry: SecretEntry = serde_json::from_str(
-            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"type":"exact","content":"h"}]}"#,
+            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"type":"exact","data":"h"}]}"#,
         )
         .unwrap();
         assert!(entry.require_tls_identity);
@@ -2190,7 +2190,7 @@ mod secret_tests {
         ]);
         assert_eq!(
             serde_json::to_string(&action).unwrap(),
-            r#"{"type":"passthrough","content":[{"type":"exact","content":"api.anthropic.com"},{"type":"wildcard","content":"*.anthropic.com"},{"type":"any"}]}"#
+            r#"{"type":"passthrough","data":[{"type":"exact","data":"api.anthropic.com"},{"type":"wildcard","data":"*.anthropic.com"},{"type":"any"}]}"#
         );
         assert_eq!(
             serde_json::to_string(&ViolationAction::BlockAndLog).unwrap(),
@@ -2205,7 +2205,7 @@ mod secret_tests {
     #[test]
     fn violation_action_accepts_legacy_pascal_case() {
         let action: ViolationAction = serde_json::from_str(
-            r#"{"type":"Passthrough","content":[{"type":"Exact","content":"api.anthropic.com"}]}"#,
+            r#"{"type":"Passthrough","data":[{"type":"Exact","data":"api.anthropic.com"}]}"#,
         )
         .unwrap();
         assert_eq!(

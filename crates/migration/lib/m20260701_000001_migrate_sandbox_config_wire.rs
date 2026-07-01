@@ -4,7 +4,7 @@
 //! The pre-harmonization build serialized several sandbox-spec enums with
 //! serde's external/internal tagging and PascalCase/kebab-case variant names.
 //! The harmonized `microsandbox-types` contract tags those enums *adjacently*
-//! (`{"type":..,"content":..}`) with snake_case variant names, renames
+//! (`{"type":..,"data":..}`) with snake_case variant names, renames
 //! `resources.cpus` → `resources.vcpus`, and renames the secrets list key
 //! `secrets` → `entries`.
 //!
@@ -346,7 +346,7 @@ fn reshape_passthrough_hosts(node: &mut Value, dir: Dir) {
     if node.get("type").and_then(Value::as_str) != Some("passthrough") {
         return;
     }
-    if let Some(Value::Array(hosts)) = node.get_mut("content") {
+    if let Some(Value::Array(hosts)) = node.get_mut("data") {
         for host in hosts.iter_mut() {
             reshape_external(host, HOST_PATTERN, dir);
         }
@@ -358,7 +358,7 @@ fn reshape_passthrough_hosts(node: &mut Value, dir: Dir) {
 //--------------------------------------------------------------------------------------------------
 
 /// Convert an enum node between the old externally-tagged shape and the new
-/// adjacently-tagged shape (`{"type":..,"content":..}`). Unit variants are a
+/// adjacently-tagged shape (`{"type":..,"data":..}`). Unit variants are a
 /// bare string in the old shape and `{"type":..}` (no content) in the new one.
 fn reshape_external(node: &mut Value, map: &[(&str, &str)], dir: Dir) {
     match dir {
@@ -392,7 +392,7 @@ fn reshape_external(node: &mut Value, map: &[(&str, &str)], dir: Dir) {
             let Some(old_tag) = map_tag(map, tag, Dir::Down).map(str::to_owned) else {
                 return;
             };
-            let new = match node.get("content").cloned() {
+            let new = match node.get("data").cloned() {
                 Some(content) => {
                     let mut obj = Map::new();
                     obj.insert(old_tag, content);
@@ -410,7 +410,7 @@ fn reshape_external(node: &mut Value, map: &[(&str, &str)], dir: Dir) {
 fn reshape_internal(node: &mut Value, map: &[(&str, &str)], dir: Dir) {
     match dir {
         Dir::Up => {
-            if node.get("content").is_some() {
+            if node.get("data").is_some() {
                 return; // already adjacent
             }
             let Some(obj) = node.as_object() else {
@@ -428,11 +428,11 @@ fn reshape_internal(node: &mut Value, map: &[(&str, &str)], dir: Dir) {
             content.remove("type");
             let mut wrapper = Map::new();
             wrapper.insert("type".to_owned(), Value::String(tag));
-            wrapper.insert("content".to_owned(), Value::Object(content));
+            wrapper.insert("data".to_owned(), Value::Object(content));
             *node = Value::Object(wrapper);
         }
         Dir::Down => {
-            let Some(content) = node.get("content").cloned() else {
+            let Some(content) = node.get("data").cloned() else {
                 return; // already flat
             };
             let Some(old_tag) = node
@@ -457,7 +457,7 @@ fn remap_disk_format(node: &mut Value, dir: Dir) {
     if node.get("type").and_then(Value::as_str) != Some("disk_image") {
         return;
     }
-    let Some(content) = node.get_mut("content").and_then(Value::as_object_mut) else {
+    let Some(content) = node.get_mut("data").and_then(Value::as_object_mut) else {
         return;
     };
     let Some(mapped) = content
@@ -490,12 +490,12 @@ fn remap_string(obj: &mut Map<String, Value>, key: &str, map: &[(&str, &str)], d
 // Functions: helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Build an adjacent node `{"type": tag}` or `{"type": tag, "content": ..}`.
+/// Build an adjacent node `{"type": tag}` or `{"type": tag, "data": ..}`.
 fn tagged(tag: &str, content: Option<Value>) -> Value {
     let mut obj = Map::new();
     obj.insert("type".to_owned(), Value::String(tag.to_owned()));
     if let Some(content) = content {
-        obj.insert("content".to_owned(), content);
+        obj.insert("data".to_owned(), content);
     }
     Value::Object(obj)
 }
@@ -593,7 +593,7 @@ mod tests {
 
         // image: RootfsSource — adjacent.
         assert_eq!(v["image"]["type"], "oci");
-        assert_eq!(v["image"]["content"]["reference"], "python");
+        assert_eq!(v["image"]["data"]["reference"], "python");
 
         // resources: cpus → vcpus.
         assert_eq!(v["resources"]["vcpus"], 2);
@@ -606,9 +606,9 @@ mod tests {
 
         // mounts: VolumeMount — adjacent, disk_image format re-cased.
         assert_eq!(v["mounts"][0]["type"], "bind");
-        assert_eq!(v["mounts"][0]["content"]["host"], "/host/data");
+        assert_eq!(v["mounts"][0]["data"]["host"], "/host/data");
         assert_eq!(v["mounts"][1]["type"], "disk_image");
-        assert_eq!(v["mounts"][1]["content"]["format"], "raw");
+        assert_eq!(v["mounts"][1]["data"]["format"], "raw");
         assert_eq!(v["mounts"][3]["type"], "named");
 
         // patches: Patch — adjacent, snake_case multiword tags.
@@ -621,9 +621,9 @@ mod tests {
         let rules = &v["network"]["policy"]["rules"];
         assert_eq!(rules[0]["destination"]["type"], "any");
         assert_eq!(rules[1]["destination"]["type"], "cidr");
-        assert_eq!(rules[1]["destination"]["content"], "10.0.0.0/8");
+        assert_eq!(rules[1]["destination"]["data"], "10.0.0.0/8");
         assert_eq!(rules[3]["destination"]["type"], "domain_suffix");
-        assert_eq!(rules[4]["destination"]["content"], "loopback");
+        assert_eq!(rules[4]["destination"]["data"], "loopback");
 
         // secrets: list key renamed, HostPattern + ViolationAction reshaped.
         let secrets = &v["network"]["secrets"];
@@ -633,8 +633,8 @@ mod tests {
         assert_eq!(entry["allowed_hosts"][2]["type"], "any");
         assert_eq!(entry["on_violation"]["type"], "block_and_log");
         assert_eq!(secrets["on_violation"]["type"], "passthrough");
-        assert_eq!(secrets["on_violation"]["content"][0]["type"], "exact");
-        assert_eq!(secrets["on_violation"]["content"][1]["type"], "any");
+        assert_eq!(secrets["on_violation"]["data"][0]["type"], "exact");
+        assert_eq!(secrets["on_violation"]["data"][1]["type"], "any");
     }
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
     fn down_recases_new_only_bare_string_enums_for_the_old_build() {
         let new_native = r#"{
           "name": "demo",
-          "image": { "type": "oci", "content": { "reference": "python" } },
+          "image": { "type": "oci", "data": { "reference": "python" } },
           "resources": { "vcpus": 2, "memory_mib": 1024 },
           "pull_policy": "always",
           "rlimits": [
