@@ -5,8 +5,6 @@
 mod cloud;
 mod domain;
 mod error;
-#[cfg(feature = "ts")]
-pub mod typescript;
 mod validation;
 
 //--------------------------------------------------------------------------------------------------
@@ -15,7 +13,8 @@ mod validation;
 
 pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudMessageResponse, CloudPaginated, CloudRootfsSource, CloudSandboxResources,
+    CloudSandboxSpec, CloudSandboxStatus,
 };
 pub use domain::{
     Action, CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_MEMORY_MIB,

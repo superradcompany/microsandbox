@@ -169,7 +169,7 @@ impl SandboxBuilder {
 
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
-        self.config.spec.resources.cpus = count;
+        self.config.spec.resources.vcpus = count;
         self
     }
 
@@ -987,7 +987,7 @@ impl SandboxBuilder {
         }
         super::validate_sandbox_name(&self.config.spec.name)?;
         super::validate_hostname(self.config.spec.runtime.hostname.as_deref())?;
-        if self.config.spec.resources.cpus == 0 {
+        if self.config.spec.resources.vcpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "cpus must be greater than 0".into(),
             ));
@@ -1136,7 +1136,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.name, "test");
-        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.vcpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
         assert_eq!(config.spec.env.len(), 1);

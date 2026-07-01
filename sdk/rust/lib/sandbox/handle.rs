@@ -89,7 +89,7 @@ impl SandboxHandle {
         cloud: CloudCreateSandboxResponse,
     ) -> MicrosandboxResult<Self> {
         let status = crate::backend::sandbox::cloud_status_to_sandbox_status(cloud.status);
-        let config_json = serde_json::to_string(&cloud.config)?;
+        let config_json = serde_json::to_string(&cloud.spec)?;
         let name = cloud.name.clone();
         Ok(Self {
             backend,

@@ -457,7 +457,7 @@ pub(crate) async fn create_local(
         sandbox = %config.spec.name,
         image = ?config.spec.image,
         mode = ?mode,
-        cpus = config.spec.resources.cpus,
+        cpus = config.spec.resources.vcpus,
         memory_mib = config.spec.resources.memory_mib,
         "create_local: starting"
     );

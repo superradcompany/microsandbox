@@ -765,7 +765,7 @@ impl SandboxBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let cloud = CloudBackend::start_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&cloud);
+            let config = sandbox_config_from_cloud(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
         })
     }
@@ -779,7 +779,7 @@ impl SandboxBackend for CloudBackend {
         // after this process exits. Same code path as `start`.
         Box::pin(async move {
             let cloud = CloudBackend::start_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&cloud);
+            let config = sandbox_config_from_cloud(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
         })
     }
@@ -1088,14 +1088,16 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
 /// with no cloud counterpart are filled from [`SandboxConfig::default()`], so
 /// a caller inspecting `sb.config()` after `Sandbox::start(name)` can reason
 /// about which fields are "live" vs. "synthesized stub".
-fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfig {
-    // The cloud request body now embeds the shared `SandboxSpec` directly, so the
-    // local config is just that spec cloned through; the remaining `SandboxConfig`
-    // fields are local-only and stay defaulted.
-    SandboxConfig {
-        spec: cloud.config.spec.clone(),
+fn sandbox_config_from_cloud(
+    cloud: &CloudCreateSandboxResponse,
+) -> MicrosandboxResult<SandboxConfig> {
+    // The cloud request body carries the wire `CloudSandboxSpec`; convert it back
+    // into the shared domain `SandboxSpec` for the local config. The remaining
+    // `SandboxConfig` fields are local-only and stay defaulted.
+    Ok(SandboxConfig {
+        spec: cloud.spec.clone().try_into()?,
         ..Default::default()
-    }
+    })
 }
 
 pub(super) fn cloud_create_request_from_config(
@@ -1188,7 +1190,7 @@ pub(super) fn cloud_create_request_from_config(
     // The cloud request composes the shared spec verbatim plus cloud-only fields.
     // The SDK has no local source for `slug`/`registry` today (registry auth is
     // rejected above), so default them; the control plane assigns a slug.
-    Ok(CloudCreateSandboxRequest { spec: config.spec })
+    Ok(CloudCreateSandboxRequest::from(config.spec))
 }
 
 fn reject_cloud_deferred(
@@ -1236,6 +1238,8 @@ fn unsupported_metrics(feature: &'static str) -> MicrosandboxError {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::CloudSandboxSpec;
+
     use super::*;
     use crate::sandbox::{EnvVar, OciRootfsSource, SandboxBuilder, SandboxSpec};
 
@@ -1255,10 +1259,12 @@ mod tests {
 
         let req = cloud_create_request_from_config(config).unwrap();
 
-        // The request now embeds the shared spec verbatim, so assert on `spec`.
+        // The request now carries the cloud wire spec, so assert on `spec`.
         assert_eq!(req.spec.name, "agent-1");
-        assert!(matches!(req.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12"));
-        assert_eq!(req.spec.resources.cpus, 2);
+        assert!(
+            matches!(req.spec.image, microsandbox_types::CloudRootfsSource::Oci { ref reference } if reference == "python:3.12")
+        );
+        assert_eq!(req.spec.resources.vcpus, 2);
         assert_eq!(req.spec.resources.memory_mib, 1024);
         assert_eq!(req.spec.env, vec![EnvVar::new("A", "B")]);
         assert_eq!(req.spec.runtime.workdir.as_deref(), Some("/app"));
@@ -1382,9 +1388,9 @@ mod tests {
 
     #[test]
     fn sandbox_config_from_cloud_round_trips_d13_fields() {
-        // The cloud response now embeds the shared spec directly, so the
-        // conversion is a verbatim clone-through. Populate a full spec and
-        // assert every field survives.
+        // The cloud response carries the wire `CloudSandboxSpec`, which converts
+        // back into the shared `SandboxSpec`. Populate a full spec and assert
+        // every field survives the round-trip.
         let mut spec = SandboxSpec {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
@@ -1394,7 +1400,7 @@ mod tests {
             env: vec![EnvVar::new("A", "B")],
             ..Default::default()
         };
-        spec.resources.cpus = 4;
+        spec.resources.vcpus = 4;
         spec.resources.memory_mib = 2048;
         spec.runtime.workdir = Some("/app".into());
         spec.runtime.shell = Some("/bin/bash".into());
@@ -1414,7 +1420,7 @@ mod tests {
             name: "agent-1".into(),
             slug: "brave-otter".into(),
             status: CloudSandboxStatus::Running,
-            config: CloudCreateSandboxRequest { spec },
+            spec: CloudSandboxSpec::from(spec),
             ephemeral: true,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1422,13 +1428,13 @@ mod tests {
             last_error: None,
         };
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, "agent-1");
         assert!(
             matches!(config.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12")
         );
-        assert_eq!(config.spec.resources.cpus, 4);
+        assert_eq!(config.spec.resources.vcpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 2048);
         assert_eq!(
             config.spec.env,

@@ -19,23 +19,19 @@ packages/microsandbox-types/
 
 ## Source Of Truth
 
-The Rust crate owns the definitions. The TypeScript bindings are derived from them with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs) behind the crate's `ts` feature, so the two stay byte-for-byte aligned.
+The Rust crate owns the definitions. Both the TypeScript (`typescript/src/index.ts`) and Go (`../go/types_gen.go`) bindings are derived from the `#[typeshare]`-annotated Rust types with [typeshare](https://github.com/1Password/typeshare) — one codegen for both languages.
 
 ```text
-rust/lib/*.rs  ──(ts-rs)──▶  typescript/src/index.ts
+rust/lib/*.rs  ──(typeshare)──▶  typescript/src/index.ts + ../go/types_gen.go
 ```
 
-To regenerate the bindings after changing a Rust type:
+To regenerate the bindings after changing a Rust type (requires `cargo install typeshare-cli`):
 
 ```bash
-cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate
+just gen
 ```
 
-CI runs the same generator with `--check` and fails when the checked-in bindings drift:
-
-```bash
-cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
-```
+Only the `#[typeshare]`-annotated `SandboxSpec` sub-types are emitted, so the bindings cover the sandbox spec building blocks. The cloud wire DTOs and the top-level container specs (`SandboxSpec`, `NetworkSpec`, `VolumeSpec`, …) live in the Rust crate but are intentionally out of scope for the generated bindings. CI regenerates and `git diff --exit-code`s the output, failing when the checked-in bindings drift.
 
 ## What Lives Here
 

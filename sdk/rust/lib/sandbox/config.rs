@@ -495,7 +495,7 @@ impl Default for SandboxConfig {
         Self {
             spec: SandboxSpec {
                 resources: SandboxResources {
-                    cpus: default_cpus(),
+                    vcpus: default_cpus(),
                     memory_mib: default_memory_mib(),
                 },
                 runtime: SandboxRuntimeOptions {
@@ -1164,7 +1164,7 @@ mod tests {
             name: "spec-test".into(),
             image: RootfsSource::oci("python:3.12"),
             resources: SandboxResources {
-                cpus: 2,
+                vcpus: 2,
                 memory_mib: 1024,
             },
             runtime: SandboxRuntimeOptions {
@@ -1208,7 +1208,7 @@ mod tests {
         assert!(
             matches!(config.spec.image, RootfsSource::Oci(ref oci) if oci.reference == "python:3.12")
         );
-        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.vcpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Trace));
         assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(750));
@@ -1235,8 +1235,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_config_deserializes_legacy_readonly_mounts() {
-        let json = r#"{"name":"legacy","mounts":[{"type":"Tmpfs","guest":"/tmp","size_mib":512,"readonly":false}]}"#;
+    fn test_sandbox_config_deserializes_adjacent_tagged_mounts() {
+        let json = r#"{"name":"legacy","mounts":[{"type":"tmpfs","content":{"guest":"/tmp","size_mib":512}}]}"#;
 
         let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
 

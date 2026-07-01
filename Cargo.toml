@@ -131,7 +131,6 @@ tokio-tungstenite = "0.29.0"
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ts-rs = "12.0.1"
 typed-builder = "0.23"
 which = "8"
 xattr = "1.3"

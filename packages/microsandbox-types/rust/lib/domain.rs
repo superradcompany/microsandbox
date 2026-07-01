@@ -28,36 +28,44 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
 /// Disk image format for virtio-blk root filesystems and volume mounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "snake_case")]
 pub enum DiskImageFormat {
     /// QEMU Copy-on-Write v2.
+    #[serde(alias = "Qcow2")]
     Qcow2,
     /// Raw disk image.
+    #[serde(alias = "Raw")]
     Raw,
     /// VMware Disk (FLAT/ZERO only, no delta links).
+    #[serde(alias = "Vmdk")]
     Vmdk,
 }
 
 /// Root filesystem source for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
+    #[serde(alias = "Bind")]
     Bind(
         /// Host path to bind mount.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         PathBuf,
     ),
 
     /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
+    #[serde(alias = "Oci")]
     Oci(OciRootfsSource),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
+    #[serde(alias = "DiskImage")]
     DiskImage {
         /// Path to the disk image file on the host.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         path: PathBuf,
         /// Disk image format.
         format: DiskImageFormat,
@@ -68,27 +76,38 @@ pub enum RootfsSource {
 
 /// OCI root filesystem source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
+
+    /// Writable overlay upper size in MiB.
+    #[serde(
+        default,
+        alias = "disk_size_mib",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub upper_size_mib: Option<u32>,
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "snake_case")]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
     #[default]
+    #[serde(alias = "IfMissing")]
     IfMissing,
 
     /// Always fetch the manifest from the registry, reusing cached layers whose digests still match.
+    #[serde(alias = "Always")]
     Always,
 
     /// Never contact the registry. Error if the image is not fully cached locally.
+    #[serde(alias = "Never")]
     Never,
 }
 
@@ -100,7 +119,6 @@ pub enum PullPolicy {
 ///
 /// Serializes/deserializes as the lowercase variant name (`"strict"`, `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
@@ -117,7 +135,6 @@ pub enum StatVirtualization {
 ///
 /// Serializes/deserializes as the lowercase variant name (`"private"`, `"mirror"`) to align with the CLI and NAPI spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
@@ -130,7 +147,6 @@ pub enum HostPermissions {
 
 /// Sandbox-level in-guest security profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
@@ -149,7 +165,6 @@ pub enum SecurityProfile {
 
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
@@ -173,20 +188,23 @@ pub struct MountOptions {
 
 /// Storage kind for a named volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "snake_case")]
 pub enum VolumeKind {
     /// Directory-backed named volume mounted through virtiofs.
+    #[serde(alias = "Directory")]
     Directory,
 
     /// Raw ext4 disk-image named volume mounted through virtio-blk.
+    #[serde(alias = "Disk")]
     Disk,
 }
 
 /// Configuration for creating a named volume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct VolumeSpec {
     /// Volume name.
     pub name: String,
@@ -201,28 +219,33 @@ pub struct VolumeSpec {
     pub capacity_mib: Option<u32>,
 
     /// Labels for organization.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub labels: Vec<(String, String)>,
 }
 
 /// Sandbox-time behavior for a named volume mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(rename_all = "snake_case")]
 pub enum NamedVolumeMode {
     /// Require the named volume to already exist.
+    #[serde(alias = "Existing")]
     Existing,
 
     /// Create the named volume and fail if it already exists.
+    #[serde(alias = "Create")]
     Create,
 
     /// Ensure the named volume exists, or reuse a compatible existing volume.
+    #[serde(alias = "EnsureExists")]
     EnsureExists,
 }
 
 /// Creation metadata for sandbox-time named volume provisioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct NamedVolumeCreate {
     /// Creation behavior for this named volume mount.
     pub mode: NamedVolumeMode,
@@ -240,38 +263,56 @@ pub struct NamedVolumeCreate {
     pub capacity_mib: Option<u32>,
 
     /// Labels to attach to newly-created volumes.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub labels: Vec<(String, String)>,
 }
 
+/// Default stat-virtualization policy (`Strict`) for a deserialized volume mount.
+fn default_strict() -> StatVirtualization {
+    StatVirtualization::Strict
+}
+
+/// Default host-permission policy (`Private`) for a deserialized volume mount.
+fn default_private() -> HostPermissions {
+    HostPermissions::Private
+}
+
 /// A volume mount specification for a sandbox.
-#[derive(Clone)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "ts", ts(tag = "type"))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
+    #[serde(alias = "Bind")]
     Bind {
         /// Host path to bind mount.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
         /// Guest mount behavior.
+        #[serde(default)]
         options: MountOptions,
         /// Guest-visible stat virtualization policy.
+        #[serde(default = "default_strict")]
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
+        #[serde(default = "default_private")]
         host_permissions: HostPermissions,
         /// Guest-write byte budget in MiB.
         ///
         /// Bounds how much the guest may add beyond the directory's existing
         /// contents. `None` applies the protective default at spawn time; set a
         /// value to override it.
+        #[serde(default)]
         quota_mib: Option<u32>,
     },
 
     /// Mount a named volume into the guest.
+    #[serde(alias = "Named")]
     Named {
         /// Volume name.
         name: String,
@@ -280,48 +321,61 @@ pub enum VolumeMount {
         /// Creation metadata for sandbox-time named volume provisioning.
         ///
         /// This is transient and intentionally skipped when sandbox configs are persisted; restarting a sandbox mounts the already-created volume.
+        #[serde(skip)]
         create: Option<NamedVolumeCreate>,
         /// Guest mount behavior.
+        #[serde(default)]
         options: MountOptions,
         /// Guest-visible stat virtualization policy.
+        #[serde(default = "default_strict")]
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
+        #[serde(default = "default_private")]
         host_permissions: HostPermissions,
     },
 
     /// Temporary filesystem backed by guest memory.
+    #[serde(alias = "Tmpfs")]
     Tmpfs {
         /// Guest mount path.
         guest: String,
         /// Size limit in MiB.
+        #[serde(default)]
         size_mib: Option<u32>,
         /// Guest mount behavior.
+        #[serde(default)]
         options: MountOptions,
     },
 
     /// Mount a disk image file as a virtio-blk device at a guest path.
+    #[serde(alias = "DiskImage")]
     DiskImage {
         /// Host path to the disk image file.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
         /// Disk image format.
         format: DiskImageFormat,
         /// Inner filesystem type. When `None`, agentd probes `/proc/filesystems`.
+        #[serde(default)]
         fstype: Option<String>,
         /// Guest mount behavior.
+        #[serde(default)]
         options: MountOptions,
     },
 }
 
 /// Rootfs patch applied before VM startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum Patch {
     /// Write text content to a file.
+    #[serde(alias = "Text")]
     Text {
         /// Absolute guest path, such as `/etc/app.conf`.
         path: String,
@@ -334,6 +388,7 @@ pub enum Patch {
     },
 
     /// Write raw bytes to a file.
+    #[serde(alias = "File")]
     File {
         /// Absolute guest path.
         path: String,
@@ -346,10 +401,11 @@ pub enum Patch {
     },
 
     /// Copy a file from the host into the rootfs.
+    #[serde(alias = "CopyFile")]
     CopyFile {
         /// Host path to copy from.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -360,10 +416,11 @@ pub enum Patch {
     },
 
     /// Copy a directory from the host into the rootfs.
+    #[serde(alias = "CopyDir")]
     CopyDir {
         /// Host directory to copy from.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -372,6 +429,7 @@ pub enum Patch {
     },
 
     /// Create a symlink.
+    #[serde(alias = "Symlink")]
     Symlink {
         /// Symlink target path.
         target: String,
@@ -382,6 +440,7 @@ pub enum Patch {
     },
 
     /// Create a directory.
+    #[serde(alias = "Mkdir")]
     Mkdir {
         /// Absolute guest path.
         path: String,
@@ -390,12 +449,14 @@ pub enum Patch {
     },
 
     /// Remove a file or directory.
+    #[serde(alias = "Remove")]
     Remove {
         /// Absolute guest path to remove.
         path: String,
     },
 
     /// Append content to an existing file.
+    #[serde(alias = "Append")]
     Append {
         /// Absolute guest path of the file to append to.
         path: String,
@@ -418,8 +479,8 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// allowed host (and blocks/forwards per [`ViolationAction`] otherwise). Carried
 /// in [`NetworkSpec::secrets`](NetworkSpec).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SecretsConfig {
     /// List of secrets to inject.
     #[serde(default, alias = "secrets")]
@@ -435,8 +496,8 @@ pub struct SecretsConfig {
 /// `value` is the sensitive material — it never enters the sandbox and is
 /// redacted by the [`Debug`](fmt::Debug) impl.
 #[derive(Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SecretEntry {
     /// Environment variable name exposed to the sandbox (holds the placeholder).
     ///
@@ -476,9 +537,10 @@ pub struct SecretEntry {
 
 /// Host pattern for a secret allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum HostPattern {
     /// Exact hostname match.
     #[serde(alias = "Exact")]
@@ -493,8 +555,8 @@ pub enum HostPattern {
 
 /// Where in the HTTP request a secret can be injected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SecretInjection {
     /// Substitute in HTTP headers (default: true).
     #[serde(default = "default_true")]
@@ -521,19 +583,20 @@ pub struct SecretInjection {
 
 /// Action when a secret placeholder is detected going to a disallowed host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum ViolationAction {
     /// Block the request silently.
     #[serde(alias = "Block")]
     Block,
     /// Block and log (default).
     #[default]
-    #[serde(alias = "BlockAndLog", alias = "block_and_log")]
+    #[serde(alias = "BlockAndLog", alias = "block-and-log")]
     BlockAndLog,
     /// Block and terminate the sandbox.
-    #[serde(alias = "BlockAndTerminate", alias = "block_and_terminate")]
+    #[serde(alias = "BlockAndTerminate", alias = "block-and-terminate")]
     BlockAndTerminate,
     /// Forward the request with the placeholder unchanged for matching hosts.
     #[serde(alias = "Passthrough")]
@@ -730,7 +793,6 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 /// is handled by proxy tasks — these fields configure which ports/domains are
 /// intercepted and how the interception CA is sourced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct TlsConfig {
@@ -773,7 +835,6 @@ pub struct TlsConfig {
 
 /// Certificate authority configuration for TLS interception.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct InterceptCaConfig {
@@ -794,7 +855,6 @@ pub struct InterceptCaConfig {
 
 /// Per-domain certificate cache configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct CertCacheConfig {
@@ -851,7 +911,6 @@ fn default_cert_validity_hours() -> u64 {
 
 /// Action to take on traffic matched by a [`Rule`] (or a policy default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "kebab-case")]
@@ -864,7 +923,6 @@ pub enum Action {
 
 /// Direction a [`Rule`] applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "kebab-case")]
@@ -879,7 +937,6 @@ pub enum Direction {
 
 /// Protocol filter for a [`Rule`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "kebab-case")]
@@ -896,10 +953,9 @@ pub enum Protocol {
 
 /// Pre-defined destination category for a [`Destination::Group`] match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum DestinationGroup {
     /// Public internet — any address not in another category.
     Public,
@@ -908,7 +964,7 @@ pub enum DestinationGroup {
     /// Private ranges (RFC 1918 / RFC 4193 ULA / CGN).
     Private,
     /// Link-local addresses, excluding the metadata IP.
-    #[serde(alias = "link_local")]
+    #[serde(alias = "link-local")]
     LinkLocal,
     /// Cloud metadata endpoint (`169.254.169.254`).
     Metadata,
@@ -925,24 +981,20 @@ pub enum DestinationGroup {
 /// engine re-parses and validates them into its richer internal types at
 /// load time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type", content = "content")]
+#[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
     Any,
     /// IP address or CIDR block (e.g. `"1.2.3.4"`, `"10.0.0.0/8"`).
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    Cidr(
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
-        IpNetwork,
-    ),
+    Cidr(#[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))] IpNetwork),
     /// Exact domain name (e.g. `"example.com"`).
     Domain(String),
     /// Domain suffix — the apex and any subdomain of it.
-    #[serde(alias = "domain_suffix")]
+    #[serde(alias = "domain-suffix")]
     DomainSuffix(String),
     /// A pre-defined destination group.
     Group(DestinationGroup),
@@ -950,7 +1002,6 @@ pub enum Destination {
 
 /// Inclusive guest-side port range for a [`Rule`] match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct PortRange {
@@ -963,7 +1014,6 @@ pub struct PortRange {
 /// A single egress/ingress policy rule. Evaluated first-match-wins per
 /// direction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct Rule {
@@ -984,7 +1034,6 @@ pub struct Rule {
 /// Egress/ingress network policy: an ordered [`Rule`] list plus a
 /// per-direction default [`Action`]. Carried in [`NetworkSpec::policy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct NetworkPolicy {
@@ -1011,7 +1060,6 @@ fn action_deny() -> Action {
 
 /// DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
@@ -1040,13 +1088,13 @@ impl Default for DnsConfig {
 /// sandbox slot by the local network engine. Carried in
 /// [`NetworkSpec::interface`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct InterfaceOverrides {
     /// Guest MAC address as six octets. Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<Vec<U53>>"))]
     pub mac: Option<[u8; 6]>,
     /// Interface MTU. Default: 1500.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1058,7 +1106,6 @@ pub struct InterfaceOverrides {
     pub ipv4_address: Option<Ipv4Addr>,
     /// Guest IPv4 pool CIDR (e.g. `"172.16.0.0/12"`). Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
     pub ipv4_pool: Option<Ipv4Network>,
@@ -1069,7 +1116,6 @@ pub struct InterfaceOverrides {
     pub ipv6_address: Option<Ipv6Addr>,
     /// Guest IPv6 pool CIDR. Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
     pub ipv6_pool: Option<Ipv6Network>,
@@ -1088,8 +1134,8 @@ pub struct InterfaceOverrides {
 /// load time, which keeps that engine's validation crates out of this shared
 /// contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct NetworkSpec {
     /// Whether networking is enabled for this sandbox.
@@ -1119,6 +1165,7 @@ pub struct NetworkSpec {
     pub secrets: Option<SecretsConfig>,
 
     /// Max concurrent guest connections.
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub max_connections: Option<usize>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
@@ -1127,7 +1174,6 @@ pub struct NetworkSpec {
 
 /// A published port mapping between host and guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct PublishedPortSpec {
@@ -1147,7 +1193,6 @@ pub struct PublishedPortSpec {
 
 /// Transport protocol for a published port.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub enum PortProtocol {
@@ -1167,12 +1212,12 @@ pub enum PortProtocol {
 
 /// Fully-assembled handoff-init specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct HandoffInit {
     /// Init binary: absolute path inside the guest rootfs, or the literal `auto`.
-    #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
     pub cmd: PathBuf,
 
     /// Supplemental argv. `argv[0]` is implicitly `cmd`.
@@ -1181,6 +1226,7 @@ pub struct HandoffInit {
 
     /// Extra env vars merged on top of the inherited env.
     #[serde(default)]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub env: Vec<(String, String)>,
 }
 
@@ -1190,7 +1236,6 @@ pub struct HandoffInit {
 
 /// Sandbox lifecycle policy.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct SandboxPolicy {
@@ -1223,7 +1268,6 @@ pub struct SandboxPolicy {
 
 /// Where to place a new snapshot artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotDestination {
     /// Bare name resolved under the default snapshots directory.
@@ -1234,14 +1278,12 @@ pub enum SnapshotDestination {
     #[serde(alias = "Path")]
     Path(
         /// Destination path.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
         PathBuf,
     ),
 }
 
 /// Inputs to create a snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SnapshotSpec {
     /// Name of the source sandbox. Must be stopped.
     pub source_sandbox: String,
@@ -1267,8 +1309,8 @@ pub struct SnapshotSpec {
 ///
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
 pub struct SandboxSpec {
     /// Unique sandbox name.
@@ -1288,6 +1330,10 @@ pub struct SandboxSpec {
     pub env: Vec<EnvVar>,
 
     /// User-defined labels attached to the sandbox.
+    #[cfg_attr(
+        feature = "typeshare",
+        typeshare(serialized_as = "HashMap<String, String>")
+    )]
     pub labels: BTreeMap<String, String>,
 
     /// Sandbox-wide resource limits inherited by guest processes.
@@ -1317,7 +1363,6 @@ pub struct SandboxSpec {
 
 /// CPU and memory resources for a sandbox.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
@@ -1327,16 +1372,10 @@ pub struct SandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
-
-    /// Writable disk size in MiB. Realized as the OCI writable-overlay size for
-    /// an OCI rootfs (driver `WithOCIUpperSize`); ignored for non-OCI rootfs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub disk_size_mib: Option<u32>,
 }
 
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(default)]
@@ -1381,7 +1420,6 @@ pub struct SandboxRuntimeOptions {
 
 /// Environment variable entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct EnvVar {
@@ -1394,7 +1432,6 @@ pub struct EnvVar {
 
 /// Runtime log verbosity for sandbox specs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
@@ -1421,7 +1458,6 @@ pub enum SandboxLogLevel {
 
 /// POSIX resource limit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 #[serde(rename_all = "lowercase")]
@@ -1478,7 +1514,6 @@ pub enum RlimitResource {
 
 /// A POSIX resource limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typeshare", typeshare::typeshare)]
 pub struct Rlimit {
@@ -1500,7 +1535,6 @@ pub struct Rlimit {
 
 /// Source tag on a captured log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LogSource {
@@ -1549,6 +1583,7 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
+            upper_size_mib: None,
         }
     }
 }
@@ -1563,6 +1598,14 @@ impl RootfsSource {
     pub fn oci_reference(&self) -> Option<&str> {
         match self {
             Self::Oci(oci) => Some(&oci.reference),
+            _ => None,
+        }
+    }
+
+    /// Return the writable-overlay upper size in MiB for an OCI rootfs, if set.
+    pub fn oci_upper_size_mib(&self) -> Option<u32> {
+        match self {
+            Self::Oci(oci) => oci.upper_size_mib,
             _ => None,
         }
     }
@@ -1756,7 +1799,6 @@ impl Default for SandboxResources {
         Self {
             vcpus: DEFAULT_SANDBOX_VCPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
-            disk_size_mib: None,
         }
     }
 }
@@ -1832,263 +1874,6 @@ impl FromStr for SandboxLogLevel {
     }
 }
 
-impl Serialize for VolumeMount {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-
-        match self {
-            Self::Bind {
-                host,
-                guest,
-                options,
-                stat_virtualization,
-                host_permissions,
-                quota_mib,
-            } => {
-                let mut map = serializer.serialize_map(Some(7))?;
-                map.serialize_entry("type", "Bind")?;
-                map.serialize_entry("host", host)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("options", options)?;
-                map.serialize_entry("stat_virtualization", stat_virtualization)?;
-                map.serialize_entry("host_permissions", host_permissions)?;
-                map.serialize_entry("quota_mib", quota_mib)?;
-                map.end()
-            }
-            Self::Named {
-                name,
-                guest,
-                create: _,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "Named")?;
-                map.serialize_entry("name", name)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("options", options)?;
-                map.serialize_entry("stat_virtualization", stat_virtualization)?;
-                map.serialize_entry("host_permissions", host_permissions)?;
-                map.end()
-            }
-            Self::Tmpfs {
-                guest,
-                size_mib,
-                options,
-            } => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "Tmpfs")?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("size_mib", size_mib)?;
-                map.serialize_entry("options", options)?;
-                map.end()
-            }
-            Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "DiskImage")?;
-                map.serialize_entry("host", host)?;
-                map.serialize_entry("guest", guest)?;
-                map.serialize_entry("format", format)?;
-                map.serialize_entry("fstype", fstype)?;
-                map.serialize_entry("options", options)?;
-                map.end()
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for VolumeMount {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        fn default_strict() -> StatVirtualization {
-            StatVirtualization::Strict
-        }
-
-        fn default_private() -> HostPermissions {
-            HostPermissions::Private
-        }
-
-        #[derive(Deserialize)]
-        #[serde(tag = "type")]
-        enum VolumeMountHelper {
-            Bind {
-                host: PathBuf,
-                guest: String,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-                #[serde(default = "default_strict")]
-                stat_virtualization: StatVirtualization,
-                #[serde(default = "default_private")]
-                host_permissions: HostPermissions,
-                #[serde(default)]
-                quota_mib: Option<u32>,
-            },
-            Named {
-                name: String,
-                guest: String,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-                #[serde(default = "default_strict")]
-                stat_virtualization: StatVirtualization,
-                #[serde(default = "default_private")]
-                host_permissions: HostPermissions,
-            },
-            Tmpfs {
-                guest: String,
-                #[serde(default)]
-                size_mib: Option<u32>,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-            },
-            DiskImage {
-                host: PathBuf,
-                guest: String,
-                format: DiskImageFormat,
-                #[serde(default)]
-                fstype: Option<String>,
-                #[serde(default)]
-                options: Option<MountOptions>,
-                #[serde(default)]
-                readonly: bool,
-            },
-        }
-
-        let helper = VolumeMountHelper::deserialize(deserializer)?;
-        Ok(match helper {
-            VolumeMountHelper::Bind {
-                host,
-                guest,
-                options,
-                readonly,
-                stat_virtualization,
-                host_permissions,
-                quota_mib,
-            } => Self::Bind {
-                host,
-                guest,
-                options: decode_mount_options(options, readonly),
-                stat_virtualization,
-                host_permissions,
-                quota_mib,
-            },
-            VolumeMountHelper::Named {
-                name,
-                guest,
-                options,
-                readonly,
-                stat_virtualization,
-                host_permissions,
-            } => Self::Named {
-                name,
-                guest,
-                create: None,
-                options: decode_mount_options(options, readonly),
-                stat_virtualization,
-                host_permissions,
-            },
-            VolumeMountHelper::Tmpfs {
-                guest,
-                size_mib,
-                options,
-                readonly,
-            } => Self::Tmpfs {
-                guest,
-                size_mib,
-                options: decode_mount_options(options, readonly),
-            },
-            VolumeMountHelper::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-                readonly,
-            } => Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options: decode_mount_options(options, readonly),
-            },
-        })
-    }
-}
-
-impl fmt::Debug for VolumeMount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Bind {
-                host,
-                guest,
-                options,
-                stat_virtualization,
-                host_permissions,
-                quota_mib,
-            } => f
-                .debug_struct("Bind")
-                .field("host", host)
-                .field("guest", guest)
-                .field("options", options)
-                .field("stat_virtualization", stat_virtualization)
-                .field("host_permissions", host_permissions)
-                .field("quota_mib", quota_mib)
-                .finish(),
-            Self::Named {
-                name,
-                guest,
-                create,
-                options,
-                stat_virtualization,
-                host_permissions,
-            } => f
-                .debug_struct("Named")
-                .field("name", name)
-                .field("guest", guest)
-                .field("create", create)
-                .field("options", options)
-                .field("stat_virtualization", stat_virtualization)
-                .field("host_permissions", host_permissions)
-                .finish(),
-            Self::Tmpfs {
-                guest,
-                size_mib,
-                options,
-            } => f
-                .debug_struct("Tmpfs")
-                .field("guest", guest)
-                .field("size_mib", size_mib)
-                .field("options", options)
-                .finish(),
-            Self::DiskImage {
-                host,
-                guest,
-                format,
-                fstype,
-                options,
-            } => f
-                .debug_struct("DiskImage")
-                .field("host", host)
-                .field("guest", guest)
-                .field("format", format)
-                .field("fstype", fstype)
-                .field("options", options)
-                .finish(),
-        }
-    }
-}
-
 /// Case-insensitive string to [`RlimitResource`] conversion.
 impl TryFrom<&str> for RlimitResource {
     type Error = String;
@@ -2114,17 +1899,6 @@ impl TryFrom<&str> for RlimitResource {
             _ => Err(format!("unknown rlimit resource: {s}")),
         }
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountOptions {
-    options.unwrap_or(MountOptions {
-        readonly,
-        ..MountOptions::default()
-    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2331,7 +2105,7 @@ mod secret_tests {
     #[test]
     fn default_require_tls_identity_when_deserialized() {
         let entry: SecretEntry = serde_json::from_str(
-            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"exact":"h"}]}"#,
+            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"type":"exact","content":"h"}]}"#,
         )
         .unwrap();
         assert!(entry.require_tls_identity);
@@ -2416,28 +2190,30 @@ mod secret_tests {
         ]);
         assert_eq!(
             serde_json::to_string(&action).unwrap(),
-            r#"{"passthrough":[{"exact":"api.anthropic.com"},{"wildcard":"*.anthropic.com"},"any"]}"#
+            r#"{"type":"passthrough","content":[{"type":"exact","content":"api.anthropic.com"},{"type":"wildcard","content":"*.anthropic.com"},{"type":"any"}]}"#
         );
         assert_eq!(
             serde_json::to_string(&ViolationAction::BlockAndLog).unwrap(),
-            r#""block-and-log""#
+            r#"{"type":"block_and_log"}"#
         );
         assert_eq!(
             serde_json::to_string(&ViolationAction::BlockAndTerminate).unwrap(),
-            r#""block-and-terminate""#
+            r#"{"type":"block_and_terminate"}"#
         );
     }
 
     #[test]
     fn violation_action_accepts_legacy_pascal_case() {
-        let action: ViolationAction =
-            serde_json::from_str(r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#).unwrap();
+        let action: ViolationAction = serde_json::from_str(
+            r#"{"type":"Passthrough","content":[{"type":"Exact","content":"api.anthropic.com"}]}"#,
+        )
+        .unwrap();
         assert_eq!(
             action,
             ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())])
         );
         assert_eq!(
-            serde_json::from_str::<ViolationAction>(r#""BlockAndTerminate""#).unwrap(),
+            serde_json::from_str::<ViolationAction>(r#"{"type":"BlockAndTerminate"}"#).unwrap(),
             ViolationAction::BlockAndTerminate
         );
     }

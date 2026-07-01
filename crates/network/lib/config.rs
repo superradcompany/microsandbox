@@ -251,23 +251,24 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&wire_iface).unwrap()).unwrap();
         assert_eq!(iface_json, serde_json::to_value(&back).unwrap());
 
-        // Kebab-case is canonical; legacy snake_case tags still deserialize via
+        // Snake_case is canonical; legacy kebab-case tags still deserialize via
         // `#[serde(alias)]` on both the engine and the wire enums.
         assert_eq!(
             serde_json::to_string(&Destination::DomainSuffix(
                 "staging.example.com".parse().unwrap()
             ))
             .unwrap(),
-            r#"{"domain-suffix":"staging.example.com"}"#
+            r#"{"type":"domain_suffix","content":"staging.example.com"}"#
         );
         let legacy: microsandbox_types::Destination =
-            serde_json::from_str(r#"{"domain_suffix":"old.example.com"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"domain-suffix","content":"old.example.com"}"#)
+                .unwrap();
         assert!(matches!(
             legacy,
             microsandbox_types::Destination::DomainSuffix(_)
         ));
         let legacy_group: microsandbox_types::DestinationGroup =
-            serde_json::from_str(r#""link_local""#).unwrap();
+            serde_json::from_str(r#""link-local""#).unwrap();
         assert_eq!(
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
