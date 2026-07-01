@@ -1,50 +1,52 @@
 # microsandbox
 
-Lightweight VM sandboxes for running AI agents and untrusted code with hardware-level isolation.
+Lightweight VM sandboxes for Rust applications that need hardware-level isolation for AI agents, tools, tests, and untrusted code.
 
-`microsandbox` is the core Rust library for the [microsandbox](https://github.com/superradcompany/microsandbox) project. It provides a high-level async API for creating, managing, and interacting with microVM sandboxes — real virtual machines that boot in under 100ms and run standard OCI (Docker) images.
+`microsandbox` is the Rust SDK for the [microsandbox](https://github.com/superradcompany/microsandbox) runtime. It exposes an async API for creating microVM-backed sandboxes, running commands, reading and writing guest files, managing volumes, configuring network policy, and working with secrets.
+
+For full API documentation, use the docs site and generated Rust docs:
+
+- [Rust SDK guide](https://docs.microsandbox.dev/sdk/rust/sandbox)
+- [SDK overview](https://docs.microsandbox.dev/sdk/overview)
+- [Repository examples](../../examples/rust)
 
 ## Features
 
-- **Hardware isolation** — Each sandbox is a real VM with its own Linux kernel, not a container
-- **Sub-100ms boot** — MicroVMs start nearly instantly, no daemon or server required
-- **OCI image support** — Pull and run images from Docker Hub, GHCR, ECR, or any OCI registry
-- **Command execution** — Run commands with streaming or collected output, interactive shells
-- **Guest filesystem access** — Read, write, list, copy files inside a running sandbox
-- **Named volumes** — Persistent storage that survives sandbox restarts, with quotas
-- **Network policies** — Control outbound access: public-only (default), allow-all, or fully airgapped
-- **DNS filtering** — Block specific domains or domain suffixes
-- **TLS interception** — Transparent MITM proxy for HTTPS inspection and secret substitution
-- **Secrets** — Credentials that never enter the VM; placeholder substitution at the network layer
-- **Port publishing** — Expose guest TCP/UDP services on host ports
-- **Rootfs patches** — Modify the filesystem before the VM boots
-- **Detached mode** — Sandboxes can outlive the parent process
-- **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
+- Hardware VM isolation with a guest Linux kernel
+- OCI image, bind-rootfs, disk-image, and snapshot-based sandboxes
+- Collected and streaming command execution
+- Guest filesystem read, write, list, copy, stat, and stream operations
+- Named volumes, bind mounts, tmpfs mounts, and disk-image mounts
+- Network policies, DNS filtering, TLS interception, secrets, and port publishing
+- Rootfs patches before boot
+- Detached sandboxes that can outlive the Rust process
+- Metrics, logs, snapshots, SSH/SFTP, image cache, and local/cloud backend helpers
 
 ## Requirements
 
-- **Linux** with KVM enabled, or **macOS** with Apple Silicon (M-series)
-- Rust 2024 edition
+- Rust toolchain with Rust 2024 edition support
+- Linux with KVM, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform
+- Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/getting-started/windows-troubleshooting) for WHP and runtime setup notes.
 
 ## Installation
 
-```toml
-[dependencies]
-microsandbox = "0.4"
+```bash
+cargo add microsandbox
 ```
 
 ### Cargo Features
 
-| Feature    | Default | Description                                         |
-| ---------- | ------- | --------------------------------------------------- |
-| `prebuilt` | yes     | Use pre-built runtime binaries                      |
-| `net`      | yes     | Networking: port publishing, policies, TLS, secrets |
+| Feature | Default | Description |
+| --- | --- | --- |
+| `keyring` | yes | Registry credential lookup through the platform keyring |
+| `net` | yes | Networking, port publishing, policies, TLS interception, and secrets |
+| `prebuilt` | yes | Use prebuilt runtime artifacts where available |
+| `ssh` | no | SSH, SFTP, and interactive SSH helpers |
 
-To disable networking:
+To build without the networking stack while keeping the default keyring and prebuilt-runtime behavior:
 
-```toml
-[dependencies]
-microsandbox = { version = "0.4", default-features = false, features = ["prebuilt"] }
+```bash
+cargo add microsandbox --no-default-features --features keyring,prebuilt
 ```
 
 ## Quick Start
@@ -54,44 +56,52 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a sandbox from an OCI image.
-    let sandbox = Sandbox::builder("my-sandbox")
+    let sandbox = Sandbox::builder("rust-readme")
         .image("alpine")
         .cpus(1)
         .memory(512)
+        .replace()
         .create()
         .await?;
 
-    // Run a command.
     let output = sandbox.shell("echo 'Hello from microsandbox!'").await?;
-    println!("{}", output.stdout()?);
+    println!("{}", output.stdout()?.trim());
 
-    // Stop the sandbox.
     sandbox.stop().await?;
+    Sandbox::remove("rust-readme").await?;
+
     Ok(())
 }
 ```
 
-## Examples
+## Common Examples
+
+These snippets assume you already have a live `sandbox: Sandbox`. See [examples/rust](../../examples/rust) for complete runnable crates.
 
 ### Command Execution
 
 ```rust
-use microsandbox::Sandbox;
+use microsandbox::ExecEvent;
 
-// Collected output.
 let output = sandbox.exec("python3", ["-c", "print(1 + 1)"]).await?;
 println!("stdout: {}", output.stdout()?);
 println!("exit code: {}", output.status().code);
 
-// Streaming output.
 let mut handle = sandbox.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
 while let Some(event) = handle.recv().await {
     match event {
         ExecEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
         ExecEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
-        ExecEvent::Exited { code } => break,
-        _ => {}
+        ExecEvent::Exited { code } => {
+            println!("exited with {code}");
+            break;
+        }
+        ExecEvent::Started { .. } => {}
+        ExecEvent::Failed(err) => {
+            eprintln!("exec failed: {err:?}");
+            break;
+        }
+        ExecEvent::StdinError(err) => eprintln!("stdin error: {err:?}"),
     }
 }
 ```
@@ -101,14 +111,11 @@ while let Some(event) = handle.recv().await {
 ```rust
 let fs = sandbox.fs();
 
-// Write a file.
-fs.write("/tmp/config.json", b"{\"debug\": true}").await?;
+fs.write("/tmp/config.json", br#"{"debug": true}"#).await?;
 
-// Read it back.
 let data = fs.read("/tmp/config.json").await?;
 println!("{}", String::from_utf8_lossy(&data));
 
-// List a directory.
 for entry in fs.list("/etc").await? {
     println!("{} ({:?})", entry.path, entry.kind);
 }
@@ -119,187 +126,124 @@ for entry in fs.list("/etc").await? {
 ```rust
 use microsandbox::{Sandbox, Volume, size::SizeExt};
 
-// Create a 100 MiB named volume.
-let data = Volume::builder("my-data").quota(100.mib()).create().await?;
+let data = Volume::builder("readme-data").quota(100.mib()).create().await?;
 
-// Mount it in a sandbox.
-let sandbox = Sandbox::builder("writer")
+let writer = Sandbox::builder("readme-writer")
     .image("alpine")
     .volume("/data", |v| v.named(data.name()))
+    .replace()
     .create()
     .await?;
 
-sandbox.shell("echo 'hello' > /data/message.txt").await?;
-sandbox.stop().await?;
+writer.shell("echo 'hello' > /data/message.txt").await?;
+writer.stop().await?;
 
-// Mount the same volume in another sandbox (read-only).
-let reader = Sandbox::builder("reader")
+let reader = Sandbox::builder("readme-reader")
     .image("alpine")
     .volume("/data", |v| v.named(data.name()).readonly())
+    .replace()
     .create()
     .await?;
 
 let output = reader.shell("cat /data/message.txt").await?;
-println!("{}", output.stdout()?); // "hello"
+println!("{}", output.stdout()?.trim());
 ```
 
 ### Network Policies
 
 ```rust
-use microsandbox::{Sandbox, NetworkPolicy};
+use microsandbox::{NetworkPolicy, Sandbox};
 
-// Default: public internet only (blocks private ranges).
-let sandbox = Sandbox::builder("public")
-    .image("alpine")
-    .create()
-    .await?;
-
-// Fully airgapped.
-let sandbox = Sandbox::builder("isolated")
+let isolated = Sandbox::builder("readme-isolated")
     .image("alpine")
     .network(|n| n.policy(NetworkPolicy::none()))
+    .replace()
     .create()
     .await?;
 
-// Domain blocking via policy rules (refused at DNS and at TCP egress).
-use microsandbox_network::policy::{Destination, Rule};
+let filtered_policy = NetworkPolicy::builder()
+    .default_allow()
+    .rule(|r| r.egress().deny().domain("blocked.example.com"))
+    .rule(|r| r.egress().deny().domain_suffix(".evil.com"))
+    .build()?;
 
-let mut policy = NetworkPolicy::default();
-policy.rules.push(Rule::deny_egress(Destination::Domain(
-    "blocked.example.com".parse()?,
-)));
-policy.rules.push(Rule::deny_egress(Destination::DomainSuffix(
-    ".evil.com".parse()?,
-)));
-let sandbox = Sandbox::builder("filtered")
+let filtered = Sandbox::builder("readme-filtered")
     .image("alpine")
-    .network(|n| n.policy(policy))
+    .network(|n| n.policy(filtered_policy))
+    .replace()
     .create()
     .await?;
 ```
 
+Use `.disable_network()` when the sandbox should not receive a network interface at all. Use `NetworkPolicy::none()` when the interface should exist but policy should deny traffic.
+
 ### Port Publishing
 
 ```rust
-let sandbox = Sandbox::builder("web")
+let sandbox = Sandbox::builder("readme-web")
     .image("python")
-    .port(8080, 80) // host:8080 → guest:80
+    .port(8080, 80)
+    .replace()
     .create()
     .await?;
 ```
 
 ### Secrets
 
-Secrets use placeholder substitution — the real value never enters the VM. It is only swapped in at the network layer for HTTPS requests to allowed hosts.
+Secrets use placeholder substitution. The real value stays on the host and is substituted only for allowed network destinations.
 
 ```rust
-let sandbox = Sandbox::builder("agent")
+let sandbox = Sandbox::builder("readme-agent")
     .image("python")
-    .secret_env("API_KEY", "sk-real-secret-123", "api.openai.com")
+    .secret_env("OPENAI_API_KEY", "sk-real-secret-123", "api.openai.com")
+    .replace()
     .create()
     .await?;
-
-// Guest sees: API_KEY=$MSB_API_KEY (a placeholder)
-// HTTPS to api.openai.com: placeholder is transparently replaced with the real key
-// HTTPS to any other host with the placeholder: request is blocked
 ```
 
 ### Rootfs Patches
 
-Modify the filesystem before the VM boots:
-
 ```rust
-let sandbox = Sandbox::builder("patched")
+let sandbox = Sandbox::builder("readme-patched")
     .image("alpine")
     .patch(|p| {
         p.text("/etc/greeting.txt", "Hello!\n", None, false)
-         .mkdir("/app", Some(0o755))
-         .append("/etc/hosts", "127.0.0.1 myapp.local\n")
+            .mkdir("/app", Some(0o755))
+            .append("/etc/hosts", "127.0.0.1 myapp.local\n")
     })
+    .replace()
     .create()
     .await?;
 ```
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the parent process:
-
 ```rust
-// Create and detach.
-let sandbox = Sandbox::builder("background")
+let sandbox = Sandbox::builder("readme-background")
     .image("python")
     .detached(true)
+    .replace()
     .create()
     .await?;
 
-// Later, from another process:
-let sandbox = Sandbox::start("background").await?;
-let output = sandbox.shell("echo reconnected").await?;
+sandbox.detach().await;
+
+let handle = Sandbox::get("readme-background").await?;
+let reconnected = handle.connect().await?;
+let output = reconnected.shell("echo reconnected").await?;
+println!("{}", output.stdout()?.trim());
 ```
 
-### Image Sources
+## More Documentation
 
-```rust
-use microsandbox::Sandbox;
-
-// OCI image (most common).
-Sandbox::builder("a").image("python")
-
-// Local bind-mounted rootfs.
-Sandbox::builder("b").image("/path/to/rootfs")
-
-// QCOW2 disk image.
-Sandbox::builder("c").image_with(|img| img.disk("/path/to/disk.qcow2").fstype("ext4"))
-```
-
-## API Overview
-
-### Core Types
-
-| Type             | Description                                                         |
-| ---------------- | ------------------------------------------------------------------- |
-| `Sandbox`        | Live handle to a running sandbox — lifecycle, execution, filesystem |
-| `SandboxBuilder` | Fluent builder for configuring and creating sandboxes               |
-| `SandboxConfig`  | Serializable sandbox configuration                                  |
-| `SandboxHandle`  | Lightweight metadata handle from the database                       |
-| `Volume`         | Persistent named volume                                             |
-| `VolumeBuilder`  | Fluent builder for creating volumes                                 |
-| `Image`          | OCI image metadata and inspection                                   |
-
-### Execution Types
-
-| Type                                 | Description                                                |
-| ------------------------------------ | ---------------------------------------------------------- |
-| `ExecOutput`                         | Captured stdout/stderr with exit status                    |
-| `ExecHandle`                         | Streaming execution handle with event channel              |
-| `ExecOptions` / `ExecOptionsBuilder` | Execution configuration (args, env, cwd, timeout, rlimits) |
-| `ExecEvent`                          | Stream event: `Started`, `Stdout`, `Stderr`, `Exited`      |
-| `ExecSink`                           | Writable stdin channel for streaming exec                  |
-| `ExitStatus`                         | Exit code and success flag                                 |
-
-### Filesystem Types
-
-| Type         | Description                              |
-| ------------ | ---------------------------------------- |
-| `SandboxFsOps`  | Gateway for guest filesystem operations  |
-| `FsEntry`    | Directory entry (name, kind, size, mode) |
-| `FsMetadata` | File metadata (size, mode, timestamps)   |
-
-### Configuration Types
-
-| Type                     | Description                                         |
-| ------------------------ | --------------------------------------------------- |
-| `RootfsSource`           | Image source: `Oci`, `Bind`, or `DiskImage`         |
-| `VolumeMount`            | Mount type: `Bind`, `Named`, or `Tmpfs`             |
-| `Patch` / `PatchBuilder` | Pre-boot filesystem modifications                   |
-| `NetworkPolicy`          | Network access control (requires `net` feature)     |
-| `RegistryAuth`           | Docker registry credentials                         |
-| `PullPolicy`             | Image pull strategy: `Always`, `IfMissing`, `Never` |
-| `LogLevel`               | Logging verbosity                                   |
-
-### Error Handling
-
-All fallible operations return `MicrosandboxResult<T>`, which uses `MicrosandboxError` — an enum covering I/O, network, database, configuration, runtime, and timeout errors.
+- [Sandbox lifecycle](https://docs.microsandbox.dev/sdk/rust/sandbox)
+- [Execution](https://docs.microsandbox.dev/sdk/rust/execution)
+- [Filesystem](https://docs.microsandbox.dev/sdk/rust/filesystem)
+- [Networking](https://docs.microsandbox.dev/sdk/rust/networking)
+- [Secrets](https://docs.microsandbox.dev/sdk/rust/secrets)
+- [Volumes](https://docs.microsandbox.dev/sdk/rust/volumes)
+- [Snapshots](https://docs.microsandbox.dev/sdk/rust/snapshots)
+- [SSH](https://docs.microsandbox.dev/sdk/rust/ssh)
 
 ## License
 

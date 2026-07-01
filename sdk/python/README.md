@@ -1,41 +1,42 @@
 # microsandbox
 
-Lightweight VM sandboxes for Python — run AI agents and untrusted code with hardware-level isolation.
+Lightweight VM sandboxes for Python applications that need hardware-level isolation for AI agents, tools, tests, and untrusted code.
 
-The `microsandbox` Python package provides native bindings to the [microsandbox](https://github.com/superradcompany/microsandbox) runtime via pyo3. It spins up real microVMs (not containers) in under 100ms, runs standard OCI (Docker) images, and gives you full control over execution, filesystem, networking, and secrets — all from a simple async API.
+The `microsandbox` Python package provides async Python bindings to the [microsandbox](https://github.com/superradcompany/microsandbox) runtime. It creates microVM-backed sandboxes from OCI images or other rootfs sources, then exposes command execution, guest filesystem access, networking, secrets, volumes, metrics, logs, snapshots, and SSH/SFTP through Python-friendly classes and dataclasses.
+
+For the full API reference and longer guides, use the docs site:
+
+- [Python SDK guide](https://docs.microsandbox.dev/sdk/python/sandbox)
+- [SDK overview](https://docs.microsandbox.dev/sdk/overview)
+- [Repository examples](../../examples/python)
 
 ## Features
 
-- **Hardware isolation** — Each sandbox is a real VM with its own Linux kernel
-- **Sub-100ms boot** — No daemon, no server setup, embedded directly in your app
-- **OCI image support** — Pull and run images from Docker Hub, GHCR, ECR, or any OCI registry
-- **Command execution** — Run commands with collected or streaming output, interactive shells
-- **Guest filesystem access** — Read, write, list, copy files inside a running sandbox
-- **Named volumes** — Persistent storage across sandbox restarts, with quotas
-- **Network policies** — Public-only (default), allow-all, or fully airgapped
-- **DNS filtering** — Block specific domains or domain suffixes
-- **TLS interception** — Transparent HTTPS inspection and secret substitution
-- **Secrets** — Credentials that never enter the VM; placeholder substitution at the network layer
-- **Port publishing** — Expose guest TCP/UDP services on host ports
-- **Rootfs patches** — Modify the filesystem before the VM boots
-- **Detached mode** — Sandboxes can outlive the Python process
-- **Metrics** — CPU, memory, disk I/O, network I/O, and optional upper disk usage per sandbox
-- **Typed** — Frozen dataclasses, `StrEnum`s, event objects, `.pyi` stubs
+- Hardware VM isolation with a guest Linux kernel
+- Async sandbox lifecycle, execution, filesystem, metrics, and logs APIs
+- OCI image, bind-rootfs, disk-image, and snapshot-based sandboxes
+- Named volumes, bind mounts, tmpfs mounts, and disk-image mounts
+- Network policies, DNS filtering, TLS interception, secrets, and port publishing
+- Rootfs patches before boot
+- Detached sandboxes that can outlive the Python process
+- Typed Python surface with `StrEnum`s, frozen dataclasses, event objects, `.pyi` stubs, and `py.typed`
 
 ## Requirements
 
-- **Python** >= 3.10
-- **Linux** with KVM enabled, or **macOS** with Apple Silicon (M-series)
+- Python 3.10+
+- Linux with KVM, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform
+- Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/getting-started/windows-troubleshooting) for WHP and runtime setup notes.
 
 ## Supported Platforms
 
-| Platform | Architecture | Wheel tag |
-|----------|-------------|-----------|
-| macOS | ARM64 (Apple Silicon) | `macosx_11_0_arm64` |
-| Linux | x86_64 | `manylinux_2_28_x86_64` |
-| Linux | ARM64 | `manylinux_2_28_aarch64` |
+| Platform | Architecture | Notes |
+| --- | --- | --- |
+| macOS | ARM64 / Apple Silicon | Wheel bundles `msb` and `libkrunfw` |
+| Linux | x86_64 | Wheel bundles `msb` and `libkrunfw` |
+| Linux | ARM64 | Wheel bundles `msb` and `libkrunfw` |
+| Windows | x86_64, ARM64 | Preview; requires WHP |
 
-Runtime binaries (`msb` + `libkrunfw`) are bundled in the wheel. One wheel per platform, all Python 3.10+ versions via `abi3`.
+Python wheels bundle the matching `msb` runtime and `libkrunfw` library. Source checkouts and unreleased local builds can override runtime paths with `MSB_PATH`, `MSB_LIBKRUNFW_PATH`, or `microsandbox.set_libkrunfw_path(...)`.
 
 ## Installation
 
@@ -47,46 +48,37 @@ pip install microsandbox
 
 ```python
 import asyncio
+
 from microsandbox import Sandbox
 
-async def main():
-    # Create a sandbox from an OCI image.
-    sandbox = await Sandbox.create(
-        "my-sandbox",
-        image="alpine",
-        cpus=1,
-        memory=512,
-    )
 
-    # Run a command.
-    output = await sandbox.shell("echo 'Hello from microsandbox!'")
-    print(output.stdout_text)
+async def main() -> None:
+    async with await Sandbox.create("python-readme", image="alpine", replace=True) as sandbox:
+        output = await sandbox.shell("echo 'Hello from microsandbox!'")
+        print(output.stdout_text.strip())
 
-    # Stop the sandbox.
-    await sandbox.stop()
 
 asyncio.run(main())
 ```
 
-## Examples
+`async with` stops and removes the sandbox when the block exits. Use `Sandbox.create(...)` without a context manager when you want to control `stop()`, `kill()`, or `remove()` yourself.
+
+## Common Examples
+
+These snippets assume you already have a live `sandbox: Sandbox`.
 
 ### Command Execution
 
 ```python
 import sys
 
-from microsandbox import Sandbox
-
-# Collected output.
 output = await sandbox.exec("python3", ["-c", "print(1 + 1)"])
-print(output.stdout_text)   # "2\n"
-print(output.exit_code)      # 0
+print(output.stdout_text)
+print(output.exit_code)
 
-# Shell command (pipes, redirects, etc.).
 output = await sandbox.shell("echo hello && pwd")
 print(output.stdout_text)
 
-# Full configuration via keyword-only options.
 output = await sandbox.exec(
     "python3",
     ["script.py"],
@@ -95,15 +87,15 @@ output = await sandbox.exec(
     timeout=30.0,
 )
 
-# Streaming output.
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
 async for event in handle:
     match event.event_type:
-        case "stdout": sys.stdout.buffer.write(event.data)
-        case "stderr": sys.stderr.buffer.write(event.data)
-        case "exited": break
-
-await sandbox.stop()
+        case "stdout":
+            sys.stdout.buffer.write(event.data)
+        case "stderr":
+            sys.stderr.buffer.write(event.data)
+        case "exited":
+            break
 ```
 
 ### Filesystem Operations
@@ -111,27 +103,18 @@ await sandbox.stop()
 ```python
 fs = sandbox.fs
 
-# Write and read files.
 await fs.write("/tmp/config.json", b'{"debug": true}')
-content = await fs.read_text("/tmp/config.json")
+print(await fs.read_text("/tmp/config.json"))
 
-# List a directory.
-entries = await fs.list("/etc")
-for entry in entries:
+for entry in await fs.list("/etc"):
     print(f"{entry.path} ({entry.kind})")
 
-# Copy between host and guest.
 await fs.copy_from_host("./local-file.txt", "/tmp/file.txt")
 await fs.copy_to_host("/tmp/output.txt", "./output.txt")
 
-# Check existence and metadata.
 if await fs.exists("/tmp/config.json"):
     meta = await fs.stat("/tmp/config.json")
     print(f"size: {meta.size}, kind: {meta.kind}")
-
-# Streaming read.
-async for chunk in await fs.read_stream("/tmp/large-file.bin"):
-    process(chunk)
 ```
 
 ### Named Volumes
@@ -139,392 +122,196 @@ async for chunk in await fs.read_stream("/tmp/large-file.bin"):
 ```python
 from microsandbox import Sandbox, Volume
 
-# Create a 100 MiB named volume.
-data = await Volume.create("my-data", quota_mib=100)
+data = await Volume.create("python-readme-data", quota_mib=100)
 
-# Mount it in a sandbox.
 writer = await Sandbox.create(
-    "writer",
+    "python-readme-writer",
     image="alpine",
     volumes={"/data": Volume.named(data.name)},
     replace=True,
 )
-
 await writer.shell("echo 'hello' > /data/message.txt")
 await writer.stop()
 
-# Mount the same volume in another sandbox (read-only).
 reader = await Sandbox.create(
-    "reader",
+    "python-readme-reader",
     image="alpine",
     volumes={"/data": Volume.named(data.name, readonly=True)},
     replace=True,
 )
-
 output = await reader.shell("cat /data/message.txt")
-print(output.stdout_text)  # "hello\n"
-
+print(output.stdout_text.strip())
 await reader.stop()
-
-# Cleanup.
-await Sandbox.remove("writer")
-await Sandbox.remove("reader")
-await Volume.remove("my-data")
 ```
 
-### Disk Image Volumes
+### Network, DNS, and Ports
 
 ```python
-from microsandbox import Sandbox, Volume, DiskImageFormat
+from microsandbox import Network, Sandbox
+from microsandbox.types import DnsConfig
 
-# Mount a host disk image at a guest path. Format is inferred from the
-# extension; pass `format=` to override. `fstype` is the inner FS agentd
-# will mount; omit to let agentd autodetect.
-sb = await Sandbox.create(
-    "worker",
-    image="alpine",
-    volumes={
-        "/data": Volume.disk("./data.qcow2", format=DiskImageFormat.QCOW2, fstype="ext4"),
-        "/seed": Volume.disk("./seed.raw", readonly=True),
-        "/scratch": Volume.tmpfs(size_mib=128, readonly=True),
-    },
-    replace=True,
-)
-```
-
-### Network Policies
-
-```python
-from microsandbox import Destination, Network, NetworkPolicy, Protocol, Rule, Sandbox
-
-# Default: public internet only (blocks private ranges).
-sandbox = await Sandbox.create("public", image="alpine")
-
-# Fully airgapped.
-sandbox = await Sandbox.create(
-    "isolated",
+isolated = await Sandbox.create(
+    "python-readme-isolated",
     image="alpine",
     network=Network.none(),
+    replace=True,
 )
 
-# Unrestricted.
-sandbox = await Sandbox.create(
-    "open",
-    image="alpine",
-    network=Network.allow_all(),
-)
-
-# DNS filtering.
-sandbox = await Sandbox.create(
-    "filtered",
+filtered = await Sandbox.create(
+    "python-readme-filtered",
     image="alpine",
     network=Network(
         deny_domains=("blocked.example.com",),
         deny_domain_suffixes=(".evil.com",),
+        dns=DnsConfig(nameservers=("1.1.1.1:53",)),
     ),
+    replace=True,
 )
 
-# Explicit allowlist with typed destinations.
-sandbox = await Sandbox.create(
-    "allowlisted",
-    image="alpine",
-    network=Network(
-        policy=NetworkPolicy(
-            default_egress="deny",
-            rules=(
-                Rule.allow(
-                    destination=Destination.ip("1.1.1.1"),
-                    protocol=Protocol.TCP,
-                    port=443,
-                ),
-                Rule.allow(
-                    destination=Destination.domain("api.github.com"),
-                    protocol=Protocol.TCP,
-                    port=443,
-                ),
-            ),
-        ),
-    ),
-)
-```
-
-### Port Publishing
-
-```python
-sandbox = await Sandbox.create(
-    "web",
+web = await Sandbox.create(
+    "python-readme-web",
     image="python",
-    ports={8080: 80},  # host:8080 → guest:80
+    ports={8080: 80},
+    network=Network.public_only(),
+    replace=True,
 )
 ```
 
 ### Secrets
 
-Secrets use placeholder substitution — the real value never enters the VM. It is only swapped in at the network layer for HTTPS requests to allowed hosts.
+Secrets use placeholder substitution. The real value stays on the host and is substituted only for allowed network destinations.
 
 ```python
+import os
+
 from microsandbox import Sandbox, Secret
 
 sandbox = await Sandbox.create(
-    "agent",
+    "python-readme-agent",
     image="python",
     secrets=[
-        Secret.env("OPENAI_API_KEY",
-                    value=os.environ["OPENAI_API_KEY"],
-                    allow_hosts=["api.openai.com"]),
+        Secret.env(
+            "OPENAI_API_KEY",
+            value=os.environ["OPENAI_API_KEY"],
+            allow_hosts=["api.openai.com"],
+        ),
     ],
+    replace=True,
 )
-
-# Guest sees: OPENAI_API_KEY=$MSB_OPENAI_API_KEY (a placeholder)
-# HTTPS to api.openai.com: placeholder is transparently replaced with the real key
-# HTTPS to any other host with the placeholder: request is blocked
 ```
 
 ### Rootfs Patches
-
-Modify the filesystem before the VM boots:
 
 ```python
 from microsandbox import Patch, Sandbox
 
 sandbox = await Sandbox.create(
-    "patched",
+    "python-readme-patched",
     image="alpine",
     patches=[
         Patch.text("/etc/greeting.txt", "Hello!\n"),
         Patch.mkdir("/app", mode=0o755),
         Patch.text("/app/config.json", '{"debug": true}', mode=0o644),
-        Patch.copy_dir("./scripts", "/app/scripts"),
         Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ],
+    replace=True,
 )
 ```
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Python process. The returned sandbox can still issue operations by name, but it does not own the host process lifecycle:
-
 ```python
-# Create in detached mode.
 sandbox = await Sandbox.create(
-    "background",
+    "python-readme-background",
     image="python",
     detached=True,
+    replace=True,
 )
 
-# Later, from another process:
-handle = await Sandbox.get("background")
+handle = await Sandbox.get("python-readme-background")
 reconnected = await handle.connect()
 output = await reconnected.shell("echo reconnected")
-```
-
-### Context Manager
-
-```python
-async with await Sandbox.create("temp", image="alpine", replace=True) as sb:
-    output = await sb.shell("echo hello")
-    print(output.stdout_text)
-# Sandbox is automatically killed and removed on exit.
-```
-
-### Replace Existing
-
-`replace=True` stops a sandbox with the same name (if any) and
-recreates it. By default the existing one gets 10 seconds to exit
-cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_timeout`
-(in seconds, fractional allowed) to override. Setting
-`replace_with_timeout` implies `replace=True`.
-
-```python
-# Default 10s SIGTERM timeout.
-sb = await Sandbox.create("worker", image="alpine", replace=True)
-
-# Wait longer for a workload that needs more time to shut down.
-sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=30)
-
-# Skip SIGTERM entirely; SIGKILL immediately.
-sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=0)
-```
-
-If you'd rather handle the conflict yourself, catch the typed error:
-
-```python
-from microsandbox import SandboxAlreadyExistsError
-
-try:
-    sb = await Sandbox.create("worker", image="alpine")
-except SandboxAlreadyExistsError:
-    print("already exists; resume or pass replace=True")
-```
-
-### TLS Interception
-
-```python
-from microsandbox import Network, Sandbox, TlsConfig
-
-sandbox = await Sandbox.create(
-    "tls-inspect",
-    image="python",
-    network=Network(
-        tls=TlsConfig(
-            bypass=("*.googleapis.com",),
-            verify_upstream=True,
-            intercepted_ports=(443,),
-        ),
-    ),
-)
+print(output.stdout_text.strip())
 ```
 
 ### Metrics
 
 ```python
-from microsandbox import Sandbox, all_sandbox_metrics, MiB
+from microsandbox import MiB, all_sandbox_metrics
 
-sandbox = await Sandbox.create("metrics-demo", image="python")
+metrics = await sandbox.metrics()
+print(f"CPU: {metrics.cpu_percent:.1f}%")
+print(f"Memory: {metrics.memory_bytes // MiB} MiB")
 
-# Per-sandbox metrics.
-m = await sandbox.metrics()
-print(f"CPU: {m.cpu_percent:.1f}%")
-print(f"Memory: {m.memory_bytes // MiB} MiB")
-print(f"Uptime: {m.uptime_ms / 1000:.1f}s")
+async for sample in sandbox.metrics_stream(interval=1.0):
+    print(f"CPU: {sample.cpu_percent:.1f}%")
+    break
 
-# Streaming metrics.
-async for m in sandbox.metrics_stream(interval=1.0):
-    print(f"CPU: {m.cpu_percent:.1f}%")
-
-# All sandboxes at once.
-all_metrics = await all_sandbox_metrics()
-for name, metrics in all_metrics.items():
-    print(f"{name}: {metrics.cpu_percent:.1f}%")
+for name, sample in (await all_sandbox_metrics()).items():
+    print(f"{name}: {sample.cpu_percent:.1f}%")
 ```
 
-### Runtime Setup
+### Typed Errors
+
+Python exports typed errors for the common SDK categories and falls back to `MicrosandboxError` for unmapped runtime variants. Catch specific errors when you need category-specific handling, and catch `MicrosandboxError` as the broad SDK base class.
 
 ```python
-from microsandbox import is_installed, install
+from microsandbox import MicrosandboxError, Sandbox, SandboxAlreadyExistsError
 
-if not is_installed():
-    await install()  # Downloads msb + libkrunfw to ~/.microsandbox/
+try:
+    await Sandbox.create("worker", image="alpine")
+except SandboxAlreadyExistsError:
+    print("already exists; resume it or pass replace=True")
+except MicrosandboxError as exc:
+    print(f"microsandbox error: {exc}")
 ```
 
-## API Reference
+## Runtime Setup
 
-### Classes (native)
+Installed wheels bundle the runtime files. The setup helpers are useful for source checkouts, shared runtime installs, and surfacing setup failures at process startup.
 
-| Class | Description |
-|-------|-------------|
-| `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
-| `SandboxHandle` | Lightweight database handle — use `connect()` or `start()` to get a live `Sandbox` |
-| `ExecOutput` | Captured stdout/stderr with exit status |
-| `ExecHandle` | Streaming execution handle — async iterator over events |
-| `ExecSink` | Writable stdin channel for streaming exec |
-| `SandboxFsOps` | Guest filesystem operations (read, write, list, copy, stat) |
-| `FsReadStream` | Async iterator over file data chunks |
-| `FsWriteSink` | Async context manager for streaming writes |
-| `Volume` | Persistent named volume |
-| `VolumeHandle` | Lightweight volume handle from the database |
-| `Image` | Image source factories and local OCI image-cache management |
-| `ImageHandle` | Lightweight cached image handle from the database |
-| `ImagePruneReport` | Summary returned by `Image.prune()` |
-| `MetricsStream` | Async iterator over metrics snapshots |
-| `PullSession` | Async context manager for creation with pull progress |
+```python
+from microsandbox import install, is_installed
 
-### Factories (Python)
+if not is_installed():
+    await install()
+```
 
-| Class | Description |
-|-------|-------------|
-| `Volume.bind()` / `.named()` / `.tmpfs()` / `.disk()` | Volume mount configuration |
-| `Network.none()` / `.public_only()` / `.allow_all()` | Network presets |
-| `Secret.env()` | Secret entry with host allowlist |
-| `Patch.text()` / `.mkdir()` / `.copy_file()` / `.append()` / ... | Pre-boot filesystem modifications |
-| `Image.oci(..., upper_size_mib=...)` / `.bind()` / `.disk()` | Explicit rootfs source configuration |
-| `Rlimit.nofile()` / `.cpu()` / `.as_()` / ... | POSIX resource limits |
+## More Documentation
 
-### Enums (Python `StrEnum`)
-
-| Enum | Values |
-|------|--------|
-| `PullPolicy` | `ALWAYS`, `IF_MISSING`, `NEVER` |
-| `LogLevel` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` |
-| `SecurityProfile` | `DEFAULT`, `RESTRICTED` |
-| `SandboxStatus` | `RUNNING`, `STOPPED`, `CRASHED`, `DRAINING`, `PAUSED` |
-| `Action` | `ALLOW`, `DENY` |
-| `Direction` | `EGRESS`, `INGRESS` |
-| `Protocol` | `TCP`, `UDP`, `ICMPV4`, `ICMPV6` |
-| `DestGroup` | `LOOPBACK`, `PRIVATE`, `LINK_LOCAL`, `METADATA`, `MULTICAST` |
-| `ViolationAction` | `BLOCK`, `BLOCK_AND_LOG`, `BLOCK_AND_TERMINATE` |
-| `FsEntryKind` | `FILE`, `DIRECTORY`, `SYMLINK`, `OTHER` |
-| `RlimitResource` | `CPU`, `FSIZE`, `NOFILE`, `AS`, ... (16 variants) |
-
-### Dataclasses (Python, frozen)
-
-| Type | Description |
-|------|-------------|
-| `ExitStatus` | Exit code and success flag |
-| `MountConfig` | Volume mount (bind, named, tmpfs, or disk) |
-| `PatchConfig` | Pre-boot filesystem modification |
-| `SecretEntry` | Secret binding to env var with host allowlist |
-| `NetworkPolicy` | Custom network policy with rules |
-| `TlsConfig` | TLS interception options |
-| `Network` | Full network configuration |
-| `Rule` | Network policy rule |
-| `RegistryAuth` | Docker registry credentials |
-| `Size` | Memory/storage size value type |
-| `Rlimit` | POSIX resource limit |
-
-### Event Types
-
-| Type | Description |
-|------|-------------|
-| Streaming exec events | Event objects returned by `exec_stream()` / `shell_stream()`. Inspect `event_type`, `pid`, `data`, and `code`. |
-| Pull progress events | Event objects yielded by `PullSession.progress`. Inspect `event_type` and the optional detail fields for that event. |
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `is_installed()` | Check if `msb` and `libkrunfw` are available |
-| `install()` | Download and install runtime dependencies |
-| `all_sandbox_metrics()` | Get metrics for all running sandboxes |
-| `version()` | Return the SDK version string |
+- [Sandbox lifecycle](https://docs.microsandbox.dev/sdk/python/sandbox)
+- [Execution](https://docs.microsandbox.dev/sdk/python/execution)
+- [Filesystem](https://docs.microsandbox.dev/sdk/python/filesystem)
+- [Networking](https://docs.microsandbox.dev/sdk/python/networking)
+- [Secrets](https://docs.microsandbox.dev/sdk/python/secrets)
+- [Volumes](https://docs.microsandbox.dev/sdk/python/volumes)
+- [Snapshots](https://docs.microsandbox.dev/sdk/python/snapshots)
+- [Images](https://docs.microsandbox.dev/sdk/python/images)
+- [SSH](https://docs.microsandbox.dev/sdk/python/ssh)
+- [Agent client](https://docs.microsandbox.dev/sdk/python/agent-client)
 
 ## Development
 
-### Prerequisites
-
-- [Rust](https://rustup.rs/) (2024 edition)
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- [maturin](https://www.maturin.rs/) (`uv tool install maturin`)
-
-### Setup
+From `sdk/python`:
 
 ```bash
-cd sdk/python
 uv sync --group dev
+uv run maturin develop --release
+uv run pytest tests
+uv run ruff check .
 ```
 
-### Build the extension
-
-```bash
-maturin develop --release
-```
-
-### Run tests
-
-```bash
-uv run pytest tests/
-```
-
-### Run an example
+From the repository root, run an example against the SDK project:
 
 ```bash
 uv run --project sdk/python python examples/python/root-oci/main.py
 ```
 
-### Lint
+Runtime integration tests require local virtualization support and runtime artifacts:
 
 ```bash
-uv run ruff check .
+cd sdk/python
+uv run pytest integration/test_create_kwargs.py integration/test_exec.py
 ```
 
 ## License
