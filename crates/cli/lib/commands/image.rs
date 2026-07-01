@@ -585,6 +585,34 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
     let cache_dir = local.cache_dir();
+    // Start the progress display before reading the archive, so a piped
+    // `docker save | msb load` shows activity while stdin is consumed.
+    let quiet = args.quiet;
+    let label = args
+        .tag
+        .first()
+        .cloned()
+        .or_else(|| {
+            args.input
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "archive".to_string());
+    let (progress, sender) = microsandbox_image::progress_channel();
+    let (display_ready_tx, display_ready_rx) = mpsc::sync_channel(1);
+    let display_thread = std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut display = ui::PullProgressDisplay::load(&label, quiet);
+        let _ = display_ready_tx.send(());
+        let mut receiver = progress.into_receiver();
+        while let Some(event) = receiver.blocking_recv() {
+            display.handle_event(event);
+        }
+        display.finish();
+        Ok(())
+    });
+    let _ = display_ready_rx.recv();
+
     let temp_input;
     let input_path = if let Some(path) = args.input.as_ref() {
         path
@@ -602,9 +630,17 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
         input_path,
         ImageLoadOptions {
             tags: args.tag.clone(),
+            progress: Some(sender),
         },
     )
-    .await?;
+    .await;
+
+    match display_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(error = %error, "failed to render load progress"),
+        Err(_) => tracing::warn!("load progress thread panicked"),
+    }
+    let loaded = loaded?;
 
     for image in &loaded {
         Image::persist(local, &image.reference, image.metadata.clone()).await?;
