@@ -122,7 +122,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -133,7 +133,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1692,7 +1692,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1774,6 +1774,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -3098,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3156,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3169,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64",
  "chrono",
@@ -3185,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3225,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3237,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3249,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64",
  "cbindgen",
@@ -3267,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -3294,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "libc",
@@ -3306,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3333,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "microsandbox-types",
  "sea-orm-migration",
@@ -3342,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64",
  "bytes",
@@ -3385,7 +3386,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -3402,7 +3403,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "ciborium",
@@ -3417,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "futures",
@@ -3432,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -3463,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "ipnetwork",
@@ -3477,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "dirs",
  "libc",
@@ -3549,9 +3550,9 @@ dependencies = [
 
 [[package]]
 name = "msb-imago"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16db000f7280d4c8a78b8b95f64a41006d447fd116ecd69d984d93774cb85d09"
+checksum = "c3077f41d73d78575dd706fcb626778eea7942ab2f1402ec040a4e11badc5dfa"
 dependencies = [
  "async-trait",
  "bincode",
@@ -4866,7 +4867,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5377,7 +5378,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5445,7 +5446,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6027,7 +6028,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6473,19 +6474,19 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "test-init"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6494,7 +6495,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "tempfile",
  "test-macros",
@@ -6992,7 +6993,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8243,6 +8244,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
 
 [[package]]
 name = "zmij"

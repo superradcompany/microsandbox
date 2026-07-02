@@ -174,6 +174,16 @@ impl DnsForwarder {
             return build_status_response(&query_msg, ResponseCode::NXDomain);
         }
 
+        if let Some(family) = inactive_query_family(query_type, self.gateway) {
+            tracing::debug!(
+                domain = %domain,
+                ?family,
+                "DNS query family is inactive for this sandbox",
+            );
+            self.shared.clear_resolved_hostname(&domain, family);
+            return build_status_response(&query_msg, ResponseCode::NoError);
+        }
+
         // Locally synthesize answers for the host alias; MX / TXT / etc.
         // fall through to upstream.
         if is_host_alias_query(&domain)
@@ -510,6 +520,18 @@ fn family_for_query_type(query_type: RecordType) -> Option<ResolvedHostnameFamil
     }
 }
 
+/// Return the queried address family when the sandbox has no gateway for it.
+fn inactive_query_family(
+    query_type: RecordType,
+    gateway: GatewayIps,
+) -> Option<ResolvedHostnameFamily> {
+    match query_type {
+        RecordType::A if gateway.ipv4.is_none() => Some(ResolvedHostnameFamily::Ipv4),
+        RecordType::AAAA if gateway.ipv6.is_none() => Some(ResolvedHostnameFamily::Ipv6),
+        _ => None,
+    }
+}
+
 /// Extract resolved IP addresses and the minimum TTL across answers of
 /// the requested family. Zero-TTL answers are floored to
 /// [`RESOLVED_HOSTNAME_MIN_TTL_SECS`] so an immediate connect following
@@ -647,6 +669,17 @@ mod tests {
     }
 
     #[test]
+    fn build_status_response_noerror_variant_is_nodata() {
+        let query = make_query("example.com.", RecordType::AAAA);
+        let bytes = build_status_response(&query, ResponseCode::NoError).expect("built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+    }
+
+    #[test]
     fn build_truncated_response_sets_tc_and_keeps_question() {
         let query = make_query("example.com.", RecordType::TXT);
         let bytes = build_truncated_response(&query).expect("built");
@@ -689,6 +722,44 @@ mod tests {
         let query = make_query("example.com.", RecordType::A);
         assert!(query.extensions().is_none());
         assert_eq!(query.max_payload(), 512);
+    }
+
+    #[test]
+    fn inactive_query_family_detects_missing_ipv6_gateway() {
+        let gateway = GatewayIps {
+            ipv4: Some(std::net::Ipv4Addr::new(172, 16, 0, 1)),
+            ipv6: None,
+        };
+
+        assert_eq!(
+            inactive_query_family(RecordType::AAAA, gateway),
+            Some(ResolvedHostnameFamily::Ipv6)
+        );
+        assert_eq!(inactive_query_family(RecordType::A, gateway), None);
+    }
+
+    #[test]
+    fn inactive_query_family_detects_missing_ipv4_gateway() {
+        let gateway = GatewayIps {
+            ipv4: None,
+            ipv6: Some("fd42:6d73:62::1".parse().unwrap()),
+        };
+
+        assert_eq!(
+            inactive_query_family(RecordType::A, gateway),
+            Some(ResolvedHostnameFamily::Ipv4)
+        );
+        assert_eq!(inactive_query_family(RecordType::AAAA, gateway), None);
+    }
+
+    #[test]
+    fn inactive_query_family_ignores_non_address_queries() {
+        let gateway = GatewayIps {
+            ipv4: None,
+            ipv6: None,
+        };
+
+        assert_eq!(inactive_query_family(RecordType::MX, gateway), None);
     }
 
     fn gateway_set() -> HashSet<IpAddr> {

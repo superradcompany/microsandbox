@@ -23,10 +23,10 @@ pub use domain::{
     LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate, NamedVolumeMode,
     NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PortRange, Protocol,
     PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, Rule, SandboxLogLevel,
-    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretConfigError,
-    SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotDestination,
-    SnapshotSpec, StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount,
-    VolumeSpec,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert,
+    ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection, SecretsConfig,
+    SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization, TlsConfig,
+    ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use validation::{

@@ -93,7 +93,7 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
     <a className="msb-chip" href="#rd-any">.any()</a>
   </div>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · DnsBuilder · TlsBuilder · ViolationActionBuilder<span className="msb-ct">16</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · DnsBuilder · TlsBuilder · ViolationActionBuilder<span className="msb-ct">18</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#nameservers">.nameservers()</a>
     <a className="msb-chip" href="#querytimeoutms">.queryTimeoutMs()</a>
@@ -105,6 +105,8 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
     <a className="msb-chip" href="#interceptcacert">.interceptCaCert()</a>
     <a className="msb-chip" href="#interceptcakey">.interceptCaKey()</a>
     <a className="msb-chip" href="#upstreamcacert">.upstreamCaCert()</a>
+    <a className="msb-chip" href="#upstreamcacertfor">.upstreamCaCertFor()</a>
+    <a className="msb-chip" href="#verifyupstreamfor">.verifyUpstreamFor()</a>
     <a className="msb-chip" href="#va-block">.block()</a>
     <a className="msb-chip" href="#blockandlog">.blockAndLog()</a>
     <a className="msb-chip" href="#blockandterminate">.blockAndTerminate()</a>
@@ -2037,6 +2039,17 @@ Verify upstream server certificates. Default `true`. Set to `false` only for sel
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">verifyUpstreamFor()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+verifyUpstreamFor(pattern: string, verify: boolean): this
+```
+
+Verify upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">interceptedPorts()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
@@ -2124,7 +2137,7 @@ Path to a PEM file used as the intercepting CA's private key.
 upstreamCaCert(path: string): this
 ```
 
-Path to a PEM file with extra root CAs the proxy should trust.
+Path to a PEM file with extra root CAs the proxy should trust when verifying every upstream server.
 
 <p className="msb-label">Parameters</p>
 
@@ -2134,6 +2147,17 @@ Path to a PEM file with extra root CAs the proxy should trust.
     <div className="msb-param-desc">PEM cert path.</div>
   </div>
 </div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">upstreamCaCertFor()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+upstreamCaCertFor(pattern: string, path: string): this
+```
+
+Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported.
 
 ---
 
@@ -2233,8 +2257,6 @@ Allow placeholders to pass through unchanged to any host. The explicit `iUnderst
     <div className="msb-param-desc">Must be <code>true</code> to opt in.</div>
   </div>
 </div>
-
----
 
 ## Types
 
@@ -2436,8 +2458,24 @@ TLS interception configuration.
 | interceptedPorts | `readonly number[]` | Intercepted TCP ports |
 | blockQuic | `boolean \| null` | Block QUIC on intercepted ports |
 | upstreamCaCertPaths | `readonly string[]` | Extra trust roots for upstream verification |
+| scopedUpstreamCaCerts | `readonly ScopedUpstreamCaCert[]` | Host-scoped extra trust roots for upstream verification |
+| scopedVerifyUpstream | `readonly ScopedVerifyUpstream[]` | Host-scoped upstream certificate verification overrides |
 | interceptCaCertPath | `string \| null` | Custom intercept CA cert (PEM) |
 | interceptCaKeyPath | `string \| null` | Custom intercept CA key (PEM) |
+
+### ScopedUpstreamCaCert
+
+| Field | Type | Description |
+|-------|------|-------------|
+| pattern | `string` | Exact host or `*.suffix` wildcard |
+| path | `string` | CA bundle path trusted for matching upstream hosts |
+
+### ScopedVerifyUpstream
+
+| Field | Type | Description |
+|-------|------|-------------|
+| pattern | `string` | Exact host or `*.suffix` wildcard |
+| verify | `boolean` | Whether to verify certificates for matching upstream hosts |
 
 ### InterfaceOverridesBuilder
 

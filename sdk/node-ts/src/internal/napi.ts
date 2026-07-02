@@ -142,7 +142,6 @@ export interface NapiSandboxBuilderSetters {
   imageWith(configure: (b: any) => any): this;
   cpus(n: number): this;
   memory(mib: number): this;
-  diskSize(sizeMib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -745,12 +744,24 @@ export interface NapiDnsConfig {
 export interface NapiTlsBuilder {
   bypass(pattern: string): this;
   verifyUpstream(verify: boolean): this;
+  verifyUpstreamFor(pattern: string, verify: boolean): this;
   interceptedPorts(ports: number[]): this;
   blockQuic(block: boolean): this;
   upstreamCaCert(path: string): this;
+  upstreamCaCertFor(pattern: string, path: string): this;
   interceptCaCert(path: string): this;
   interceptCaKey(path: string): this;
   build(): NapiTlsConfig;
+}
+
+export interface NapiScopedUpstreamCaCert {
+  readonly pattern: string;
+  readonly path: string;
+}
+
+export interface NapiScopedVerifyUpstream {
+  readonly pattern: string;
+  readonly verify: boolean;
 }
 
 export interface NapiTlsConfig {
@@ -760,6 +771,8 @@ export interface NapiTlsConfig {
   readonly interceptedPorts: number[];
   readonly blockQuic: boolean;
   readonly upstreamCaCertPaths: string[];
+  readonly scopedUpstreamCaCerts: NapiScopedUpstreamCaCert[];
+  readonly scopedVerifyUpstream: NapiScopedVerifyUpstream[];
   readonly interceptCaCertPath: string | null;
   readonly interceptCaKeyPath: string | null;
 }
@@ -1024,6 +1037,7 @@ export interface NapiRegistryConfigBuilder {
 
 export interface NapiImageBuilder {
   oci(reference: string): this;
+  upperSize(sizeMiB: number): this;
   disk(path: string): this;
   bind(host: string): this;
   fstype(fstype: string): this;

@@ -5,4 +5,6 @@
 //! SDKs, and this engine speak one contract. This module re-exports them so
 //! existing `microsandbox_network::tls::*` paths are unchanged.
 
-pub use microsandbox_types::{CertCacheConfig, InterceptCaConfig, TlsConfig};
+pub use microsandbox_types::{
+    CertCacheConfig, InterceptCaConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig,
+};

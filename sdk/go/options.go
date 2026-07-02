@@ -16,8 +16,8 @@ type SandboxConfig struct {
 	Image           string
 	ImageFstype     string
 	ImageBind       string
-	DiskSizeMiB     uint32
-	diskSizeSet     bool
+	OCIUpperSizeMiB uint32
+	ociUpperSizeSet bool
 	Snapshot        string
 	MemoryMiB       uint32
 	CPUs            uint8
@@ -62,7 +62,7 @@ type persistedSandboxConfig struct {
 	Name            string               `json:"name"`
 	Image           json.RawMessage      `json:"image"`
 	ImageFstype     string               `json:"image_fstype"`
-	DiskSizeMiB     uint32               `json:"oci_upper_size_mib"`
+	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
 	MemoryMiB       uint32               `json:"memory_mib"`
 	CPUs            uint8                `json:"cpus"`
 	Workdir         string               `json:"workdir"`
@@ -109,8 +109,8 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 	if raw.ImageFstype != "" {
 		imageFstype = raw.ImageFstype
 	}
-	if raw.DiskSizeMiB != 0 {
-		upperSizeMiB = raw.DiskSizeMiB
+	if raw.OCIUpperSizeMiB != 0 {
+		upperSizeMiB = raw.OCIUpperSizeMiB
 		upperSizeSet = true
 	}
 
@@ -118,8 +118,8 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Name:            raw.Name,
 		Image:           image,
 		ImageFstype:     imageFstype,
-		DiskSizeMiB:     upperSizeMiB,
-		diskSizeSet:     upperSizeSet,
+		OCIUpperSizeMiB: upperSizeMiB,
+		ociUpperSizeSet: upperSizeSet,
 		MemoryMiB:       raw.MemoryMiB,
 		CPUs:            raw.CPUs,
 		Workdir:         raw.Workdir,
@@ -247,12 +247,12 @@ func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// WithDiskSize sets the writable disk size for an OCI image, in MiB.
+// WithOCIUpperSize sets the writable overlay upper size for an OCI image, in MiB.
 // It is valid only with WithImage when the image resolves to an OCI reference.
-func WithDiskSize(mebibytes uint32) SandboxOption {
+func WithOCIUpperSize(mebibytes uint32) SandboxOption {
 	return func(o *SandboxConfig) {
-		o.DiskSizeMiB = mebibytes
-		o.diskSizeSet = true
+		o.OCIUpperSizeMiB = mebibytes
+		o.ociUpperSizeSet = true
 	}
 }
 
@@ -662,6 +662,24 @@ type PolicyRule struct {
 	Ports []string
 }
 
+// ScopedUpstreamCACert configures an upstream CA bundle for a host pattern.
+type ScopedUpstreamCACert struct {
+	// Pattern is an exact host or "*.suffix" wildcard.
+	Pattern string
+
+	// Path is the path to a CA bundle trusted for matching upstream hosts.
+	Path string
+}
+
+// ScopedVerifyUpstream configures upstream certificate verification for a host pattern.
+type ScopedVerifyUpstream struct {
+	// Pattern is an exact host or "*.suffix" wildcard.
+	Pattern string
+
+	// Verify controls upstream certificate verification for matching hosts.
+	Verify bool
+}
+
 // TLSConfig configures the transparent HTTPS inspection proxy.
 type TLSConfig struct {
 	// Bypass is a list of domain patterns (supports "*.suffix") to skip MITM.
@@ -685,6 +703,14 @@ type TLSConfig struct {
 	// UpstreamCACerts is a list of paths to additional CA bundles trusted
 	// for upstream verification.
 	UpstreamCACerts []string
+
+	// ScopedUpstreamCACerts is a list of host-scoped CA bundles trusted
+	// only for matching upstream hosts.
+	ScopedUpstreamCACerts []ScopedUpstreamCACert
+
+	// ScopedVerifyUpstream is a list of host-scoped upstream verification
+	// overrides.
+	ScopedVerifyUpstream []ScopedVerifyUpstream
 }
 
 // networkPolicyFactory is the static-method surface matching the Node

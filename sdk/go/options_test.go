@@ -15,25 +15,25 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
-func TestWithDiskSize(t *testing.T) {
+func TestWithOCIUpperSize(t *testing.T) {
 	o := SandboxConfig{}
-	WithDiskSize(8192)(&o)
-	if o.DiskSizeMiB != 8192 {
-		t.Errorf("DiskSizeMiB = %d, want 8192", o.DiskSizeMiB)
+	WithOCIUpperSize(8192)(&o)
+	if o.OCIUpperSizeMiB != 8192 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
 	}
-	if !o.diskSizeSet {
-		t.Error("diskSizeSet = false, want true")
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
 	}
 }
 
-func TestWithDiskSizeZeroIsExplicit(t *testing.T) {
+func TestWithOCIUpperSizeZeroIsExplicit(t *testing.T) {
 	o := SandboxConfig{}
-	WithDiskSize(0)(&o)
-	if o.DiskSizeMiB != 0 {
-		t.Errorf("DiskSizeMiB = %d, want 0", o.DiskSizeMiB)
+	WithOCIUpperSize(0)(&o)
+	if o.OCIUpperSizeMiB != 0 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 0", o.OCIUpperSizeMiB)
 	}
-	if !o.diskSizeSet {
-		t.Error("diskSizeSet = false, want true")
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
 	}
 }
 
@@ -448,6 +448,13 @@ func TestTlsConfigFields(t *testing.T) {
 		BlockQUIC:        &boolTrue,
 		CACert:           "/ca.pem",
 		CAKey:            "/ca.key",
+		UpstreamCACerts:  []string{"/corp.pem"},
+		ScopedUpstreamCACerts: []ScopedUpstreamCACert{
+			{Pattern: "*.internal", Path: "/internal.pem"},
+		},
+		ScopedVerifyUpstream: []ScopedVerifyUpstream{
+			{Pattern: "*.preview.internal", Verify: false},
+		},
 	}
 	if tls.Bypass[0] != "*.internal" {
 		t.Errorf("Bypass[0]: got %q", tls.Bypass[0])
@@ -460,6 +467,15 @@ func TestTlsConfigFields(t *testing.T) {
 	}
 	if tls.CACert != "/ca.pem" {
 		t.Errorf("CACert: got %q", tls.CACert)
+	}
+	if tls.UpstreamCACerts[0] != "/corp.pem" {
+		t.Errorf("UpstreamCACerts[0]: got %q", tls.UpstreamCACerts[0])
+	}
+	if tls.ScopedUpstreamCACerts[0].Pattern != "*.internal" {
+		t.Errorf("ScopedUpstreamCACerts[0]: got %+v", tls.ScopedUpstreamCACerts[0])
+	}
+	if tls.ScopedVerifyUpstream[0].Pattern != "*.preview.internal" {
+		t.Errorf("ScopedVerifyUpstream[0]: got %+v", tls.ScopedVerifyUpstream[0])
 	}
 }
 

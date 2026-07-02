@@ -110,3 +110,87 @@ async fn tls_bypass_domain_connects() {
 
     stop_and_remove(name).await;
 }
+
+/// Verify a host-scoped upstream no-verify override keeps TLS interception
+/// active while allowing a live self-signed upstream certificate.
+#[msb_test]
+async fn tls_scoped_no_verify_accepts_live_self_signed_upstream() {
+    let host = "self-signed.badssl.com";
+    let curl_script = format!(
+        concat!(
+            "set +e\n",
+            "curl --http1.1 -m 30 -sS -o /tmp/self-signed-body ",
+            "-w 'status=%{{http_code}}\\n' https://{host}/\n",
+            "status=$?\n",
+            "echo \"exit=$status\"\n",
+            "if [ \"$status\" -eq 0 ] && grep -q self-signed /tmp/self-signed-body; then\n",
+            "  echo body=ok\n",
+            "else\n",
+            "  echo body=missing\n",
+            "fi\n"
+        ),
+        host = host
+    );
+
+    let control_name = "tls-test-live-self-signed-control";
+    let control = Sandbox::builder(control_name)
+        .image("alpine")
+        .cpus(1)
+        .memory(512)
+        .user("0")
+        .network(|n| n.tls(|t| t))
+        .replace()
+        .create()
+        .await
+        .expect("failed to create control sandbox");
+    control
+        .shell("apk add --quiet curl")
+        .await
+        .expect("failed to install curl in control sandbox");
+    let control_output = control
+        .shell(curl_script.as_str())
+        .await
+        .expect("control curl shell failed");
+    let control_stdout = control_output.stdout().expect("invalid utf8");
+    stop_and_remove(control_name).await;
+
+    assert!(
+        control_stdout.contains("exit=") && !control_stdout.contains("exit=0"),
+        "expected self-signed upstream to fail without scoped no-verify, stdout: {control_stdout}"
+    );
+
+    let scoped_name = "tls-test-live-self-signed-scoped";
+    let scoped = Sandbox::builder(scoped_name)
+        .image("alpine")
+        .cpus(1)
+        .memory(512)
+        .user("0")
+        .network(|n| n.tls(|t| t.verify_upstream_for(host, false)))
+        .replace()
+        .create()
+        .await
+        .expect("failed to create scoped sandbox");
+    scoped
+        .shell("apk add --quiet curl")
+        .await
+        .expect("failed to install curl in scoped sandbox");
+    let scoped_output = scoped
+        .shell(curl_script.as_str())
+        .await
+        .expect("scoped curl shell failed");
+    let scoped_stdout = scoped_output.stdout().expect("invalid utf8");
+    stop_and_remove(scoped_name).await;
+
+    assert!(
+        scoped_stdout.contains("exit=0"),
+        "expected scoped no-verify curl to succeed, stdout: {scoped_stdout}"
+    );
+    assert!(
+        scoped_stdout.contains("status=200"),
+        "expected scoped no-verify upstream to return 200, stdout: {scoped_stdout}"
+    );
+    assert!(
+        scoped_stdout.contains("body=ok"),
+        "expected live self-signed response body, stdout: {scoped_stdout}"
+    );
+}

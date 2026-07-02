@@ -309,7 +309,7 @@ pub(crate) async fn intercept_relay(
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut server_tls = tls_state
-        .connector
+        .upstream_connector_for(sni_name)
         .connect(server_name, server_stream)
         .await
         .map_err(io::Error::other)?;

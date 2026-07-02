@@ -427,6 +427,22 @@ export interface DnsConfig {
 	query_timeout_ms: number;
 }
 
+/** A CA certificate PEM file trusted only for matching upstream hosts. */
+export interface ScopedUpstreamCaCert {
+	/** Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards. */
+	pattern: string;
+	/** Path to the CA certificate PEM file. */
+	path: string;
+}
+
+/** An upstream certificate verification override for matching hosts. */
+export interface ScopedVerifyUpstream {
+	/** Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards. */
+	pattern: string;
+	/** Whether to verify matching upstream server certificates. */
+	verify: boolean;
+}
+
 /** Certificate authority configuration for TLS interception. */
 export interface InterceptCaConfig {
 	/**
@@ -464,6 +480,10 @@ export interface TlsConfig {
 	block_quic_on_intercept: boolean;
 	/** CA certificate PEM files to trust for upstream server verification. */
 	upstream_ca_cert?: string[];
+	/** Host-scoped CA certificate PEM files to trust for upstream server verification. */
+	scoped_upstream_ca_cert?: ScopedUpstreamCaCert[];
+	/** Host-scoped upstream verification overrides. */
+	scoped_verify_upstream?: ScopedVerifyUpstream[];
 	/**
 	 * Interception CA configuration. The TLS proxy uses this CA to sign
 	 * per-domain certs it presents to the guest during interception.

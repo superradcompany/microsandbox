@@ -205,9 +205,9 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
-    /// Writable disk size for OCI images (e.g. 4G, 8192M).
-    #[arg(long = "disk-size", value_name = "SIZE")]
-    pub disk_size: Option<String>,
+    /// Writable overlay upper size for OCI images (e.g. 4G, 8192M).
+    #[arg(long = "oci-upper-size", value_name = "SIZE")]
+    pub oci_upper_size: Option<String>,
 
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long)]
@@ -359,6 +359,18 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub tls_upstream_ca_cert: Vec<PathBuf>,
 
+    /// Trust an additional CA certificate only for matching upstream hosts (PATTERN=PATH).
+    /// Can be specified multiple times.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "PATTERN=PATH")]
+    pub tls_upstream_ca_cert_for: Vec<String>,
+
+    /// Disable upstream certificate verification for matching upstream hosts.
+    /// Can be specified multiple times.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "PATTERN")]
+    pub tls_no_verify_upstream_for: Vec<String>,
+
     // --- Secrets ---
     /// Inject a secret that is only sent to an allowed host (ENV@HOST or ENV=VALUE@HOST).
     #[cfg(feature = "net")]
@@ -452,7 +464,7 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
-            || self.disk_size.is_some()
+            || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some()
@@ -477,6 +489,8 @@ impl SandboxOpts {
             || self.tls_intercept_ca_cert.is_some()
             || self.tls_intercept_ca_key.is_some()
             || !self.tls_upstream_ca_cert.is_empty()
+            || !self.tls_upstream_ca_cert_for.is_empty()
+            || !self.tls_no_verify_upstream_for.is_empty()
             || !self.secret.is_empty()
             || self.on_secret_violation.is_some();
 
@@ -597,9 +611,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
     }
-    if let Some(ref size) = opts.disk_size {
+    if let Some(ref size) = opts.oci_upper_size {
         let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
-        builder = builder.disk_size(size_mib);
+        builder = builder.oci_upper_size(size_mib);
     }
     if let Some(ref security) = opts.security {
         builder = builder.security(parse_security_profile(security)?);
@@ -1300,6 +1314,8 @@ fn apply_network_opts(
         || opts.tls_intercept_ca_cert.is_some()
         || opts.tls_intercept_ca_key.is_some()
         || !opts.tls_upstream_ca_cert.is_empty()
+        || !opts.tls_upstream_ca_cert_for.is_empty()
+        || !opts.tls_no_verify_upstream_for.is_empty()
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
@@ -1342,6 +1358,12 @@ fn apply_network_opts(
         let intercept_ca_cert = opts.tls_intercept_ca_cert.clone();
         let intercept_ca_key = opts.tls_intercept_ca_key.clone();
         let upstream_ca_cert = opts.tls_upstream_ca_cert.clone();
+        let scoped_upstream_ca_cert = opts
+            .tls_upstream_ca_cert_for
+            .iter()
+            .map(|spec| parse_scoped_upstream_ca_cert(spec))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
@@ -1385,7 +1407,9 @@ fn apply_network_opts(
                 || no_block_quic
                 || intercept_ca_cert.is_some()
                 || intercept_ca_key.is_some()
-                || !upstream_ca_cert.is_empty();
+                || !upstream_ca_cert.is_empty()
+                || !scoped_upstream_ca_cert.is_empty()
+                || !no_verify_upstream_for.is_empty();
 
             if has_tls {
                 let tls_ports = tls_ports.clone();
@@ -1393,6 +1417,8 @@ fn apply_network_opts(
                 let intercept_ca_cert = intercept_ca_cert.clone();
                 let intercept_ca_key = intercept_ca_key.clone();
                 let upstream_ca_cert = upstream_ca_cert.clone();
+                let scoped_upstream_ca_cert = scoped_upstream_ca_cert.clone();
+                let no_verify_upstream_for = no_verify_upstream_for.clone();
                 n = n.tls(move |mut t| {
                     if !tls_ports.is_empty() {
                         t = t.intercepted_ports(tls_ports);
@@ -1411,6 +1437,12 @@ fn apply_network_opts(
                     }
                     for path in &upstream_ca_cert {
                         t = t.upstream_ca_cert(path);
+                    }
+                    for (pattern, path) in &scoped_upstream_ca_cert {
+                        t = t.upstream_ca_cert_for(pattern, path);
+                    }
+                    for pattern in &no_verify_upstream_for {
+                        t = t.verify_upstream_for(pattern, false);
                     }
                     t
                 });
@@ -1640,6 +1672,20 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
     };
 
     Ok((env_var, value, host))
+}
+
+/// Parse a scoped upstream CA spec: `PATTERN=PATH`.
+#[cfg(feature = "net")]
+fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
+    let (pattern, path) = spec
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("scoped upstream CA must be in format PATTERN=PATH"))?;
+
+    if pattern.is_empty() || path.is_empty() {
+        anyhow::bail!("scoped upstream CA must be in format PATTERN=PATH (both parts required)");
+    }
+
+    Ok((pattern.to_string(), PathBuf::from(path)))
 }
 
 /// Parse a violation action string.
@@ -2166,6 +2212,26 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn parse_scoped_upstream_ca_cert_accepts_pattern_and_path() {
+        let (pattern, path) =
+            parse_scoped_upstream_ca_cert("*.internal=/tmp/internal-ca.pem").unwrap();
+
+        assert_eq!(pattern, "*.internal");
+        assert_eq!(path, PathBuf::from("/tmp/internal-ca.pem"));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_scoped_upstream_ca_cert_rejects_missing_separator() {
+        let err = parse_scoped_upstream_ca_cert("*.internal:/tmp/internal-ca.pem")
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "scoped upstream CA must be in format PATTERN=PATH");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn parse_violation_action_accepts_passthrough() {
         let action = parse_violation_action(&Some("passthrough".to_string()))
             .expect("passthrough should parse")
@@ -2178,9 +2244,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_sandbox_opts_sets_disk_size() {
+    async fn apply_sandbox_opts_sets_oci_upper_size() {
         let opts = SandboxOpts {
-            disk_size: Some("8G".to_string()),
+            oci_upper_size: Some("8G".to_string()),
             ..Default::default()
         };
         let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)

@@ -84,7 +84,7 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
     <a className="msb-chip" href="#rd-any">.any()</a>
   </div>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · DnsBuilder · TlsBuilder · ViolationActionBuilder<span className="msb-ct">16</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · DnsBuilder · TlsBuilder · ViolationActionBuilder<span className="msb-ct">18</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#nameservers">.nameservers()</a>
     <a className="msb-chip" href="#query_timeout_ms">.query_timeout_ms()</a>
@@ -96,6 +96,8 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
     <a className="msb-chip" href="#intercept_ca_cert">.intercept_ca_cert()</a>
     <a className="msb-chip" href="#intercept_ca_key">.intercept_ca_key()</a>
     <a className="msb-chip" href="#upstream_ca_cert">.upstream_ca_cert()</a>
+    <a className="msb-chip" href="#upstream_ca_cert_for">.upstream_ca_cert_for()</a>
+    <a className="msb-chip" href="#verify_upstream_for">.verify_upstream_for()</a>
     <a className="msb-chip" href="#block_and_log">.block_and_log()</a>
     <a className="msb-chip" href="#passthrough_host">.passthrough_host()</a>
     <a className="msb-chip" href="#passthrough_host_pattern">.passthrough_host_pattern()</a>
@@ -1414,7 +1416,37 @@ PEM file used as the intercepting CA's private key.
 fn upstream_ca_cert(self, path: impl Into<PathBuf>) -> Self
 ```
 
-PEM file with extra root CAs the proxy should trust when verifying upstream servers. Useful for self-signed or private upstream CAs. Can be called multiple times.
+PEM file with extra root CAs the proxy should trust when verifying every upstream server. Useful for self-signed or private upstream CAs. Can be called multiple times.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">upstream_ca_cert_for()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn upstream_ca_cert_for(
+    self,
+    pattern: impl Into<String>,
+    path: impl Into<PathBuf>,
+) -> Self
+```
+
+PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">verify_upstream_for()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn verify_upstream_for(
+    self,
+    pattern: impl Into<String>,
+    verify: bool,
+) -> Self
+```
+
+Whether the proxy verifies upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
 
 ---
 
@@ -1505,8 +1537,6 @@ Allow **any** host to receive placeholders unchanged. Takes effect only when `i_
     <div className="msb-param-desc">Must be <code>true</code> to take effect.</div>
   </div>
 </div>
-
----
 
 ## Types
 

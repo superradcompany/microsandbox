@@ -810,6 +810,24 @@ struct TlsOpts {
     /// Extra CA certificates to trust for upstream verification.
     #[serde(default)]
     upstream_ca_certs: Vec<String>,
+    /// Host-scoped CA certificates to trust for upstream verification.
+    #[serde(default)]
+    scoped_upstream_ca_certs: Vec<ScopedUpstreamCaCertOpts>,
+    /// Host-scoped upstream certificate verification overrides.
+    #[serde(default)]
+    scoped_verify_upstream: Vec<ScopedVerifyUpstreamOpts>,
+}
+
+#[derive(Clone, serde::Deserialize, Default)]
+struct ScopedUpstreamCaCertOpts {
+    pattern: String,
+    path: String,
+}
+
+#[derive(Clone, serde::Deserialize, Default)]
+struct ScopedVerifyUpstreamOpts {
+    pattern: String,
+    verify: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1232,6 +1250,8 @@ fn apply_network(
         let ca_cert = tls.ca_cert.clone();
         let ca_key = tls.ca_key.clone();
         let upstream_ca = tls.upstream_ca_certs.clone();
+        let scoped_upstream_ca = tls.scoped_upstream_ca_certs.clone();
+        let scoped_verify_upstream = tls.scoped_verify_upstream.clone();
         builder = builder.network(move |n| {
             n.tls(move |mut t| {
                 for domain in &bypass {
@@ -1254,6 +1274,12 @@ fn apply_network(
                 }
                 for path in &upstream_ca {
                     t = t.upstream_ca_cert(path);
+                }
+                for scoped in &scoped_upstream_ca {
+                    t = t.upstream_ca_cert_for(&scoped.pattern, &scoped.path);
+                }
+                for scoped in &scoped_verify_upstream {
+                    t = t.verify_upstream_for(&scoped.pattern, scoped.verify);
                 }
                 t
             })
@@ -1878,7 +1904,7 @@ fn apply_create_opts(
     }
     if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
         return Err(FfiError::invalid_argument(
-            "disk_size is not valid when booting from a snapshot",
+            "oci_upper_size_mib is not valid when booting from a snapshot",
         ));
     }
     if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
@@ -1897,7 +1923,7 @@ fn apply_create_opts(
         builder = builder.image_with(|i| i.bind(bind_path));
     }
     if let Some(size_mib) = opts.oci_upper_size_mib {
-        builder = builder.disk_size(size_mib);
+        builder = builder.oci_upper_size(size_mib);
     }
     if let Some(snapshot) = opts.snapshot {
         builder = builder.from_snapshot(snapshot);

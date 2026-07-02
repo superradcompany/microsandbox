@@ -261,8 +261,7 @@ mod tests {
             r#"{"type":"domain_suffix","data":"staging.example.com"}"#
         );
         let legacy: microsandbox_types::Destination =
-            serde_json::from_str(r#"{"type":"domain-suffix","data":"old.example.com"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"type":"domain-suffix","data":"old.example.com"}"#).unwrap();
         assert!(matches!(
             legacy,
             microsandbox_types::Destination::DomainSuffix(_)

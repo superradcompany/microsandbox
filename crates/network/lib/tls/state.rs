@@ -1,5 +1,6 @@
-//! Shared TLS state: CA, certificate cache, and upstream connector.
+//! Shared TLS state: CA, certificate cache, and upstream connectors.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,30 +24,45 @@ use crate::secrets::config::SecretsConfig;
 
 /// Shared TLS interception state.
 ///
-/// Holds the CA, per-domain certificate cache, upstream TLS connector,
+/// Holds the CA, per-domain certificate cache, upstream TLS connectors,
 /// and configuration. Shared across all TLS proxy tasks via `Arc`.
 pub struct TlsState {
     /// Interception CA for signing per-domain certs presented to the guest.
     pub intercept_ca: CertAuthority,
     /// LRU cache of generated domain certificates.
     cert_cache: Mutex<LruCache<String, Arc<DomainCert>>>,
-    /// TLS connector for upstream (real server) connections.
+    /// Default TLS connector for upstream (real server) connections.
     pub connector: TlsConnector,
+    /// Host-scoped TLS connectors for upstream connections.
+    scoped_upstream_connectors: Vec<ScopedUpstreamConnector>,
     /// TLS configuration.
     pub config: TlsConfig,
     /// Secrets configuration for placeholder substitution.
     pub secrets: SecretsConfig,
     /// Pre-computed lowercased bypass patterns for efficient matching.
-    bypass_patterns: Vec<BypassPattern>,
+    bypass_patterns: Vec<DomainPattern>,
 }
 
-/// A pre-processed bypass pattern (avoids per-connection allocations).
-enum BypassPattern {
+/// A pre-processed domain pattern (avoids per-connection allocations).
+enum DomainPattern {
     /// Exact domain match (lowercased).
     Exact(String),
     /// Wildcard suffix match. `suffix` is the bare suffix, `dotted` is `.suffix`
     /// (pre-computed to avoid per-connection `format!` allocations).
     Wildcard { suffix: String, dotted: String },
+}
+
+/// An upstream connector selected only for matching server names.
+struct ScopedUpstreamConnector {
+    pattern: DomainPattern,
+    connector: TlsConnector,
+}
+
+/// Effective upstream TLS settings for one host pattern.
+struct ScopedUpstreamSettings {
+    pattern: String,
+    ca_cert: Vec<PathBuf>,
+    verify_upstream: Option<bool>,
 }
 
 /// A [`ServerCertVerifier`] that accepts all server certificates without
@@ -76,30 +92,21 @@ impl TlsState {
             NonZeroUsize::new(config.cache.capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
         let cert_cache = Mutex::new(LruCache::new(capacity));
 
-        let connector = build_upstream_connector(&config);
+        let connector = build_upstream_connector(&config, config.verify_upstream, &[]);
+        let scoped_upstream_connectors = build_scoped_upstream_connectors(&config);
 
         // Pre-compute lowercased bypass patterns to avoid per-connection allocations.
         let bypass_patterns = config
             .bypass
             .iter()
-            .map(|pattern| {
-                let lower = pattern.to_lowercase();
-                if let Some(suffix) = lower.strip_prefix("*.") {
-                    let dotted = format!(".{suffix}");
-                    BypassPattern::Wildcard {
-                        suffix: suffix.to_string(),
-                        dotted,
-                    }
-                } else {
-                    BypassPattern::Exact(lower)
-                }
-            })
+            .map(|pattern| DomainPattern::new(pattern))
             .collect();
 
         Self {
             intercept_ca: ca,
             cert_cache,
             connector,
+            scoped_upstream_connectors,
             config,
             secrets,
             bypass_patterns,
@@ -132,13 +139,31 @@ impl TlsState {
 
     /// Check if a domain should bypass TLS interception.
     pub fn should_bypass(&self, sni: &str) -> bool {
-        let sni_lower = sni.to_lowercase();
-        self.bypass_patterns.iter().any(|pattern| match pattern {
-            BypassPattern::Exact(exact) => sni_lower == *exact,
-            BypassPattern::Wildcard { suffix, dotted } => {
-                sni_lower == *suffix || sni_lower.ends_with(dotted.as_str())
+        let sni_lower = normalize_domain(sni);
+        self.bypass_patterns
+            .iter()
+            .any(|pattern| pattern.matches_normalized(&sni_lower))
+    }
+
+    /// Select the upstream connector for the given server name.
+    pub fn upstream_connector_for(&self, sni: &str) -> &TlsConnector {
+        let sni_lower = normalize_domain(sni);
+        let mut best = None;
+
+        for scoped in &self.scoped_upstream_connectors {
+            if !scoped.pattern.matches_normalized(&sni_lower) {
+                continue;
             }
-        })
+            let specificity = scoped.pattern.specificity();
+            if best
+                .map(|(_, best_specificity)| specificity > best_specificity)
+                .unwrap_or(true)
+            {
+                best = Some((scoped, specificity));
+            }
+        }
+
+        best.map_or(&self.connector, |(scoped, _)| &scoped.connector)
     }
 
     /// Get the CA certificate PEM bytes for guest installation.
@@ -147,9 +172,42 @@ impl TlsState {
     }
 }
 
+impl DomainPattern {
+    fn new(pattern: &str) -> Self {
+        let lower = normalize_domain(pattern);
+        if let Some(suffix) = lower.strip_prefix("*.") {
+            let dotted = format!(".{suffix}");
+            DomainPattern::Wildcard {
+                suffix: suffix.to_string(),
+                dotted,
+            }
+        } else {
+            DomainPattern::Exact(lower)
+        }
+    }
+
+    fn matches_normalized(&self, sni_lower: &str) -> bool {
+        match self {
+            DomainPattern::Exact(exact) => sni_lower == exact,
+            DomainPattern::Wildcard { suffix, dotted } => {
+                sni_lower == suffix || sni_lower.ends_with(dotted.as_str())
+            }
+        }
+    }
+
+    fn specificity(&self) -> usize {
+        match self {
+            DomainPattern::Exact(exact) => exact.len() + 1,
+            DomainPattern::Wildcard { suffix, .. } => suffix.len(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::config::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
     use super::*;
+
     use crate::secrets::config::SecretsConfig;
 
     #[test]
@@ -192,6 +250,71 @@ mod tests {
             default_ca_dir_from_home(&home),
             home.join(microsandbox_utils::TLS_SUBDIR)
         );
+    }
+
+    #[test]
+    fn domain_patterns_match_exact_and_wildcard_hosts() {
+        let exact = DomainPattern::new("api.internal.");
+        assert!(exact.matches_normalized("api.internal"));
+        assert!(!exact.matches_normalized("other.api.internal"));
+
+        let wildcard = DomainPattern::new("*.internal");
+        assert!(wildcard.matches_normalized("internal"));
+        assert!(wildcard.matches_normalized("api.internal"));
+        assert!(!wildcard.matches_normalized("notinternal"));
+    }
+
+    #[test]
+    fn domain_patterns_score_exact_as_more_specific() {
+        let exact = DomainPattern::new("api.internal");
+        let wildcard = DomainPattern::new("*.internal");
+
+        assert!(exact.specificity() > wildcard.specificity());
+    }
+
+    #[test]
+    fn scoped_upstream_settings_group_ca_and_verify_by_pattern() {
+        let mut config = TlsConfig::default();
+        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
+            pattern: "*.internal".to_string(),
+            path: PathBuf::from("/tmp/one.pem"),
+        });
+        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
+            pattern: "*.internal.".to_string(),
+            path: PathBuf::from("/tmp/two.pem"),
+        });
+        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
+            pattern: "*.internal".to_string(),
+            verify: false,
+        });
+
+        let settings = grouped_scoped_upstream_settings(&config);
+
+        assert_eq!(settings.len(), 1);
+        assert_eq!(settings[0].pattern, "*.internal");
+        assert_eq!(
+            settings[0].ca_cert,
+            vec![PathBuf::from("/tmp/one.pem"), PathBuf::from("/tmp/two.pem")]
+        );
+        assert_eq!(settings[0].verify_upstream, Some(false));
+    }
+
+    #[test]
+    fn upstream_connector_for_selects_scoped_no_verify_connector() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut config = TlsConfig::default();
+        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
+            pattern: "*.internal".to_string(),
+            verify: false,
+        });
+        let state = TlsState::new(config, SecretsConfig::default());
+
+        let default = &state.connector as *const TlsConnector;
+        let scoped = state.upstream_connector_for("api.internal") as *const TlsConnector;
+        let unmatched = state.upstream_connector_for("api.example.com") as *const TlsConnector;
+
+        assert_ne!(default, scoped);
+        assert_eq!(default, unmatched);
     }
 }
 
@@ -250,8 +373,12 @@ impl ServerCertVerifier for NoVerify {
 ///
 /// When `verify_upstream` is true, loads the system's native root certificates.
 /// When false, uses a permissive verifier that accepts all server certificates.
-fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
-    let client_config = if config.verify_upstream {
+fn build_upstream_connector(
+    config: &TlsConfig,
+    verify_upstream: bool,
+    scoped_ca_cert: &[PathBuf],
+) -> TlsConnector {
+    let client_config = if verify_upstream {
         let mut root_store = rustls::RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
         if !certs.errors.is_empty() {
@@ -270,31 +397,8 @@ fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
             tracing::error!("no native root certificates loaded — all upstream TLS will fail");
         }
 
-        // Load extra CA certificates from user-provided PEM files.
-        for path in &config.upstream_ca_cert {
-            match std::fs::read(path) {
-                Ok(pem_data) => {
-                    let mut extra_added = 0usize;
-                    for cert in rustls_pemfile::certs(&mut pem_data.as_slice()).flatten() {
-                        if root_store.add(cert).is_ok() {
-                            extra_added += 1;
-                        }
-                    }
-                    tracing::info!(
-                        path = %path.display(),
-                        count = extra_added,
-                        "loaded upstream CA certificates"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        path = %path.display(),
-                        error = %e,
-                        "failed to read upstream CA certificate file"
-                    );
-                }
-            }
-        }
+        load_upstream_ca_certificates(&mut root_store, &config.upstream_ca_cert);
+        load_upstream_ca_certificates(&mut root_store, scoped_ca_cert);
 
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -307,6 +411,96 @@ fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
     };
 
     TlsConnector::from(Arc::new(client_config))
+}
+
+/// Build host-scoped upstream TLS connectors from grouped scoped settings.
+fn build_scoped_upstream_connectors(config: &TlsConfig) -> Vec<ScopedUpstreamConnector> {
+    grouped_scoped_upstream_settings(config)
+        .into_iter()
+        .filter_map(|settings| {
+            let verify_upstream = settings.verify_upstream.unwrap_or(config.verify_upstream);
+            if verify_upstream == config.verify_upstream && settings.ca_cert.is_empty() {
+                return None;
+            }
+
+            Some(ScopedUpstreamConnector {
+                pattern: DomainPattern::new(&settings.pattern),
+                connector: build_upstream_connector(config, verify_upstream, &settings.ca_cert),
+            })
+        })
+        .collect()
+}
+
+/// Group repeated scoped upstream settings by host pattern while preserving first-seen order.
+fn grouped_scoped_upstream_settings(config: &TlsConfig) -> Vec<ScopedUpstreamSettings> {
+    let mut grouped = Vec::<ScopedUpstreamSettings>::new();
+    let mut indexes = HashMap::<String, usize>::new();
+
+    for scoped in &config.scoped_upstream_ca_cert {
+        let index = scoped_settings_index(&mut grouped, &mut indexes, &scoped.pattern);
+        grouped[index].ca_cert.push(scoped.path.clone());
+    }
+
+    for scoped in &config.scoped_verify_upstream {
+        let index = scoped_settings_index(&mut grouped, &mut indexes, &scoped.pattern);
+        grouped[index].verify_upstream = Some(scoped.verify);
+    }
+
+    grouped
+}
+
+/// Return the grouped settings index for `pattern`, creating it if needed.
+fn scoped_settings_index(
+    grouped: &mut Vec<ScopedUpstreamSettings>,
+    indexes: &mut HashMap<String, usize>,
+    pattern: &str,
+) -> usize {
+    let normalized = normalize_domain(pattern);
+    if let Some(index) = indexes.get(&normalized) {
+        return *index;
+    }
+
+    let index = grouped.len();
+    indexes.insert(normalized, index);
+    grouped.push(ScopedUpstreamSettings {
+        pattern: pattern.to_string(),
+        ca_cert: Vec::new(),
+        verify_upstream: None,
+    });
+    index
+}
+
+/// Load extra upstream CA certificates into the provided root store.
+fn load_upstream_ca_certificates(root_store: &mut rustls::RootCertStore, paths: &[PathBuf]) {
+    for path in paths {
+        match std::fs::read(path) {
+            Ok(pem_data) => {
+                let mut extra_added = 0usize;
+                for cert in rustls_pemfile::certs(&mut pem_data.as_slice()).flatten() {
+                    if root_store.add(cert).is_ok() {
+                        extra_added += 1;
+                    }
+                }
+                tracing::info!(
+                    path = %path.display(),
+                    count = extra_added,
+                    "loaded upstream CA certificates"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read upstream CA certificate file"
+                );
+            }
+        }
+    }
+}
+
+/// Normalize host patterns and SNI names for matching.
+fn normalize_domain(domain: &str) -> String {
+    domain.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Load or generate a CA based on the TLS configuration.

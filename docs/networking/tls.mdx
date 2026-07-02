@@ -84,6 +84,34 @@ Some domains don't play well with interception, typically ones whose clients pin
 
 Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`, `*.apple.com`).
 
+## Upstream CA trust
+
+By default, the TLS proxy verifies upstream server certificates using the host's native root store. Add global upstream CAs when every intercepted host should trust the same private root, add scoped upstream CAs when only specific host patterns should trust a private root, or disable upstream verification for ephemeral hosts where you cannot get a PEM. Disabling upstream verification is the proxy-side equivalent of `curl -k`: interception still happens, but microsandbox does not authenticate the proxy-to-upstream TLS certificate for matching hosts.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n.tls(|t| {
+        t.upstream_ca_cert("/etc/ssl/corp-root.pem")
+         .upstream_ca_cert_for("api.internal.example.com", "./certs/api-ca.pem")
+         .upstream_ca_cert_for("*.svc.cluster.local", "./certs/k8s-ca.pem")
+         .verify_upstream_for("*.preview.internal", false)
+    }))
+    .create()
+    .await?;
+```
+
+```bash CLI
+msb create python --name agent \
+  --tls-intercept \
+  --tls-upstream-ca-cert /etc/ssl/corp-root.pem \
+  --tls-upstream-ca-cert-for 'api.internal.example.com=./certs/api-ca.pem' \
+  --tls-upstream-ca-cert-for '*.svc.cluster.local=./certs/k8s-ca.pem' \
+  --tls-no-verify-upstream-for '*.preview.internal'
+```
+</CodeGroup>
+
 ## Limits
 
 - **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.

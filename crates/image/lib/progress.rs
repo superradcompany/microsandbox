@@ -128,7 +128,7 @@ pub struct PullProgressHandle {
 }
 
 /// Emits progress events. Uses `try_send` — never blocks downloads.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PullProgressSender {
     tx: mpsc::Sender<PullProgress>,
 }

@@ -884,6 +884,22 @@ type DnsConfig struct {
 	QueryTimeoutMs uint64 `json:"query_timeout_ms"`
 }
 
+// A CA certificate PEM file trusted only for matching upstream hosts.
+type ScopedUpstreamCaCert struct {
+	// Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards.
+	Pattern string `json:"pattern"`
+	// Path to the CA certificate PEM file.
+	Path string `json:"path"`
+}
+
+// An upstream certificate verification override for matching hosts.
+type ScopedVerifyUpstream struct {
+	// Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards.
+	Pattern string `json:"pattern"`
+	// Whether to verify matching upstream server certificates.
+	Verify bool `json:"verify"`
+}
+
 // Certificate authority configuration for TLS interception.
 type InterceptCaConfig struct {
 	// Path to an existing CA certificate PEM file. If `None`, a CA is
@@ -913,6 +929,10 @@ type TlsConfig struct {
 	BlockQuicOnIntercept bool `json:"block_quic_on_intercept"`
 	// CA certificate PEM files to trust for upstream server verification.
 	UpstreamCaCert *[]string `json:"upstream_ca_cert,omitempty"`
+	// Host-scoped CA certificate PEM files to trust for upstream server verification.
+	ScopedUpstreamCaCert *[]ScopedUpstreamCaCert `json:"scoped_upstream_ca_cert,omitempty"`
+	// Host-scoped upstream verification overrides.
+	ScopedVerifyUpstream *[]ScopedVerifyUpstream `json:"scoped_verify_upstream,omitempty"`
 	// Interception CA configuration. The TLS proxy uses this CA to sign
 	// per-domain certs it presents to the guest during interception.
 	InterceptCa *InterceptCaConfig `json:"intercept_ca,omitempty"`

@@ -227,8 +227,8 @@ export type JsFsWriteSink = FsWriteSink
 /**
  * Fluent builder for an explicit rootfs image source.
  *
- * Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`.
- * The writable disk size is set at the sandbox level via `.diskSize(...)`.
+ * Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
+ * or `Sandbox.builder(...).imageWith((i) => i.oci(...).upperSize(...))`.
  * Standalone use is rare; `.image("python:3.12")` and `.image("./ubuntu.qcow2")`
  * resolve the common cases automatically.
  */
@@ -236,6 +236,8 @@ export declare class ImageBuilder {
   constructor()
   /** Use an OCI image reference as the root filesystem. */
   oci(reference: string): this
+  /** Set the writable overlay upper size for an OCI rootfs, in MiB. */
+  upperSize(sizeMib: number): this
   /**
    * Use a host disk image file as the root filesystem. The format is
    * derived from the file extension: `.qcow2`, `.raw`, or `.vmdk`.
@@ -913,11 +915,6 @@ export declare class SandboxBuilder {
   cpus(count: number): this
   /** Guest memory in MiB. */
   memory(mib: number): this
-  /**
-   * Writable disk size (the OCI `upper.ext4` overlay) in MiB. Only valid for an
-   * OCI-image rootfs.
-   */
-  diskSize(sizeMib: number): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1378,12 +1375,16 @@ export declare class TlsBuilder {
   bypass(pattern: string): this
   /** Verify upstream server certificates (default: true). */
   verifyUpstream(verify: boolean): this
+  /** Verify upstream server certificates for matching hosts. */
+  verifyUpstreamFor(pattern: string, verify: boolean): this
   /** Set the ports to intercept (default: 443). */
   interceptedPorts(ports: Array<number>): this
   /** Block QUIC on intercepted ports (default: true). */
   blockQuic(block: boolean): this
   /** Add an upstream CA certificate PEM path. May be called repeatedly. */
   upstreamCaCert(path: string): this
+  /** Add an upstream CA certificate PEM path for matching hosts. */
+  upstreamCaCertFor(pattern: string, path: string): this
   /** Set a custom interception CA certificate PEM path. */
   interceptCaCert(path: string): this
   /** Set a custom interception CA private key PEM path. */
@@ -2103,8 +2104,22 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
+  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
+}
+
+/** Host-scoped upstream CA certificate path. */
+export interface ScopedUpstreamCaCert {
+  pattern: string
+  path: string
+}
+
+/** Host-scoped upstream certificate verification override. */
+export interface ScopedVerifyUpstream {
+  pattern: string
+  verify: boolean
 }
 
 /** Built volume configuration produced by `VolumeBuilder.build()`. */

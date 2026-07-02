@@ -823,6 +823,14 @@ pub struct TlsConfig {
     #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<String>"))]
     pub upstream_ca_cert: Vec<PathBuf>,
 
+    /// Host-scoped CA certificate PEM files to trust for upstream server verification.
+    #[serde(default, alias = "scoped_upstream_ca_certs")]
+    pub scoped_upstream_ca_cert: Vec<ScopedUpstreamCaCert>,
+
+    /// Host-scoped upstream verification overrides.
+    #[serde(default)]
+    pub scoped_verify_upstream: Vec<ScopedVerifyUpstream>,
+
     /// Interception CA configuration. The TLS proxy uses this CA to sign
     /// per-domain certs it presents to the guest during interception.
     #[serde(default, alias = "ca")]
@@ -869,6 +877,32 @@ pub struct CertCacheConfig {
     pub validity_hours: u64,
 }
 
+/// A CA certificate PEM file trusted only for matching upstream hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct ScopedUpstreamCaCert {
+    /// Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards.
+    pub pattern: String,
+
+    /// Path to the CA certificate PEM file.
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+    pub path: PathBuf,
+}
+
+/// An upstream certificate verification override for matching hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+pub struct ScopedVerifyUpstream {
+    /// Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards.
+    pub pattern: String,
+
+    /// Whether to verify matching upstream server certificates.
+    pub verify: bool,
+}
+
 impl Default for TlsConfig {
     fn default() -> Self {
         Self {
@@ -878,6 +912,8 @@ impl Default for TlsConfig {
             verify_upstream: true,
             block_quic_on_intercept: true,
             upstream_ca_cert: Vec::new(),
+            scoped_upstream_ca_cert: Vec::new(),
+            scoped_verify_upstream: Vec::new(),
             intercept_ca: InterceptCaConfig::default(),
             cache: CertCacheConfig::default(),
         }

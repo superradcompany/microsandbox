@@ -1388,7 +1388,7 @@ type CreateOptions struct {
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
 	ImageBind            string               `json:"image_bind,omitempty"`
-	DiskSizeMiB          *uint32              `json:"oci_upper_size_mib,omitempty"`
+	OCIUpperSizeMiB      *uint32              `json:"oci_upper_size_mib,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
@@ -1509,13 +1509,27 @@ type NetworkRule struct {
 
 // TLSOptions configures the transparent HTTPS interception proxy.
 type TLSOptions struct {
-	Bypass           []string `json:"bypass,omitempty"`
-	VerifyUpstream   *bool    `json:"verify_upstream,omitempty"`
-	InterceptedPorts []uint16 `json:"intercepted_ports,omitempty"`
-	BlockQUIC        *bool    `json:"block_quic,omitempty"`
-	CACert           string   `json:"ca_cert,omitempty"`
-	CAKey            string   `json:"ca_key,omitempty"`
-	UpstreamCACerts  []string `json:"upstream_ca_certs,omitempty"`
+	Bypass                []string               `json:"bypass,omitempty"`
+	VerifyUpstream        *bool                  `json:"verify_upstream,omitempty"`
+	InterceptedPorts      []uint16               `json:"intercepted_ports,omitempty"`
+	BlockQUIC             *bool                  `json:"block_quic,omitempty"`
+	CACert                string                 `json:"ca_cert,omitempty"`
+	CAKey                 string                 `json:"ca_key,omitempty"`
+	UpstreamCACerts       []string               `json:"upstream_ca_certs,omitempty"`
+	ScopedUpstreamCACerts []ScopedUpstreamCACert `json:"scoped_upstream_ca_certs,omitempty"`
+	ScopedVerifyUpstream  []ScopedVerifyUpstream `json:"scoped_verify_upstream,omitempty"`
+}
+
+// ScopedUpstreamCACert configures a CA bundle for matching upstream hosts.
+type ScopedUpstreamCACert struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+}
+
+// ScopedVerifyUpstream configures upstream certificate verification for matching hosts.
+type ScopedVerifyUpstream struct {
+	Pattern string `json:"pattern"`
+	Verify  bool   `json:"verify"`
 }
 
 // SecretOptions is the JSON representation of a single credential.
