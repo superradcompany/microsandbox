@@ -32,7 +32,7 @@ const libkrunfwABI = "5"
 
 // libkrunfwVersion is the full version of the prebuilt libkrunfw shipped in
 // each release tarball.
-const libkrunfwVersion = "5.2.1"
+const libkrunfwVersion = "5.5.0"
 
 // githubOrg / githubRepo locate the GitHub release assets for the
 // msb + libkrunfw download (FFI library ships embedded in the SDK).

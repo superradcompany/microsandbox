@@ -384,14 +384,14 @@ mod tests {
             Path::new("/home/me/.microsandbox"),
             None,
             Err("resolved path is not a file: /tmp/msb".to_string()),
-            Err("searched: /tmp/libkrunfw.so.5.2.1".to_string()),
+            Err("searched: /tmp/libkrunfw.so.5.5.0".to_string()),
         );
 
         assert_eq!(section.checks[2].state, CheckState::Fail);
         assert_eq!(section.checks[3].state, CheckState::Fail);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].hints[0].contains("/tmp/msb"));
-        assert!(problems[0].hints[1].contains("/tmp/libkrunfw.so.5.2.1"));
+        assert!(problems[0].hints[1].contains("/tmp/libkrunfw.so.5.5.0"));
     }
 
     #[test]
@@ -400,7 +400,7 @@ mod tests {
             Path::new("/home/me/.microsandbox"),
             Some("failed to parse config `/home/me/.microsandbox/config.json`".to_string()),
             Ok(PathBuf::from("/usr/bin/msb")),
-            Ok(PathBuf::from("/usr/lib/libkrunfw.so.5.2.1")),
+            Ok(PathBuf::from("/usr/lib/libkrunfw.so.5.5.0")),
         );
 
         assert_eq!(section.checks[2].label, "config");
