@@ -475,6 +475,8 @@ jobs:
 
       - name: Build msb
         shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
@@ -485,6 +487,8 @@ jobs:
 
       - name: Build msb-metrics
         shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
