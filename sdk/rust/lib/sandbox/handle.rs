@@ -510,7 +510,16 @@ impl SandboxHandle {
     /// Wait until this sandbox is observed in a terminal non-running state.
     pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
         loop {
-            let current = self.refresh().await?;
+            let current = match self.refresh().await {
+                Ok(current) => current,
+                Err(error)
+                    if self.is_local_ephemeral()
+                        && super::sandbox_not_found_for_name(&error, &self.name) =>
+                {
+                    return Ok(super::ephemeral_cleanup_stop_result(&self.name));
+                }
+                Err(error) => return Err(error),
+            };
             let status = current.status_snapshot();
             if sandbox_status_is_terminal(status) {
                 return Ok(SandboxStopResult {
@@ -576,11 +585,25 @@ impl SandboxHandle {
             }
         }
     }
+
+    fn is_local_ephemeral(&self) -> bool {
+        is_local_ephemeral_handle(&self.inner)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
+    let SandboxHandleInner::Local(state) = inner else {
+        return false;
+    };
+
+    serde_json::from_str::<SandboxConfig>(&state.config_json)
+        .map(|config| config.spec.lifecycle.ephemeral)
+        .unwrap_or(false)
+}
 
 fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
     matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)

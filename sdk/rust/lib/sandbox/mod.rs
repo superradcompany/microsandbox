@@ -1352,12 +1352,20 @@ impl Sandbox {
             return Ok(stop_result_from_exit_status(&self.name, status));
         }
 
-        self.backend
+        match self
+            .backend
             .sandboxes()
             .get(self.backend.clone(), &self.name)
-            .await?
-            .wait_until_stopped()
             .await
+        {
+            Ok(handle) => handle.wait_until_stopped().await,
+            Err(error)
+                if self.is_local_ephemeral() && sandbox_not_found_for_name(&error, &self.name) =>
+            {
+                Ok(ephemeral_cleanup_stop_result(&self.name))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -1374,6 +1382,10 @@ impl Sandbox {
         }
         // Normal drop runs — client reader task is aborted and
         // ProcessHandle drops without sending SIGTERM.
+    }
+
+    fn is_local_ephemeral(&self) -> bool {
+        self.local().is_some() && self.config.spec.lifecycle.ephemeral
     }
 }
 
@@ -1919,6 +1931,21 @@ fn stop_result_from_exit_status(name: &str, status: ExitStatus) -> SandboxStopRe
         observed_at: chrono::Utc::now(),
         source: Some("owned process wait".to_string()),
     }
+}
+
+pub(super) fn ephemeral_cleanup_stop_result(name: &str) -> SandboxStopResult {
+    SandboxStopResult {
+        name: name.to_string(),
+        status: SandboxStatus::Stopped,
+        exit_code: None,
+        signal: None,
+        observed_at: chrono::Utc::now(),
+        source: Some("ephemeral cleanup removed persisted state".to_string()),
+    }
+}
+
+pub(super) fn sandbox_not_found_for_name(error: &crate::MicrosandboxError, name: &str) -> bool {
+    matches!(error, crate::MicrosandboxError::SandboxNotFound(missing) if missing == name)
 }
 
 /// Update the sandbox status in the database.
@@ -2777,9 +2804,10 @@ mod tests {
 
     use super::{
         MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount, hostname_from_sandbox_name, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, validate_hostname, validate_rootfs_source,
+        SandboxStatus, VolumeMount, ephemeral_cleanup_stop_result, hostname_from_sandbox_name,
+        insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
+        reconcile_sandbox_runtime_state, remove_dir_if_exists, sandbox_not_found_for_name,
+        validate_hostname, validate_rootfs_source,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2834,6 +2862,36 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[test]
+    fn test_sandbox_not_found_for_name_requires_exact_match() {
+        assert!(sandbox_not_found_for_name(
+            &crate::MicrosandboxError::SandboxNotFound("gone".into()),
+            "gone"
+        ));
+        assert!(!sandbox_not_found_for_name(
+            &crate::MicrosandboxError::SandboxNotFound("other".into()),
+            "gone"
+        ));
+        assert!(!sandbox_not_found_for_name(
+            &crate::MicrosandboxError::Runtime("gone".into()),
+            "gone"
+        ));
+    }
+
+    #[test]
+    fn test_ephemeral_cleanup_stop_result_marks_stopped() {
+        let result = ephemeral_cleanup_stop_result("msb-gone");
+
+        assert_eq!(result.name, "msb-gone");
+        assert_eq!(result.status, SandboxStatus::Stopped);
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.signal, None);
+        assert_eq!(
+            result.source.as_deref(),
+            Some("ephemeral cleanup removed persisted state")
+        );
     }
 
     #[tokio::test]
