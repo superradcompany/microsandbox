@@ -1552,6 +1552,27 @@ fn request_guest_shutdown_with_timeout(
 }
 
 fn guest_shutdown_flush_timeout(has_handoff_init: bool) -> Duration {
+    let override_ms = std::env::var("MSB_SHUTDOWN_FLUSH_TIMEOUT_MS").ok();
+    guest_shutdown_flush_timeout_with_override(has_handoff_init, override_ms.as_deref())
+}
+
+fn guest_shutdown_flush_timeout_with_override(
+    has_handoff_init: bool,
+    override_ms: Option<&str>,
+) -> Duration {
+    if let Some(raw) = override_ms {
+        match raw.parse::<u64>() {
+            Ok(ms) => return Duration::from_millis(ms),
+            Err(error) => {
+                tracing::warn!(
+                    value = raw,
+                    error = %error,
+                    "ignoring invalid MSB_SHUTDOWN_FLUSH_TIMEOUT_MS override"
+                );
+            }
+        }
+    }
+
     if has_handoff_init {
         microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
     } else {
@@ -1918,7 +1939,8 @@ mod tests {
     };
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        bind_rootfs_backend, guest_shutdown_flush_timeout, parse_mount_spec, prepend_scripts_path,
+        bind_rootfs_backend, guest_shutdown_flush_timeout,
+        guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
         request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
     };
 
@@ -2117,6 +2139,30 @@ mod tests {
         );
         assert_eq!(
             guest_shutdown_flush_timeout(true),
+            microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_accepts_ms_override() {
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(false, Some("0")),
+            Duration::ZERO
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(true, Some("125")),
+            Duration::from_millis(125)
+        );
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_ignores_invalid_override() {
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(false, Some("nope")),
+            microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(true, Some("nope")),
             microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
         );
     }
