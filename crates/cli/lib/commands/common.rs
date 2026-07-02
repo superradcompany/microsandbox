@@ -1679,11 +1679,8 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
 fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
     let (pattern, path) = spec
         .split_once('=')
+        .filter(|(pattern, path)| !pattern.is_empty() && !path.is_empty())
         .ok_or_else(|| anyhow::anyhow!("scoped upstream CA must be in format PATTERN=PATH"))?;
-
-    if pattern.is_empty() || path.is_empty() {
-        anyhow::bail!("scoped upstream CA must be in format PATTERN=PATH (both parts required)");
-    }
 
     Ok((pattern.to_string(), PathBuf::from(path)))
 }

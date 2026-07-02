@@ -65,6 +65,16 @@ struct ScopedUpstreamSettings {
     verify_upstream: Option<bool>,
 }
 
+impl ScopedUpstreamSettings {
+    fn new(pattern: &str) -> Self {
+        Self {
+            pattern: pattern.to_string(),
+            ca_cert: Vec::new(),
+            verify_upstream: None,
+        }
+    }
+}
+
 /// A [`ServerCertVerifier`] that accepts all server certificates without
 /// validation. Used when `verify_upstream` is `false`.
 #[derive(Debug)]
@@ -146,24 +156,21 @@ impl TlsState {
     }
 
     /// Select the upstream connector for the given server name.
+    ///
+    /// Falls back to the default connector when no host-scoped connector
+    /// matches; when several match, the most specific pattern wins.
     pub fn upstream_connector_for(&self, sni: &str) -> &TlsConnector {
+        self.scoped_upstream_connector_for(sni)
+            .map_or(&self.connector, |scoped| &scoped.connector)
+    }
+
+    /// Find the most specific host-scoped upstream connector for `sni`, if any.
+    fn scoped_upstream_connector_for(&self, sni: &str) -> Option<&ScopedUpstreamConnector> {
         let sni_lower = normalize_domain(sni);
-        let mut best = None;
-
-        for scoped in &self.scoped_upstream_connectors {
-            if !scoped.pattern.matches_normalized(&sni_lower) {
-                continue;
-            }
-            let specificity = scoped.pattern.specificity();
-            if best
-                .map(|(_, best_specificity)| specificity > best_specificity)
-                .unwrap_or(true)
-            {
-                best = Some((scoped, specificity));
-            }
-        }
-
-        best.map_or(&self.connector, |(scoped, _)| &scoped.connector)
+        self.scoped_upstream_connectors
+            .iter()
+            .filter(|scoped| scoped.pattern.matches_normalized(&sni_lower))
+            .max_by_key(|scoped| scoped.pattern.specificity())
     }
 
     /// Get the CA certificate PEM bytes for guest installation.
@@ -200,121 +207,6 @@ impl DomainPattern {
             DomainPattern::Exact(exact) => exact.len() + 1,
             DomainPattern::Wildcard { suffix, .. } => suffix.len(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::config::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
-    use super::*;
-
-    use crate::secrets::config::SecretsConfig;
-
-    #[test]
-    fn regenerates_cached_domain_cert_when_near_expiry() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
-        let first = state.get_or_generate_cert("openrouter.ai").unwrap();
-        let original_expires_at = first.expires_at;
-
-        {
-            let mut cache = state.cert_cache.lock().unwrap();
-            let stale = Arc::new(DomainCert {
-                chain: first.chain.clone(),
-                key: first.key.clone_key(),
-                expires_at: OffsetDateTime::now_utc() + Duration::seconds(30),
-                server_config: first.server_config.clone(),
-            });
-            cache.put("openrouter.ai".to_string(), stale);
-        }
-
-        let refreshed = state.get_or_generate_cert("openrouter.ai").unwrap();
-        assert!(refreshed.expires_at > OffsetDateTime::now_utc() + Duration::hours(23));
-        assert!(refreshed.expires_at > original_expires_at - Duration::minutes(10));
-    }
-
-    #[test]
-    fn invalid_domain_cert_request_does_not_poison_cache() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
-
-        assert!(state.get_or_generate_cert("snowman.☃").is_err());
-        assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
-    }
-
-    #[test]
-    fn default_ca_dir_uses_microsandbox_home_tls_subdir() {
-        let home = PathBuf::from("isolated-msb-home");
-
-        assert_eq!(
-            default_ca_dir_from_home(&home),
-            home.join(microsandbox_utils::TLS_SUBDIR)
-        );
-    }
-
-    #[test]
-    fn domain_patterns_match_exact_and_wildcard_hosts() {
-        let exact = DomainPattern::new("api.internal.");
-        assert!(exact.matches_normalized("api.internal"));
-        assert!(!exact.matches_normalized("other.api.internal"));
-
-        let wildcard = DomainPattern::new("*.internal");
-        assert!(wildcard.matches_normalized("internal"));
-        assert!(wildcard.matches_normalized("api.internal"));
-        assert!(!wildcard.matches_normalized("notinternal"));
-    }
-
-    #[test]
-    fn domain_patterns_score_exact_as_more_specific() {
-        let exact = DomainPattern::new("api.internal");
-        let wildcard = DomainPattern::new("*.internal");
-
-        assert!(exact.specificity() > wildcard.specificity());
-    }
-
-    #[test]
-    fn scoped_upstream_settings_group_ca_and_verify_by_pattern() {
-        let mut config = TlsConfig::default();
-        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
-            pattern: "*.internal".to_string(),
-            path: PathBuf::from("/tmp/one.pem"),
-        });
-        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
-            pattern: "*.internal.".to_string(),
-            path: PathBuf::from("/tmp/two.pem"),
-        });
-        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
-            pattern: "*.internal".to_string(),
-            verify: false,
-        });
-
-        let settings = grouped_scoped_upstream_settings(&config);
-
-        assert_eq!(settings.len(), 1);
-        assert_eq!(settings[0].pattern, "*.internal");
-        assert_eq!(
-            settings[0].ca_cert,
-            vec![PathBuf::from("/tmp/one.pem"), PathBuf::from("/tmp/two.pem")]
-        );
-        assert_eq!(settings[0].verify_upstream, Some(false));
-    }
-
-    #[test]
-    fn upstream_connector_for_selects_scoped_no_verify_connector() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut config = TlsConfig::default();
-        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
-            pattern: "*.internal".to_string(),
-            verify: false,
-        });
-        let state = TlsState::new(config, SecretsConfig::default());
-
-        let default = &state.connector as *const TlsConnector;
-        let scoped = state.upstream_connector_for("api.internal") as *const TlsConnector;
-        let unmatched = state.upstream_connector_for("api.example.com") as *const TlsConnector;
-
-        assert_ne!(default, scoped);
-        assert_eq!(default, unmatched);
     }
 }
 
@@ -431,43 +323,29 @@ fn build_scoped_upstream_connectors(config: &TlsConfig) -> Vec<ScopedUpstreamCon
         .collect()
 }
 
-/// Group repeated scoped upstream settings by host pattern while preserving first-seen order.
+/// Group repeated scoped upstream settings by host pattern.
+///
+/// Grouping order is irrelevant: [`TlsState::upstream_connector_for`] selects
+/// by pattern specificity, not declaration order.
 fn grouped_scoped_upstream_settings(config: &TlsConfig) -> Vec<ScopedUpstreamSettings> {
-    let mut grouped = Vec::<ScopedUpstreamSettings>::new();
-    let mut indexes = HashMap::<String, usize>::new();
+    let mut grouped = HashMap::<String, ScopedUpstreamSettings>::new();
 
     for scoped in &config.scoped_upstream_ca_cert {
-        let index = scoped_settings_index(&mut grouped, &mut indexes, &scoped.pattern);
-        grouped[index].ca_cert.push(scoped.path.clone());
+        grouped
+            .entry(normalize_domain(&scoped.pattern))
+            .or_insert_with(|| ScopedUpstreamSettings::new(&scoped.pattern))
+            .ca_cert
+            .push(scoped.path.clone());
     }
 
     for scoped in &config.scoped_verify_upstream {
-        let index = scoped_settings_index(&mut grouped, &mut indexes, &scoped.pattern);
-        grouped[index].verify_upstream = Some(scoped.verify);
+        grouped
+            .entry(normalize_domain(&scoped.pattern))
+            .or_insert_with(|| ScopedUpstreamSettings::new(&scoped.pattern))
+            .verify_upstream = Some(scoped.verify);
     }
 
-    grouped
-}
-
-/// Return the grouped settings index for `pattern`, creating it if needed.
-fn scoped_settings_index(
-    grouped: &mut Vec<ScopedUpstreamSettings>,
-    indexes: &mut HashMap<String, usize>,
-    pattern: &str,
-) -> usize {
-    let normalized = normalize_domain(pattern);
-    if let Some(index) = indexes.get(&normalized) {
-        return *index;
-    }
-
-    let index = grouped.len();
-    indexes.insert(normalized, index);
-    grouped.push(ScopedUpstreamSettings {
-        pattern: pattern.to_string(),
-        ca_cert: Vec::new(),
-        verify_upstream: None,
-    });
-    index
+    grouped.into_values().collect()
 }
 
 /// Load extra upstream CA certificates into the provided root store.
@@ -608,4 +486,127 @@ fn write_key_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
         std::fs::write(path, data)?;
     }
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::super::config::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
+    use super::*;
+
+    use crate::secrets::config::SecretsConfig;
+
+    #[test]
+    fn regenerates_cached_domain_cert_when_near_expiry() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+        let first = state.get_or_generate_cert("openrouter.ai").unwrap();
+        let original_expires_at = first.expires_at;
+
+        {
+            let mut cache = state.cert_cache.lock().unwrap();
+            let stale = Arc::new(DomainCert {
+                chain: first.chain.clone(),
+                key: first.key.clone_key(),
+                expires_at: OffsetDateTime::now_utc() + Duration::seconds(30),
+                server_config: first.server_config.clone(),
+            });
+            cache.put("openrouter.ai".to_string(), stale);
+        }
+
+        let refreshed = state.get_or_generate_cert("openrouter.ai").unwrap();
+        assert!(refreshed.expires_at > OffsetDateTime::now_utc() + Duration::hours(23));
+        assert!(refreshed.expires_at > original_expires_at - Duration::minutes(10));
+    }
+
+    #[test]
+    fn invalid_domain_cert_request_does_not_poison_cache() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+
+        assert!(state.get_or_generate_cert("snowman.☃").is_err());
+        assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
+    }
+
+    #[test]
+    fn default_ca_dir_uses_microsandbox_home_tls_subdir() {
+        let home = PathBuf::from("isolated-msb-home");
+
+        assert_eq!(
+            default_ca_dir_from_home(&home),
+            home.join(microsandbox_utils::TLS_SUBDIR)
+        );
+    }
+
+    #[test]
+    fn domain_patterns_match_exact_and_wildcard_hosts() {
+        let exact = DomainPattern::new("api.internal.");
+        assert!(exact.matches_normalized("api.internal"));
+        assert!(!exact.matches_normalized("other.api.internal"));
+
+        let wildcard = DomainPattern::new("*.internal");
+        assert!(wildcard.matches_normalized("internal"));
+        assert!(wildcard.matches_normalized("api.internal"));
+        assert!(!wildcard.matches_normalized("notinternal"));
+    }
+
+    #[test]
+    fn domain_patterns_score_exact_as_more_specific() {
+        let exact = DomainPattern::new("api.internal");
+        let wildcard = DomainPattern::new("*.internal");
+
+        assert!(exact.specificity() > wildcard.specificity());
+    }
+
+    #[test]
+    fn scoped_upstream_settings_group_ca_and_verify_by_pattern() {
+        let mut config = TlsConfig::default();
+        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
+            pattern: "*.internal".to_string(),
+            path: PathBuf::from("/tmp/one.pem"),
+        });
+        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
+            pattern: "*.internal.".to_string(),
+            path: PathBuf::from("/tmp/two.pem"),
+        });
+        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
+            pattern: "*.internal".to_string(),
+            verify: false,
+        });
+
+        let settings = grouped_scoped_upstream_settings(&config);
+
+        assert_eq!(settings.len(), 1);
+        assert_eq!(settings[0].pattern, "*.internal");
+        assert_eq!(
+            settings[0].ca_cert,
+            vec![PathBuf::from("/tmp/one.pem"), PathBuf::from("/tmp/two.pem")]
+        );
+        assert_eq!(settings[0].verify_upstream, Some(false));
+    }
+
+    #[test]
+    fn upstream_connector_for_selects_scoped_connector_for_matching_host() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut config = TlsConfig::default();
+        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
+            pattern: "*.internal".to_string(),
+            verify: false,
+        });
+        let state = TlsState::new(config, SecretsConfig::default());
+
+        assert!(
+            state
+                .scoped_upstream_connector_for("api.internal")
+                .is_some()
+        );
+        assert!(
+            state
+                .scoped_upstream_connector_for("api.example.com")
+                .is_none()
+        );
+    }
 }
