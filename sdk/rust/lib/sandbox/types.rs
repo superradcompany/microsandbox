@@ -1326,10 +1326,9 @@ mod tests {
     fn test_volume_mount_json_adjacent_tag_and_pascal_alias() {
         // Adjacently tagged; the legacy PascalCase tag still deserializes via
         // `#[serde(alias)]`, and an omitted `options` falls back to the default.
-        let bind: VolumeMount = serde_json::from_str(
-            r#"{"type":"Bind","data":{"host":"/host/data","guest":"/data"}}"#,
-        )
-        .unwrap();
+        let bind: VolumeMount =
+            serde_json::from_str(r#"{"type":"Bind","data":{"host":"/host/data","guest":"/data"}}"#)
+                .unwrap();
         match bind {
             VolumeMount::Bind { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Bind, got {other:?}"),
