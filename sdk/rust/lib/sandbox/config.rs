@@ -490,6 +490,17 @@ impl SandboxConfig {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl From<SandboxSpec> for SandboxConfig {
+    /// Build a config from a full durable spec, defaulting all local
+    /// operational state (registry auth, replace flags, snapshot metadata).
+    fn from(spec: SandboxSpec) -> Self {
+        Self {
+            spec,
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {

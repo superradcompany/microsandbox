@@ -13,6 +13,7 @@ use microsandbox_types::{EnvVar, PullPolicy};
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
 use super::{
+    SandboxSpec,
     config::{SandboxConfig, sandbox_log_level_from_runtime},
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
@@ -84,6 +85,17 @@ impl SandboxBuilder {
             build_error: None,
             pending_snapshot: None,
         }
+    }
+
+    /// Seed a builder from a full [`SandboxSpec`] JSON.
+    ///
+    /// Options chained afterwards override individual fields (last-wins), just as
+    /// on a builder from [`new`](Self::new). This is the Rust entry the FFI
+    /// `create_from_spec` path calls into, so both share one implementation.
+    pub fn from_spec_json(json: &str) -> MicrosandboxResult<Self> {
+        let spec: SandboxSpec = serde_json::from_str(json)
+            .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
+        Ok(Self::from(SandboxConfig::from(spec)))
     }
 
     /// Set the root filesystem image source.
