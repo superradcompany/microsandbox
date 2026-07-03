@@ -305,10 +305,8 @@ jobs:
 
       - name: Check generated microsandbox types
         run: |
-          cargo +stable install typeshare-cli --version 1.13.4 --locked
-          typeshare packages/microsandbox-types/rust/lib \
-            --lang=typescript \
-            --output-file=packages/microsandbox-types/typescript/src/index.ts
+          REGEN_TS_BINDINGS=1 cargo +stable test -p microsandbox-types --features ts \
+            checked_in_bindings_match_generated_output
           git diff --exit-code -- packages/microsandbox-types/typescript/src/index.ts
 
       # -- Checks (agentd — Linux-only) --

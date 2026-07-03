@@ -310,25 +310,17 @@ _clean-unix:
 clean:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 clean
 
-# Regenerate the `microsandbox-types` Go + TypeScript bindings from Rust.
+# Regenerate the `@microsandbox/types` TypeScript bindings from Rust.
 #
-# typeshare is the sole codegen for both: it reads the `#[typeshare]`-annotated
-# `SandboxSpec` sub-types in `microsandbox-types` and emits the Go `msbtypes`
-# package (`go/types_gen.go`) plus the TypeScript `@microsandbox/types` bindings
-# (`typescript/src/index.ts`). Adding a spec field means regenerating here, not
-# hand-editing the outputs. Requires the typeshare CLI with the Go + TypeScript
-# backends (bundled since typeshare 1.13): `cargo install typeshare-cli`.
+# ts-rs is the sole codegen: the `typescript` module in `microsandbox-types`
+# renders every `#[cfg_attr(feature = "ts", derive(TS))]` spec sub-type into the
+# checked-in `typescript/src/index.ts` (faithful to serde's external tagging).
+# Go/Python consume the JSON contract directly, so there are no generated
+# bindings for them. Adding a spec field means regenerating here, not
+# hand-editing the output.
 gen:
     #!/usr/bin/env bash
     set -euo pipefail
-    typeshare packages/microsandbox-types/rust/lib \
-        --lang=go \
-        -c packages/microsandbox-types/go/typeshare.toml \
-        --output-file=packages/microsandbox-types/go/types_gen.go
-    gofmt -w packages/microsandbox-types/go/types_gen.go
-    echo "generated packages/microsandbox-types/go/types_gen.go"
-
-    typeshare packages/microsandbox-types/rust/lib \
-        --lang=typescript \
-        --output-file=packages/microsandbox-types/typescript/src/index.ts
+    REGEN_TS_BINDINGS=1 cargo test -p microsandbox-types --features ts \
+        checked_in_bindings_match_generated_output
     echo "generated packages/microsandbox-types/typescript/src/index.ts"
