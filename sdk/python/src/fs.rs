@@ -12,7 +12,7 @@ use crate::error::to_py_err;
 /// Filesystem operations on a running sandbox.
 /// Holds the backend Arc + sandbox name; each op dispatches through the
 /// `SandboxBackend` trait. No Sandbox mutex lock per operation.
-#[pyclass(name = "SandboxFs")]
+#[pyclass(name = "SandboxFsOps")]
 pub struct PySandboxFs {
     backend: Arc<dyn microsandbox::Backend>,
     name: String,
@@ -33,7 +33,7 @@ pub struct PyFsWriteSink {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxFs
+// Methods: SandboxFsOps
 //--------------------------------------------------------------------------------------------------
 
 impl PySandboxFs {
@@ -49,7 +49,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
         })
@@ -60,7 +60,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
         })
@@ -71,7 +71,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let stream = fs.read_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsReadStream {
                 inner: Arc::new(Mutex::new(stream)),
@@ -89,7 +89,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -100,7 +100,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let sink = fs.write_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsWriteSink {
                 inner: Arc::new(Mutex::new(Some(sink))),
@@ -113,7 +113,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<PyFsEntry> = entries.into_iter().map(convert_fs_entry).collect();
             Ok(py_entries)
@@ -125,7 +125,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -136,7 +136,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -147,7 +147,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -158,7 +158,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.copy(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -174,7 +174,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.rename(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -185,7 +185,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let meta = fs.stat(&path).await.map_err(to_py_err)?;
             Ok(convert_fs_metadata(&meta))
         })
@@ -196,7 +196,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
         })
@@ -212,7 +212,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.copy_from_host(&host_path, &guest_path)
                 .await
                 .map_err(to_py_err)?;
@@ -230,7 +230,7 @@ impl PySandboxFs {
         let backend = self.backend.clone();
         let name = self.name.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let fs = microsandbox::sandbox::SandboxFs::with_backend(backend, &name);
+            let fs = microsandbox::sandbox::SandboxFsOps::with_backend(backend, &name);
             fs.copy_to_host(&guest_path, &host_path)
                 .await
                 .map_err(to_py_err)?;

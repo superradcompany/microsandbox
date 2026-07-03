@@ -1,6 +1,6 @@
 //! Host-side filesystem operations on a named volume.
 //!
-//! Unlike [`SandboxFs`](crate::sandbox::fs::SandboxFs) which goes through the
+//! Unlike [`SandboxFsOps`](crate::sandbox::fs::SandboxFsOps) which goes through the
 //! agent protocol, [`VolumeFs`] reads + writes a volume's bytes directly. For
 //! the local backend that is `tokio::fs` against `volumes_dir/<name>/`; for
 //! cloud (Phase 6) it routes through msb-cloud HTTP. Today every cloud op
@@ -408,6 +408,9 @@ pub(crate) mod local {
                         kind: FsEntryKind::Other,
                         size: 0,
                         mode: 0,
+                        uid: 0,
+                        gid: 0,
+                        accessed: None,
                         modified: None,
                     });
                 }
@@ -560,12 +563,22 @@ pub(crate) mod local {
             .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
     }
 
+    fn std_accessed(meta: &std::fs::Metadata) -> Option<chrono::DateTime<chrono::Utc>> {
+        meta.accessed()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
+    }
+
     fn metadata_to_entry(path: &str, meta: &std::fs::Metadata) -> FsEntry {
         FsEntry {
             path: path.to_string(),
             kind: std_kind(meta),
             size: meta.len(),
             mode: metadata_mode(meta),
+            uid: metadata_uid(meta),
+            gid: metadata_gid(meta),
+            accessed: std_accessed(meta),
             modified: std_modified(meta),
         }
     }
@@ -582,7 +595,10 @@ pub(crate) mod local {
             kind: std_kind(meta),
             size: meta.len(),
             mode: metadata_mode(meta),
+            uid: metadata_uid(meta),
+            gid: metadata_gid(meta),
             readonly: meta.permissions().readonly(),
+            accessed: std_accessed(meta),
             modified: std_modified(meta),
             created: std_created(meta),
         }
@@ -595,6 +611,20 @@ pub(crate) mod local {
         meta.mode()
     }
 
+    #[cfg(unix)]
+    fn metadata_uid(meta: &std::fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+
+        meta.uid()
+    }
+
+    #[cfg(unix)]
+    fn metadata_gid(meta: &std::fs::Metadata) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+
+        meta.gid()
+    }
+
     #[cfg(windows)]
     fn metadata_mode(meta: &std::fs::Metadata) -> u32 {
         match (meta.is_dir(), meta.permissions().readonly()) {
@@ -603,6 +633,16 @@ pub(crate) mod local {
             (false, true) => 0o444,
             (false, false) => 0o644,
         }
+    }
+
+    #[cfg(windows)]
+    fn metadata_uid(_meta: &std::fs::Metadata) -> u32 {
+        0
+    }
+
+    #[cfg(windows)]
+    fn metadata_gid(_meta: &std::fs::Metadata) -> u32 {
+        0
     }
 }
 

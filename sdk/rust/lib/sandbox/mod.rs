@@ -122,10 +122,13 @@ pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
-pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsSetAttrs, FsWriteSink, SandboxFs};
+pub use fs::{
+    FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
+    FsWriteSink, SandboxFsOps,
+};
 pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
-pub use metrics::{SandboxMetrics, all_sandbox_metrics};
+pub use metrics::{SandboxMetrics, all_sandbox_metrics, all_sandbox_metrics_local};
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
@@ -141,9 +144,9 @@ pub use microsandbox_types::{
 };
 #[cfg(feature = "ssh")]
 pub use ssh::{
-    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
-    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
-    SshStdioStream,
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
+    SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
+    SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
@@ -1208,8 +1211,9 @@ impl Sandbox {
     /// trait per-method, so this constructor is infallible. On cloud each
     /// op returns `Unsupported` until cloud guest-fs lands; on local each
     /// op routes through the agent protocol (`core.fs.*`).
-    pub fn fs(&self) -> fs::SandboxFs<'_> {
-        fs::SandboxFs::new(self.backend.clone(), &self.name)
+    pub fn fs(&self) -> fs::SandboxFsOps<'_> {
+        let client = self.local().map(|local| Arc::clone(&local.client));
+        fs::SandboxFsOps::new(self.backend.clone(), &self.name, client)
     }
 
     /// Stop the sandbox gracefully and wait until stopped state is observed.
@@ -2905,6 +2909,7 @@ mod tests {
         let _ = super::Sandbox::kill_with_timeout;
         let _ = super::Sandbox::request_drain;
         let _ = super::Sandbox::wait_until_stopped;
+        let _ = super::all_sandbox_metrics;
     }
 
     #[test]

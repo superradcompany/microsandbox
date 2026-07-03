@@ -167,8 +167,20 @@ pub(crate) fn local_metrics_stream(
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Get the latest metrics snapshot for every running sandbox.
-pub async fn all_sandbox_metrics(
+/// Get the latest metrics snapshot for every running sandbox from the active local backend.
+pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
+    let backend = crate::backend::default_backend();
+    let local = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "all_sandbox_metrics on cloud".into(),
+            available_when: "when cloud metrics land".into(),
+        })?;
+    all_sandbox_metrics_local(local).await
+}
+
+/// Get the latest metrics snapshot for every running sandbox from an explicit local backend.
+pub async fn all_sandbox_metrics_local(
     local: &LocalBackend,
 ) -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
     let Some(registry) = open_registry(local)? else {

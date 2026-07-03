@@ -399,7 +399,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
 pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
-    let images = Image::list(local).await?;
+    let images = Image::list_local(local).await?;
 
     if args.format.as_deref() == Some("json") {
         let entries: Vec<serde_json::Value> = images
@@ -460,7 +460,7 @@ pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
 pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
-    let detail = Image::inspect(local, &args.reference).await?;
+    let detail = Image::inspect_local(local, &args.reference).await?;
 
     if args.format.as_deref() == Some("json") {
         let layers_json: Vec<serde_json::Value> = detail
@@ -740,7 +740,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
             ui::Spinner::start("Removing", reference)
         };
 
-        match Image::remove(local, reference, args.force).await {
+        match Image::remove_local(local, reference, args.force).await {
             Ok(()) => {
                 spinner.finish_success("Removed");
             }
@@ -784,7 +784,7 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
         }
     }
 
-    let report = Image::prune(local).await?;
+    let report = Image::prune_local(local).await?;
 
     if args.format.as_deref() == Some("json") {
         let json = serde_json::json!({
