@@ -1,9 +1,0 @@
-# typeshare config for the microsandbox-types Go binding (`just gen`).
-#
-# Generated from the Rust source of truth — the `#[typeshare]`-annotated
-# `SandboxSpec` sub-types in `packages/microsandbox-types/rust/lib` — into this
-# package's `types_gen.go`. Lives alongside the Rust and TypeScript bindings as a
-# standalone Go module, so the SDK and the cloud driver import the canonical
-# types directly rather than through the SDK.
-[go]
-package = "msbtypes"
