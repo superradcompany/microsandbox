@@ -14,7 +14,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "database": {
     "url": "sqlite:///tmp/msb.db",
     "max_connections": 10,
-    "connect_timeout_secs": 30
+    "connect_timeout_secs": 30,
+    "busy_timeout_secs": 30
   },
   "paths": {
     "msb": "/usr/local/bin/msb",
@@ -22,6 +23,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
     "cache": "/mnt/fast/msb-cache",
     "sandboxes": null,
     "volumes": null,
+    "snapshots": null,
     "logs": null,
     "secrets": null
   },
@@ -35,20 +37,31 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
     "workdir": "/app"
   },
   "registries": {
-    "auth": {
+    "ca_certs": "/path/to/corporate-ca.pem",
+    "hosts": {
       "ghcr.io": {
-        "username": "octocat",
-        "store": "keyring"
+        "auth": {
+          "username": "octocat",
+          "store": "keyring"
+        }
       },
       "registry.example.com": {
-        "username": "deploy",
-        "password_env": "REGISTRY_TOKEN"
+        "insecure": true,
+        "auth": {
+          "username": "deploy",
+          "password_env": "REGISTRY_TOKEN"
+        }
       },
       "docker.io": {
-        "username": "user",
-        "secret_name": "dockerhub-token"
+        "auth": {
+          "username": "user",
+          "secret_name": "dockerhub-token"
+        }
       }
     }
+  },
+  "metrics": {
+    "capacity": 4096
   },
   "active_profile": "prod",
   "profiles": {
@@ -75,6 +88,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
 | `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
 | `registries` | [reference](#registries) | Container registry authentication |
+| `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default backend profile name |
 | `profiles` | `{}` | Named backend profiles |
 
@@ -85,6 +99,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `url` | `null` | Database URL. Uses SQLite under `home` when null |
 | `max_connections` | `5` | Maximum connection pool size |
 | `connect_timeout_secs` | `30` | Timeout when acquiring a database connection from the pool |
+| `busy_timeout_secs` | `30` | SQLite busy timeout before a contended write surfaces as an error |
 
 ## `paths`
 
@@ -94,13 +109,38 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |
-| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows) |
+| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, SDK-provided runtime path, this field, debug workspace build paths, default install path, then `PATH` |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Resolved via: `MSB_LIBKRUNFW_PATH` env, SDK-provided runtime path, this field, paths next to the resolved `msb` binary, then default install path |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |
+| `snapshots` | `{home}/snapshots` | Snapshot artifacts |
 | `logs` | `{home}/logs` | Sandbox logs |
 | `secrets` | `{home}/secrets` | Secrets. Registry secrets live under `secrets/registries/` |
+
+### Rust SDK path helpers
+
+Rust callers can inspect the active local config and resolve runtime paths with the same precedence used by sandbox startup. `microsandbox::config::config()` uses the active default backend and returns `Unsupported` when that backend is cloud.
+
+```rust
+let cfg = microsandbox::config::config()?;
+let msb = cfg.resolve_msb_path()?;
+let libkrunfw = cfg.resolve_libkrunfw_path()?;
+```
+
+When your code owns an explicit local backend, prefer the backend-owned config:
+
+```rust
+use microsandbox::LocalBackend;
+
+let backend = LocalBackend::builder()
+    .home("/tmp/msb-home")
+    .build()
+    .await?;
+
+let cfg = backend.config();
+let msb = cfg.resolve_msb_path()?;
+```
 
 ## `sandbox_defaults`
 
@@ -126,22 +166,43 @@ Defaults applied only when the sandbox rootfs is an OCI image.
 
 ## `registries`
 
-### `registries.auth`
+| Field | Default | Description |
+|-------|---------|-------------|
+| `ca_certs` | `null` | Path to a PEM file with additional CA root certificates trusted for registry pulls |
+| `hosts` | `{}` | Per-registry settings keyed by registry hostname |
 
-A map of registry hostnames to authentication entries. Each entry specifies a username and exactly **one** credential source.
+### `registries.hosts`
+
+A map of registry hostnames to settings. Each host entry can mark the registry as insecure (plain HTTP) and can include an `auth` entry. Each auth entry specifies a username and exactly **one** credential source.
 
 ```json
 {
   "registries": {
-    "auth": {
+    "hosts": {
       "ghcr.io": {
-        "username": "octocat",
-        "store": "keyring"
+        "auth": {
+          "username": "octocat",
+          "store": "keyring"
+        }
+      },
+      "localhost:5050": {
+        "insecure": true,
+        "auth": {
+          "username": "dev",
+          "password_env": "LOCAL_REGISTRY_TOKEN"
+        }
       }
     }
   }
 }
 ```
+
+#### Host entry fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `insecure` | No | Use plain HTTP instead of HTTPS for this registry |
+| `auth` | No | Authentication entry for this registry |
 
 #### Auth entry fields
 
@@ -162,9 +223,15 @@ When pulling from a registry, credentials are resolved in this order:
 
 1. **Explicit SDK auth** via `.registry_auth()` on the sandbox builder
 2. **OS keyring** entries created by `msb registry login`
-3. **Config file** `registries.auth` entries in `config.json`
+3. **Config file** `registries.hosts.<host>.auth` entries in `config.json`
 4. **Docker config** `~/.docker/config.json` credential helpers
 5. **Anonymous** (no authentication)
+
+## `metrics`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `capacity` | `0` | Number of slots reserved in the live metrics shared-memory registry. `0` uses the built-in default. Stop all sandboxes for the same home before changing this value. |
 
 ## Backend profiles
 

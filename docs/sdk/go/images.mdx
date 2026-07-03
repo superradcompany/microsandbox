@@ -264,7 +264,7 @@ if err := m.Image.Remove(ctx, "old:tag", false); err != nil {
 func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error)
 ```
 
-Remove cached image data that is not used by any sandbox. Returns a report tallying the image refs, manifests, layers, fsmeta files, and VMDK files removed, plus bytes reclaimed.
+Remove cached image data that is not used by any sandbox or indexed snapshot. Returns a report tallying the image refs, manifests, layers, fsmeta files, and VMDK files removed, plus bytes reclaimed.
 
 <p className="msb-label">Parameters</p>
 

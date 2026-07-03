@@ -144,6 +144,12 @@ impl LocalBackend {
         &self.config
     }
 
+    /// Clone the backend-owned config handle for APIs that need to return the
+    /// ambient local config without borrowing through a temporary backend `Arc`.
+    pub(crate) fn config_handle(&self) -> Arc<LocalConfig> {
+        self.config.clone()
+    }
+
     /// Host-side directory rooted at `volumes_dir/<name>` for a named volume.
     ///
     /// Non-trait helper used by [`VolumeFs`](crate::volume::VolumeFs)
