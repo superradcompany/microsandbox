@@ -2114,7 +2114,7 @@ mod secret_tests {
     #[test]
     fn default_require_tls_identity_when_deserialized() {
         let entry: SecretEntry = serde_json::from_str(
-            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"type":"exact","data":"h"}]}"#,
+            r#"{"env_var":"K","value":"v","placeholder":"$K","allowed_hosts":[{"exact":"h"}]}"#,
         )
         .unwrap();
         assert!(entry.require_tls_identity);
@@ -2199,22 +2199,22 @@ mod secret_tests {
         ]);
         assert_eq!(
             serde_json::to_string(&action).unwrap(),
-            r#"{"type":"passthrough","data":[{"type":"exact","data":"api.anthropic.com"},{"type":"wildcard","data":"*.anthropic.com"},{"type":"any"}]}"#
+            r#"{"passthrough":[{"exact":"api.anthropic.com"},{"wildcard":"*.anthropic.com"},"any"]}"#
         );
         assert_eq!(
             serde_json::to_string(&ViolationAction::BlockAndLog).unwrap(),
-            r#"{"type":"block_and_log"}"#
+            r#""block_and_log""#
         );
         assert_eq!(
             serde_json::to_string(&ViolationAction::BlockAndTerminate).unwrap(),
-            r#"{"type":"block_and_terminate"}"#
+            r#""block_and_terminate""#
         );
     }
 
     #[test]
     fn violation_action_accepts_legacy_pascal_case() {
         let action: ViolationAction = serde_json::from_str(
-            r#"{"type":"Passthrough","data":[{"type":"Exact","data":"api.anthropic.com"}]}"#,
+            r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2222,7 +2222,7 @@ mod secret_tests {
             ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())])
         );
         assert_eq!(
-            serde_json::from_str::<ViolationAction>(r#"{"type":"BlockAndTerminate"}"#).unwrap(),
+            serde_json::from_str::<ViolationAction>(r#""BlockAndTerminate""#).unwrap(),
             ViolationAction::BlockAndTerminate
         );
     }

@@ -1247,7 +1247,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_config_deserializes_adjacent_tagged_mounts() {
-        let json = r#"{"name":"legacy","mounts":[{"type":"tmpfs","data":{"guest":"/tmp","size_mib":512}}]}"#;
+        let json = r#"{"name":"legacy","mounts":[{"tmpfs":{"guest":"/tmp","size_mib":512}}]}"#;
 
         let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
 

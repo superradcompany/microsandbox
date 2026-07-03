@@ -35,7 +35,7 @@ fn spec_json(name: &str) -> String {
     format!(
         r#"{{
             "name": "{name}",
-            "image": {{ "type": "oci", "data": {{ "reference": "{IMAGE}" }} }},
+            "image": {{ "oci": {{ "reference": "{IMAGE}" }} }},
             "resources": {{ "vcpus": 1, "memory_mib": 256 }},
             "runtime": {{ "hostname": "spec-host" }},
             "env": [{{ "key": "FROM_SPEC", "value": "applied" }}]

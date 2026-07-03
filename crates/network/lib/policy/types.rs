@@ -989,7 +989,7 @@ mod tests {
                 "rules": [
                     {
                         "direction": "egress",
-                        "destination": { "type": "domain", "data": "PyPI.Org." },
+                        "destination": { "domain": "PyPI.Org." },
                         "action": "allow"
                     }
                 ]
@@ -1376,7 +1376,7 @@ mod tests {
 
         // Back-compat: legacy kebab-case tags still deserialize via #[serde(alias)].
         let legacy: Destination =
-            serde_json::from_str(r#"{"type":"domain-suffix","data":"legacy.example.com"}"#)
+            serde_json::from_str(r#"{"domain-suffix":"legacy.example.com"}"#)
                 .unwrap();
         assert!(matches!(legacy, Destination::DomainSuffix(_)));
         let legacy_group: DestinationGroup = serde_json::from_str(r#""link-local""#).unwrap();
