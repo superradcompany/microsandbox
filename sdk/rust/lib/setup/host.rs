@@ -300,7 +300,9 @@ fn runtime_file_check(label: &str, result: &Result<PathBuf, String>) -> Check {
 }
 
 fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    let path = config::resolve_msb_path(config).map_err(|error| error.to_string())?;
+    let path = config
+        .resolve_msb_path()
+        .map_err(|error| error.to_string())?;
     if path.is_file() {
         Ok(path)
     } else {
@@ -309,7 +311,9 @@ fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
 }
 
 fn resolve_libkrunfw_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    config::resolve_libkrunfw_path(config).map_err(|error| error.to_string())
+    config
+        .resolve_libkrunfw_path()
+        .map_err(|error| error.to_string())
 }
 
 /// Build the platform-specific "Host" section.

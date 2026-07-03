@@ -40,7 +40,7 @@ Read, write, list, and manipulate files inside a running sandbox. Obtained via [
 
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
   <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxfs">SandboxFs</a>
+    <a className="msb-typepill" href="#sandboxfsops">SandboxFsOps</a>
     <a className="msb-typepill" href="#fsentry">FsEntry</a>
     <a className="msb-typepill" href="#fsentrykind">FsEntryKind</a>
     <a className="msb-typepill" href="#fsmetadata">FsMetadata</a>
@@ -768,15 +768,15 @@ sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
 
 ## Types
 
-### SandboxFs
+### SandboxFsOps
 
 <div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="/sdk/rust/sandbox#sb-fs">sb.fs()</a></p>
 
-Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFs<'a>`). Every method dispatches through the same host-guest channel as command execution. Local routes to `core.fs.*` agent messages; cloud returns `Unsupported` per method until cloud guest-fs lands. All operations are listed in the sections above.
+Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFsOps<'a>`). Every method dispatches through the same host-guest channel as command execution. Local routes to `core.fs.*` agent messages; cloud returns `Unsupported` per method until cloud guest-fs lands. All operations are listed in the sections above.
 
-`with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFs` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
+`with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFsOps` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
 
 ### FsEntry
 

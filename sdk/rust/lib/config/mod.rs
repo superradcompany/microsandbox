@@ -2,7 +2,8 @@
 //!
 //! [`LocalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
 //! It is owned by [`LocalBackend`](crate::backend::LocalBackend); accessors
-//! live on the backend, not on a process-wide static. See D6.7 Layer 2a in
+//! live on explicit backend instances, with [`config`] providing an ambient
+//! helper for the active local backend. See D6.7 Layer 2a in
 //! `planning/microsandbox/design/api/local-cloud-backend.md`.
 //!
 //! Layer 1 process-wide knobs ([`set_sdk_msb_path`],
@@ -14,7 +15,7 @@ use std::{
     collections::HashMap,
     num::NonZero,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use docker_credential::{CredentialRetrievalError, DockerCredential};
@@ -405,8 +406,34 @@ impl LocalConfig {
         }
     }
 
-    /// Resolve registry transport for a given hostname from the global config.
-    /// Load additional CA root certificates from the global `registries.ca_certs` path.
+    /// Resolve the path to the `msb` binary for this local config.
+    ///
+    /// Resolution order:
+    /// 1. `MSB_PATH` environment variable
+    /// 2. SDK-provided runtime path
+    /// 3. `self.paths.msb`
+    /// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
+    /// 5. `~/.microsandbox/bin/msb`
+    /// 6. `which::which("msb")`
+    pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
+        resolve_msb_path_for_config(self)
+    }
+
+    /// Resolve the path to `libkrunfw` for this local config.
+    ///
+    /// Resolution order (highest first):
+    /// 1. `MSB_LIBKRUNFW_PATH` environment variable
+    /// 2. SDK-provided runtime path set via [`set_sdk_libkrunfw_path`]
+    /// 3. `self.paths.libkrunfw`
+    /// 4. A sibling of the resolved `msb` binary (for `build/msb`)
+    /// 5. `../lib/` next to the resolved `msb` binary (for installed layouts)
+    /// 6. `{home}/lib/libkrunfw.{so,dylib}`
+    pub fn resolve_libkrunfw_path(&self) -> MicrosandboxResult<PathBuf> {
+        resolve_libkrunfw_path_for_config(self)
+    }
+
+    /// Resolve registry transport for a given hostname from this config.
+    /// Load additional CA root certificates from `registries.ca_certs`.
     ///
     /// Returns an empty vec if no path is configured.
     pub async fn resolve_ca_certs(&self) -> MicrosandboxResult<Vec<Vec<u8>>> {
@@ -636,6 +663,22 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
     servers
 }
 
+/// Return the active default backend's local config.
+///
+/// This is the ambient convenience path for callers that do not explicitly
+/// construct a [`LocalBackend`](crate::backend::LocalBackend). It returns
+/// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
+pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
+    let backend = crate::backend::default_backend();
+    let local = backend
+        .as_local()
+        .ok_or_else(|| MicrosandboxError::Unsupported {
+            feature: "microsandbox::config::config".into(),
+            available_when: "with a local backend".into(),
+        })?;
+    Ok(local.config_handle())
+}
+
 /// Resolve the path to the persisted local config file.
 pub fn config_path() -> PathBuf {
     // Honour MSB_CONFIG_PATH if set — same env var the SDK config loader
@@ -706,6 +749,11 @@ pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
     let _ = SDK_MSB_PATH.set(path.into());
 }
 
+/// Resolve the path to the `msb` binary for the ambient local config.
+pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
+    config()?.resolve_msb_path()
+}
+
 /// Resolve the path to the `msb` binary against the supplied [`LocalConfig`].
 ///
 /// Resolution order:
@@ -715,7 +763,7 @@ pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
 /// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
 /// 5. `~/.microsandbox/bin/msb`
 /// 6. `which::which("msb")`
-pub fn resolve_msb_path(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
+fn resolve_msb_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
     let env_msb = std::env::var("MSB_PATH").ok();
     let sdk_msb = SDK_MSB_PATH.get().cloned();
     let config_msb = config.paths.msb.clone();
@@ -815,6 +863,11 @@ pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
     let _ = SDK_LIBKRUNFW_PATH.set(path.into());
 }
 
+/// Resolve the path to `libkrunfw` for the ambient local config.
+pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
+    config()?.resolve_libkrunfw_path()
+}
+
 /// Resolve the path to `libkrunfw` against the supplied [`LocalConfig`].
 ///
 /// Resolution order (highest first):
@@ -825,7 +878,7 @@ pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
 /// 4. A sibling of the resolved `msb` binary (for `build/msb`).
 /// 5. `../lib/` next to the resolved `msb` binary (for installed layouts).
 /// 6. `{home}/lib/libkrunfw.{so,dylib}`.
-pub fn resolve_libkrunfw_path(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
+fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
     if let Ok(env_path) = std::env::var("MSB_LIBKRUNFW_PATH") {
         let path = PathBuf::from(env_path);
         if path.is_file() {
@@ -862,7 +915,7 @@ pub fn resolve_libkrunfw_path(config: &LocalConfig) -> MicrosandboxResult<PathBu
         .join(&filename);
 
     let mut candidates = Vec::new();
-    if let Ok(msb_path) = resolve_msb_path(config) {
+    if let Ok(msb_path) = config.resolve_msb_path() {
         candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
     }
     candidates.push(home_fallback);
@@ -1451,6 +1504,40 @@ mod tests {
             error
                 .to_string()
                 .contains("entry defines multiple credential sources")
+        );
+    }
+
+    #[cfg(not(all(
+        feature = "keyring",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    )))]
+    #[test]
+    fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
+        let cfg = LocalConfig {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
+                        username: "user".to_string(),
+                        store: Some(RegistryCredentialStore::Keyring),
+                        password_env: None,
+                        secret_name: None,
+                    }),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let error = cfg.resolve_configured_registry_auth("ghcr.io").unwrap_err();
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("secure OS credential storage is disabled")
+                || error
+                    .to_string()
+                    .contains("secure OS credential storage is not supported")
         );
     }
 

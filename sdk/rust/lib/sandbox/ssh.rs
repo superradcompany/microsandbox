@@ -16,7 +16,8 @@ use microsandbox_protocol::{
         FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse,
         FsResponseData, FsSetAttrs,
     },
-    message::MessageType,
+    message::{Message, MessageType},
+    tcp::{TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed},
 };
 use microsandbox_types::EnvVar;
 use russh::client::Msg as ClientMsg;
@@ -45,7 +46,7 @@ pub const DEFAULT_SSH_PORT: u16 = 2222;
 
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
-pub struct SandboxSsh {
+pub struct SandboxSshOps {
     sandbox: Sandbox,
 }
 
@@ -148,6 +149,16 @@ struct SshSession {
     channels: HashMap<ChannelId, ChannelState>,
 }
 
+impl Drop for SshSession {
+    fn drop(&mut self) {
+        for state in self.channels.values() {
+            if let ChannelState::Tcp { relay, .. } = state {
+                relay.abort();
+            }
+        }
+    }
+}
+
 enum ChannelState {
     Pending {
         channel: Option<Channel<Msg>>,
@@ -157,6 +168,13 @@ enum ChannelState {
     Exec {
         control: ExecControl,
         stdin: Option<ExecSink>,
+    },
+    Tcp {
+        id: u32,
+        client: Arc<AgentClient>,
+        /// Guest-to-SSH relay task. It is aborted on channel/session teardown
+        /// so a dropped SSH connection does not leave a stream reader behind.
+        relay: tokio::task::JoinHandle<()>,
     },
     Sftp,
 }
@@ -195,18 +213,18 @@ enum ExecCommand {
 
 impl Sandbox {
     /// Return the SSH namespace for this sandbox.
-    pub fn ssh(&self) -> SandboxSsh {
-        SandboxSsh {
+    pub fn ssh(&self) -> SandboxSshOps {
+        SandboxSshOps {
             sandbox: self.clone(),
         }
     }
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: SandboxSsh
+// Methods: SandboxSshOps
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxSsh {
+impl SandboxSshOps {
     /// Connect a native in-process SSH client to this sandbox.
     pub async fn connect(&self) -> MicrosandboxResult<SshClient> {
         self.connect_with(|opts| opts).await
@@ -1054,6 +1072,90 @@ impl SshSession {
         session.channel_success(channel)?;
         Ok(())
     }
+
+    async fn start_tcp_forward(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        session: &mut Session,
+    ) -> anyhow::Result<bool> {
+        if host_to_connect.is_empty() || port_to_connect > u16::MAX as u32 {
+            tracing::warn!(
+                host = host_to_connect,
+                port = port_to_connect,
+                originator_address,
+                originator_port,
+                "ssh direct-tcpip rejected invalid destination"
+            );
+            return Ok(false);
+        }
+
+        let client = self.agent_client().await?;
+        if !client.supports(MessageType::TcpConnect) {
+            tracing::warn!(
+                negotiated_version = client.negotiated_version(),
+                "ssh direct-tcpip needs a newer sandbox runtime; restart the sandbox to enable forwarding"
+            );
+            return Ok(false);
+        }
+
+        let channel_id = channel.id();
+        drop(channel);
+        let req = TcpConnect {
+            host: host_to_connect.to_string(),
+            port: port_to_connect as u16,
+        };
+        let (tcp_id, mut tcp_rx) = client.stream(MessageType::TcpConnect, &req).await?;
+        let Some(first) = tcp_rx.recv().await else {
+            tracing::debug!(
+                host = host_to_connect,
+                port = port_to_connect,
+                "ssh direct-tcpip rejected because agent stream closed before connect reply"
+            );
+            return Ok(false);
+        };
+
+        match first.t {
+            MessageType::TcpConnected => {
+                let _: TcpConnected = first.payload()?;
+                let session_handle = session.handle();
+                let relay = tokio::spawn(async move {
+                    relay_tcp_to_ssh(channel_id, tcp_rx, session_handle).await;
+                });
+                self.channels.insert(
+                    channel_id,
+                    ChannelState::Tcp {
+                        id: tcp_id,
+                        client,
+                        relay,
+                    },
+                );
+                Ok(true)
+            }
+            MessageType::TcpFailed => {
+                let failed: TcpFailed = first.payload()?;
+                tracing::debug!(
+                    host = host_to_connect,
+                    port = port_to_connect,
+                    error = failed.error,
+                    "ssh direct-tcpip rejected because guest TCP connect failed"
+                );
+                Ok(false)
+            }
+            other => {
+                tracing::warn!(
+                    host = host_to_connect,
+                    port = port_to_connect,
+                    message_type = other.as_str(),
+                    "ssh direct-tcpip rejected unexpected agent reply"
+                );
+                Ok(false)
+            }
+        }
+    }
 }
 
 impl russh::server::Handler for SshSession {
@@ -1098,6 +1200,26 @@ impl russh::server::Handler for SshSession {
             },
         );
         Ok(true)
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        self.start_tcp_forward(
+            channel,
+            host_to_connect,
+            port_to_connect,
+            originator_address,
+            originator_port,
+            session,
+        )
+        .await
     }
 
     async fn env_request(
@@ -1219,6 +1341,23 @@ impl russh::server::Handler for SshSession {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        let tcp = match self.channels.get(&channel) {
+            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
+            _ => None,
+        };
+        if let Some((id, client)) = tcp {
+            client
+                .send(
+                    id,
+                    MessageType::TcpData,
+                    &TcpData {
+                        data: data.to_vec(),
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
+
         if let Some(ChannelState::Exec {
             stdin: Some(stdin), ..
         }) = self.channels.get(&channel)
@@ -1233,6 +1372,15 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        let tcp = match self.channels.get(&channel) {
+            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
+            _ => None,
+        };
+        if let Some((id, client)) = tcp {
+            client.send(id, MessageType::TcpEof, &TcpEof {}).await?;
+            return Ok(());
+        }
+
         if let Some(ChannelState::Exec {
             stdin: Some(stdin), ..
         }) = self.channels.get(&channel)
@@ -1247,13 +1395,18 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(ChannelState::Exec { control, stdin }) = self.channels.remove(&channel) {
-            if let Some(stdin) = stdin {
-                let _ = stdin.close().await;
+        match self.channels.remove(&channel) {
+            Some(ChannelState::Tcp { id, client, relay }) => {
+                relay.abort();
+                let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
             }
-            let _ = control.kill().await;
-        } else {
-            self.channels.remove(&channel);
+            Some(ChannelState::Exec { control, stdin }) => {
+                if let Some(stdin) = stdin {
+                    let _ = stdin.close().await;
+                }
+                let _ = control.kill().await;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1730,6 +1883,61 @@ impl AsyncWrite for SshStdioStream {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+async fn relay_tcp_to_ssh(
+    channel: ChannelId,
+    mut tcp_rx: tokio::sync::mpsc::Receiver<Message>,
+    session: russh::server::Handle,
+) {
+    while let Some(msg) = tcp_rx.recv().await {
+        match msg.t {
+            MessageType::TcpData => match msg.payload::<TcpData>() {
+                Ok(data) => {
+                    if session.data(channel, Bytes::from(data.data)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("ssh direct-tcpip: failed to decode tcp data: {e}");
+                    let _ = session.close(channel).await;
+                    return;
+                }
+            },
+            MessageType::TcpEof => {
+                if let Err(e) = msg.payload::<TcpEof>() {
+                    tracing::warn!("ssh direct-tcpip: failed to decode tcp eof: {e}");
+                }
+                let _ = session.eof(channel).await;
+            }
+            MessageType::TcpClosed => {
+                if let Err(e) = msg.payload::<TcpClosed>() {
+                    tracing::warn!("ssh direct-tcpip: failed to decode tcp closed: {e}");
+                }
+                let _ = session.eof(channel).await;
+                let _ = session.close(channel).await;
+                return;
+            }
+            MessageType::TcpFailed => {
+                match msg.payload::<TcpFailed>() {
+                    Ok(failed) => {
+                        tracing::debug!(
+                            error = failed.error,
+                            "ssh direct-tcpip: guest TCP stream failed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("ssh direct-tcpip: failed to decode tcp failed: {e}");
+                    }
+                }
+                let _ = session.close(channel).await;
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = session.close(channel).await;
+}
 
 fn build_authorized_keys(
     options: &SshServerOptions,

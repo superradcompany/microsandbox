@@ -376,7 +376,7 @@ Request graceful drain and return once the request is sent. Pair with [`wait_unt
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
-fn fs(&self) -> SandboxFs<'_>
+fn fs(&self) -> SandboxFsOps<'_>
 ```
 
 Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/rust/filesystem) for API details.
@@ -385,7 +385,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/rust/filesystem">SandboxFs</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/rust/filesystem">SandboxFsOps</a></div>
     <div className="msb-param-desc">Filesystem handle.</div>
   </div>
 </div>

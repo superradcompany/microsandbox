@@ -1622,12 +1622,6 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
-/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
-export declare function imageGc(): Promise<number>
-
-/** Garbage-collect orphaned layers. Returns the number reclaimed. */
-export declare function imageGcLayers(): Promise<number>
-
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1658,6 +1652,19 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
+
+/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
+export declare function imagePrune(): Promise<ImagePruneReportJs>
+
+/** Summary of artifacts removed by `imagePrune`. */
+export interface ImagePruneReportJs {
+  imageRefsRemoved: number
+  manifestsRemoved: number
+  layersRemoved: number
+  fsmetaRemoved: number
+  vmdkRemoved: number
+  bytesReclaimed?: number
+}
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a
@@ -1943,6 +1950,18 @@ export interface SandboxStopResult {
   source?: string
 }
 
+/** Host-scoped upstream CA certificate path. */
+export interface ScopedUpstreamCaCert {
+  pattern: string
+  path: string
+}
+
+/** Host-scoped upstream certificate verification override. */
+export interface ScopedVerifyUpstream {
+  pattern: string
+  verify: boolean
+}
+
 /** A secret entry produced by `SecretBuilder.build()`. */
 export interface SecretEntry {
   /** Environment variable name exposed to the sandbox (holds the placeholder). */
@@ -2104,22 +2123,10 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
-  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
-  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
+  scopedUpstreamCaCerts: Array<JsScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<JsScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
-}
-
-/** Host-scoped upstream CA certificate path. */
-export interface ScopedUpstreamCaCert {
-  pattern: string
-  path: string
-}
-
-/** Host-scoped upstream certificate verification override. */
-export interface ScopedVerifyUpstream {
-  pattern: string
-  verify: boolean
 }
 
 /** Built volume configuration produced by `VolumeBuilder.build()`. */

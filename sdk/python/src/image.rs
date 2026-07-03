@@ -124,7 +124,9 @@ impl PyImage {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let handle = RustImage::get(local, &reference).await.map_err(to_py_err)?;
+            let handle = RustImage::get_local(local, &reference)
+                .await
+                .map_err(to_py_err)?;
             Ok(PyImageHandle::from_rust(handle))
         })
     }
@@ -135,7 +137,7 @@ impl PyImage {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let handles = RustImage::list(local).await.map_err(to_py_err)?;
+            let handles = RustImage::list_local(local).await.map_err(to_py_err)?;
             let py_handles: Vec<PyImageHandle> =
                 handles.into_iter().map(PyImageHandle::from_rust).collect();
             Ok(py_handles)
@@ -148,7 +150,7 @@ impl PyImage {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let detail = RustImage::inspect(local, &reference)
+            let detail = RustImage::inspect_local(local, &reference)
                 .await
                 .map_err(to_py_err)?;
             Ok(PyImageDetail::from_rust(detail))
@@ -162,7 +164,7 @@ impl PyImage {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            RustImage::remove(local, &reference, force)
+            RustImage::remove_local(local, &reference, force)
                 .await
                 .map_err(to_py_err)?;
             Ok(())
@@ -175,7 +177,7 @@ impl PyImage {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let report = RustImage::prune(local).await.map_err(to_py_err)?;
+            let report = RustImage::prune_local(local).await.map_err(to_py_err)?;
             Ok(PyImagePruneReport::from_rust(report))
         })
     }
@@ -248,7 +250,7 @@ impl PyImageHandle {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let detail = RustImage::inspect(local, &reference)
+            let detail = RustImage::inspect_local(local, &reference)
                 .await
                 .map_err(to_py_err)?;
             Ok(PyImageDetail::from_rust(detail))
@@ -262,7 +264,7 @@ impl PyImageHandle {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            RustImage::remove(local, &reference, force)
+            RustImage::remove_local(local, &reference, force)
                 .await
                 .map_err(to_py_err)?;
             Ok(())
