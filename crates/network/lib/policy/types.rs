@@ -122,7 +122,6 @@ pub enum Direction {
 /// can then rely on byte equality against the DNS cache's own
 /// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.

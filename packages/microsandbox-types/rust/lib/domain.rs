@@ -29,7 +29,7 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// Disk image format for virtio-blk root filesystems and volume mounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DiskImageFormat {
     /// QEMU Copy-on-Write v2.
@@ -45,15 +45,14 @@ pub enum DiskImageFormat {
 
 /// Root filesystem source for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
     #[serde(alias = "Bind")]
     Bind(
         /// Host path to bind mount.
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         PathBuf,
     ),
 
@@ -65,7 +64,7 @@ pub enum RootfsSource {
     #[serde(alias = "DiskImage")]
     DiskImage {
         /// Path to the disk image file on the host.
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         path: PathBuf,
         /// Disk image format.
         format: DiskImageFormat,
@@ -77,7 +76,7 @@ pub enum RootfsSource {
 /// OCI root filesystem source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
@@ -94,7 +93,7 @@ pub struct OciRootfsSource {
 /// Controls when an OCI registry is contacted for manifest freshness.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
@@ -120,7 +119,7 @@ pub enum PullPolicy {
 /// Serializes/deserializes as the lowercase variant name (`"strict"`, `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum StatVirtualization {
     /// Fail-closed: probe the host backing path; require xattr support.
@@ -136,7 +135,7 @@ pub enum StatVirtualization {
 /// Serializes/deserializes as the lowercase variant name (`"private"`, `"mirror"`) to align with the CLI and NAPI spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum HostPermissions {
     /// Guest chmod stays in the metadata overlay only.
@@ -148,7 +147,7 @@ pub enum HostPermissions {
 /// Sandbox-level in-guest security profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Preserve normal guest-root semantics.
@@ -166,7 +165,7 @@ pub enum SecurityProfile {
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct MountOptions {
     /// Whether the mount is read-only.
@@ -189,7 +188,7 @@ pub struct MountOptions {
 /// Storage kind for a named volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeKind {
     /// Directory-backed named volume mounted through virtiofs.
@@ -204,7 +203,7 @@ pub enum VolumeKind {
 /// Configuration for creating a named volume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct VolumeSpec {
     /// Volume name.
     pub name: String,
@@ -219,14 +218,13 @@ pub struct VolumeSpec {
     pub capacity_mib: Option<u32>,
 
     /// Labels for organization.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub labels: Vec<(String, String)>,
 }
 
 /// Sandbox-time behavior for a named volume mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum NamedVolumeMode {
     /// Require the named volume to already exist.
@@ -245,7 +243,7 @@ pub enum NamedVolumeMode {
 /// Creation metadata for sandbox-time named volume provisioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct NamedVolumeCreate {
     /// Creation behavior for this named volume mount.
     pub mode: NamedVolumeMode,
@@ -263,7 +261,6 @@ pub struct NamedVolumeCreate {
     pub capacity_mib: Option<u32>,
 
     /// Labels to attach to newly-created volumes.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub labels: Vec<(String, String)>,
 }
 
@@ -280,8 +277,7 @@ fn default_private() -> HostPermissions {
 /// A volume mount specification for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
@@ -289,7 +285,7 @@ pub enum VolumeMount {
     Bind {
         /// Host path to bind mount.
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -352,7 +348,7 @@ pub enum VolumeMount {
     DiskImage {
         /// Host path to the disk image file.
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         host: PathBuf,
         /// Guest mount path.
         guest: String,
@@ -370,8 +366,7 @@ pub enum VolumeMount {
 /// Rootfs patch applied before VM startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Patch {
     /// Write text content to a file.
@@ -405,7 +400,7 @@ pub enum Patch {
     CopyFile {
         /// Host path to copy from.
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -420,7 +415,7 @@ pub enum Patch {
     CopyDir {
         /// Host directory to copy from.
         #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
@@ -480,7 +475,7 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// in [`NetworkSpec::secrets`](NetworkSpec).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretsConfig {
     /// List of secrets to inject.
     #[serde(default, alias = "secrets")]
@@ -497,7 +492,7 @@ pub struct SecretsConfig {
 /// redacted by the [`Debug`](fmt::Debug) impl.
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretEntry {
     /// Environment variable name exposed to the sandbox (holds the placeholder).
     ///
@@ -538,8 +533,7 @@ pub struct SecretEntry {
 /// Host pattern for a secret allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum HostPattern {
     /// Exact hostname match.
@@ -556,7 +550,7 @@ pub enum HostPattern {
 /// Where in the HTTP request a secret can be injected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretInjection {
     /// Substitute in HTTP headers (default: true).
     #[serde(default = "default_true")]
@@ -584,8 +578,7 @@ pub struct SecretInjection {
 /// Action when a secret placeholder is detected going to a disallowed host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ViolationAction {
     /// Block the request silently.
@@ -794,7 +787,7 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 /// intercepted and how the interception CA is sourced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TlsConfig {
     /// Whether TLS interception is enabled.
     #[serde(default)]
@@ -820,7 +813,7 @@ pub struct TlsConfig {
     /// CA certificate PEM files to trust for upstream server verification.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "Array<string>"))]
     pub upstream_ca_cert: Vec<PathBuf>,
 
     /// Host-scoped CA certificate PEM files to trust for upstream server verification.
@@ -844,57 +837,55 @@ pub struct TlsConfig {
 /// Certificate authority configuration for TLS interception.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct InterceptCaConfig {
     /// Path to an existing CA certificate PEM file. If `None`, a CA is
     /// auto-generated and persisted.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub cert_path: Option<PathBuf>,
 
     /// Path to an existing CA private key PEM file. If `None`, a key is
     /// auto-generated and persisted.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub key_path: Option<PathBuf>,
 }
 
 /// Per-domain certificate cache configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CertCacheConfig {
     /// Maximum number of cached certificates. Default: 1000.
     #[serde(default = "default_cache_capacity")]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub capacity: usize,
 
     /// Certificate validity duration in hours. Default: 24.
     #[serde(default = "default_cert_validity_hours")]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub validity_hours: u64,
 }
 
 /// A CA certificate PEM file trusted only for matching upstream hosts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ScopedUpstreamCaCert {
     /// Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards.
     pub pattern: String,
 
     /// Path to the CA certificate PEM file.
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub path: PathBuf,
 }
 
 /// An upstream certificate verification override for matching hosts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ScopedVerifyUpstream {
     /// Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards.
     pub pattern: String,
@@ -948,7 +939,7 @@ fn default_cert_validity_hours() -> u64 {
 /// Action to take on traffic matched by a [`Rule`] (or a policy default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     /// Allow the traffic.
@@ -960,7 +951,7 @@ pub enum Action {
 /// Direction a [`Rule`] applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum Direction {
     /// Outbound: guest → destination.
@@ -974,7 +965,7 @@ pub enum Direction {
 /// Protocol filter for a [`Rule`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum Protocol {
     /// TCP.
@@ -990,7 +981,7 @@ pub enum Protocol {
 /// Pre-defined destination category for a [`Destination::Group`] match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationGroup {
     /// Public internet — any address not in another category.
@@ -1018,15 +1009,14 @@ pub enum DestinationGroup {
 /// load time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
     Any,
     /// IP address or CIDR block (e.g. `"1.2.3.4"`, `"10.0.0.0/8"`).
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    Cidr(#[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))] IpNetwork),
+    Cidr(#[cfg_attr(feature = "ts", ts(type = "string"))] IpNetwork),
     /// Exact domain name (e.g. `"example.com"`).
     Domain(String),
     /// Domain suffix — the apex and any subdomain of it.
@@ -1039,7 +1029,7 @@ pub enum Destination {
 /// Inclusive guest-side port range for a [`Rule`] match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PortRange {
     /// Start port (inclusive).
     pub start: u16,
@@ -1051,7 +1041,7 @@ pub struct PortRange {
 /// direction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Rule {
     /// Direction this rule applies to.
     pub direction: Direction,
@@ -1071,7 +1061,7 @@ pub struct Rule {
 /// per-direction default [`Action`]. Carried in [`NetworkSpec::policy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct NetworkPolicy {
     /// Default action for egress traffic matching no rule. Default: `Deny`.
     #[serde(default = "action_deny")]
@@ -1097,7 +1087,7 @@ fn action_deny() -> Action {
 /// DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct DnsConfig {
     /// Whether DNS-rebinding protection is enabled. Default: true.
@@ -1106,7 +1096,6 @@ pub struct DnsConfig {
     /// strings. Empty falls back to the host's `/etc/resolv.conf`.
     pub nameservers: Vec<String>,
     /// Per-query timeout in milliseconds. Default: 5000.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub query_timeout_ms: u64,
 }
 
@@ -1125,12 +1114,11 @@ impl Default for DnsConfig {
 /// [`NetworkSpec::interface`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct InterfaceOverrides {
     /// Guest MAC address as six octets. Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<Vec<U53>>"))]
     pub mac: Option<[u8; 6]>,
     /// Interface MTU. Default: 1500.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1138,22 +1126,22 @@ pub struct InterfaceOverrides {
     /// Guest IPv4 address (e.g. `172.16.0.2`). Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub ipv4_address: Option<Ipv4Addr>,
     /// Guest IPv4 pool CIDR (e.g. `"172.16.0.0/12"`). Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub ipv4_pool: Option<Ipv4Network>,
     /// Guest IPv6 address. Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub ipv6_address: Option<Ipv6Addr>,
     /// Guest IPv6 pool CIDR. Default: derived from slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub ipv6_pool: Option<Ipv6Network>,
 }
 
@@ -1171,7 +1159,7 @@ pub struct InterfaceOverrides {
 /// contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct NetworkSpec {
     /// Whether networking is enabled for this sandbox.
@@ -1201,7 +1189,6 @@ pub struct NetworkSpec {
     pub secrets: Option<SecretsConfig>,
 
     /// Max concurrent guest connections.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub max_connections: Option<usize>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
@@ -1211,7 +1198,7 @@ pub struct NetworkSpec {
 /// A published port mapping between host and guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PublishedPortSpec {
     /// Host-side port to bind.
     pub host_port: u16,
@@ -1230,7 +1217,7 @@ pub struct PublishedPortSpec {
 /// Transport protocol for a published port.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum PortProtocol {
     /// TCP.
     #[default]
@@ -1249,11 +1236,11 @@ pub enum PortProtocol {
 /// Fully-assembled handoff-init specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HandoffInit {
     /// Init binary: absolute path inside the guest rootfs, or the literal `auto`.
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub cmd: PathBuf,
 
     /// Supplemental argv. `argv[0]` is implicitly `cmd`.
@@ -1262,7 +1249,6 @@ pub struct HandoffInit {
 
     /// Extra env vars merged on top of the inherited env.
     #[serde(default)]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Vec<Vec<String>>"))]
     pub env: Vec<(String, String)>,
 }
 
@@ -1273,7 +1259,7 @@ pub struct HandoffInit {
 /// Sandbox lifecycle policy.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxPolicy {
     /// Whether the sandbox is ephemeral.
     ///
@@ -1290,11 +1276,9 @@ pub struct SandboxPolicy {
     // typeshare rejects bare 64-bit ints (JS-unsafe); `U53` is its big-int
     // escape and the Go backend maps it to `uint64` — exact, since this crate's
     // typeshare output targets Go only.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub max_duration_secs: Option<u64>,
 
     /// Idle timeout in seconds. `None` = no idle detection.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub idle_timeout_secs: Option<u64>,
 }
 
@@ -1346,7 +1330,7 @@ pub struct SnapshotSpec {
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct SandboxSpec {
     /// Unique sandbox name.
@@ -1366,10 +1350,6 @@ pub struct SandboxSpec {
     pub env: Vec<EnvVar>,
 
     /// User-defined labels attached to the sandbox.
-    #[cfg_attr(
-        feature = "typeshare",
-        typeshare(serialized_as = "HashMap<String, String>")
-    )]
     pub labels: BTreeMap<String, String>,
 
     /// Sandbox-wide resource limits inherited by guest processes.
@@ -1400,7 +1380,7 @@ pub struct SandboxSpec {
 /// CPU and memory resources for a sandbox.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct SandboxResources {
     /// Number of virtual CPUs.
@@ -1413,7 +1393,7 @@ pub struct SandboxResources {
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct SandboxRuntimeOptions {
     /// Working directory inside the guest.
@@ -1425,10 +1405,6 @@ pub struct SandboxRuntimeOptions {
     /// Named scripts available inside the guest.
     // typeshare doesn't recognize `BTreeMap`; serialize as a map for codegen
     // (identical JSON object shape) → Go `map[string]string`.
-    #[cfg_attr(
-        feature = "typeshare",
-        typeshare(serialized_as = "HashMap<String, String>")
-    )]
     pub scripts: BTreeMap<String, String>,
 
     /// Image entrypoint override.
@@ -1447,7 +1423,6 @@ pub struct SandboxRuntimeOptions {
     pub log_level: Option<SandboxLogLevel>,
 
     /// Metrics sampling interval in milliseconds. `None` disables sampling.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<U53>"))]
     pub metrics_sample_interval_ms: Option<u64>,
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
@@ -1457,7 +1432,7 @@ pub struct SandboxRuntimeOptions {
 /// Environment variable entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EnvVar {
     /// Environment variable name.
     pub key: String,
@@ -1469,7 +1444,7 @@ pub struct EnvVar {
 /// Runtime log verbosity for sandbox specs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxLogLevel {
     /// Emit only error logs.
@@ -1495,7 +1470,7 @@ pub enum SandboxLogLevel {
 /// POSIX resource limit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
@@ -1551,17 +1526,15 @@ pub enum RlimitResource {
 /// A POSIX resource limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Rlimit {
     /// Resource type.
     pub resource: RlimitResource,
 
     /// Soft limit (can be raised up to hard limit by the process).
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub soft: u64,
 
     /// Hard limit (ceiling, requires privileges to raise).
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "U53"))]
     pub hard: u64,
 }
 

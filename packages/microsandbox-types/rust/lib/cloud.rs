@@ -39,7 +39,7 @@ pub struct CloudCreateSandboxRequest {
 /// Cloud sandbox specification carried on create routes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct CloudSandboxSpec {
     /// Unique sandbox name.
@@ -59,10 +59,6 @@ pub struct CloudSandboxSpec {
     pub env: Vec<EnvVar>,
 
     /// User-defined labels attached to the sandbox.
-    #[cfg_attr(
-        feature = "typeshare",
-        typeshare(serialized_as = "HashMap<String, String>")
-    )]
     pub labels: BTreeMap<String, String>,
 
     /// Sandbox-wide resource limits inherited by guest processes.
@@ -93,7 +89,7 @@ pub struct CloudSandboxSpec {
 /// Cloud resource request.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct CloudSandboxResources {
     /// Number of virtual CPUs.
@@ -114,15 +110,14 @@ pub struct CloudSandboxResources {
 /// [`CloudSandboxResources::disk_size_mib`]; conversion to the domain spec
 /// attaches it to OCI rootfs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
-#[serde(tag = "type", content = "data")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CloudRootfsSource {
     /// Use a host directory directly as the root filesystem.
     #[serde(alias = "Bind")]
     Bind(
         /// Host path to bind mount.
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         PathBuf,
     ),
 
@@ -137,7 +132,7 @@ pub enum CloudRootfsSource {
     #[serde(alias = "DiskImage")]
     DiskImage {
         /// Path to the disk image file on the host.
-        #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
         path: PathBuf,
         /// Disk image format.
         format: DiskImageFormat,
@@ -153,7 +148,7 @@ pub enum CloudRootfsSource {
 /// Wire shape of the cloud sandbox response returned by sandbox endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudCreateSandboxResponse {
     /// Server-side UUID.
     pub id: String,
@@ -170,15 +165,15 @@ pub struct CloudCreateSandboxResponse {
     /// Whether the sandbox should be removed when its allocation terminates.
     pub ephemeral: bool,
     /// Creation timestamp.
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "String"))]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: DateTime<Utc>,
     /// Last start timestamp, when known.
     #[serde(default)]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub started_at: Option<DateTime<Utc>>,
     /// Last stop timestamp, when known.
     #[serde(default)]
-    #[cfg_attr(feature = "typeshare", typeshare(serialized_as = "Option<String>"))]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub stopped_at: Option<DateTime<Utc>>,
     /// Last failure reason, when any.
     #[serde(default)]
@@ -188,7 +183,7 @@ pub struct CloudCreateSandboxResponse {
 /// Sandbox lifecycle status returned by the cloud control plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CloudSandboxStatus {
     /// Created in the database but not yet started.
@@ -208,7 +203,7 @@ pub enum CloudSandboxStatus {
 /// Wire shape of paginated list responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudPaginated<T> {
     /// Page of response items.
     pub data: Vec<T>,
@@ -220,7 +215,7 @@ pub struct CloudPaginated<T> {
 /// Wire shape of the message response returned by mutation endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudMessageResponse {
     /// Human-readable response message.
     pub message: String,
@@ -229,7 +224,7 @@ pub struct CloudMessageResponse {
 /// Wire shape of the typed error body returned by cloud APIs on 4xx/5xx responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudErrorBody {
     /// Flat machine-readable error code, when returned in this shape.
     #[serde(default)]
@@ -245,7 +240,7 @@ pub struct CloudErrorBody {
 /// Nested cloud API error details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typeshare", typeshare::typeshare)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudErrorDetails {
     /// Machine-readable error code.
     #[serde(default)]
