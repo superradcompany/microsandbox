@@ -1376,8 +1376,7 @@ mod tests {
 
         // Back-compat: legacy kebab-case tags still deserialize via #[serde(alias)].
         let legacy: Destination =
-            serde_json::from_str(r#"{"domain-suffix":"legacy.example.com"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"domain-suffix":"legacy.example.com"}"#).unwrap();
         assert!(matches!(legacy, Destination::DomainSuffix(_)));
         let legacy_group: DestinationGroup = serde_json::from_str(r#""link-local""#).unwrap();
         assert!(matches!(legacy_group, DestinationGroup::LinkLocal));

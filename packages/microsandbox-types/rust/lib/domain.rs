@@ -2213,10 +2213,8 @@ mod secret_tests {
 
     #[test]
     fn violation_action_accepts_legacy_pascal_case() {
-        let action: ViolationAction = serde_json::from_str(
-            r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#,
-        )
-        .unwrap();
+        let action: ViolationAction =
+            serde_json::from_str(r#"{"Passthrough":[{"Exact":"api.anthropic.com"}]}"#).unwrap();
         assert_eq!(
             action,
             ViolationAction::Passthrough(vec![HostPattern::Exact("api.anthropic.com".into())])

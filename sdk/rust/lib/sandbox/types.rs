@@ -1344,23 +1344,20 @@ mod tests {
         // Adjacently tagged; the legacy PascalCase tag still deserializes via
         // `#[serde(alias)]`, and an omitted `options` falls back to the default.
         let bind: VolumeMount =
-            serde_json::from_str(r#"{"Bind":{"host":"/host/data","guest":"/data"}}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"Bind":{"host":"/host/data","guest":"/data"}}"#).unwrap();
         match bind {
             VolumeMount::Bind { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Bind, got {other:?}"),
         }
 
         let named: VolumeMount =
-            serde_json::from_str(r#"{"named":{"name":"cache","guest":"/cache"}}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"named":{"name":"cache","guest":"/cache"}}"#).unwrap();
         match named {
             VolumeMount::Named { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Named, got {other:?}"),
         }
 
-        let tmpfs: VolumeMount =
-            serde_json::from_str(r#"{"Tmpfs":{"guest":"/tmp"}}"#).unwrap();
+        let tmpfs: VolumeMount = serde_json::from_str(r#"{"Tmpfs":{"guest":"/tmp"}}"#).unwrap();
         match tmpfs {
             VolumeMount::Tmpfs { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Tmpfs, got {other:?}"),
