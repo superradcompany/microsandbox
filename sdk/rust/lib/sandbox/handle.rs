@@ -224,6 +224,21 @@ impl SandboxHandle {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
+    /// Fail with a typed error when the sandbox is not running.
+    fn require_running(&self, operation: &str) -> MicrosandboxResult<()> {
+        let status = self.status_snapshot();
+        if matches!(
+            status,
+            super::SandboxStatus::Running | super::SandboxStatus::Draining
+        ) {
+            return Ok(());
+        }
+        Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+            "'{}' is not running (status: {status:?}); cannot {operation}",
+            self.name
+        )))
+    }
+
     /// Return a fresh handle for the same sandbox name.
     pub async fn refresh(&self) -> MicrosandboxResult<SandboxHandle> {
         self.backend
@@ -292,8 +307,8 @@ impl SandboxHandle {
             })?;
 
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running (status: {:?})",
+            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+                "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
         }
@@ -355,8 +370,8 @@ impl SandboxHandle {
                 available_when: "when cloud attach lands".into(),
             })?;
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running (status: {:?})",
+            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+                "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
         }
@@ -393,6 +408,7 @@ impl SandboxHandle {
     /// are not started implicitly; call [`start`](Self::start) first when that
     /// is the desired behavior.
     pub async fn ping(&self) -> MicrosandboxResult<super::SandboxPingResult> {
+        self.require_running("ping")?;
         self.connect().await?.ping().await
     }
 
@@ -402,6 +418,7 @@ impl SandboxHandle {
     /// are not started implicitly; call [`start`](Self::start) first when that
     /// is the desired behavior.
     pub async fn touch(&self) -> MicrosandboxResult<super::SandboxTouchResult> {
+        self.require_running("touch")?;
         self.connect().await?.touch().await
     }
 

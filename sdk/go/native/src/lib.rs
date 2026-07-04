@@ -431,6 +431,7 @@ where
 mod error_kind {
     pub const SANDBOX_NOT_FOUND: &str = "sandbox_not_found";
     pub const SANDBOX_STILL_RUNNING: &str = "sandbox_still_running";
+    pub const SANDBOX_NOT_RUNNING: &str = "sandbox_not_running";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -496,6 +497,7 @@ impl From<MicrosandboxError> for FfiError {
         let kind = match &e {
             MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
             MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
+            MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
