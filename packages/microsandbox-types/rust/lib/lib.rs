@@ -31,7 +31,7 @@ pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
-    SecretModificationPatch, SecretPatchOperation, SecretPlannedChange, SecretSource,
+    SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,

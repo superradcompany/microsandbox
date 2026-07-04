@@ -13,7 +13,7 @@ use crate::policy::{BuildError, NetworkPolicy};
 use zeroize::Zeroizing;
 
 use crate::secrets::config::{
-    HostPattern, SecretEntry, SecretInjection, SecretSourceRef, ViolationAction,
+    HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
 };
 use crate::tls::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
@@ -50,7 +50,7 @@ pub struct TlsBuilder {
 pub struct SecretBuilder {
     env_var: Option<String>,
     value: Option<String>,
-    source: Option<SecretSourceRef>,
+    source: Option<SecretSource>,
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
     injection: SecretInjection,
@@ -457,7 +457,7 @@ impl SecretBuilder {
     /// The durable config records only the reference; the plaintext is read
     /// from the host environment when the sandbox starts, so it never lands
     /// in the database.
-    pub fn source(mut self, source: SecretSourceRef) -> Self {
+    pub fn source(mut self, source: SecretSource) -> Self {
         self.source = Some(source);
         self
     }
@@ -772,7 +772,7 @@ mod tests {
     fn secret_builder_source_yields_reference_and_empty_value() {
         let secret = SecretBuilder::new()
             .env("API_KEY")
-            .source(SecretSourceRef::Env {
+            .source(SecretSource::Env {
                 var: "HOST_API_KEY".into(),
             })
             .allow_host("api.example.com")
@@ -781,7 +781,7 @@ mod tests {
         assert!(secret.value.is_empty());
         assert_eq!(
             secret.source,
-            Some(SecretSourceRef::Env {
+            Some(SecretSource::Env {
                 var: "HOST_API_KEY".into()
             })
         );
@@ -797,7 +797,7 @@ mod tests {
         let _ = SecretBuilder::new()
             .env("API_KEY")
             .value("inline")
-            .source(SecretSourceRef::Env {
+            .source(SecretSource::Env {
                 var: "HOST_API_KEY".into(),
             })
             .allow_host("api.example.com")

@@ -7,6 +7,7 @@
 //! binding can speak the same contract.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::domain::EnvVar;
 
@@ -17,7 +18,9 @@ use crate::domain::EnvVar;
 /// A requested sandbox modification.
 ///
 /// This type is serializable so SDKs and the CLI can share one canonical
-/// contract. It does not contain raw secret values.
+/// contract. The only field that may carry raw secret material is the
+/// per-secret `value` inside [`SecretModificationPatch`]; plans derived from
+/// a patch are always value-free.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxModificationPatch {
@@ -57,9 +60,15 @@ pub struct SandboxModificationPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
 
-    /// Requested secret modifications.
+    /// Desired secret specs, keyed by secret name. The planner diffs each
+    /// spec against the existing config to infer what changes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<SecretModificationPatch>,
+
+    /// Secret names to remove. Removal is explicit: absence of a name from
+    /// `secrets` never means removal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets_remove: Vec<String>,
 }
 
 /// Policy selected for applying or planning a modification.
@@ -78,51 +87,44 @@ pub enum ModificationPolicy {
     Restart,
 }
 
-/// A requested secret modification.
+/// A desired secret spec inside a modification patch.
 ///
-/// The patch records identity, host-side source references, placeholders, and
-/// allowed hosts. It must never carry the actual secret value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The spec is declarative: it states the target state for one secret (source
+/// or value, placeholder, allowed hosts) and the planner infers the concrete
+/// change — added, rotated, hosts updated, placeholder updated — by diffing
+/// the spec against the existing config. Removal is explicit through
+/// [`SandboxModificationPatch::secrets_remove`].
+///
+/// Only `value` may carry secret material, and only in-process: it is
+/// [`Zeroizing`]-wrapped, redacted from `Debug` output, skipped by serde when
+/// empty, and never copied into the plan.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretModificationPatch {
     /// Stable secret identity, usually the environment variable name.
     pub name: String,
 
-    /// Requested secret operation.
-    pub operation: SecretPatchOperation,
-
-    /// Host-side source reference for add or rotate operations.
+    /// Host-side source reference to resolve the value from. Mutually
+    /// exclusive with `value`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<SecretSource>,
+
+    /// Raw secret value supplied by the caller, for embedders that hold only
+    /// a value (e.g. from their own vault). Mutually exclusive with `source`.
+    /// A value-based apply persists the value into the durable config until a
+    /// later source-based rotate migrates the entry to a reference.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub value: Zeroizing<String>,
 
     /// Guest-visible placeholder/reference, if explicitly requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
 
-    /// Allowed host patterns associated with this request.
+    /// Desired allowed host patterns. Empty means "leave unchanged" for an
+    /// existing secret; a new secret needs at least one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<String>,
-}
-
-/// Secret operation requested by a modification patch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(rename_all = "snake_case")]
-pub enum SecretPatchOperation {
-    /// Add the secret if absent, or rotate it if already present.
-    Upsert,
-
-    /// Rotate an existing secret value.
-    Rotate,
-
-    /// Remove a secret.
-    Remove,
-
-    /// Update the allowed hosts for an existing secret.
-    UpdateHosts,
-
-    /// Update the guest-visible placeholder for an existing secret.
-    UpdatePlaceholder,
 }
 
 /// Host-side source for secret material.
@@ -382,4 +384,20 @@ pub struct ResourceResizeStatus {
 
     /// Convergence state.
     pub state: ResourceConvergenceState,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for SecretModificationPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretModificationPatch")
+            .field("name", &self.name)
+            .field("source", &self.source)
+            .field("value", &"[REDACTED]")
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .finish()
+    }
 }

@@ -1311,8 +1311,11 @@ fn apply_network_opts(
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
     for secret_str in &opts.secret {
-        let (env_var, host) = parse_secret(secret_str)?;
-        builder = builder.secret_env_source(&env_var, &env_var, host);
+        let (env_var, host) = parse_secret(secret_str, "create")?;
+        let source = microsandbox::sandbox::SecretSource::Env {
+            var: env_var.clone(),
+        };
+        builder = builder.secret(|s| s.env(&env_var).source(source).allow_host(host));
     }
 
     // DNS, TLS, and other network configuration.
@@ -1650,23 +1653,22 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a secret spec: `ENV@HOST` or `ENV=VALUE@HOST`.
-#[cfg(feature = "net")]
-/// Parse a `--secret ENV@HOST` spec into `(env_var, host)`.
+/// Parse a `--secret ENV@HOST` spec into `(env_var, host)` for `command`
+/// (`create` or `modify`).
 ///
-/// The value is NOT read here: `create` persists a host-side source reference
-/// (`{kind: env, var: ENV}`) that the spawn resolver reads from the host
-/// environment at start time, so raw secret material never lands in the
-/// durable config at rest.
+/// The value is NOT read here: the CLI records a host-side source reference
+/// (`{kind: env, var: ENV}`) that is resolved from the host environment when
+/// needed, so raw secret material never lands in shell history or process
+/// listings.
 ///
-/// The inline `ENV=VALUE@HOST` form is rejected: with only the env source kind
-/// available, storing a literal value would inline it into the persisted
-/// config. Users are pointed at the `ENV@HOST` env-var form instead.
-fn parse_secret(spec: &str) -> anyhow::Result<(String, String)> {
+/// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
+/// the value regardless, so the value path is SDK-only. Users are pointed at
+/// the `ENV@HOST` env-var form instead.
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, String)> {
     if let Some(eq_pos) = spec.find('=') {
         let env_var = &spec[..eq_pos];
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `create`: \
+            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
              host environment variable and reference it with `{env_var}@HOST` instead, which \
              is resolved from the environment at start time."
@@ -2136,37 +2138,41 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "net")]
     #[test]
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, host) = parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com").unwrap();
+        let (env_var, host) =
+            parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
         assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
         assert_eq!(host, "api.example.com");
     }
 
-    #[cfg(feature = "net")]
     #[test]
     fn parse_secret_rejects_inline_value_syntax() {
-        let err = parse_secret("API_KEY=literal@api.example.com")
-            .unwrap_err()
-            .to_string();
+        for command in ["create", "modify"] {
+            let err = parse_secret("API_KEY=literal@api.example.com", command)
+                .unwrap_err()
+                .to_string();
 
-        assert!(
-            err.contains("inline secret values"),
-            "unexpected error: {err}"
-        );
-        assert!(err.contains("API_KEY@HOST"), "unexpected error: {err}");
+            assert!(
+                err.contains("inline secret values"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                err.contains(&format!("`{command}`")),
+                "unexpected error: {err}"
+            );
+            assert!(err.contains("API_KEY@HOST"), "unexpected error: {err}");
+        }
     }
 
-    #[cfg(feature = "net")]
     #[test]
     fn parse_secret_rejects_missing_parts() {
-        assert!(parse_secret("API_KEY").is_err());
-        assert!(parse_secret("@api.example.com").is_err());
-        assert!(parse_secret("API_KEY@").is_err());
+        assert!(parse_secret("API_KEY", "create").is_err());
+        assert!(parse_secret("@api.example.com", "create").is_err());
+        assert!(parse_secret("API_KEY@", "create").is_err());
     }
 
     #[cfg(feature = "net")]

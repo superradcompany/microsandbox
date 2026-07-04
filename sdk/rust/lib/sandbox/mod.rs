@@ -148,7 +148,7 @@ pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchOperation,
+    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
     SecretPlannedChange, SecretSource,
 };
 #[cfg(feature = "ssh")]

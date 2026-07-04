@@ -60,7 +60,7 @@ pub use sandbox::{
     PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
     SandboxConfig, SandboxMetrics, SandboxModificationBuilder, SandboxModificationPatch,
     SandboxModificationPlan, SandboxPingResult, SandboxTouchResult, SecretChangeKind,
-    SecretModificationPatch, SecretPatchOperation, SecretPlannedChange, SecretSource,
+    SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange, SecretSource,
     all_sandbox_metrics, all_sandbox_metrics_local, validate_sandbox_name,
 };
 pub use snapshot::{

@@ -622,6 +622,17 @@ impl SandboxBuilder {
     /// ```ignore
     /// .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
     /// ```
+    ///
+    /// **Plaintext at rest.** The value is persisted verbatim in the durable
+    /// sandbox config and stays there until a later `modify` rotate with a
+    /// source reference migrates the entry. This path exists for embedders
+    /// who hold only a value (e.g. from their own vault); prefer
+    /// `.secret(|s| s.source(..))` when the value can be referenced instead.
+    /// Downstream behavior is identical either way: the guest sees only the
+    /// placeholder, the proxy injects the value for allowed hosts, and
+    /// in-memory copies are zeroized. When a host-side secret store lands,
+    /// this method will import the value and store a reference — same
+    /// signature, no more raw value at rest.
     #[cfg(feature = "net")]
     pub fn secret_env(
         self,
@@ -633,29 +644,6 @@ impl SandboxBuilder {
         let value = value.into();
         let allowed_host = allowed_host.into();
         self.secret(|s| s.env(&env_var).value(value).allow_host(allowed_host))
-    }
-
-    /// Shorthand: add a secret resolved from a host environment variable.
-    ///
-    /// Records a `{kind: env, var: <env_var>}` source reference instead of a
-    /// raw value; the plaintext is read from the host environment at spawn
-    /// time and never persisted in the durable config. Placeholder is
-    /// auto-generated as `$MSB_<env_var>`. Automatically enables TLS
-    /// interception.
-    #[cfg(feature = "net")]
-    pub fn secret_env_source(
-        self,
-        env_var: impl Into<String>,
-        host_env_var: impl Into<String>,
-        allowed_host: impl Into<String>,
-    ) -> Self {
-        use microsandbox_network::secrets::config::SecretSourceRef;
-        let env_var = env_var.into();
-        let source = SecretSourceRef::Env {
-            var: host_env_var.into(),
-        };
-        let allowed_host = allowed_host.into();
-        self.secret(|s| s.env(&env_var).source(source).allow_host(allowed_host))
     }
 
     /// Set an environment variable visible to all commands in this sandbox.

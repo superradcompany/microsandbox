@@ -595,9 +595,15 @@ labels_remove?: Array<string>,
  */
 workdir: string | null,
 /**
- * Requested secret modifications.
+ * Desired secret specs, keyed by secret name. The planner diffs each
+ * spec against the existing config to infer what changes.
  */
-secrets?: Array<SecretModificationPatch>, };
+secrets?: Array<SecretModificationPatch>,
+/**
+ * Secret names to remove. Removal is explicit: absence of a name from
+ * `secrets` never means removal.
+ */
+secrets_remove?: Array<string>, };
 
 export type ModificationPolicy = "no_restart" | "next_start" | "restart";
 
@@ -607,23 +613,26 @@ export type SecretModificationPatch = {
  */
 name: string,
 /**
- * Requested secret operation.
- */
-operation: SecretPatchOperation,
-/**
- * Host-side source reference for add or rotate operations.
+ * Host-side source reference to resolve the value from. Mutually
+ * exclusive with `value`.
  */
 source: SecretSource | null,
+/**
+ * Raw secret value supplied by the caller, for embedders that hold only
+ * a value (e.g. from their own vault). Mutually exclusive with `source`.
+ * A value-based apply persists the value into the durable config until a
+ * later source-based rotate migrates the entry to a reference.
+ */
+value?: string,
 /**
  * Guest-visible placeholder/reference, if explicitly requested.
  */
 placeholder: string | null,
 /**
- * Allowed host patterns associated with this request.
+ * Desired allowed host patterns. Empty means "leave unchanged" for an
+ * existing secret; a new secret needs at least one.
  */
 allowed_hosts?: Array<string>, };
-
-export type SecretPatchOperation = "upsert" | "rotate" | "remove" | "update_hosts" | "update_placeholder";
 
 export type SecretSource = { "kind": "env",
 /**

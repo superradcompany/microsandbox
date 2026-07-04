@@ -11,9 +11,8 @@ use crate::{
     PullPolicy, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Rlimit,
     RlimitResource, RootfsSource, SandboxLogLevel, SandboxModificationPatch,
     SandboxModificationPlan, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    SecretChangeKind, SecretModificationPatch, SecretPatchOperation, SecretPlannedChange,
-    SecretSource, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,
-    VolumeKind, VolumeMount, VolumeSpec,
+    SecretChangeKind, SecretModificationPatch, SecretPlannedChange, SecretSource, SecurityProfile,
+    SnapshotDestination, SnapshotSpec, StatVirtualization, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -79,7 +78,6 @@ pub fn declarations() -> Vec<String> {
         SandboxModificationPatch::decl(&cfg),
         ModificationPolicy::decl(&cfg),
         SecretModificationPatch::decl(&cfg),
-        SecretPatchOperation::decl(&cfg),
         SecretSource::decl(&cfg),
         SandboxModificationPlan::decl(&cfg),
         PlannedChange::decl(&cfg),
@@ -155,7 +153,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 54);
+        assert_eq!(declarations.len(), 53);
         assert!(
             declarations
                 .iter()

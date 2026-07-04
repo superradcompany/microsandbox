@@ -964,6 +964,7 @@ pub(crate) fn build_modify_patch(
         labels_remove: labels_rm.unwrap_or_default(),
         workdir,
         secrets: Vec::new(),
+        secrets_remove: Vec::new(),
     }
 }
 

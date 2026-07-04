@@ -6,8 +6,10 @@ use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
     ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
     SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind, SecretPlannedChange,
+    SecretSource,
 };
 
+use super::common;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -174,11 +176,24 @@ fn apply_secret_args(
     mut builder: SandboxModificationBuilder,
     args: &ModifyArgs,
 ) -> anyhow::Result<SandboxModificationBuilder> {
+    // Group hosts by secret name so repeated `--secret NAME@HOST` flags
+    // accumulate into one declarative spec per name.
+    let mut specs: Vec<(String, Vec<String>)> = Vec::new();
     for secret in &args.secrets {
-        let parsed = parse_secret_spec(secret)?;
-        builder = builder
-            .secret_from_env(&parsed.name)
-            .allow_secret_host(&parsed.name, parsed.host);
+        let (name, host) = common::parse_secret(secret, "modify")?;
+        match specs.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, hosts)) => hosts.push(host),
+            None => specs.push((name, vec![host])),
+        }
+    }
+    for (name, hosts) in specs {
+        builder = builder.secret(|mut s| {
+            s = s.env(&name).source(SecretSource::Env { var: name.clone() });
+            for host in hosts {
+                s = s.allow_host(host);
+            }
+            s
+        });
     }
 
     for name in &args.secret_remove {
@@ -519,23 +534,6 @@ fn disposition_label(disposition: ModificationDisposition) -> &'static str {
     }
 }
 
-fn parse_secret_spec(spec: &str) -> anyhow::Result<ParsedSecretSpec> {
-    let Some((left, host)) = spec.rsplit_once('@') else {
-        anyhow::bail!("secret must be NAME@HOST");
-    };
-    let name = left.split_once('=').map(|(name, _)| name).unwrap_or(left);
-    if name.is_empty() {
-        anyhow::bail!("secret name must not be empty");
-    }
-    if host.is_empty() {
-        anyhow::bail!("secret host must not be empty");
-    }
-    Ok(ParsedSecretSpec {
-        name: name.to_string(),
-        host: host.to_string(),
-    })
-}
-
 fn parse_key_value(entry: &str, flag: &str) -> anyhow::Result<(String, String)> {
     let Some((key, value)) = entry.split_once('=') else {
         anyhow::bail!("{flag} must be KEY=VALUE");
@@ -577,8 +575,8 @@ fn replayed_args(args: &ModifyArgs) -> String {
         rendered.push(format!("--workdir {workdir}"));
     }
     for secret in &args.secrets {
-        let sanitized = parse_secret_spec(secret)
-            .map(|parsed| format!("{}@{}", parsed.name, parsed.host))
+        let sanitized = common::parse_secret(secret, "modify")
+            .map(|(name, host)| format!("{name}@{host}"))
             .unwrap_or_else(|_| "<secret>".to_string());
         rendered.push(format!("--secret {sanitized}"));
     }
@@ -591,11 +589,6 @@ fn replayed_args(args: &ModifyArgs) -> String {
     } else {
         format!("{} ", rendered.join(" "))
     }
-}
-
-struct ParsedSecretSpec {
-    name: String,
-    host: String,
 }
 
 struct ApplyBlocker {
@@ -713,11 +706,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_secret_without_exposing_inline_value() {
-        let spec = parse_secret_spec("API_KEY=secret-value@api.example.com").unwrap();
+    fn rejects_inline_secret_values_loudly() {
+        // The old parser silently discarded the inline value; it must be a
+        // loud error with the same wording as create's rejection.
+        let err = common::parse_secret("API_KEY=secret-value@api.example.com", "modify")
+            .unwrap_err()
+            .to_string();
 
-        assert_eq!(spec.name, "API_KEY");
-        assert_eq!(spec.host, "api.example.com");
+        assert!(
+            err.contains("inline secret values"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("`modify`"), "unexpected error: {err}");
+        assert!(err.contains("API_KEY@HOST"), "unexpected error: {err}");
+        assert!(
+            !err.contains("secret-value"),
+            "error must not echo the value: {err}"
+        );
     }
 
     fn resize_entry(

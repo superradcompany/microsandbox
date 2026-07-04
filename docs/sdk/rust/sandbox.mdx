@@ -1493,6 +1493,10 @@ fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowe
 
 Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow_host(allowed_host))`.
 
+<Warning>
+  **Plaintext at rest.** The value is persisted verbatim in the durable sandbox config until a later `modify` rotate migrates the entry to a source reference. Prefer `.secret(|s| s.source(..))` when the value can be referenced; use this path when you hold only a value. A future host-side secret store will switch this method to import-then-reference with no signature change.
+</Warning>
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">

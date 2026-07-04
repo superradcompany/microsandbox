@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+/// Host-side reference a secret value is resolved from at spawn time. This is
+/// the shared-contract `SecretSource` from `microsandbox-types`, re-exported
+/// so one public source enum serves the whole stack.
+pub use microsandbox_types::SecretSource;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -50,9 +55,9 @@ pub struct SecretEntry {
 
     /// Host-side source reference resolved into [`value`](Self::value) at
     /// spawn time. `None` means `value` already carries the material (the
-    /// legacy inline model used by `msb create --secret`).
+    /// inline model used by value-based secrets).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SecretSourceRef>,
+    pub source: Option<SecretSource>,
 
     /// Placeholder string the sandbox sees instead of the real value.
     ///
@@ -77,26 +82,6 @@ pub struct SecretEntry {
     /// interception (not bypass) and the SNI matches an allowed host.
     #[serde(default = "default_true")]
     pub require_tls_identity: bool,
-}
-
-/// Host-side reference a secret value is resolved from at spawn time.
-///
-/// The serde shape (`kind` tag, snake_case) matches the SDK's public
-/// `SecretSource` type so the same JSON round-trips through the sandbox spec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SecretSourceRef {
-    /// Read the value from a host environment variable.
-    Env {
-        /// Host environment variable name.
-        var: String,
-    },
-
-    /// Read the value from a host-side secret store reference.
-    Store {
-        /// Store-specific secret reference.
-        reference: String,
-    },
 }
 
 /// Host pattern for secret allowlist.
@@ -462,7 +447,7 @@ mod tests {
         assert!(entry.value.is_empty());
         assert_eq!(
             entry.source,
-            Some(SecretSourceRef::Env {
+            Some(SecretSource::Env {
                 var: "API_KEY".into()
             })
         );

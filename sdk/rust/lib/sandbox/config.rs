@@ -498,7 +498,7 @@ impl SandboxConfig {
 pub(crate) fn resolve_config_secret_sources(
     config: &SandboxConfig,
 ) -> crate::MicrosandboxResult<Option<SandboxConfig>> {
-    use microsandbox_network::secrets::config::SecretSourceRef;
+    use microsandbox_network::secrets::config::SecretSource;
 
     if !config.spec.network.enabled {
         return Ok(None);
@@ -510,7 +510,7 @@ pub(crate) fn resolve_config_secret_sources(
             continue;
         };
         match source {
-            SecretSourceRef::Env { var } => {
+            SecretSource::Env { var } => {
                 let value = std::env::var(var).map_err(|_| {
                     crate::MicrosandboxError::InvalidConfig(format!(
                         "secret {}: host environment variable {var} is not set",
@@ -528,7 +528,7 @@ pub(crate) fn resolve_config_secret_sources(
                 secret.value = zeroize::Zeroizing::new(value);
                 resolved_any = true;
             }
-            SecretSourceRef::Store { .. } => {
+            SecretSource::Store { .. } => {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
                     "secret {}: store-backed secret sources are not supported yet",
                     secret.env_var
@@ -1474,7 +1474,7 @@ mod tests {
     #[cfg(feature = "net")]
     fn config_with_source_secret(source_var: Option<&str>) -> SandboxConfig {
         use microsandbox_network::secrets::config::{
-            HostPattern, SecretEntry, SecretInjection, SecretSourceRef,
+            HostPattern, SecretEntry, SecretInjection, SecretSource,
         };
 
         let mut config = SandboxConfig::default();
@@ -1487,7 +1487,7 @@ mod tests {
             } else {
                 zeroize::Zeroizing::new(SECRET_SENTINEL.into())
             },
-            source: source_var.map(|var| SecretSourceRef::Env {
+            source: source_var.map(|var| SecretSource::Env {
                 var: var.to_string(),
             }),
             placeholder: "$MSB_API_KEY".into(),

@@ -875,6 +875,7 @@ pub(crate) fn configure_modify(
         labels_remove: options.labels_remove.clone().unwrap_or_default(),
         workdir: options.workdir.clone(),
         secrets: Vec::new(),
+        secrets_remove: Vec::new(),
     };
 
     let builder = builder.with_patch(patch);

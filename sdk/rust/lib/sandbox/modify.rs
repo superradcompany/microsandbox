@@ -16,7 +16,7 @@ pub use microsandbox_types::modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
-    SecretModificationPatch, SecretPatchOperation, SecretPlannedChange, SecretSource,
+    SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -56,6 +56,19 @@ pub struct SandboxModificationBuilder {
     name: String,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
+}
+
+/// Fluent builder for one declarative secret spec inside a modification
+/// patch, obtained through [`SandboxModificationBuilder::secret`].
+///
+/// It shares the create-time [`SecretBuilder`](crate::sandbox::SecretBuilder)
+/// vocabulary: [`env`](Self::env) names the secret, [`source`](Self::source)
+/// or [`value`](Self::value) provides material (mutually exclusive),
+/// [`placeholder`](Self::placeholder) and [`allow_host`](Self::allow_host)
+/// state the guest-visible reference and the host allow-list.
+#[derive(Default)]
+pub struct SecretPatchBuilder {
+    spec: SecretModificationPatch,
 }
 
 struct DesiredResources {
@@ -171,86 +184,41 @@ impl SandboxModificationBuilder {
         self
     }
 
-    /// Add or rotate a secret from a host environment variable.
+    /// Declare the desired state of one secret via a closure.
     ///
-    /// The environment variable name is recorded as a source reference only;
-    /// its value is not read or stored by the plan.
-    pub fn secret_from_env(mut self, name: impl Into<String>) -> Self {
-        let name = name.into();
-        self.patch.secrets.push(SecretModificationPatch {
-            source: Some(SecretSource::Env { var: name.clone() }),
-            name,
-            operation: SecretPatchOperation::Upsert,
-            placeholder: None,
-            allowed_hosts: Vec::new(),
-        });
+    /// The spec mirrors the create-time secret vocabulary: name the secret
+    /// with `.env(..)`, provide material with `.source(..)` or `.value(..)`,
+    /// and optionally set `.placeholder(..)` and `.allow_host(..)`. The
+    /// planner diffs the spec against the existing config to infer the
+    /// change: a secret that does not exist yet is added, material on an
+    /// existing secret rotates it, and host or placeholder differences
+    /// update those aspects.
+    ///
+    /// ```ignore
+    /// sandbox.modify()
+    ///     .secret(|s| s
+    ///         .env("API_KEY")
+    ///         .source(SecretSource::Env { var: "API_KEY".into() })
+    ///         .allow_host("api.example.com"))
+    ///     .apply()
+    ///     .await?;
+    /// ```
+    ///
+    /// Declaring the same secret again replaces the earlier spec. Removal is
+    /// always explicit through [`remove_secret`](Self::remove_secret).
+    pub fn secret(mut self, f: impl FnOnce(SecretPatchBuilder) -> SecretPatchBuilder) -> Self {
+        let spec = f(SecretPatchBuilder::new()).build();
+        self.patch
+            .secrets
+            .retain(|existing| existing.name != spec.name);
+        self.patch.secrets.push(spec);
         self
     }
 
-    /// Rotate an existing secret from a host environment variable.
-    ///
-    /// The environment variable name is recorded as a source reference only;
-    /// its value is not read or stored by the plan.
-    pub fn rotate_secret_from_env(mut self, name: impl Into<String>) -> Self {
-        let name = name.into();
-        self.patch.secrets.push(SecretModificationPatch {
-            source: Some(SecretSource::Env { var: name.clone() }),
-            name,
-            operation: SecretPatchOperation::Rotate,
-            placeholder: None,
-            allowed_hosts: Vec::new(),
-        });
-        self
-    }
-
-    /// Remove a secret.
+    /// Remove a secret. Removal is always explicit; omitting a secret from
+    /// the patch never removes it.
     pub fn remove_secret(mut self, name: impl Into<String>) -> Self {
-        self.patch.secrets.push(SecretModificationPatch {
-            source: None,
-            name: name.into(),
-            operation: SecretPatchOperation::Remove,
-            placeholder: None,
-            allowed_hosts: Vec::new(),
-        });
-        self
-    }
-
-    /// Set the guest-visible placeholder for a secret.
-    pub fn secret_placeholder(
-        mut self,
-        name: impl Into<String>,
-        placeholder: impl Into<String>,
-    ) -> Self {
-        self.patch.secrets.push(SecretModificationPatch {
-            source: None,
-            name: name.into(),
-            operation: SecretPatchOperation::UpdatePlaceholder,
-            placeholder: Some(placeholder.into()),
-            allowed_hosts: Vec::new(),
-        });
-        self
-    }
-
-    /// Add an allowed host to a secret modification.
-    pub fn allow_secret_host(mut self, name: impl Into<String>, host: impl Into<String>) -> Self {
-        let name = name.into();
-        let host = host.into();
-        if let Some(secret) =
-            self.patch.secrets.iter_mut().rev().find(|secret| {
-                secret.name == name && secret.operation != SecretPatchOperation::Remove
-            })
-        {
-            secret.allowed_hosts.push(host);
-            return self;
-        }
-
-        self.patch.secrets.push(SecretModificationPatch {
-            source: None,
-            name,
-            operation: SecretPatchOperation::UpdateHosts,
-            placeholder: None,
-            allowed_hosts: vec![host],
-        });
+        self.patch.secrets_remove.push(name.into());
         self
     }
 
@@ -291,7 +259,9 @@ impl SandboxModificationBuilder {
     /// start. When the policy is `restart`, the existing stop/start lifecycle
     /// path makes restart-required changes active. Live secret rotation,
     /// removal, and allowed-host updates go through the runtime control
-    /// socket; the durable config records host-side source references only.
+    /// socket; the durable config records host-side source references for
+    /// source-based specs and persists the value for value-based specs (the
+    /// same at-rest property as create's `secret_env`).
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         let handle = self
             .backend
@@ -383,6 +353,60 @@ impl SandboxModificationBuilder {
         }
         plan.applied = true;
         Ok(plan)
+    }
+}
+
+impl SecretPatchBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Name the secret (required). This is the environment variable that
+    /// exposes the placeholder inside the guest.
+    pub fn env(mut self, name: impl Into<String>) -> Self {
+        self.spec.name = name.into();
+        self
+    }
+
+    /// Provide the secret material as a raw value (mutually exclusive with
+    /// [`source`](Self::source)), for embedders that hold only a value.
+    ///
+    /// The value rides in the in-process patch only: it is zeroized on drop,
+    /// redacted from `Debug` output, and never enters the plan. Applying a
+    /// value persists it into the durable config — the same at-rest property
+    /// as create's `secret_env` — until a later source-based rotate migrates
+    /// the entry to a reference.
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.spec.value = zeroize::Zeroizing::new(value.into());
+        self
+    }
+
+    /// Provide the secret material as a host-side source reference (mutually
+    /// exclusive with [`value`](Self::value)). The durable config records
+    /// only the reference; the value is resolved host-side when needed.
+    pub fn source(mut self, source: SecretSource) -> Self {
+        self.spec.source = Some(source);
+        self
+    }
+
+    /// Set the guest-visible placeholder. Placeholder changes cannot reach
+    /// already-running processes, so they classify as restart-required on a
+    /// running sandbox.
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.spec.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// Add an allowed host pattern (`api.example.com`, `*.example.org`, or
+    /// `*`). A non-empty list replaces the secret's current allow-list; an
+    /// empty list leaves it unchanged.
+    pub fn allow_host(mut self, host: impl Into<String>) -> Self {
+        self.spec.allowed_hosts.push(host.into());
+        self
+    }
+
+    fn build(self) -> SecretModificationPatch {
+        self.spec
     }
 }
 
@@ -754,24 +778,30 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
     }
 }
 
-/// Persist secret patches into the sandbox's network secrets config.
+/// Persist secret specs and removals into the sandbox's network secrets
+/// config.
 ///
-/// Upsert and rotate record the host-side source reference and drop any
-/// previously inlined raw value: after a modify touches a secret, the durable
-/// config carries only the reference, the guest-visible placeholder, and the
-/// allowed hosts. Values are resolved from the source at spawn time.
+/// A source-based spec records the host-side reference and drops any
+/// previously inlined raw value; the value is resolved from the source at
+/// spawn time. A value-based spec persists the value into the entry — the
+/// documented at-rest property shared with create's `secret_env` — until a
+/// later source-based rotate migrates the entry to a reference.
 #[cfg(feature = "net")]
 fn apply_secret_patch_to_config(
     config: &mut SandboxConfig,
     patch: &SandboxModificationPatch,
 ) -> MicrosandboxResult<()> {
-    if patch.secrets.is_empty() {
+    if patch.secrets.is_empty() && patch.secrets_remove.is_empty() {
         return Ok(());
     }
     let mut network = config.local_network_config()?;
-    for secret in &patch.secrets {
-        apply_secret_patch_entry(&mut network.secrets, secret)?;
+    for spec in &patch.secrets {
+        apply_secret_spec(&mut network.secrets, spec)?;
     }
+    network
+        .secrets
+        .secrets
+        .retain(|entry| !patch.secrets_remove.contains(&entry.env_var));
     // Enforce env-var and placeholder shape rules before anything persists;
     // validation errors carry entry indexes and sizes, never values.
     network.secrets.validate().map_err(|err| {
@@ -785,7 +815,7 @@ fn apply_secret_patch_to_config(
     _config: &mut SandboxConfig,
     patch: &SandboxModificationPatch,
 ) -> MicrosandboxResult<()> {
-    if patch.secrets.is_empty() {
+    if patch.secrets.is_empty() && patch.secrets_remove.is_empty() {
         return Ok(());
     }
     Err(crate::MicrosandboxError::Unsupported {
@@ -794,72 +824,92 @@ fn apply_secret_patch_to_config(
     })
 }
 
+/// Secret material carried by one spec: a raw value or a source reference.
 #[cfg(feature = "net")]
-fn apply_secret_patch_entry(
+enum SecretMaterial {
+    Value(zeroize::Zeroizing<String>),
+    Source(SecretSource),
+}
+
+/// Extract the material from a spec, enforcing the value/source exclusivity
+/// and the store-source gap. Errors carry the secret name only.
+#[cfg(feature = "net")]
+fn secret_material(spec: &SecretModificationPatch) -> MicrosandboxResult<Option<SecretMaterial>> {
+    if !spec.value.is_empty() {
+        if spec.source.is_some() {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "secret {}: value and source are mutually exclusive",
+                spec.name
+            )));
+        }
+        return Ok(Some(SecretMaterial::Value(spec.value.clone())));
+    }
+    match &spec.source {
+        Some(source @ SecretSource::Env { .. }) => Ok(Some(SecretMaterial::Source(source.clone()))),
+        Some(SecretSource::Store { .. }) => Err(crate::MicrosandboxError::Custom(format!(
+            "secret {}: store-backed secret sources are not supported yet",
+            spec.name
+        ))),
+        None => Ok(None),
+    }
+}
+
+#[cfg(feature = "net")]
+fn apply_secret_spec(
     secrets: &mut microsandbox_network::secrets::config::SecretsConfig,
-    patch: &SecretModificationPatch,
+    spec: &SecretModificationPatch,
 ) -> MicrosandboxResult<()> {
     use microsandbox_network::secrets::config::{SecretEntry, SecretInjection};
 
-    match patch.operation {
-        SecretPatchOperation::Upsert | SecretPatchOperation::Rotate => {
-            let source = durable_secret_source(&patch.name, patch.source.as_ref())?;
-            if let Some(entry) = secrets
-                .secrets
-                .iter_mut()
-                .find(|entry| entry.env_var == patch.name)
-            {
+    let material = secret_material(spec)?;
+    if let Some(entry) = secrets
+        .secrets
+        .iter_mut()
+        .find(|entry| entry.env_var == spec.name)
+    {
+        match material {
+            Some(SecretMaterial::Value(value)) => {
+                entry.value = value;
+                entry.source = None;
+            }
+            Some(SecretMaterial::Source(source)) => {
                 entry.value = zeroize::Zeroizing::new(String::new());
                 entry.source = Some(source);
-                if let Some(placeholder) = &patch.placeholder {
-                    entry.placeholder = placeholder.clone();
-                }
-                if !patch.allowed_hosts.is_empty() {
-                    entry.allowed_hosts = parse_host_patterns(&patch.allowed_hosts);
-                }
-            } else {
-                if patch.operation == SecretPatchOperation::Rotate {
-                    return Err(missing_secret_error(&patch.name));
-                }
-                secrets.secrets.push(SecretEntry {
-                    env_var: patch.name.clone(),
-                    value: zeroize::Zeroizing::new(String::new()),
-                    source: Some(source),
-                    placeholder: patch
-                        .placeholder
-                        .clone()
-                        .unwrap_or_else(|| default_secret_ref(&patch.name)),
-                    allowed_hosts: parse_host_patterns(&patch.allowed_hosts),
-                    injection: SecretInjection::default(),
-                    on_violation: None,
-                    require_tls_identity: true,
-                });
             }
+            None => {}
         }
-        SecretPatchOperation::Remove => {
-            secrets.secrets.retain(|entry| entry.env_var != patch.name);
+        if let Some(placeholder) = &spec.placeholder {
+            entry.placeholder = placeholder.clone();
         }
-        SecretPatchOperation::UpdateHosts => {
-            let entry = secrets
-                .secrets
-                .iter_mut()
-                .find(|entry| entry.env_var == patch.name)
-                .ok_or_else(|| missing_secret_error(&patch.name))?;
-            entry.allowed_hosts = parse_host_patterns(&patch.allowed_hosts);
+        if !spec.allowed_hosts.is_empty() {
+            entry.allowed_hosts = parse_host_patterns(&spec.allowed_hosts);
         }
-        SecretPatchOperation::UpdatePlaceholder => {
-            let entry = secrets
-                .secrets
-                .iter_mut()
-                .find(|entry| entry.env_var == patch.name)
-                .ok_or_else(|| missing_secret_error(&patch.name))?;
-            entry.placeholder = patch.placeholder.clone().ok_or_else(|| {
-                crate::MicrosandboxError::Custom(format!(
-                    "secret {} needs a placeholder",
-                    patch.name
-                ))
-            })?;
-        }
+    } else {
+        let (value, source) = match material {
+            Some(SecretMaterial::Value(value)) => (value, None),
+            Some(SecretMaterial::Source(source)) => {
+                (zeroize::Zeroizing::new(String::new()), Some(source))
+            }
+            None => {
+                return Err(crate::MicrosandboxError::Custom(format!(
+                    "secret {} needs a host-side source or value to add",
+                    spec.name
+                )));
+            }
+        };
+        secrets.secrets.push(SecretEntry {
+            env_var: spec.name.clone(),
+            value,
+            source,
+            placeholder: spec
+                .placeholder
+                .clone()
+                .unwrap_or_else(|| default_secret_ref(&spec.name)),
+            allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
+            injection: SecretInjection::default(),
+            on_violation: None,
+            require_tls_identity: true,
+        });
     }
     Ok(())
 }
@@ -874,77 +924,64 @@ fn parse_host_patterns(
         .collect()
 }
 
-/// Map a patch source to the reference persisted in durable config. Values
-/// are never read here.
-#[cfg(feature = "net")]
-fn durable_secret_source(
-    name: &str,
-    source: Option<&SecretSource>,
-) -> MicrosandboxResult<microsandbox_network::secrets::config::SecretSourceRef> {
-    match source {
-        Some(SecretSource::Env { var }) => {
-            Ok(microsandbox_network::secrets::config::SecretSourceRef::Env { var: var.clone() })
-        }
-        Some(SecretSource::Store { .. }) => Err(crate::MicrosandboxError::Custom(format!(
-            "secret {name}: store-backed secret sources are not supported yet"
-        ))),
-        None => Err(crate::MicrosandboxError::Custom(format!(
-            "secret {name} needs a host-side source to add or rotate"
-        ))),
-    }
-}
-
-fn missing_secret_error(name: &str) -> crate::MicrosandboxError {
-    crate::MicrosandboxError::Custom(format!("secret {name} does not exist"))
-}
-
 /// Build the value-bearing live batch for secret changes the plan classified
-/// as live. Rotation resolves the host-side source here, in the caller's
-/// process, so the value goes straight to the control socket and never into
-/// the plan, logs, or durable config.
+/// as live. Rotation material resolves here, in the caller's process: a
+/// caller-supplied value is passed through as-is, a source reference is
+/// resolved host-side. Either way the value goes straight to the control
+/// socket and never into the plan or logs.
 fn live_secret_updates(
     plan: &SandboxModificationPlan,
     patch: &SandboxModificationPatch,
 ) -> MicrosandboxResult<Vec<microsandbox_runtime::control::SecretLiveChange>> {
     use microsandbox_runtime::control::{SecretLiveChange, SecretValue};
 
-    // Planned secret changes are emitted one per patch entry, in order.
-    let planned = plan.changes.iter().filter_map(|change| match change {
-        PlannedChange::Secret(change) => Some(change),
-        PlannedChange::Config(_) => None,
-    });
+    let spec_for = |name: &str| {
+        patch
+            .secrets
+            .iter()
+            .find(|spec| spec.name == name)
+            .ok_or_else(|| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "planned secret change for {name} has no matching patch spec"
+                ))
+            })
+    };
 
     let mut updates = Vec::new();
-    for (planned, requested) in planned.zip(&patch.secrets) {
+    for change in &plan.changes {
+        let PlannedChange::Secret(planned) = change else {
+            continue;
+        };
         if !matches!(planned.disposition, ModificationDisposition::Live) {
             continue;
         }
         match planned.change {
             SecretChangeKind::Rotated => {
-                let value =
-                    resolve_secret_source_value(&requested.name, requested.source.as_ref())?;
+                let spec = spec_for(&planned.name)?;
+                let value = resolve_secret_value(spec)?;
                 updates.push(SecretLiveChange::Rotate {
-                    name: requested.name.clone(),
+                    name: spec.name.clone(),
                     value: SecretValue(value),
                 });
                 // A rotate request may carry new hosts (e.g. `--secret NAME@HOST`
                 // on an existing secret); apply them in the same batch.
-                if !requested.allowed_hosts.is_empty() {
+                if !spec.allowed_hosts.is_empty() {
                     updates.push(SecretLiveChange::SetAllowedHosts {
-                        name: requested.name.clone(),
-                        hosts: requested.allowed_hosts.clone(),
+                        name: spec.name.clone(),
+                        hosts: spec.allowed_hosts.clone(),
                     });
                 }
             }
             SecretChangeKind::Removed => {
                 updates.push(SecretLiveChange::Remove {
-                    name: requested.name.clone(),
+                    name: planned.name.clone(),
                 });
             }
             SecretChangeKind::HostsUpdated => {
+                let spec = spec_for(&planned.name)?;
                 updates.push(SecretLiveChange::SetAllowedHosts {
-                    name: requested.name.clone(),
-                    hosts: requested.allowed_hosts.clone(),
+                    name: spec.name.clone(),
+                    hosts: spec.allowed_hosts.clone(),
                 });
             }
             // Added, renamed, and placeholder changes never classify live.
@@ -954,6 +991,16 @@ fn live_secret_updates(
         }
     }
     Ok(updates)
+}
+
+/// Resolve a spec's material into the value sent over the control socket.
+/// A caller-supplied value wins; otherwise the source reference resolves
+/// host-side. Errors name the secret and the source reference only.
+fn resolve_secret_value(spec: &SecretModificationPatch) -> MicrosandboxResult<String> {
+    if !spec.value.is_empty() {
+        return Ok(spec.value.as_str().to_owned());
+    }
+    resolve_secret_source_value(&spec.name, spec.source.as_ref())
 }
 
 /// Resolve a secret source into its value at apply time. Errors name the
@@ -980,7 +1027,7 @@ fn resolve_secret_source_value(
             "secret {name}: store-backed secret sources are not supported yet"
         ))),
         None => Err(crate::MicrosandboxError::Custom(format!(
-            "secret {name} needs a host-side source to rotate"
+            "secret {name} needs a host-side source or value to rotate"
         ))),
     }
 }
@@ -1162,47 +1209,171 @@ fn push_secret_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    for secret in &patch.secrets {
-        let existing = existing_secret(config, &secret.name);
-        let change = secret_change_kind(secret.operation, existing.is_some());
-        let before_ref = secret_before_ref(secret, existing.as_ref());
-        let after_ref = secret_after_ref(secret, existing.as_ref());
-        let disposition =
-            secret_disposition(status, policy, change, live_secret_reconfigure_supported);
-        let reason = secret_reason(status, policy, change, live_secret_reconfigure_supported);
+    for spec in &patch.secrets {
+        let existing = existing_secret(config, &spec.name);
+        let Some(change) = infer_secret_change(spec, existing.as_ref()) else {
+            // The spec already matches the current config: declarative no-op.
+            continue;
+        };
+        let placeholder_changed = secret_placeholder_changes(spec, existing.as_ref());
+        let disposition = secret_disposition(
+            status,
+            policy,
+            change,
+            placeholder_changed,
+            live_secret_reconfigure_supported,
+        );
+        let reason = secret_reason(
+            status,
+            policy,
+            change,
+            placeholder_changed,
+            live_secret_reconfigure_supported,
+        );
 
-        if matches!(disposition, ModificationDisposition::RequiresRestart)
-            && running_status(status)
-            && matches!(
-                change,
-                SecretChangeKind::Rotated
-                    | SecretChangeKind::Removed
-                    | SecretChangeKind::HostsUpdated
-            )
-        {
-            warnings.push(ModificationWarning {
-                field: SECRET_FIELD.to_string(),
-                message: LIVE_SECRET_RECONFIGURE_UNAVAILABLE.to_string(),
-            });
-        }
+        push_live_secret_warning(
+            status,
+            change,
+            placeholder_changed,
+            disposition,
+            live_secret_reconfigure_supported,
+            warnings,
+        );
 
         changes.push(PlannedChange::Secret(SecretPlannedChange {
             field: SECRET_FIELD.to_string(),
-            name: secret.name.clone(),
+            name: spec.name.clone(),
             change,
-            before_ref,
-            after_ref,
+            before_ref: existing.as_ref().map(|secret| secret.placeholder.clone()),
+            after_ref: Some(
+                spec.placeholder
+                    .clone()
+                    .or_else(|| existing.as_ref().map(|secret| secret.placeholder.clone()))
+                    .unwrap_or_else(|| default_secret_ref(&spec.name)),
+            ),
             disposition,
-            allow_hosts: if secret.allowed_hosts.is_empty() {
+            allow_hosts: if spec.allowed_hosts.is_empty() {
                 existing
                     .as_ref()
                     .map(|secret| secret.allowed_hosts.clone())
                     .unwrap_or_default()
             } else {
-                secret.allowed_hosts.clone()
+                spec.allowed_hosts.clone()
             },
             reason,
         }));
+    }
+
+    for name in &patch.secrets_remove {
+        let existing = existing_secret(config, name);
+        if existing.is_none() && cfg!(feature = "net") {
+            // Already absent: declarative no-op. Without the net feature the
+            // change is still emitted so it surfaces as unsupported.
+            continue;
+        }
+        let change = SecretChangeKind::Removed;
+        let disposition = secret_disposition(
+            status,
+            policy,
+            change,
+            false,
+            live_secret_reconfigure_supported,
+        );
+        let reason = secret_reason(
+            status,
+            policy,
+            change,
+            false,
+            live_secret_reconfigure_supported,
+        );
+        push_live_secret_warning(
+            status,
+            change,
+            false,
+            disposition,
+            live_secret_reconfigure_supported,
+            warnings,
+        );
+        changes.push(PlannedChange::Secret(SecretPlannedChange {
+            field: SECRET_FIELD.to_string(),
+            name: name.clone(),
+            change,
+            before_ref: Some(
+                existing
+                    .as_ref()
+                    .map(|secret| secret.placeholder.clone())
+                    .unwrap_or_else(|| default_secret_ref(name)),
+            ),
+            after_ref: None,
+            disposition,
+            allow_hosts: existing
+                .as_ref()
+                .map(|secret| secret.allowed_hosts.clone())
+                .unwrap_or_default(),
+            reason,
+        }));
+    }
+}
+
+/// Infer what a declarative secret spec changes by diffing it against the
+/// existing config. `None` means the spec already matches the target state.
+fn infer_secret_change(
+    spec: &SecretModificationPatch,
+    existing: Option<&ExistingSecret>,
+) -> Option<SecretChangeKind> {
+    let has_material = spec.source.is_some() || !spec.value.is_empty();
+    let Some(existing) = existing else {
+        return Some(SecretChangeKind::Added);
+    };
+    if has_material {
+        return Some(SecretChangeKind::Rotated);
+    }
+    if secret_placeholder_changes(spec, Some(existing)) {
+        return Some(SecretChangeKind::PlaceholderUpdated);
+    }
+    if !spec.allowed_hosts.is_empty() && spec.allowed_hosts != existing.allowed_hosts {
+        return Some(SecretChangeKind::HostsUpdated);
+    }
+    None
+}
+
+/// Whether the spec asks for a guest-visible placeholder different from the
+/// current one. Placeholder changes cannot reach running processes, so they
+/// disqualify an otherwise live-capable change.
+fn secret_placeholder_changes(
+    spec: &SecretModificationPatch,
+    existing: Option<&ExistingSecret>,
+) -> bool {
+    match (&spec.placeholder, existing) {
+        (Some(placeholder), Some(existing)) => *placeholder != existing.placeholder,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// Warn when a live-capable secret change falls back to restart-required
+/// only because the running runtime lacks live secret reconfiguration.
+fn push_live_secret_warning(
+    status: SandboxStatus,
+    change: SecretChangeKind,
+    placeholder_changed: bool,
+    disposition: ModificationDisposition,
+    live_secret_reconfigure_supported: bool,
+    warnings: &mut Vec<ModificationWarning>,
+) {
+    if matches!(disposition, ModificationDisposition::RequiresRestart)
+        && running_status(status)
+        && !placeholder_changed
+        && !live_secret_reconfigure_supported
+        && matches!(
+            change,
+            SecretChangeKind::Rotated | SecretChangeKind::Removed | SecretChangeKind::HostsUpdated
+        )
+    {
+        warnings.push(ModificationWarning {
+            field: SECRET_FIELD.to_string(),
+            message: LIVE_SECRET_RECONFIGURE_UNAVAILABLE.to_string(),
+        });
     }
 }
 
@@ -1325,10 +1496,12 @@ fn push_spec_conflicts(
     }
 }
 
-/// Reject secret patches that could never persist or apply: missing or
-/// unsupported sources, operations on secrets that do not exist, and host or
-/// placeholder updates without a payload. Without the net feature the whole
-/// secret surface is already unsupported, so no per-entry checks run.
+/// Reject secret specs that could never persist or apply: material conflicts
+/// (both value and source, or neither for a new secret), unsupported store
+/// sources, a new secret without hosts, and a name that is both configured
+/// and removed. Messages carry names and references, never values. Without
+/// the net feature the whole secret surface is already unsupported, so no
+/// per-entry checks run.
 fn push_secret_conflicts(
     config: &SandboxConfig,
     patch: &SandboxModificationPatch,
@@ -1345,51 +1518,40 @@ fn push_secret_conflicts(
         });
     };
 
-    for secret in &patch.secrets {
-        let name = &secret.name;
-        let exists = existing_secret(config, name).is_some();
-        let source_conflict = match (&secret.operation, &secret.source) {
-            (SecretPatchOperation::Upsert | SecretPatchOperation::Rotate, None) => Some(format!(
-                "secret {name} needs a host-side source to add or rotate"
-            )),
-            (
-                SecretPatchOperation::Upsert | SecretPatchOperation::Rotate,
-                Some(SecretSource::Store { .. }),
-            ) => Some(format!(
-                "secret {name}: store-backed secret sources are not supported yet"
-            )),
-            _ => None,
-        };
-        if let Some(message) = source_conflict {
-            conflict(message);
+    for spec in &patch.secrets {
+        let name = &spec.name;
+        if name.is_empty() {
+            conflict("secret spec needs a name; call .env(..) in the secret closure".to_string());
+            continue;
         }
 
-        match secret.operation {
-            SecretPatchOperation::Upsert => {
-                if !exists && secret.allowed_hosts.is_empty() {
-                    conflict(format!("secret {name} needs at least one allowed host"));
-                }
+        let has_value = !spec.value.is_empty();
+        if has_value && spec.source.is_some() {
+            conflict(format!(
+                "secret {name}: value and source are mutually exclusive"
+            ));
+        }
+        if matches!(spec.source, Some(SecretSource::Store { .. })) {
+            conflict(format!(
+                "secret {name}: store-backed secret sources are not supported yet"
+            ));
+        }
+
+        if existing_secret(config, name).is_none() {
+            if spec.source.is_none() && !has_value {
+                conflict(format!(
+                    "secret {name} needs a host-side source or value to add"
+                ));
             }
-            SecretPatchOperation::Rotate => {
-                if !exists {
-                    conflict(format!("secret {name} does not exist"));
-                }
+            if spec.allowed_hosts.is_empty() {
+                conflict(format!("secret {name} needs at least one allowed host"));
             }
-            SecretPatchOperation::Remove => {}
-            SecretPatchOperation::UpdateHosts => {
-                if !exists {
-                    conflict(format!("secret {name} does not exist"));
-                } else if secret.allowed_hosts.is_empty() {
-                    conflict(format!("secret {name} needs at least one allowed host"));
-                }
-            }
-            SecretPatchOperation::UpdatePlaceholder => {
-                if !exists {
-                    conflict(format!("secret {name} does not exist"));
-                } else if secret.placeholder.is_none() {
-                    conflict(format!("secret {name} needs a placeholder"));
-                }
-            }
+        }
+
+        if patch.secrets_remove.contains(name) {
+            conflict(format!(
+                "secret {name} is both configured and removed in the same modification"
+            ));
         }
     }
 }
@@ -1591,17 +1753,30 @@ fn secret_disposition(
     status: SandboxStatus,
     policy: ModificationPolicy,
     change: SecretChangeKind,
+    placeholder_changed: bool,
     live_secret_reconfigure_supported: bool,
 ) -> ModificationDisposition {
     // Without the net feature there is no secrets layer to persist into or
     // reconfigure, so every secret change is unsupported.
     #[cfg(not(feature = "net"))]
     {
-        let _ = (status, policy, change, live_secret_reconfigure_supported);
+        let _ = (
+            status,
+            policy,
+            change,
+            placeholder_changed,
+            live_secret_reconfigure_supported,
+        );
         return ModificationDisposition::Unsupported;
     }
     #[cfg(feature = "net")]
-    secret_disposition_net(status, policy, change, live_secret_reconfigure_supported)
+    secret_disposition_net(
+        status,
+        policy,
+        change,
+        placeholder_changed,
+        live_secret_reconfigure_supported,
+    )
 }
 
 #[cfg(feature = "net")]
@@ -1609,6 +1784,7 @@ fn secret_disposition_net(
     status: SandboxStatus,
     policy: ModificationPolicy,
     change: SecretChangeKind,
+    placeholder_changed: bool,
     live_secret_reconfigure_supported: bool,
 ) -> ModificationDisposition {
     if policy == ModificationPolicy::NextStart || stopped_status(status) {
@@ -1622,8 +1798,10 @@ fn secret_disposition_net(
     }
 
     match change {
+        // A rotate that also changes the guest-visible placeholder cannot
+        // apply live: the new placeholder never reaches running processes.
         SecretChangeKind::Rotated | SecretChangeKind::Removed | SecretChangeKind::HostsUpdated
-            if live_secret_reconfigure_supported =>
+            if live_secret_reconfigure_supported && !placeholder_changed =>
         {
             ModificationDisposition::Live
         }
@@ -1635,71 +1813,50 @@ fn secret_reason(
     status: SandboxStatus,
     policy: ModificationPolicy,
     change: SecretChangeKind,
+    placeholder_changed: bool,
     live_secret_reconfigure_supported: bool,
 ) -> Option<String> {
     #[cfg(not(feature = "net"))]
     {
-        let _ = (status, policy, change, live_secret_reconfigure_supported);
+        let _ = (
+            status,
+            policy,
+            change,
+            placeholder_changed,
+            live_secret_reconfigure_supported,
+        );
         return Some(SECRETS_UNAVAILABLE_WITHOUT_NET.to_string());
     }
     #[cfg(feature = "net")]
-    match secret_disposition(status, policy, change, live_secret_reconfigure_supported) {
-        ModificationDisposition::RequiresRestart if running_status(status) => match change {
-            SecretChangeKind::Added
-            | SecretChangeKind::Renamed
-            | SecretChangeKind::PlaceholderUpdated => Some(
-                "guest-visible secret placeholders cannot be introduced into existing processes"
-                    .to_string(),
-            ),
-            SecretChangeKind::Rotated
-            | SecretChangeKind::Removed
-            | SecretChangeKind::HostsUpdated => {
+    match secret_disposition(
+        status,
+        policy,
+        change,
+        placeholder_changed,
+        live_secret_reconfigure_supported,
+    ) {
+        ModificationDisposition::RequiresRestart if running_status(status) => {
+            if placeholder_changed
+                || matches!(
+                    change,
+                    SecretChangeKind::Added
+                        | SecretChangeKind::Renamed
+                        | SecretChangeKind::PlaceholderUpdated
+                )
+            {
+                Some(
+                    "guest-visible secret placeholders cannot be introduced into existing processes"
+                        .to_string(),
+                )
+            } else {
                 Some(LIVE_SECRET_RECONFIGURE_UNAVAILABLE.to_string())
             }
-        },
+        }
         ModificationDisposition::Unsupported => Some(format!(
             "cannot modify while sandbox is {}",
             status_name(status)
         )),
         _ => None,
-    }
-}
-
-fn secret_change_kind(operation: SecretPatchOperation, existing: bool) -> SecretChangeKind {
-    match operation {
-        SecretPatchOperation::Upsert if existing => SecretChangeKind::Rotated,
-        SecretPatchOperation::Upsert => SecretChangeKind::Added,
-        SecretPatchOperation::Rotate => SecretChangeKind::Rotated,
-        SecretPatchOperation::Remove => SecretChangeKind::Removed,
-        SecretPatchOperation::UpdateHosts => SecretChangeKind::HostsUpdated,
-        SecretPatchOperation::UpdatePlaceholder => SecretChangeKind::PlaceholderUpdated,
-    }
-}
-
-fn secret_before_ref(
-    patch: &SecretModificationPatch,
-    existing: Option<&ExistingSecret>,
-) -> Option<String> {
-    match patch.operation {
-        SecretPatchOperation::Upsert if existing.is_none() => None,
-        _ => existing
-            .map(|secret| secret.placeholder.clone())
-            .or_else(|| Some(default_secret_ref(&patch.name))),
-    }
-}
-
-fn secret_after_ref(
-    patch: &SecretModificationPatch,
-    existing: Option<&ExistingSecret>,
-) -> Option<String> {
-    match patch.operation {
-        SecretPatchOperation::Remove => None,
-        SecretPatchOperation::UpdatePlaceholder => patch.placeholder.clone(),
-        _ => patch
-            .placeholder
-            .clone()
-            .or_else(|| existing.map(|secret| secret.placeholder.clone()))
-            .or_else(|| Some(default_secret_ref(&patch.name))),
     }
 }
 
@@ -2427,10 +2584,10 @@ mod tests {
         let patch = SandboxModificationPatch {
             secrets: vec![SecretModificationPatch {
                 name: "API_KEY".to_string(),
-                operation: SecretPatchOperation::Upsert,
                 source: Some(SecretSource::Env {
                     var: "API_KEY".to_string(),
                 }),
+                value: zeroize::Zeroizing::new(String::new()),
                 placeholder: None,
                 allowed_hosts: vec!["api.example.com".to_string()],
             }],
@@ -2487,27 +2644,34 @@ mod tests {
         config
     }
 
+    /// A source-based spec for `name`, resolving from the same-named host
+    /// environment variable.
     #[cfg(feature = "net")]
-    fn secret_patch(
-        name: &str,
-        operation: SecretPatchOperation,
-        hosts: &[&str],
-    ) -> SandboxModificationPatch {
-        let source = matches!(
-            operation,
-            SecretPatchOperation::Upsert | SecretPatchOperation::Rotate
-        )
-        .then(|| SecretSource::Env {
-            var: name.to_string(),
-        });
+    fn source_spec(name: &str, hosts: &[&str]) -> SecretModificationPatch {
+        SecretModificationPatch {
+            name: name.to_string(),
+            source: Some(SecretSource::Env {
+                var: name.to_string(),
+            }),
+            allowed_hosts: hosts.iter().map(ToString::to_string).collect(),
+            ..SecretModificationPatch::default()
+        }
+    }
+
+    /// A material-free spec for `name` (hosts and/or placeholder only).
+    #[cfg(feature = "net")]
+    fn bare_spec(name: &str, hosts: &[&str]) -> SecretModificationPatch {
+        SecretModificationPatch {
+            name: name.to_string(),
+            allowed_hosts: hosts.iter().map(ToString::to_string).collect(),
+            ..SecretModificationPatch::default()
+        }
+    }
+
+    #[cfg(feature = "net")]
+    fn patch_with_specs(specs: Vec<SecretModificationPatch>) -> SandboxModificationPatch {
         SandboxModificationPatch {
-            secrets: vec![SecretModificationPatch {
-                name: name.to_string(),
-                operation,
-                source,
-                placeholder: None,
-                allowed_hosts: hosts.iter().map(ToString::to_string).collect(),
-            }],
+            secrets: specs,
             ..SandboxModificationPatch::default()
         }
     }
@@ -2524,21 +2688,35 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
+    fn secret_plan_kinds(plan: &SandboxModificationPlan) -> Vec<SecretChangeKind> {
+        plan.changes
+            .iter()
+            .map(|change| match change {
+                PlannedChange::Secret(change) => change.change,
+                PlannedChange::Config(_) => panic!("expected secret change"),
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn running_secret_rotate_remove_hosts_classify_live_with_runtime_support() {
-        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let mut patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
-        patch
-            .secrets
-            .extend(secret_patch("API_KEY", SecretPatchOperation::Remove, &[]).secrets);
-        patch.secrets.extend(
-            secret_patch(
-                "API_KEY",
-                SecretPatchOperation::UpdateHosts,
-                &["*.example.org"],
-            )
-            .secrets,
-        );
+        let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let mut network = config.local_network_config().unwrap();
+        let mut other = network.secrets.secrets[0].clone();
+        other.env_var = "OTHER_KEY".to_string();
+        other.placeholder = "$MSB_OTHER_KEY".to_string();
+        network.secrets.secrets.push(other);
+        config.set_local_network_config(network).unwrap();
+
+        let patch = patch_with_specs(vec![
+            source_spec("API_KEY", &[]),
+            bare_spec("OTHER_KEY", &["*.example.org"]),
+        ]);
+        let removal_patch = SandboxModificationPatch {
+            secrets_remove: vec!["API_KEY".to_string()],
+            ..SandboxModificationPatch::default()
+        };
 
         let plan = build_plan(
             "api".to_string(),
@@ -2554,26 +2732,47 @@ mod tests {
         );
 
         assert_eq!(
+            secret_plan_kinds(&plan),
+            vec![SecretChangeKind::Rotated, SecretChangeKind::HostsUpdated]
+        );
+        assert_eq!(
             secret_plan_dispositions(&plan),
-            vec![ModificationDisposition::Live; 3]
+            vec![ModificationDisposition::Live; 2]
         );
         assert!(plan.conflicts.is_empty());
         assert!(plan.warnings.is_empty());
         assert!(validate_apply_supported(&plan).is_ok());
+
+        let removal_plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            removal_patch,
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(
+            secret_plan_kinds(&removal_plan),
+            vec![SecretChangeKind::Removed]
+        );
+        assert_eq!(
+            secret_plan_dispositions(&removal_plan),
+            vec![ModificationDisposition::Live]
+        );
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn running_secret_add_and_placeholder_change_require_restart_even_with_live_support() {
         let config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let mut patch = secret_patch("NEW_KEY", SecretPatchOperation::Upsert, &["api.new.test"]);
-        patch.secrets.push(SecretModificationPatch {
-            name: "API_KEY".to_string(),
-            operation: SecretPatchOperation::UpdatePlaceholder,
-            source: None,
-            placeholder: Some("$ROTATED_REF".to_string()),
-            allowed_hosts: Vec::new(),
-        });
+        let mut patch = patch_with_specs(vec![source_spec("NEW_KEY", &["api.new.test"])]);
+        let mut placeholder_spec = bare_spec("API_KEY", &[]);
+        placeholder_spec.placeholder = Some("$ROTATED_REF".to_string());
+        patch.secrets.push(placeholder_spec);
 
         let plan = build_plan(
             "api".to_string(),
@@ -2588,6 +2787,13 @@ mod tests {
             ModificationPolicy::NoRestart,
         );
 
+        assert_eq!(
+            secret_plan_kinds(&plan),
+            vec![
+                SecretChangeKind::Added,
+                SecretChangeKind::PlaceholderUpdated
+            ]
+        );
         assert_eq!(
             secret_plan_dispositions(&plan),
             vec![ModificationDisposition::RequiresRestart; 2]
@@ -2597,9 +2803,46 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn running_rotate_with_placeholder_change_requires_restart_even_with_live_support() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let mut spec = source_spec("API_KEY", &[]);
+        spec.placeholder = Some("$NEW_REF".to_string());
+        let patch = patch_with_specs(vec![spec]);
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        let PlannedChange::Secret(change) = &plan.changes[0] else {
+            panic!("expected secret change");
+        };
+        assert_eq!(change.change, SecretChangeKind::Rotated);
+        assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        assert!(
+            change
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("placeholder"))
+        );
+        // No live-support warning: the restart is forced by the placeholder,
+        // not by a runtime gap.
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn running_secret_rotate_requires_restart_without_runtime_support() {
         let config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
 
         let plan = build_plan(
             "api".to_string(),
@@ -2637,7 +2880,7 @@ mod tests {
     #[test]
     fn stopped_secret_changes_are_next_start_and_apply_supported() {
         let config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
 
         let plan = build_plan(
             "api".to_string(),
@@ -2658,49 +2901,165 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn secret_conflicts_reject_impossible_patches() {
+    fn planner_infers_change_kinds_from_spec_diffs() {
         let config = config_with_secret("API_KEY", SECRET_SENTINEL);
 
-        // Upserting a new secret without any allowed host.
-        let patch = secret_patch("NEW_KEY", SecretPatchOperation::Upsert, &[]);
-        let mut conflicts = Vec::new();
-        push_secret_conflicts(&config, &patch, &mut conflicts);
-        assert!(conflicts[0].message.contains("allowed host"));
+        // Material on an existing secret: rotated (source or value alike).
+        let mut value_spec = bare_spec("API_KEY", &[]);
+        value_spec.value = zeroize::Zeroizing::new("new-material".to_string());
+        for spec in [source_spec("API_KEY", &[]), value_spec] {
+            let plan = build_plan(
+                "api".to_string(),
+                SandboxStatus::Stopped,
+                &config,
+                None,
+                LiveControl::default(),
+                patch_with_specs(vec![spec]),
+                ModificationPolicy::NoRestart,
+            );
+            assert_eq!(secret_plan_kinds(&plan), vec![SecretChangeKind::Rotated]);
+            assert!(plan.conflicts.is_empty());
+        }
 
-        // Rotating a secret that does not exist.
-        let patch = secret_patch("MISSING", SecretPatchOperation::Rotate, &[]);
-        let mut conflicts = Vec::new();
-        push_secret_conflicts(&config, &patch, &mut conflicts);
-        assert!(conflicts[0].message.contains("does not exist"));
+        // Material for an unknown name: added.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch_with_specs(vec![source_spec("NEW_KEY", &["api.new.test"])]),
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(secret_plan_kinds(&plan), vec![SecretChangeKind::Added]);
+        assert!(plan.conflicts.is_empty());
 
-        // Store-backed sources are not implemented yet.
-        let mut patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
-        patch.secrets[0].source = Some(SecretSource::Store {
-            reference: "vault://team/api-key".to_string(),
-        });
-        let mut conflicts = Vec::new();
-        push_secret_conflicts(&config, &patch, &mut conflicts);
-        assert!(conflicts[0].message.contains("store-backed"));
+        // Hosts-only diff: hosts updated.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch_with_specs(vec![bare_spec("API_KEY", &["*.example.org"])]),
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(
+            secret_plan_kinds(&plan),
+            vec![SecretChangeKind::HostsUpdated]
+        );
 
-        // Rotating without any source.
-        let mut patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
-        patch.secrets[0].source = None;
-        let mut conflicts = Vec::new();
-        push_secret_conflicts(&config, &patch, &mut conflicts);
-        assert!(conflicts[0].message.contains("source"));
+        // Placeholder-only diff: placeholder updated.
+        let mut spec = bare_spec("API_KEY", &[]);
+        spec.placeholder = Some("$NEW_REF".to_string());
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch_with_specs(vec![spec]),
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(
+            secret_plan_kinds(&plan),
+            vec![SecretChangeKind::PlaceholderUpdated]
+        );
     }
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_secret_upsert_records_reference_not_value() {
-        use microsandbox_network::secrets::config::{HostPattern, SecretSourceRef};
+    fn spec_matching_current_state_is_a_declarative_noop() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+
+        // Same hosts, same placeholder, no material: nothing to change.
+        let mut spec = bare_spec("API_KEY", &["api.example.com"]);
+        spec.placeholder = Some("$MSB_API_KEY".to_string());
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch_with_specs(vec![spec]),
+            ModificationPolicy::NoRestart,
+        );
+        assert!(plan.changes.is_empty());
+        assert!(plan.conflicts.is_empty());
+
+        // Removing a secret that does not exist is also a no-op.
+        let patch = SandboxModificationPatch {
+            secrets_remove: vec!["MISSING".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+        assert!(plan.changes.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn secret_conflicts_reject_impossible_patches() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+
+        // Adding a new secret without any allowed host.
+        let patch = patch_with_specs(vec![source_spec("NEW_KEY", &[])]);
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("allowed host"));
+
+        // A new secret needs material (source or value).
+        let patch = patch_with_specs(vec![bare_spec("MISSING", &["api.example.com"])]);
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("source or value"));
+
+        // Value and source together are ambiguous.
+        let mut spec = source_spec("API_KEY", &[]);
+        spec.value = zeroize::Zeroizing::new("inline-material".to_string());
+        let patch = patch_with_specs(vec![spec]);
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("mutually exclusive"));
+
+        // Store-backed sources are not implemented yet.
+        let mut spec = source_spec("API_KEY", &[]);
+        spec.source = Some(SecretSource::Store {
+            reference: "vault://team/api-key".to_string(),
+        });
+        let patch = patch_with_specs(vec![spec]);
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("store-backed"));
+
+        // Configuring and removing the same secret in one patch.
+        let mut patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
+        patch.secrets_remove.push("API_KEY".to_string());
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("both configured and removed"));
+
+        // A spec without a name cannot target anything.
+        let patch = patch_with_specs(vec![SecretModificationPatch::default()]);
+        let mut conflicts = Vec::new();
+        push_secret_conflicts(&config, &patch, &mut conflicts);
+        assert!(conflicts[0].message.contains("needs a name"));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn applying_new_source_spec_records_reference_not_value() {
+        use microsandbox_network::secrets::config::HostPattern;
 
         let mut config = config(2, 1024);
-        let patch = secret_patch(
-            "API_KEY",
-            SecretPatchOperation::Upsert,
-            &["api.example.com"],
-        );
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &["api.example.com"])]);
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
@@ -2710,7 +3069,7 @@ mod tests {
         assert!(entry.value.is_empty());
         assert_eq!(
             entry.source,
-            Some(SecretSourceRef::Env {
+            Some(SecretSource::Env {
                 var: "API_KEY".into()
             })
         );
@@ -2724,11 +3083,9 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_secret_rotate_drops_inlined_value_and_keeps_placeholder() {
-        use microsandbox_network::secrets::config::SecretSourceRef;
-
+    fn applying_source_rotate_drops_inlined_value_and_keeps_placeholder() {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
@@ -2737,7 +3094,7 @@ mod tests {
         assert!(entry.value.is_empty());
         assert_eq!(
             entry.source,
-            Some(SecretSourceRef::Env {
+            Some(SecretSource::Env {
                 var: "API_KEY".into()
             })
         );
@@ -2748,9 +3105,38 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn applying_value_spec_persists_value_and_clears_reference() {
+        let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        // Give the entry a stale source reference to prove the value clears it.
+        let mut network = config.local_network_config().unwrap();
+        network.secrets.secrets[0].source = Some(SecretSource::Env {
+            var: "API_KEY".into(),
+        });
+        config.set_local_network_config(network).unwrap();
+
+        let mut spec = bare_spec("API_KEY", &[]);
+        spec.value = zeroize::Zeroizing::new("caller-held-value".to_string());
+        let patch = patch_with_specs(vec![spec]);
+
+        apply_secret_patch_to_config(&mut config, &patch).unwrap();
+
+        // The value persists at rest (documented secret_env-style property)
+        // and the entry is no longer reference-backed.
+        let network = config.local_network_config().unwrap();
+        let entry = &network.secrets.secrets[0];
+        assert_eq!(entry.value.as_str(), "caller-held-value");
+        assert_eq!(entry.source, None);
+        assert_eq!(entry.placeholder, "$MSB_API_KEY");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn applying_secret_remove_deletes_entry() {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch("API_KEY", SecretPatchOperation::Remove, &[]);
+        let patch = SandboxModificationPatch {
+            secrets_remove: vec!["API_KEY".to_string()],
+            ..SandboxModificationPatch::default()
+        };
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
@@ -2760,15 +3146,11 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_secret_hosts_update_replaces_allow_list() {
+    fn applying_hosts_only_spec_replaces_allow_list() {
         use microsandbox_network::secrets::config::HostPattern;
 
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch(
-            "API_KEY",
-            SecretPatchOperation::UpdateHosts,
-            &["*.example.org", "*"],
-        );
+        let patch = patch_with_specs(vec![bare_spec("API_KEY", &["*.example.org", "*"])]);
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
@@ -2784,10 +3166,11 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_secret_placeholder_update_renames_guest_reference() {
+    fn applying_placeholder_only_spec_renames_guest_reference() {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let mut patch = secret_patch("API_KEY", SecretPatchOperation::UpdatePlaceholder, &[]);
-        patch.secrets[0].placeholder = Some("$NEW_REF".to_string());
+        let mut spec = bare_spec("API_KEY", &[]);
+        spec.placeholder = Some("$NEW_REF".to_string());
+        let patch = patch_with_specs(vec![spec]);
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
@@ -2799,7 +3182,7 @@ mod tests {
     #[test]
     fn rotate_flow_never_leaks_the_value_into_plans_configs_or_errors() {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let patch = secret_patch("API_KEY", SecretPatchOperation::Rotate, &[]);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
 
         // The plan for a live rotate is value-free even though the current
         // config carries an inlined value.
@@ -2856,19 +3239,69 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn value_bearing_patch_never_leaks_into_plans_debug_or_live_request_debug() {
+        const VALUE_SENTINEL: &str = "value-sentinel-material";
+
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let mut spec = bare_spec("API_KEY", &[]);
+        spec.value = zeroize::Zeroizing::new(VALUE_SENTINEL.to_string());
+        let patch = patch_with_specs(vec![spec]);
+
+        // Debug output of the patch redacts the value.
+        let debug = format!("{patch:?}");
+        assert!(!debug.contains(VALUE_SENTINEL));
+        assert!(debug.contains("[REDACTED]"));
+
+        // The plan is value-free.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(secret_plan_kinds(&plan), vec![SecretChangeKind::Rotated]);
+        assert_eq!(
+            secret_plan_dispositions(&plan),
+            vec![ModificationDisposition::Live]
+        );
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        assert!(!plan_json.contains(VALUE_SENTINEL));
+
+        // The live rotate uses the caller value without touching the host
+        // environment, and the request's Debug form stays redacted.
+        let updates = live_secret_updates(&plan, &patch).unwrap();
+        assert_eq!(updates.len(), 1);
+        let request =
+            microsandbox_runtime::control::ControlRequest::SecretsUpdate { changes: updates };
+        assert!(!format!("{request:?}").contains(VALUE_SENTINEL));
+
+        // Material-free rotate errors name the secret only.
+        let error = resolve_secret_value(&bare_spec("API_KEY", &[])).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("API_KEY"));
+        assert!(!message.contains(VALUE_SENTINEL));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn live_secret_updates_cover_only_live_dispositions() {
         use microsandbox_runtime::control::SecretLiveChange;
 
         let config = config_with_secret("API_KEY", SECRET_SENTINEL);
-        let mut patch = secret_patch("API_KEY", SecretPatchOperation::Remove, &[]);
-        patch.secrets.extend(
-            secret_patch(
-                "API_KEY",
-                SecretPatchOperation::UpdateHosts,
-                &["api.example.com", "*.example.org"],
-            )
-            .secrets,
-        );
+        let patch = SandboxModificationPatch {
+            secrets: vec![bare_spec("API_KEY", &["api.example.com", "*.example.org"])],
+            ..SandboxModificationPatch::default()
+        };
+        let removal_patch = SandboxModificationPatch {
+            secrets_remove: vec!["API_KEY".to_string()],
+            ..SandboxModificationPatch::default()
+        };
 
         let live_plan = build_plan(
             "api".to_string(),
@@ -2883,13 +3316,28 @@ mod tests {
             ModificationPolicy::NoRestart,
         );
         let updates = live_secret_updates(&live_plan, &patch).unwrap();
-        assert_eq!(updates.len(), 2);
-        assert!(matches!(&updates[0], SecretLiveChange::Remove { name } if name == "API_KEY"));
+        assert_eq!(updates.len(), 1);
         assert!(matches!(
-            &updates[1],
+            &updates[0],
             SecretLiveChange::SetAllowedHosts { name, hosts }
                 if name == "API_KEY" && hosts.len() == 2
         ));
+
+        let removal_plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            removal_patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+        let updates = live_secret_updates(&removal_plan, &removal_patch).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(&updates[0], SecretLiveChange::Remove { name } if name == "API_KEY"));
 
         // Next-start plans produce no live updates.
         let stopped_plan = build_plan(
@@ -2906,5 +3354,37 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn secret_patch_builder_builds_declarative_specs() {
+        let spec = SecretPatchBuilder::new()
+            .env("API_KEY")
+            .source(SecretSource::Env {
+                var: "HOST_API_KEY".to_string(),
+            })
+            .placeholder("$REF")
+            .allow_host("api.example.com")
+            .allow_host("*.example.org")
+            .build();
+
+        assert_eq!(spec.name, "API_KEY");
+        assert_eq!(
+            spec.source,
+            Some(SecretSource::Env {
+                var: "HOST_API_KEY".to_string()
+            })
+        );
+        assert!(spec.value.is_empty());
+        assert_eq!(spec.placeholder.as_deref(), Some("$REF"));
+        assert_eq!(spec.allowed_hosts, vec!["api.example.com", "*.example.org"]);
+
+        let spec = SecretPatchBuilder::new()
+            .env("API_KEY")
+            .value("caller-held")
+            .build();
+        assert_eq!(spec.value.as_str(), "caller-held");
+        assert_eq!(spec.source, None);
     }
 }
