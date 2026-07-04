@@ -76,8 +76,8 @@ microsandbox-network = { version = "=0.6.2", path = "crates/network" }
 microsandbox-protocol = { version = "=0.6.2", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.2", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.2", path = "crates/utils" }
-msb_krun = "=0.1.19"
-msb_krun_utils = "=0.1.19"
+msb_krun = "=0.1.20"
+msb_krun_utils = "=0.1.20"
 test-macros = { path = "crates/test-macros" }
 test-utils = { path = "crates/test-utils" }
 
@@ -165,3 +165,10 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.61.1"
 russh-sftp = "2.3.0"
+
+# Temporary: build against the local libkrun fork while the live-resize
+# runtime work (boot capacity, VmControl, virtio-mem) is in flight.
+# Remove once msb_krun 0.1.2x with that work is published to crates.io.
+[patch.crates-io]
+msb_krun = { path = "../libkrun/src/krun" }
+msb_krun_utils = { path = "../libkrun/src/utils" }
