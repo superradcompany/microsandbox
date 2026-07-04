@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3158,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "base64",
  "chrono",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3239,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "base64",
  "cbindgen",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "libc",
@@ -3308,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "sea-orm-migration",
  "serde_json",
@@ -3343,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "base64",
  "bytes",
@@ -3387,7 +3387,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "ciborium",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "futures",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -3466,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "serde",
@@ -3479,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "dirs",
  "libc",
@@ -3571,9 +3571,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9458681a824744f5151c3ab376edb77ae159696fa6bfe9654bacf0091adb00"
+checksum = "fd209b7bc7db96040b3d5b516d33467bdc15a437952a0c91adad158c1f169f67"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -3591,9 +3591,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "418bd6efec30b38b1b82b9393ff1200a782e8e7a656ce79b9a6b0edcc867a55e"
+checksum = "beab35489ad84feb43198f7003ebd8071dd4f443f29a36afb841f53c7c8980d8"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3606,15 +3606,15 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch_gen"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c6d3e765e4a117975d53ab363109eef3b1ab63e0ed663ddf0315ecbfa0772a0"
+checksum = "f0d488a4d6409dbd40125fc8e5d1f3feae851a90c994c5a70d581a598fad042c"
 
 [[package]]
 name = "msb_krun_cpuid"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "946ce25cc75945412c68704e27807ccd77d5e7e95894cf8120460800d6b6b3b3"
+checksum = "c6ce55a5c94eebb5d8d2d017cba48606abc0902a2dc93c794c6b3821fd0e5f9e"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3623,9 +3623,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_devices"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c3875773ad80ecadb52d35c7f31fd9d53c583e2afe9059edd108d58cf734e57"
+checksum = "8b9a040d132aa10fe411f33a8720421bfe2e1cfd2697a222cc266a750a50c8a5"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -3653,9 +3653,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_hvf"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95ee0eec747f8a8773a94b1d8e8c168958f19fe92ee2181cc626211126d268c4"
+checksum = "9e967066841726227153c47d6bb45370c2b802d69972368259e23b019309f07f"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -3665,9 +3665,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_kernel"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1843eeafd6896b5763cf35f31bb172494cbf41b83f4845129b0ccfc15d86453e"
+checksum = "3fb49a1ea2589a5f0f45156f36f9f5895b4c02a00f6332d663022ab7943a4b05"
 dependencies = [
  "msb_krun_utils",
  "vm-memory",
@@ -3675,9 +3675,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_polly"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59180729455df2db92a57de39974cf7608519dbc85181684979752da3999c222"
+checksum = "7af213f2b8b44f3808f3a58b48f5d3fe5a5b1b612f709e728b6ffbca406decda"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -3685,18 +3685,18 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_smbios"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49d6bde053acede288b3529c282b3087053e203180692199c85d8431b27a988e"
+checksum = "3369c4b45662b967eb35975a0f1a8ac68037eda690726164db7cf22e41b83544"
 dependencies = [
  "vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_utils"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21d28debd96b2ede1152eb3db67ba28b62f340e91521cde7f8501a769c562183"
+checksum = "682c4241c7b02ea881b5203fe382fd8432bfe582b48681ebb070c57074f528f3"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -3710,9 +3710,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_vmm"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1baa2e71e66a699210fa9f862de496e941d473c49ad59b445a3670035ad250e5"
+checksum = "7df1632f861c9df181bfc63a69a4c3cba316104f2949d3c55648054fa3931c1b"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
@@ -6489,14 +6489,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6505,7 +6505,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "tempfile",
  "test-macros",
