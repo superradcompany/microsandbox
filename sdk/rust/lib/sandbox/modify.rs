@@ -25,6 +25,8 @@ const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
     "affects future execs only after restart; live exec-default updates are not available yet";
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
     "live label updates are not available in this runtime yet";
+const FUTURE_EXECS_ONLY: &str =
+    "applies to future execs only; running processes keep their current environment";
 #[cfg(not(feature = "net"))]
 const SECRETS_UNAVAILABLE_WITHOUT_NET: &str =
     "secret modification requires a build with the net feature";
@@ -766,7 +768,7 @@ fn build_plan(
         &mut changes,
         &mut warnings,
     );
-    push_spec_changes(status, config, &patch, policy, &mut changes);
+    push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_secret_changes(
         status,
         config,
@@ -1569,6 +1571,7 @@ fn push_spec_changes(
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
+    warnings: &mut Vec<ModificationWarning>,
 ) {
     for var in &patch.env {
         let existing = config.spec.env.iter().find(|entry| entry.key == var.key);
@@ -1584,6 +1587,7 @@ fn push_spec_changes(
             policy,
             LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
         ));
+        push_future_exec_warning(ENV_FIELD, status, policy, warnings);
     }
 
     for key in &patch.env_remove {
@@ -1599,6 +1603,7 @@ fn push_spec_changes(
             policy,
             LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
         ));
+        push_future_exec_warning(ENV_FIELD, status, policy, warnings);
     }
 
     for (key, value) in &patch.labels {
@@ -1644,6 +1649,7 @@ fn push_spec_changes(
                 policy,
                 LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
             ));
+            push_future_exec_warning(WORKDIR_FIELD, status, policy, warnings);
         }
     }
 }
@@ -2106,6 +2112,35 @@ fn push_live_resize_warning(
             message: LIVE_RESIZE_UNAVAILABLE.to_string(),
         });
     }
+}
+
+/// Warn that a running-sandbox exec-default change (env, workdir) only reaches
+/// future execs: even after a `--restart` apply or a persisted `--next-start`
+/// patch, processes already running keep the environment they started with.
+fn push_future_exec_warning(
+    field: &str,
+    status: SandboxStatus,
+    policy: ModificationPolicy,
+    warnings: &mut Vec<ModificationWarning>,
+) {
+    if !running_status(status)
+        || !matches!(
+            policy,
+            ModificationPolicy::Restart | ModificationPolicy::NextStart
+        )
+    {
+        return;
+    }
+    if warnings
+        .iter()
+        .any(|warning| warning.field == field && warning.message == FUTURE_EXECS_ONLY)
+    {
+        return;
+    }
+    warnings.push(ModificationWarning {
+        field: field.to_string(),
+        message: FUTURE_EXECS_ONLY.to_string(),
+    });
 }
 
 fn stopped_status(status: SandboxStatus) -> bool {
@@ -2614,6 +2649,72 @@ mod tests {
                 ("workdir", ChangeKind::Updated, Some("/app"), Some("/srv")),
             ]
         );
+    }
+
+    #[test]
+    fn running_spec_changes_warn_future_execs_only_under_restart_and_next_start() {
+        let current = config(2, 1024);
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod"), EnvVar::new("NEW", "1")],
+            workdir: Some("/srv".to_string()),
+            labels: vec![("tier".to_string(), "gold".to_string())],
+            ..SandboxModificationPatch::default()
+        };
+
+        for policy in [ModificationPolicy::Restart, ModificationPolicy::NextStart] {
+            let plan = build_plan(
+                "api".to_string(),
+                SandboxStatus::Running,
+                &current,
+                None,
+                LiveControl::default(),
+                patch.clone(),
+                policy,
+            );
+
+            let future_exec_fields: Vec<&str> = plan
+                .warnings
+                .iter()
+                .filter(|warning| warning.message == FUTURE_EXECS_ONLY)
+                .map(|warning| warning.field.as_str())
+                .collect();
+            // One warning per field: env is deduplicated, labels are excluded.
+            assert_eq!(future_exec_fields, vec![ENV_FIELD, WORKDIR_FIELD]);
+        }
+    }
+
+    #[test]
+    fn future_exec_warning_skips_stopped_sandboxes_and_default_policy() {
+        let current = config(2, 1024);
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod")],
+            workdir: Some("/srv".to_string()),
+            ..SandboxModificationPatch::default()
+        };
+
+        let cases = [
+            (SandboxStatus::Stopped, ModificationPolicy::NextStart),
+            (SandboxStatus::Stopped, ModificationPolicy::Restart),
+            (SandboxStatus::Running, ModificationPolicy::NoRestart),
+        ];
+        for (status, policy) in cases {
+            let plan = build_plan(
+                "api".to_string(),
+                status,
+                &current,
+                None,
+                LiveControl::default(),
+                patch.clone(),
+                policy,
+            );
+
+            assert!(
+                plan.warnings
+                    .iter()
+                    .all(|warning| warning.message != FUTURE_EXECS_ONLY),
+                "unexpected future-exec warning for {status:?} under {policy:?}"
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,8 @@
 use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
-    ChangeKind, ConfigPlannedChange, ModificationDisposition, PlannedChange, Sandbox,
+    ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
     SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind, SecretPlannedChange,
 };
 
@@ -230,6 +231,9 @@ fn print_human_plan(plan: &SandboxModificationPlan) {
     }
 
     table.print();
+    for warning in &plan.warnings {
+        eprintln!("{}", style(warning_line(warning)).dim());
+    }
     if include_effect {
         eprintln!("{}", style("   dry run · nothing applied").dim());
     } else {
@@ -238,6 +242,10 @@ fn print_human_plan(plan: &SandboxModificationPlan) {
             style("   dry run · applies on next start · nothing applied").dim()
         );
     }
+}
+
+fn warning_line(warning: &ModificationWarning) -> String {
+    format!("   ! {}: {}", warning.field, warning.message)
 }
 
 fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<ApplyBlocker> {
@@ -362,18 +370,71 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
     {
         ui::success("Modified", &plan.sandbox);
         ui::success("Restarted", &plan.sandbox);
-        return;
+    } else {
+        let target = if plan.policy == microsandbox::sandbox::ModificationPolicy::NextStart
+            && !matches!(plan.status.as_str(), "created" | "stopped" | "crashed")
+        {
+            format!("{} {}", plan.sandbox, style("(next start)").dim())
+        } else {
+            plan.sandbox.clone()
+        };
+
+        ui::success("Modified", &target);
     }
 
-    let target = if plan.policy == microsandbox::sandbox::ModificationPolicy::NextStart
-        && !matches!(plan.status.as_str(), "created" | "stopped" | "crashed")
-    {
-        format!("{} {}", plan.sandbox, style("(next start)").dim())
-    } else {
-        plan.sandbox.clone()
-    };
+    if should_render_resize_status(&plan.resize_status) {
+        print_resize_status(&plan.resize_status);
+    }
+}
 
-    ui::success("Modified", &target);
+/// Live resize is not necessarily instant: surface the convergence table only
+/// when some accepted resize has not fully applied yet.
+fn should_render_resize_status(resize_status: &[ResourceResizeStatus]) -> bool {
+    resize_status
+        .iter()
+        .any(|status| status.state != ResourceConvergenceState::Applied)
+}
+
+fn print_resize_status(resize_status: &[ResourceResizeStatus]) {
+    let mut table = ui::Table::new(&["FIELD", "REQUESTED", "ACTUAL", "ENFORCED", "STATE"]);
+    for status in resize_status {
+        table.add_row(vec![
+            resource_label(status.resource).to_string(),
+            status.requested.clone(),
+            status.actual.clone(),
+            status.enforced.clone(),
+            convergence_cell(status.state),
+        ]);
+    }
+    table.print();
+}
+
+fn resource_label(resource: ResourceKind) -> &'static str {
+    match resource {
+        ResourceKind::Cpus => "cpus",
+        ResourceKind::Memory => "memory",
+    }
+}
+
+fn convergence_label(state: ResourceConvergenceState) -> &'static str {
+    match state {
+        ResourceConvergenceState::Accepted => "accepted",
+        ResourceConvergenceState::Converging => "converging",
+        ResourceConvergenceState::Applied => "applied",
+        ResourceConvergenceState::GuestRefused => "guest-refused",
+        ResourceConvergenceState::Failed => "failed",
+    }
+}
+
+fn convergence_cell(state: ResourceConvergenceState) -> String {
+    let label = convergence_label(state);
+    match state {
+        ResourceConvergenceState::Converging => style(label).dim().to_string(),
+        ResourceConvergenceState::GuestRefused | ResourceConvergenceState::Failed => {
+            style(label).red().bold().to_string()
+        }
+        ResourceConvergenceState::Accepted | ResourceConvergenceState::Applied => label.to_string(),
+    }
 }
 
 fn plan_has_restart_required(plan: &SandboxModificationPlan) -> bool {
@@ -658,5 +719,78 @@ mod tests {
 
         assert_eq!(spec.name, "API_KEY");
         assert_eq!(spec.host, "api.example.com");
+    }
+
+    fn resize_entry(
+        resource: ResourceKind,
+        state: ResourceConvergenceState,
+    ) -> ResourceResizeStatus {
+        ResourceResizeStatus {
+            resource,
+            requested: "4".to_string(),
+            actual: "2".to_string(),
+            enforced: "4".to_string(),
+            state,
+        }
+    }
+
+    #[test]
+    fn resize_table_renders_only_when_convergence_is_pending() {
+        assert!(!should_render_resize_status(&[]));
+        assert!(!should_render_resize_status(&[
+            resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Applied),
+            resize_entry(ResourceKind::Memory, ResourceConvergenceState::Applied),
+        ]));
+        assert!(should_render_resize_status(&[
+            resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Applied),
+            resize_entry(ResourceKind::Memory, ResourceConvergenceState::Converging),
+        ]));
+        assert!(should_render_resize_status(&[resize_entry(
+            ResourceKind::Memory,
+            ResourceConvergenceState::GuestRefused
+        )]));
+        assert!(should_render_resize_status(&[resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Failed
+        )]));
+    }
+
+    #[test]
+    fn convergence_states_render_plainly() {
+        assert_eq!(
+            convergence_label(ResourceConvergenceState::Accepted),
+            "accepted"
+        );
+        assert_eq!(
+            convergence_label(ResourceConvergenceState::Converging),
+            "converging"
+        );
+        assert_eq!(
+            convergence_label(ResourceConvergenceState::Applied),
+            "applied"
+        );
+        assert_eq!(
+            convergence_label(ResourceConvergenceState::GuestRefused),
+            "guest-refused"
+        );
+        assert_eq!(
+            convergence_label(ResourceConvergenceState::Failed),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn warning_lines_use_field_message_shape() {
+        let warning = ModificationWarning {
+            field: "env".to_string(),
+            message:
+                "applies to future execs only; running processes keep their current environment"
+                    .to_string(),
+        };
+
+        assert_eq!(
+            warning_line(&warning),
+            "   ! env: applies to future execs only; running processes keep their current environment"
+        );
     }
 }
