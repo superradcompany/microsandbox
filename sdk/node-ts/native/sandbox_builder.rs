@@ -111,11 +111,29 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Boot-time maximum possible virtual CPUs.
+    #[napi(js_name = "maxCpus")]
+    pub fn max_cpus(&mut self, count: u32) -> Result<&Self> {
+        let n =
+            u8::try_from(count).map_err(|_| napi::Error::from_reason("maxCpus out of u8 range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.max_cpus(n));
+        Ok(self)
+    }
+
     /// Guest memory in MiB.
     #[napi]
     pub fn memory(&mut self, mib: u32) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.memory(Mebibytes::from(mib)));
+        self
+    }
+
+    /// Boot-time maximum hotpluggable guest memory in MiB.
+    #[napi(js_name = "maxMemory")]
+    pub fn max_memory(&mut self, mib: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.max_memory(Mebibytes::from(mib)));
         self
     }
 

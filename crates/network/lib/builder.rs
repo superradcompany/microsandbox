@@ -10,7 +10,11 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
+use zeroize::Zeroizing;
+
+use crate::secrets::config::{
+    HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
+};
 use crate::tls::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -46,6 +50,7 @@ pub struct TlsBuilder {
 pub struct SecretBuilder {
     env_var: Option<String>,
     value: Option<String>,
+    source: Option<SecretSource>,
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
     injection: SecretInjection,
@@ -184,7 +189,8 @@ impl NetworkBuilder {
     ) -> Self {
         self.config.secrets.secrets.push(SecretEntry {
             env_var: env_var.into(),
-            value: value.into(),
+            value: Zeroizing::new(value.into()),
+            source: None,
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
             injection: SecretInjection::default(),
@@ -417,6 +423,7 @@ impl SecretBuilder {
         Self {
             env_var: None,
             value: None,
+            source: None,
             placeholder: None,
             allowed_hosts: Vec::new(),
             injection: SecretInjection::default(),
@@ -434,9 +441,24 @@ impl SecretBuilder {
         self
     }
 
-    /// Set the secret value (required).
+    /// Set the secret value inline (mutually exclusive with [`source`](Self::source)).
+    ///
+    /// Prefer [`source`](Self::source) for durable configs: an inline value is
+    /// persisted verbatim in the sandbox spec, whereas a source reference is
+    /// resolved host-side at spawn time and never stored at rest.
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = Some(value.into());
+        self
+    }
+
+    /// Resolve the value from a host-side source reference at spawn time
+    /// (mutually exclusive with [`value`](Self::value)).
+    ///
+    /// The durable config records only the reference; the plaintext is read
+    /// from the host environment when the sandbox starts, so it never lands
+    /// in the database.
+    pub fn source(mut self, source: SecretSource) -> Self {
+        self.source = Some(source);
         self
     }
 
@@ -518,11 +540,19 @@ impl SecretBuilder {
 
     /// Consume the builder and return a [`SecretEntry`].
     ///
+    /// Exactly one of [`value`](Self::value) or [`source`](Self::source) must
+    /// be set. A source-backed entry carries an empty durable value; it is
+    /// resolved host-side at spawn time.
+    ///
     /// # Panics
-    /// Panics if `env`, `value`, or at least one allowed host was not set.
+    /// Panics if `env` or at least one allowed host was not set, or if neither
+    /// (or both) of `value`/`source` was set.
     pub fn build(self) -> SecretEntry {
         let env_var = self.env_var.expect("SecretBuilder: .env() is required");
-        let value = self.value.expect("SecretBuilder: .value() is required");
+        assert!(
+            self.value.is_some() ^ self.source.is_some(),
+            "SecretBuilder: exactly one of .value() or .source() is required"
+        );
         assert!(
             !self.allowed_hosts.is_empty(),
             "SecretBuilder: at least one allowed host is required; use .allow_any_host_dangerous(true) for an explicit any-host secret"
@@ -533,7 +563,8 @@ impl SecretBuilder {
 
         SecretEntry {
             env_var,
-            value,
+            value: Zeroizing::new(self.value.unwrap_or_default()),
+            source: self.source,
             placeholder,
             allowed_hosts: self.allowed_hosts,
             injection: self.injection,
@@ -738,11 +769,48 @@ mod tests {
     }
 
     #[test]
+    fn secret_builder_source_yields_reference_and_empty_value() {
+        let secret = SecretBuilder::new()
+            .env("API_KEY")
+            .source(SecretSource::Env {
+                var: "HOST_API_KEY".into(),
+            })
+            .allow_host("api.example.com")
+            .build();
+
+        assert!(secret.value.is_empty());
+        assert_eq!(
+            secret.source,
+            Some(SecretSource::Env {
+                var: "HOST_API_KEY".into()
+            })
+        );
+
+        // Serialized durable form carries the reference, not a value.
+        let json = serde_json::to_string(&secret).unwrap();
+        assert!(json.contains("\"var\":\"HOST_API_KEY\""));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one of .value() or .source()")]
+    fn secret_builder_rejects_both_value_and_source() {
+        let _ = SecretBuilder::new()
+            .env("API_KEY")
+            .value("inline")
+            .source(SecretSource::Env {
+                var: "HOST_API_KEY".into(),
+            })
+            .allow_host("api.example.com")
+            .build();
+    }
+
+    #[test]
     fn network_builder_rejects_invalid_secret_config() {
         let err = NetworkBuilder::new()
             .secret_entry(SecretEntry {
                 env_var: "API=KEY".into(),
-                value: "secret-value".into(),
+                value: Zeroizing::new("secret-value".into()),
+                source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
                 injection: SecretInjection::default(),

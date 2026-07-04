@@ -1,5 +1,11 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
+  modificationPlanFromJson,
+  modifyOptionsToNapi,
+  type ModifyOptions,
+  type SandboxModificationPlan,
+} from "./modify.js";
+import {
   napi,
   type NapiAttachOptionsBuilder,
   type NapiExecOptionsBuilder,
@@ -51,6 +57,16 @@ export type SandboxConfig = NapiSandboxConfig;
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
+}
+
+export interface SandboxPingResult {
+  readonly name: string;
+  readonly latencyMs: number;
+}
+
+export interface SandboxTouchResult {
+  readonly name: string;
+  readonly activitySeq: number;
 }
 
 /**
@@ -327,6 +343,31 @@ export class Sandbox implements AsyncDisposable {
   async metrics(): Promise<SandboxMetrics> {
     const raw = await withMappedErrors(() => this.inner.metrics());
     return metricsFromNapi(raw);
+  }
+
+  /**
+   * Check whether agentd is reachable without refreshing idle activity.
+   */
+  async ping(): Promise<SandboxPingResult> {
+    return await withMappedErrors(() => this.inner.ping());
+  }
+
+  /**
+   * Explicitly refresh this sandbox's idle activity timer.
+   */
+  async touch(): Promise<SandboxTouchResult> {
+    return await withMappedErrors(() => this.inner.touch());
+  }
+
+  /**
+   * Plan or apply a sandbox modification. With `dryRun: true` the plan is
+   * computed without applying anything.
+   */
+  async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    const raw = await withMappedErrors(() =>
+      this.inner.modify(modifyOptionsToNapi(opts)),
+    );
+    return modificationPlanFromJson(raw);
   }
 
   /** Stream metrics snapshots at the given interval (in milliseconds). */

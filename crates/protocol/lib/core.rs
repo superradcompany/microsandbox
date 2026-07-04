@@ -46,6 +46,35 @@ pub struct ClockSync {
     pub unix_time_nanos: u64,
 }
 
+/// Payload for `core.ping` messages.
+///
+/// Sent by the host to verify that agentd is reachable. A ping is maintenance
+/// traffic and does not refresh the sandbox idle timer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ping {}
+
+/// Payload for `core.pong` messages.
+///
+/// Sent by agentd in response to `core.ping`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pong {}
+
+/// Payload for `core.touch` messages.
+///
+/// Sent by the host to explicitly refresh the sandbox idle timer without
+/// starting an exec, filesystem, or TCP session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Touch {}
+
+/// Payload for `core.touched` messages.
+///
+/// Sent by agentd in response to `core.touch`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Touched {
+    /// Activity sequence after the explicit touch was recorded.
+    pub activity_seq: u64,
+}
+
 /// Payload for `core.error` messages.
 ///
 /// Sent when a peer can identify a recoverable protocol error for a specific

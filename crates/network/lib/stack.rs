@@ -33,7 +33,7 @@ use crate::icmp_relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
-use crate::secrets::config::SecretsConfig;
+use crate::secrets::handle::SecretsHandle;
 use crate::shared::SharedState;
 use crate::tls::{proxy as tls_proxy, state::TlsState};
 use crate::udp_fragments::{
@@ -225,7 +225,7 @@ pub fn smoltcp_poll_loop(
     published_ports: Vec<PublishedPort>,
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
-    secrets: Arc<SecretsConfig>,
+    secrets: SecretsHandle,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -564,7 +564,9 @@ pub fn smoltcp_poll_loop(
                 conn.to_smoltcp,
                 shared.clone(),
                 network_policy.clone(),
-                secrets.clone(),
+                // Load the current snapshot per connection so live secret
+                // updates apply to traffic the guest starts afterwards.
+                secrets.load(),
                 tls_state.clone(),
                 conn.proxy_connect,
             );

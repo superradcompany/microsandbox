@@ -5,4 +5,5 @@
 //! substitutes the real value only when the request goes to an allowed host.
 
 pub mod config;
+pub mod handle;
 pub mod handler;

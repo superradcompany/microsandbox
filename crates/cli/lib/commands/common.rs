@@ -56,9 +56,17 @@ pub struct SandboxOpts {
     #[arg(short = 'c', long)]
     pub cpus: Option<u8>,
 
+    /// Boot-time maximum possible virtual CPUs.
+    #[arg(long = "max-cpus")]
+    pub max_cpus: Option<u8>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
+
+    /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
+    #[arg(long = "max-memory", value_name = "SIZE")]
+    pub max_memory: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -372,7 +380,10 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to an allowed host (ENV@HOST or ENV=VALUE@HOST).
+    /// Inject a secret that is only sent to an allowed host (ENV@HOST). The
+    /// value is read from the host environment variable ENV at start time and
+    /// stored only as a source reference, never inlined in the sandbox config.
+    /// Inline `ENV=VALUE@HOST` is rejected; export the value and use `ENV@HOST`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
@@ -439,7 +450,9 @@ impl SandboxOpts {
     /// Returns true if any creation-time configuration flag was set.
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
+            || self.max_cpus.is_some()
             || self.memory.is_some()
+            || self.max_memory.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -514,8 +527,14 @@ pub fn apply_sandbox_opts(
     if let Some(cpus) = opts.cpus {
         builder = builder.cpus(cpus);
     }
+    if let Some(max_cpus) = opts.max_cpus {
+        builder = builder.max_cpus(max_cpus);
+    }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref max_memory) = opts.max_memory {
+        builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -1288,10 +1307,15 @@ fn apply_network_opts(
         };
     }
 
-    // Secrets.
+    // Secrets. `create` persists a host-side source reference, not the raw
+    // value: the plaintext is read from the host environment at spawn time so
+    // the durable config never stores secret material at rest.
     for secret_str in &opts.secret {
-        let (env_var, value, host) = parse_secret(secret_str)?;
-        builder = builder.secret_env(env_var, value, host);
+        let (env_var, host) = parse_secret(secret_str, "create")?;
+        let source = microsandbox::sandbox::SecretSource::Env {
+            var: env_var.clone(),
+        };
+        builder = builder.secret(|s| s.env(&env_var).source(source).allow_host(host));
     }
 
     // DNS, TLS, and other network configuration.
@@ -1629,49 +1653,39 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a secret spec: `ENV@HOST` or `ENV=VALUE@HOST`.
-#[cfg(feature = "net")]
-fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
+/// Parse a `--secret ENV@HOST` spec into `(env_var, host)` for `command`
+/// (`create` or `modify`).
+///
+/// The value is NOT read here: the CLI records a host-side source reference
+/// (`{kind: env, var: ENV}`) that is resolved from the host environment when
+/// needed, so raw secret material never lands in shell history or process
+/// listings.
+///
+/// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
+/// the value regardless, so the value path is SDK-only. Users are pointed at
+/// the `ENV@HOST` env-var form instead.
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, String)> {
     if let Some(eq_pos) = spec.find('=') {
-        let env_var = spec[..eq_pos].to_string();
-        let rest = &spec[eq_pos + 1..];
-        let at_pos = rest.rfind('@').ok_or_else(|| {
-            anyhow::anyhow!("secret must be in format ENV@HOST or ENV=VALUE@HOST")
-        })?;
-        let value = rest[..at_pos].to_string();
-        let host = rest[at_pos + 1..].to_string();
-
-        if env_var.is_empty() || value.is_empty() || host.is_empty() {
-            anyhow::bail!(
-                "secret must be in format ENV@HOST or ENV=VALUE@HOST (all parts required)"
-            );
-        }
-
-        return Ok((env_var, value, host));
+        let env_var = &spec[..eq_pos];
+        anyhow::bail!(
+            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+             the value would be stored in the sandbox config at rest. Export the value as a \
+             host environment variable and reference it with `{env_var}@HOST` instead, which \
+             is resolved from the environment at start time."
+        );
     }
 
     let at_pos = spec
         .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST or ENV=VALUE@HOST"))?;
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST"))?;
     let env_var = spec[..at_pos].to_string();
     let host = spec[at_pos + 1..].to_string();
 
     if env_var.is_empty() || host.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST or ENV=VALUE@HOST (all parts required)");
+        anyhow::bail!("secret must be in format ENV@HOST (all parts required)");
     }
 
-    let value = match std::env::var(&env_var) {
-        Ok(value) if !value.is_empty() => value,
-        Ok(_) => anyhow::bail!("secret environment variable `{env_var}` is empty"),
-        Err(std::env::VarError::NotPresent) => {
-            anyhow::bail!("secret environment variable `{env_var}` is not set")
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("secret environment variable `{env_var}` is not valid UTF-8")
-        }
-    };
-
-    Ok((env_var, value, host))
+    Ok((env_var, host))
 }
 
 /// Parse a scoped upstream CA spec: `PATTERN=PATH`.
@@ -2124,90 +2138,41 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "net")]
-    static SECRET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[cfg(feature = "net")]
-    struct SecretEnvCleanup<'a> {
-        name: &'a str,
-    }
-
-    #[cfg(feature = "net")]
-    impl Drop for SecretEnvCleanup<'_> {
-        fn drop(&mut self) {
-            // SAFETY: these tests use unique variable names and serialize
-            // mutations within this module.
-            unsafe { std::env::remove_var(self.name) };
-        }
-    }
-
-    #[cfg(feature = "net")]
-    fn with_secret_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = SECRET_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: these tests use unique variable names and serialize
-        // mutations within this module.
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-        let _cleanup = SecretEnvCleanup { name };
-        f()
-    }
-
-    #[cfg(feature = "net")]
     #[test]
-    fn parse_secret_reads_value_from_same_named_env() {
-        with_secret_env("MSB_PARSE_SECRET_TOKEN", Some("from-env"), || {
-            let (env_var, value, host) =
-                parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com").unwrap();
+    fn parse_secret_returns_env_and_host_reference() {
+        // The value is NOT read here: `create` persists a source reference and
+        // the spawn resolver reads the host env at start time.
+        let (env_var, host) =
+            parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
-            assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-            assert_eq!(value, "from-env");
-            assert_eq!(host, "api.example.com");
-        });
-    }
-
-    #[cfg(feature = "net")]
-    #[test]
-    fn parse_secret_preserves_explicit_value_syntax() {
-        let (env_var, value, host) =
-            parse_secret("API_KEY=literal@with-at@api.example.com").unwrap();
-
-        assert_eq!(env_var, "API_KEY");
-        assert_eq!(value, "literal@with-at");
+        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
         assert_eq!(host, "api.example.com");
     }
 
-    #[cfg(feature = "net")]
     #[test]
-    fn parse_secret_rejects_missing_env_source() {
-        let err = with_secret_env("MSB_PARSE_SECRET_MISSING", None, || {
-            parse_secret("MSB_PARSE_SECRET_MISSING@api.example.com")
+    fn parse_secret_rejects_inline_value_syntax() {
+        for command in ["create", "modify"] {
+            let err = parse_secret("API_KEY=literal@api.example.com", command)
                 .unwrap_err()
-                .to_string()
-        });
+                .to_string();
 
-        assert_eq!(
-            err,
-            "secret environment variable `MSB_PARSE_SECRET_MISSING` is not set"
-        );
+            assert!(
+                err.contains("inline secret values"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                err.contains(&format!("`{command}`")),
+                "unexpected error: {err}"
+            );
+            assert!(err.contains("API_KEY@HOST"), "unexpected error: {err}");
+        }
     }
 
-    #[cfg(feature = "net")]
     #[test]
-    fn parse_secret_rejects_empty_env_source() {
-        let err = with_secret_env("MSB_PARSE_SECRET_EMPTY", Some(""), || {
-            parse_secret("MSB_PARSE_SECRET_EMPTY@api.example.com")
-                .unwrap_err()
-                .to_string()
-        });
-
-        assert_eq!(
-            err,
-            "secret environment variable `MSB_PARSE_SECRET_EMPTY` is empty"
-        );
+    fn parse_secret_rejects_missing_parts() {
+        assert!(parse_secret("API_KEY", "create").is_err());
+        assert!(parse_secret("@api.example.com", "create").is_err());
+        assert!(parse_secret("API_KEY@", "create").is_err());
     }
 
     #[cfg(feature = "net")]

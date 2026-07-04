@@ -106,7 +106,9 @@ msb create python --name worker \
 |--------|---------|-------------|
 | `image` | required | OCI image, local rootfs path, or disk image |
 | `cpus` | `1` | Virtual CPU limit |
+| `max_cpus` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | `memory` | `512` | Guest memory limit in MiB |
+| `max_memory` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
 | `workdir` | image default | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | empty | Environment variables |
@@ -114,6 +116,16 @@ msb create python --name worker \
 | `volumes` | empty | Bind, named, tmpfs, or disk-image mounts |
 | `network` | public-only | Network policy and published ports |
 | `scripts` | empty | Named scripts mounted at `/.msb/scripts/` |
+
+`max_cpus` and `max_memory` are boot-time reservations: they fix the CPU
+topology and the hotpluggable memory range the VM boots with, so they are
+chosen at create time. Because they default to the effective `cpus` and
+`memory` values, a sandbox created without them has no growth headroom — a
+later live grow with `msb modify` is impossible without a restart. Reserving
+capacity costs almost nothing: vCPUs above the effective count boot offline
+and stay parked, and reserved memory is backed lazily so unplugged capacity
+uses no host memory. If a sandbox may need to grow, set
+`max_cpus`/`max_memory` above the initial values when you create it.
 
 Labels are arbitrary `key=value` metadata attached to a sandbox, set at creation
 and fixed for the sandbox's life. They are meant for attribution — tagging a

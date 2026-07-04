@@ -1,6 +1,12 @@
 //! Secret injection configuration types.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+/// Host-side reference a secret value is resolved from at spawn time. This is
+/// the shared-contract `SecretSource` from `microsandbox-types`, re-exported
+/// so one public source enum serves the whole stack.
+pub use microsandbox_types::SecretSource;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -36,7 +42,22 @@ pub struct SecretEntry {
     pub env_var: String,
 
     /// The actual secret value (never enters the sandbox).
-    pub value: String,
+    ///
+    /// Empty when the entry carries a [`source`](Self::source) reference
+    /// instead: reference-model entries resolve the value host-side at spawn
+    /// time so the durable sandbox config never stores raw secret material.
+    ///
+    /// Wrapped in [`Zeroizing`] so the owned plaintext copy is wiped when the
+    /// entry drops. This only scrubs this in-memory copy; serde/JSON buffers
+    /// that ever carried a legacy inlined value are explicitly out of scope.
+    #[serde(default = "empty_secret_value")]
+    pub value: Zeroizing<String>,
+
+    /// Host-side source reference resolved into [`value`](Self::value) at
+    /// spawn time. `None` means `value` already carries the material (the
+    /// inline model used by value-based secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SecretSource>,
 
     /// Placeholder string the sandbox sees instead of the real value.
     ///
@@ -247,6 +268,7 @@ impl std::fmt::Debug for SecretEntry {
         f.debug_struct("SecretEntry")
             .field("env_var", &self.env_var)
             .field("value", &"[REDACTED]")
+            .field("source", &self.source)
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .field("injection", &self.injection)
@@ -257,6 +279,18 @@ impl std::fmt::Debug for SecretEntry {
 }
 
 impl HostPattern {
+    /// Parse a user-facing host string: `*` is any host, `*.`-prefixed
+    /// strings are wildcards, everything else matches exactly.
+    pub fn parse(host: &str) -> Self {
+        if host == "*" {
+            HostPattern::Any
+        } else if host.starts_with("*.") {
+            HostPattern::Wildcard(host.to_string())
+        } else {
+            HostPattern::Exact(host.to_string())
+        }
+    }
+
     /// Check if a hostname matches this pattern.
     ///
     /// Uses ASCII case-insensitive comparison to avoid `to_lowercase()`
@@ -301,6 +335,10 @@ impl Default for SecretInjection {
 
 fn default_true() -> bool {
     true
+}
+
+fn empty_secret_value() -> Zeroizing<String> {
+    Zeroizing::new(String::new())
 }
 
 fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
@@ -351,7 +389,8 @@ mod tests {
     fn valid_secret() -> SecretEntry {
         SecretEntry {
             env_var: "API_KEY".into(),
-            value: "secret".into(),
+            value: Zeroizing::new("secret".into()),
+            source: None,
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
             injection: SecretInjection::default(),
@@ -383,6 +422,38 @@ mod tests {
     }
 
     #[test]
+    fn host_pattern_parse_shapes() {
+        assert_eq!(HostPattern::parse("*"), HostPattern::Any);
+        assert_eq!(
+            HostPattern::parse("*.openai.com"),
+            HostPattern::Wildcard("*.openai.com".into())
+        );
+        assert_eq!(
+            HostPattern::parse("api.openai.com"),
+            HostPattern::Exact("api.openai.com".into())
+        );
+    }
+
+    #[test]
+    fn secret_entry_deserializes_without_value_when_source_present() {
+        let json = r#"{
+            "env_var": "API_KEY",
+            "source": {"kind": "env", "var": "API_KEY"},
+            "placeholder": "$API_KEY",
+            "allowed_hosts": [{"exact": "api.example.com"}]
+        }"#;
+        let entry: SecretEntry = serde_json::from_str(json).unwrap();
+
+        assert!(entry.value.is_empty());
+        assert_eq!(
+            entry.source,
+            Some(SecretSource::Env {
+                var: "API_KEY".into()
+            })
+        );
+    }
+
+    #[test]
     fn default_injection_scopes() {
         let inj = SecretInjection::default();
         assert!(inj.headers);
@@ -395,7 +466,8 @@ mod tests {
     fn default_require_tls_identity() {
         let entry = SecretEntry {
             env_var: "K".into(),
-            value: "v".into(),
+            value: Zeroizing::new("v".into()),
+            source: None,
             placeholder: "$K".into(),
             allowed_hosts: vec![],
             injection: SecretInjection::default(),

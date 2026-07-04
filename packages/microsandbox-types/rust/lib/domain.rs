@@ -601,15 +601,20 @@ pub struct SandboxSpec {
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(default)]
 pub struct SandboxResources {
-    /// Number of virtual CPUs.
+    /// Number of virtual CPUs currently presented to the guest at boot.
     pub cpus: u8,
 
-    /// Guest memory in MiB.
+    /// Guest memory currently presented to the guest at boot, in MiB.
     pub memory_mib: u32,
+
+    /// Maximum virtual CPUs the sandbox may expose after boot-time hotplug support lands.
+    pub max_cpus: u8,
+
+    /// Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
+    pub max_memory_mib: u32,
 }
 
 /// Guest runtime options for a sandbox.
@@ -1006,7 +1011,37 @@ impl Default for SandboxResources {
         Self {
             cpus: DEFAULT_SANDBOX_CPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            max_cpus: DEFAULT_SANDBOX_CPUS,
+            max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxResources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawResources {
+            #[serde(default = "default_sandbox_cpus")]
+            cpus: u8,
+            #[serde(default = "default_sandbox_memory_mib")]
+            memory_mib: u32,
+            max_cpus: Option<u8>,
+            max_memory_mib: Option<u32>,
+        }
+
+        let raw = RawResources::deserialize(deserializer)?;
+        Ok(Self {
+            cpus: raw.cpus,
+            memory_mib: raw.memory_mib,
+            // Legacy configs predate boot-capacity fields. Treat their effective
+            // resources as their maximum capacity so old sandboxes do not
+            // deserialize into an impossible cpus > max_cpus state.
+            max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
+            max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
+        })
     }
 }
 
@@ -1369,6 +1404,14 @@ impl TryFrom<&str> for RlimitResource {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn default_sandbox_cpus() -> u8 {
+    DEFAULT_SANDBOX_CPUS
+}
+
+fn default_sandbox_memory_mib() -> u32 {
+    DEFAULT_SANDBOX_MEMORY_MIB
+}
+
 fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountOptions {
     options.unwrap_or(MountOptions {
         readonly,
@@ -1400,6 +1443,17 @@ mod tests {
         );
         assert_eq!(DiskImageFormat::from_extension("ext4"), None);
         assert_eq!(DiskImageFormat::from_extension(""), None);
+    }
+
+    #[test]
+    fn sandbox_resources_deserialize_legacy_capacity_from_effective_values() {
+        let resources: SandboxResources =
+            serde_json::from_str(r#"{"cpus":4,"memory_mib":2048}"#).unwrap();
+
+        assert_eq!(resources.cpus, 4);
+        assert_eq!(resources.max_cpus, 4);
+        assert_eq!(resources.memory_mib, 2048);
+        assert_eq!(resources.max_memory_mib, 2048);
     }
 
     #[test]

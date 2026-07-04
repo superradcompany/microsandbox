@@ -71,6 +71,55 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	}
 }
 
+func TestSandboxConfigUnmarshalNestedResources(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"image": {
+			"Oci": {
+				"reference": "mirror.gcr.io/library/alpine",
+				"upper_size_mib": 4096
+			}
+		},
+		"resources": {
+			"cpus": 2,
+			"memory_mib": 1024,
+			"max_cpus": 8,
+			"max_memory_mib": 4096
+		}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.CPUs != 2 || cfg.MemoryMiB != 1024 {
+		t.Fatalf("effective resources mismatch: %#v", cfg)
+	}
+	if cfg.MaxCPUs != 8 || cfg.MaxMemoryMiB != 4096 {
+		t.Fatalf("max resources mismatch: %#v", cfg)
+	}
+}
+
+func TestSandboxConfigUnmarshalLegacyNestedResourcesDefaultMax(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"resources": {
+			"cpus": 4,
+			"memory_mib": 2048
+		}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.MaxCPUs != 4 || cfg.MaxMemoryMiB != 2048 {
+		t.Fatalf("legacy max resources mismatch: %#v", cfg)
+	}
+}
+
 func TestFFIWireShape_WithImage(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"))
 	if v := mustField(t, got, "image"); v != "python:3.12" {
@@ -120,6 +169,8 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		WithImage("alpine"),
 		WithMemory(512),
 		WithCPUs(2),
+		WithMaxMemory(4096),
+		WithMaxCPUs(8),
 		WithWorkdir("/app"),
 		WithShell("/bin/bash"),
 		WithHostname("sb"),
@@ -140,6 +191,8 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		{"image", "alpine"},
 		{"memory_mib", float64(512)},
 		{"cpus", float64(2)},
+		{"max_memory_mib", float64(4096)},
+		{"max_cpus", float64(8)},
 		{"workdir", "/app"},
 		{"shell", "/bin/bash"},
 		{"hostname", "sb"},
@@ -432,7 +485,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 	got := marshalCreateOptions(t)
 
 	for _, key := range []string{
-		"image", "snapshot", "memory_mib", "cpus", "workdir", "shell",
+		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
 		"init", "registry_auth", "oci_upper_size_mib",

@@ -3,13 +3,16 @@
 use ts_rs::TS;
 
 use crate::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, DiskImageFormat, EnvVar, HandoffInit,
-    HostPermissions, LogSource, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkSpec,
-    OciRootfsSource, Patch, PortProtocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,
-    RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,
-    VolumeKind, VolumeMount, VolumeSpec,
+    ChangeKind, CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
+    CloudPaginated, CloudSandbox, CloudSandboxStatus, ConfigPlannedChange, DiskImageFormat, EnvVar,
+    HandoffInit, HostPermissions, LogSource, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, MountOptions, NamedVolumeCreate, NamedVolumeMode,
+    NetworkSpec, OciRootfsSource, Patch, PlannedChange, PortProtocol, PublishedPortSpec,
+    PullPolicy, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Rlimit,
+    RlimitResource, RootfsSource, SandboxLogLevel, SandboxModificationPatch,
+    SandboxModificationPlan, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    SecretChangeKind, SecretModificationPatch, SecretPlannedChange, SecretSource, SecurityProfile,
+    SnapshotDestination, SnapshotSpec, StatVirtualization, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -72,6 +75,22 @@ pub fn declarations() -> Vec<String> {
         RlimitResource::decl(&cfg),
         Rlimit::decl(&cfg),
         LogSource::decl(&cfg),
+        SandboxModificationPatch::decl(&cfg),
+        ModificationPolicy::decl(&cfg),
+        SecretModificationPatch::decl(&cfg),
+        SecretSource::decl(&cfg),
+        SandboxModificationPlan::decl(&cfg),
+        PlannedChange::decl(&cfg),
+        ConfigPlannedChange::decl(&cfg),
+        SecretPlannedChange::decl(&cfg),
+        ChangeKind::decl(&cfg),
+        SecretChangeKind::decl(&cfg),
+        ModificationDisposition::decl(&cfg),
+        ModificationConflict::decl(&cfg),
+        ModificationWarning::decl(&cfg),
+        ResourceKind::decl(&cfg),
+        ResourceConvergenceState::decl(&cfg),
+        ResourceResizeStatus::decl(&cfg),
         CloudCreateSandboxRequest::decl(&cfg),
         CloudSandbox::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
@@ -134,7 +153,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 37);
+        assert_eq!(declarations.len(), 53);
         assert!(
             declarations
                 .iter()

@@ -56,6 +56,130 @@ func TestSandboxRequestDrain(t *testing.T) {
 	}
 }
 
+// TestSandboxPingTouch verifies health checks and explicit idle refreshes on
+// live sandboxes, then proves name-addressed handles do not start stopped
+// sandboxes implicitly.
+func TestSandboxPingTouch(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-pingtouch-" + t.Name()
+
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+		_ = microsandbox.RemoveSandbox(context.Background(), name)
+	})
+
+	ping, err := sb.Ping(ctx)
+	if err != nil {
+		t.Fatalf("Sandbox.Ping: %v", err)
+	}
+	if ping.Name != name {
+		t.Fatalf("Sandbox.Ping name = %q, want %q", ping.Name, name)
+	}
+	if ping.Latency < 0 {
+		t.Fatalf("Sandbox.Ping latency = %s, want non-negative", ping.Latency)
+	}
+
+	touch, err := sb.Touch(ctx)
+	if err != nil {
+		t.Fatalf("Sandbox.Touch: %v", err)
+	}
+	if touch.Name != name || touch.ActivitySeq == 0 {
+		t.Fatalf("Sandbox.Touch = %+v", touch)
+	}
+
+	handle, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if _, err := handle.Ping(ctx); err != nil {
+		t.Fatalf("SandboxHandle.Ping: %v", err)
+	}
+	if _, err := handle.Touch(ctx); err != nil {
+		t.Fatalf("SandboxHandle.Touch: %v", err)
+	}
+
+	if err := sb.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := handle.Ping(ctx); err == nil {
+		t.Fatal("SandboxHandle.Ping on stopped sandbox succeeded; want error")
+	}
+	if _, err := handle.Touch(ctx); err == nil {
+		t.Fatal("SandboxHandle.Touch on stopped sandbox succeeded; want error")
+	}
+
+	refreshed, err := handle.Refresh(ctx)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshed.Status() != microsandbox.SandboxStatusStopped {
+		t.Fatalf("status after stopped ping/touch = %q, want stopped", refreshed.Status())
+	}
+}
+
+// TestSandboxModifyDryRun plans a modification against a live sandbox without
+// applying it, on both the live Sandbox and the name-addressed handle.
+func TestSandboxModifyDryRun(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-modify-" + t.Name()
+
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+		_ = microsandbox.RemoveSandbox(context.Background(), name)
+	})
+
+	plan, err := sb.Modify(ctx, microsandbox.ModifyOptions{
+		CPUs:   2,
+		Labels: map[string]string{"tier": "gold"},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("Sandbox.Modify: %v", err)
+	}
+	if plan.Sandbox != name || plan.Applied {
+		t.Fatalf("Sandbox.Modify plan = %+v", plan)
+	}
+	if plan.Policy != microsandbox.ModificationPolicyNoRestart {
+		t.Fatalf("Sandbox.Modify policy = %q", plan.Policy)
+	}
+	fields := map[string]bool{}
+	for _, change := range plan.Changes {
+		fields[change.Field] = true
+	}
+	if !fields["cpus"] || !fields["label"] {
+		t.Fatalf("Sandbox.Modify changes = %+v", plan.Changes)
+	}
+
+	handle, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	handlePlan, err := handle.Modify(ctx, microsandbox.ModifyOptions{
+		Env:    map[string]string{"MODIFIED": "1"},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("SandboxHandle.Modify: %v", err)
+	}
+	if handlePlan.Sandbox != name || handlePlan.Applied {
+		t.Fatalf("SandboxHandle.Modify plan = %+v", handlePlan)
+	}
+}
+
 // TestSandboxRemove removes the persisted state of a stopped sandbox.
 func TestSandboxRemove(t *testing.T) {
 	ctx := integrationCtx(t)

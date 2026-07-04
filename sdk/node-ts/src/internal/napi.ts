@@ -141,7 +141,9 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   cpus(n: number): this;
+  maxCpus(n: number): this;
   memory(mib: number): this;
+  maxMemory(mib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -209,6 +211,9 @@ export interface NapiSandbox {
   sshServer(opts?: NapiSshServerOptions): Promise<NapiSshServer>;
   metrics(): Promise<NapiSandboxMetrics>;
   metricsStream(intervalMs: number): Promise<NapiMetricsStream>;
+  ping(): Promise<NapiSandboxPingResult>;
+  touch(): Promise<NapiSandboxTouchResult>;
+  modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
@@ -233,6 +238,9 @@ export interface NapiSandboxHandle {
   readonly updatedAt: number | null;
   refresh(): Promise<NapiSandboxHandle>;
   metrics(): Promise<NapiSandboxMetrics>;
+  ping(): Promise<NapiSandboxPingResult>;
+  touch(): Promise<NapiSandboxTouchResult>;
+  modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
@@ -259,6 +267,31 @@ export interface NapiSandboxStopResult {
   readonly signal: number | null;
   readonly observedAt: number;
   readonly source: string | null;
+}
+
+export interface NapiSandboxPingResult {
+  readonly name: string;
+  readonly latencyMs: number;
+}
+
+export interface NapiSandboxTouchResult {
+  readonly name: string;
+  readonly activitySeq: number;
+}
+
+/** Native option object accepted by `modify()`. */
+export interface NapiSandboxModifyOptions {
+  cpus?: number;
+  maxCpus?: number;
+  memoryMib?: number;
+  maxMemoryMib?: number;
+  env?: Record<string, string>;
+  envRemove?: string[];
+  labels?: Record<string, string>;
+  labelsRemove?: string[];
+  workdir?: string;
+  policy?: string;
+  dryRun?: boolean;
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
