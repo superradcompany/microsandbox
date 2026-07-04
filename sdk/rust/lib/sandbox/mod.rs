@@ -30,7 +30,7 @@ use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::Registry;
 use microsandbox_protocol::{
-    core::{CoreError, CpusResized, Ping, Pong, ResizeCpus, Touch, Touched},
+    core::{CoreError, Ping, Pong, Touch, Touched},
     exec::{ExecRequest, ExecRlimit},
     message::MessageType,
 };
@@ -1113,17 +1113,6 @@ async fn touch_agent(name: &str, client: &AgentClient) -> MicrosandboxResult<San
     })
 }
 
-async fn resize_cpus_agent(client: &AgentClient, online: u8) -> MicrosandboxResult<CpusResized> {
-    let msg = client
-        .request(MessageType::ResizeCpus, &ResizeCpus { online })
-        .await?;
-    if msg.t != MessageType::CpusResized {
-        return Err(unexpected_agent_response("resize_cpus", &msg));
-    }
-
-    Ok(msg.payload()?)
-}
-
 fn unexpected_agent_response(
     operation: &'static str,
     msg: &microsandbox_protocol::message::Message,
@@ -1322,20 +1311,19 @@ impl Sandbox {
     /// Ask the running guest to change how many CPUs are online.
     ///
     /// Local backend only. This is the low-level control behind
-    /// [`modify`](Self::modify): the target must fit inside the CPU capacity the
-    /// sandbox booted with (`max_cpus`); the guest cooperates through CPU
-    /// hotplug and reports the state it converged to. If the sandbox runtime
-    /// predates protocol generation 7, this fails before any bytes are sent
-    /// with an unsupported-operation error.
+    /// [`modify`](Self::modify): the target must fit inside the CPU capacity
+    /// the sandbox booted with (`max_cpus`). The request goes to the sandbox
+    /// process's runtime control socket; the VMM enforces the new ceiling
+    /// immediately while the guest driver converges asynchronously.
     pub async fn resize_cpus(&self, online: u8) -> MicrosandboxResult<SandboxCpuResizeResult> {
         crate::experimental::require_modify("sandbox resize_cpus")?;
         self.require_local("resize_cpus")?;
-        let resized = resize_cpus_agent(self.client(), online).await?;
+        let state = modify::control_cpu_target(&self.name, u32::from(online)).await?;
         Ok(SandboxCpuResizeResult {
             name: self.name.clone(),
-            requested: resized.requested,
-            online: resized.online,
-            possible: resized.possible,
+            requested: state.requested_online.min(u32::from(u8::MAX)) as u8,
+            online: state.actual_online.min(u32::from(u8::MAX)) as u8,
+            possible: state.possible.min(u32::from(u8::MAX)) as u8,
         })
     }
 

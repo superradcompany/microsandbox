@@ -607,13 +607,13 @@ impl SandboxModificationBuilder {
         let status = handle.status_snapshot();
         let config = handle.config()?;
         let active = handle.active_config().ok().flatten();
-        let live_memory = running_status(status) && control_socket_exists(&self.name);
+        let live_control = running_status(status) && control_socket_exists(&self.name);
         Ok(build_plan(
             self.name,
             status,
             &config,
             active.as_ref(),
-            live_memory,
+            live_control,
             self.patch,
             self.policy,
         ))
@@ -638,13 +638,13 @@ impl SandboxModificationBuilder {
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
         let active = handle.active_config().ok().flatten();
-        let live_memory = running_status(status) && control_socket_exists(&self.name);
+        let live_control = running_status(status) && control_socket_exists(&self.name);
         let mut plan = build_plan(
             self.name.clone(),
             status,
             &config,
             active.as_ref(),
-            live_memory,
+            live_control,
             self.patch.clone(),
             self.policy,
         );
@@ -655,34 +655,35 @@ impl SandboxModificationBuilder {
             handle.stop().await?;
         }
         if !restart_required && let Some(target) = live_cpu_target(&plan, &self.patch) {
-            let resized = handle.connect().await?.resize_cpus(target).await?;
+            let state = control_cpu_target(&self.name, u32::from(target)).await?;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Cpus,
                 requested: target.to_string(),
-                actual: resized.online.to_string(),
-                enforced: target.to_string(),
-                state: if resized.online == target {
+                actual: state.actual_online.to_string(),
+                enforced: state.enforced.to_string(),
+                state: if state.actual_online == u32::from(target) {
                     ResourceConvergenceState::Applied
                 } else {
-                    ResourceConvergenceState::GuestRefused
+                    ResourceConvergenceState::Converging
                 },
             });
-            // The running VM changed: refresh the active snapshot with the CPU
-            // count the guest converged to, so inspect does not report the
-            // already-live change as pending for the next start.
+            // The running VM changed: refresh the active snapshot with the
+            // enforced target so inspect does not report the already-live
+            // change as pending. The guest driver converges asynchronously;
+            // enforcement applies immediately either way.
             if let Some(mut active) = active.clone() {
-                active.spec.resources.cpus = resized.online;
+                active.spec.resources.cpus = target;
                 persist_active_config(&self.backend, &handle, &active).await?;
             }
         }
         if !restart_required && let Some(target_mib) = live_memory_target(&plan, &self.patch) {
-            let response = control_memory_target(&self.name, u64::from(target_mib)).await?;
+            let state = control_memory_target(&self.name, u64::from(target_mib)).await?;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Memory,
                 requested: format_mib(target_mib),
-                actual: format_mib(response.current_mib as u32),
-                enforced: format_mib(response.target_mib as u32),
-                state: if response.current_mib >= response.target_mib {
+                actual: format_mib(state.current_mib as u32),
+                enforced: format_mib(state.target_mib as u32),
+                state: if state.current_mib >= state.target_mib {
                     ResourceConvergenceState::Applied
                 } else {
                     ResourceConvergenceState::Converging
@@ -692,7 +693,7 @@ impl SandboxModificationBuilder {
             // does not report the already-live change as pending. Convergence
             // (plugging blocks) continues asynchronously in the guest.
             if let Some(mut active) = active.clone() {
-                active.spec.resources.memory_mib = response.target_mib as u32;
+                active.spec.resources.memory_mib = state.target_mib as u32;
                 persist_active_config(&self.backend, &handle, &active).await?;
             }
         }
@@ -718,7 +719,7 @@ fn build_plan(
     status: SandboxStatus,
     config: &SandboxConfig,
     active: Option<&SandboxConfig>,
-    live_memory_supported: bool,
+    live_control_supported: bool,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> SandboxModificationPlan {
@@ -730,7 +731,7 @@ fn build_plan(
         status,
         config,
         active,
-        live_memory_supported,
+        live_control_supported,
         &patch,
         policy,
         &mut changes,
@@ -784,8 +785,9 @@ fn live_memory_target(
 
 /// Path of the sandbox's host-side runtime control socket.
 fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
-    Ok(crate::runtime::agent_socket_path(name)?
-        .with_file_name(microsandbox_runtime::control::CONTROL_SOCKET_NAME))
+    Ok(microsandbox_runtime::control::control_socket_path_for(
+        &crate::runtime::agent_socket_path(name)?,
+    ))
 }
 
 /// Whether the running sandbox exposes the runtime control socket. Its absence
@@ -795,11 +797,11 @@ fn control_socket_exists(name: &str) -> bool {
     control_socket_path(name).is_ok_and(|path| path.exists())
 }
 
-/// Ask the sandbox process to converge on `total_mib` of usable guest memory.
+/// Send one control request line and parse the reply.
 #[cfg(unix)]
-async fn control_memory_target(
+async fn control_request(
     name: &str,
-    total_mib: u64,
+    request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -811,7 +813,7 @@ async fn control_memory_target(
         ))
     })?;
     stream
-        .write_all(format!("{{\"op\":\"memory_target\",\"total_mib\":{total_mib}}}\n").as_bytes())
+        .write_all(request.as_bytes())
         .await
         .map_err(|e| crate::MicrosandboxError::Runtime(format!("control request failed: {e}")))?;
 
@@ -824,7 +826,7 @@ async fn control_memory_target(
         serde_json::from_str(line.trim())?;
     if !response.ok {
         return Err(crate::MicrosandboxError::Runtime(format!(
-            "live memory resize refused: {}",
+            "live resize refused: {}",
             response
                 .error
                 .unwrap_or_else(|| "unknown error".to_string())
@@ -833,17 +835,60 @@ async fn control_memory_target(
     Ok(response)
 }
 
+/// Ask the sandbox process to converge on `total_mib` of usable guest memory.
+#[cfg(unix)]
+async fn control_memory_target(
+    name: &str,
+    total_mib: u64,
+) -> MicrosandboxResult<microsandbox_runtime::control::MemoryControlState> {
+    let response = control_request(
+        name,
+        format!("{{\"op\":\"memory_target\",\"total_mib\":{total_mib}}}\n"),
+    )
+    .await?;
+    response.memory.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("control response missing memory state".to_string())
+    })
+}
+
+/// Ask the sandbox process to converge on `online` CPUs. Enforcement applies
+/// immediately in the VMM; the guest driver converges asynchronously.
+#[cfg(unix)]
+pub(crate) async fn control_cpu_target(
+    name: &str,
+    online: u32,
+) -> MicrosandboxResult<microsandbox_runtime::control::CpuControlState> {
+    let response = control_request(
+        name,
+        format!("{{\"op\":\"cpu_target\",\"online\":{online}}}\n"),
+    )
+    .await?;
+    response.cpu.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("control response missing cpu state".to_string())
+    })
+}
+
 #[cfg(not(unix))]
 async fn control_memory_target(
     _name: &str,
     _total_mib: u64,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+) -> MicrosandboxResult<microsandbox_runtime::control::MemoryControlState> {
     Err(crate::MicrosandboxError::Unsupported {
         feature: "live memory resize".into(),
         available_when: "on unix hosts".into(),
     })
 }
 
+#[cfg(not(unix))]
+pub(crate) async fn control_cpu_target(
+    _name: &str,
+    _online: u32,
+) -> MicrosandboxResult<microsandbox_runtime::control::CpuControlState> {
+    Err(crate::MicrosandboxError::Unsupported {
+        feature: "live CPU resize".into(),
+        available_when: "on unix hosts".into(),
+    })
+}
 fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResult<()> {
     if let Some(conflict) = plan.conflicts.first() {
         return Err(crate::MicrosandboxError::Custom(format!(
@@ -1015,7 +1060,7 @@ fn push_resource_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
     active: Option<&SandboxConfig>,
-    live_memory_supported: bool,
+    live_control_supported: bool,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
@@ -1031,7 +1076,7 @@ fn push_resource_changes(
         // VM actually booted with. The active config snapshot is the authority;
         // older runtimes without one classify as restart-required.
         let active_max_cpus = active.map(|active| active.spec.resources.max_cpus);
-        let live = active_max_cpus.is_some_and(|max| cpus <= max);
+        let live = live_control_supported && active_max_cpus.is_some_and(|max| cpus <= max);
         let reason = match (resource_disposition(status, policy, live), active_max_cpus) {
             (ModificationDisposition::RequiresRestart, Some(max)) if cpus > max => Some(format!(
                 "cpus {cpus} exceeds the active max capacity {max}; restart with a larger max_cpus"
@@ -1069,7 +1114,7 @@ fn push_resource_changes(
         // the active hotpluggable capacity AND the running sandbox exposes a
         // runtime control socket (older runtimes and Windows do not).
         let active_max_memory = active.map(|active| active.spec.resources.max_memory_mib);
-        let live = live_memory_supported && active_max_memory.is_some_and(|max| memory_mib <= max);
+        let live = live_control_supported && active_max_memory.is_some_and(|max| memory_mib <= max);
         let reason = match (
             resource_disposition(status, policy, live),
             active_max_memory,
@@ -1731,7 +1776,7 @@ mod tests {
             SandboxStatus::Running,
             &desired,
             Some(&active),
-            false,
+            true,
             patch.clone(),
             ModificationPolicy::NoRestart,
         );
@@ -1796,7 +1841,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             Some(&active),
-            false,
+            true,
             patch.clone(),
             ModificationPolicy::NoRestart,
         );

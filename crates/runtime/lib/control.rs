@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// File name of the control socket, created next to the agent socket.
-pub const CONTROL_SOCKET_NAME: &str = "control.sock";
+/// Extension of the per-sandbox control socket, derived from the agent
+/// socket path (`<sandbox>.sock` becomes `<sandbox>.control.sock`).
+pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -34,6 +35,16 @@ pub enum ControlRequest {
 
     /// Report the current memory sizing without changing anything.
     MemoryState,
+
+    /// Ask the guest to converge on this many online CPUs; the VMM enforces
+    /// the ceiling immediately regardless of guest cooperation.
+    CpuTarget {
+        /// Desired online CPU count.
+        online: u32,
+    },
+
+    /// Report the current CPU sizing without changing anything.
+    CpuState,
 }
 
 /// The reply to any control request.
@@ -46,22 +57,55 @@ pub struct ControlResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 
-    /// Memory the VM booted with, in MiB.
+    /// Memory sizing, present for memory requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryControlState>,
+
+    /// CPU sizing, present for CPU requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuControlState>,
+}
+
+/// Memory sizing carried in [`ControlResponse`], all in MiB.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct MemoryControlState {
+    /// Memory the VM booted with.
     pub boot_mib: u64,
 
-    /// Total memory the host asked the guest to converge on, in MiB.
+    /// Total memory the host asked the guest to converge on.
     pub target_mib: u64,
 
-    /// Total memory currently usable by the guest, in MiB.
+    /// Total memory currently usable by the guest.
     pub current_mib: u64,
 
-    /// Boot-time ceiling for live growth, in MiB.
+    /// Boot-time ceiling for live growth.
     pub max_mib: u64,
+}
+
+/// CPU sizing carried in [`ControlResponse`].
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct CpuControlState {
+    /// CPUs possible in this boot.
+    pub possible: u32,
+
+    /// Online count the host asked the guest to converge on.
+    pub requested_online: u32,
+
+    /// Online count the guest driver last reported.
+    pub actual_online: u32,
+
+    /// Online count the VMM currently enforces.
+    pub enforced: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// The control socket path that belongs to the given agent socket path.
+pub fn control_socket_path_for(agent_sock: &std::path::Path) -> PathBuf {
+    agent_sock.with_extension(CONTROL_SOCKET_EXTENSION)
+}
 
 /// Spawn the control listener thread. Non-fatal on failure by design: the
 /// caller logs and continues, and the SDK treats a missing socket as "no live
@@ -119,14 +163,16 @@ fn serve_connection(
 
 #[cfg(unix)]
 fn handle_request(request: ControlRequest, control: &msb_krun::VmControl) -> ControlResponse {
-    let respond = |state: Option<msb_krun::VmMemoryState>| match state {
+    let memory = |state: Option<msb_krun::VmMemoryState>| match state {
         Some(state) => ControlResponse {
             ok: true,
-            error: None,
-            boot_mib: state.boot_mib,
-            target_mib: state.target_mib,
-            current_mib: state.current_mib,
-            max_mib: state.max_mib,
+            memory: Some(MemoryControlState {
+                boot_mib: state.boot_mib,
+                target_mib: state.target_mib,
+                current_mib: state.current_mib,
+                max_mib: state.max_mib,
+            }),
+            ..Default::default()
         },
         None => ControlResponse {
             ok: false,
@@ -134,14 +180,38 @@ fn handle_request(request: ControlRequest, control: &msb_krun::VmControl) -> Con
             ..Default::default()
         },
     };
+    let cpu = |state: Option<msb_krun::VmCpuState>| match state {
+        Some(state) => ControlResponse {
+            ok: true,
+            cpu: Some(CpuControlState {
+                possible: state.possible,
+                requested_online: state.requested_online,
+                actual_online: state.actual_online,
+                enforced: state.enforced,
+            }),
+            ..Default::default()
+        },
+        None => ControlResponse {
+            ok: false,
+            error: Some("this VM booted without CPU capacity".to_string()),
+            ..Default::default()
+        },
+    };
 
     match request {
         ControlRequest::MemoryTarget { total_mib } => {
             if control.set_memory_target_mib(total_mib).is_none() {
-                return respond(None);
+                return memory(None);
             }
-            respond(control.memory_state())
+            memory(control.memory_state())
         }
-        ControlRequest::MemoryState => respond(control.memory_state()),
+        ControlRequest::MemoryState => memory(control.memory_state()),
+        ControlRequest::CpuTarget { online } => {
+            if control.set_cpu_target(online).is_none() {
+                return cpu(None);
+            }
+            cpu(control.cpu_state())
+        }
+        ControlRequest::CpuState => cpu(control.cpu_state()),
     }
 }

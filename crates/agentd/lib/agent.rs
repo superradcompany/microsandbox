@@ -16,8 +16,8 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, CoreError, CoreErrorKind, CpusResized, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResizeCpus, ResolvedUser, Touch, Touched,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -430,17 +430,6 @@ async fn handle_message(
                 .map_err(|e| AgentdError::ExecSession(format!("encode touched frame: {e}")))?;
         }
 
-        MessageType::ResizeCpus => {
-            let Some(req) = decode_payload_or_core_error::<ResizeCpus>(&msg, out_buf)? else {
-                return Ok(());
-            };
-            let resized = resize_online_cpus(req.online);
-            let reply = Message::with_payload(MessageType::CpusResized, msg.id, &resized)
-                .map_err(|e| AgentdError::ExecSession(format!("encode cpus_resized: {e}")))?;
-            codec::encode_to_buf(&reply, out_buf)
-                .map_err(|e| AgentdError::ExecSession(format!("encode cpus_resized frame: {e}")))?;
-        }
-
         MessageType::ExecRequest => {
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
@@ -697,70 +686,6 @@ async fn handle_message(
 /// Default PATH for the guest when no PATH is inherited.
 const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Onlines or offlines CPUs through sysfs until the requested count is online.
-///
-/// CPUs are onlined lowest-first and offlined highest-first; CPU 0 is never
-/// offlined. Per-CPU failures are tolerated — the reply carries the state the
-/// guest actually converged to, which the host compares against its request.
-fn resize_online_cpus(requested: u8) -> CpusResized {
-    let possible = read_cpu_list("/sys/devices/system/cpu/possible");
-    let possible_count = possible.len().max(1);
-    let target = (requested.max(1) as usize).min(possible_count);
-
-    for &cpu in &possible {
-        if cpu == 0 {
-            continue;
-        }
-        let want_online = (cpu as usize) < target;
-        let path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
-        let currently_online = match std::fs::read_to_string(&path) {
-            Ok(state) => state.trim() == "1",
-            // No online file means the CPU cannot be hotplugged; leave it be.
-            Err(_) => continue,
-        };
-        if want_online != currently_online
-            && let Err(e) = std::fs::write(&path, if want_online { "1" } else { "0" })
-        {
-            eprintln!(
-                "cpu resize: failed to set cpu{cpu} online={}: {e}",
-                want_online as u8
-            );
-        }
-    }
-
-    CpusResized {
-        requested,
-        online: read_cpu_list("/sys/devices/system/cpu/online").len() as u8,
-        possible: possible_count as u8,
-    }
-}
-
-/// Parses a sysfs CPU list such as `0-3`, `0`, or `0-1,5` into CPU numbers.
-fn read_cpu_list(path: &str) -> Vec<u8> {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    parse_cpu_list(contents.trim())
-}
-
-fn parse_cpu_list(list: &str) -> Vec<u8> {
-    let mut cpus = Vec::new();
-    for part in list.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some((start, end)) = part.split_once('-') {
-            if let (Ok(start), Ok(end)) = (start.parse::<u8>(), end.parse::<u8>()) {
-                cpus.extend(start..=end);
-            }
-        } else if let Ok(cpu) = part.parse::<u8>() {
-            cpus.push(cpu);
-        }
-    }
-    cpus
-}
-
 /// Returns whether a host message should refresh the sandbox idle timer.
 ///
 /// Maintenance traffic such as clock synchronization and reachability checks
@@ -781,15 +706,10 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
 /// health check and `touch` advances activity exactly once. `core.error` is
 /// also excluded because valid work already records activity on the incoming
 /// request, while malformed maintenance traffic should not become a keepalive.
-/// `core.cpus_resized` is excluded for the same reason: the incoming resize
-/// request already counted as host activity.
 fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
-        MessageType::Pong
-            | MessageType::Touched
-            | MessageType::CpusResized
-            | MessageType::CoreError
+        MessageType::Pong | MessageType::Touched | MessageType::CoreError
     )
 }
 
@@ -1360,22 +1280,6 @@ mod tests {
         assert!(!message_refreshes_idle_timer(&MessageType::Ping));
         assert!(!message_refreshes_idle_timer(&MessageType::Touch));
         assert!(message_refreshes_idle_timer(&MessageType::ExecRequest));
-    }
-
-    #[test]
-    fn resize_cpus_refreshes_idle_timer_once() {
-        assert!(message_refreshes_idle_timer(&MessageType::ResizeCpus));
-        assert!(!guest_message_refreshes_idle_timer(
-            &MessageType::CpusResized
-        ));
-    }
-
-    #[test]
-    fn parse_cpu_list_handles_sysfs_forms() {
-        assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
-        assert_eq!(parse_cpu_list("0"), vec![0]);
-        assert_eq!(parse_cpu_list("0-1,5"), vec![0, 1, 5]);
-        assert_eq!(parse_cpu_list(""), Vec::<u8>::new());
     }
 
     #[test]
