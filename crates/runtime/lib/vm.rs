@@ -246,11 +246,17 @@ pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
 
-    /// Number of virtual CPUs.
+    /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
-    /// Memory in MiB.
+    /// Memory in MiB at boot.
     pub memory_mib: u32,
+
+    /// Maximum possible virtual CPUs; CPUs above `vcpus` boot parked for later hotplug.
+    pub max_cpus: u8,
+
+    /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
+    pub max_memory_mib: u32,
 
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
@@ -376,6 +382,8 @@ impl std::fmt::Debug for VmConfig {
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
+            .field("max_cpus", &self.max_cpus)
+            .field("max_memory_mib", &self.max_memory_mib)
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -1036,6 +1044,8 @@ fn build_vm(
             let m = m
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
+                .max_vcpus(vm.max_cpus.max(vm.vcpus))
+                .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {

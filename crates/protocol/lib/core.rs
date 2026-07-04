@@ -75,6 +75,34 @@ pub struct Touched {
     pub activity_seq: u64,
 }
 
+/// Payload for `core.resize_cpus` messages.
+///
+/// Sent by the host to ask the guest to online or offline CPUs until the
+/// requested count is online. The guest can only use CPUs that were possible
+/// at boot; CPU 0 is never offlined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResizeCpus {
+    /// Desired number of online CPUs.
+    pub online: u8,
+}
+
+/// Payload for `core.cpus_resized` messages.
+///
+/// Sent by agentd in response to `core.resize_cpus` with the observed state
+/// after attempting the change. `online != requested` means the guest could
+/// not fully converge (for example a CPU refused to offline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpusResized {
+    /// The count the host requested.
+    pub requested: u8,
+
+    /// CPUs actually online after the attempt.
+    pub online: u8,
+
+    /// CPUs possible in this boot (the live-resize ceiling).
+    pub possible: u8,
+}
+
 /// Payload for `core.error` messages.
 ///
 /// Sent when a peer can identify a recoverable protocol error for a specific

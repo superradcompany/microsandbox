@@ -72,6 +72,14 @@ pub struct SandboxArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
+    /// Maximum possible virtual CPUs (defaults to `--vcpus`).
+    #[arg(long = "max-vcpus")]
+    pub max_vcpus: Option<u8>,
+
+    /// Maximum hotpluggable memory in MiB (defaults to `--memory-mib`).
+    #[arg(long = "max-memory-mib")]
+    pub max_memory_mib: Option<u32>,
+
     /// Inherited fd carrying the JSON [`LaunchConfig`] (set by the SDK).
     #[cfg(unix)]
     #[arg(long = "config-fd", hide = true)]
@@ -141,6 +149,11 @@ pub fn run(args: SandboxArgs) -> ! {
         libkrunfw_path: launch.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
+        max_cpus: args.max_vcpus.unwrap_or(args.vcpus).max(args.vcpus),
+        max_memory_mib: args
+            .max_memory_mib
+            .unwrap_or(args.memory_mib)
+            .max(args.memory_mib),
         rootfs_path: launch.rootfs.path,
         rootfs_vmdk: if is_vmdk {
             launch.rootfs.disk.clone()
@@ -516,6 +529,8 @@ mod tests {
             forward_output: false,
             vcpus: 1,
             memory_mib: 512,
+            max_vcpus: None,
+            max_memory_mib: None,
             #[cfg(unix)]
             config_fd,
             config_file,

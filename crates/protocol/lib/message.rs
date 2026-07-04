@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 6;
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -133,6 +133,14 @@ pub enum MessageType {
     /// Guest confirms that sandbox activity was recorded.
     #[strum(serialize = "core.touched")]
     Touched,
+
+    /// Host asks the guest to change how many CPUs are online.
+    #[strum(serialize = "core.resize_cpus")]
+    ResizeCpus,
+
+    /// Guest reports the CPU counts after a resize request.
+    #[strum(serialize = "core.cpus_resized")]
+    CpusResized,
 
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
@@ -271,6 +279,7 @@ impl MessageType {
         match self {
             Self::Pong
             | Self::Touched
+            | Self::CpusResized
             | Self::CoreError
             | Self::ExecExited
             | Self::ExecFailed
@@ -297,7 +306,8 @@ impl MessageType {
     /// (generation 1), so the `Fs*` types require generation 2 or newer.
     /// TCP forwarding was introduced in generation 4. `core.error` was
     /// introduced in generation 5. Reachability checks and explicit idle
-    /// refreshes were introduced in generation 6.
+    /// refreshes were introduced in generation 6. Live CPU resize was
+    /// introduced in generation 7.
     ///
     /// There is deliberately no wildcard arm: adding a new `MessageType` must
     /// force a conscious choice of the generation that introduced it (and a
@@ -324,6 +334,7 @@ impl MessageType {
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
+            Self::ResizeCpus | Self::CpusResized => 7,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData

@@ -1,6 +1,7 @@
 //! `msb inspect` command — show detailed sandbox information.
 
 use clap::Args;
+use console::style;
 use microsandbox::sandbox::{
     HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus, SecurityProfile,
     StatVirtualization, VolumeMount,
@@ -135,33 +136,36 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         }
 
         let show_experimental = common::experimental_modify_enabled();
+        let change_for = |field: &str| pending_changes.iter().find(|c| c.field == field);
         ui::detail_header("Resources");
-        ui::detail_kv_indent("CPUs", &config.spec.resources.cpus.to_string());
+        ui::detail_kv_indent(
+            "CPUs",
+            &resource_value(&config.spec.resources.cpus.to_string(), change_for("cpus")),
+        );
         if show_experimental {
-            ui::detail_kv_indent("Max CPUs", &config.spec.resources.max_cpus.to_string());
+            ui::detail_kv_indent(
+                "Max CPUs",
+                &resource_value(
+                    &config.spec.resources.max_cpus.to_string(),
+                    change_for("max_cpus"),
+                ),
+            );
         }
         ui::detail_kv_indent(
             "Memory",
-            &format!("{} MiB", config.spec.resources.memory_mib),
+            &resource_value(
+                &format!("{} MiB", config.spec.resources.memory_mib),
+                change_for("memory"),
+            ),
         );
         if show_experimental {
             ui::detail_kv_indent(
                 "Max Memory",
-                &format!("{} MiB", config.spec.resources.max_memory_mib),
+                &resource_value(
+                    &format!("{} MiB", config.spec.resources.max_memory_mib),
+                    change_for("max_memory"),
+                ),
             );
-        }
-        if !pending_changes.is_empty() {
-            ui::detail_header("Pending Next Start");
-            let mut table = ui::Table::new(&["FIELD", "ACTIVE", "NEXT START", "EFFECT"]);
-            for change in &pending_changes {
-                table.add_row(vec![
-                    display_field(change.field).to_string(),
-                    change.active.clone(),
-                    change.desired.clone(),
-                    ui::format_disposition(change.effect),
-                ]);
-            }
-            table.print();
         }
 
         let security = match config.spec.security_profile {
@@ -324,11 +328,17 @@ fn format_mib(mib: u32) -> String {
     }
 }
 
-fn display_field(field: &str) -> &str {
-    match field {
-        "max_cpus" => "max CPUs",
-        "max_memory" => "max memory",
-        field => field,
+/// Render a resource row value, inlining any pending next-start divergence.
+///
+/// With no pending change the plain (desired) value is shown as-is. With one, the ACTIVE value leads and a dim `→ <desired> next start` suffix flags the divergence.
+fn resource_value(plain: &str, change: Option<&PendingConfigChange>) -> String {
+    match change {
+        Some(change) => format!(
+            "{}{}",
+            change.active,
+            style(format!(" \u{2192} {} next start", change.desired)).dim()
+        ),
+        None => plain.to_string(),
     }
 }
 
@@ -369,6 +379,23 @@ mod tests {
         assert_eq!(changes[3].field, "max_memory");
         assert_eq!(changes[3].active, "1 GiB");
         assert_eq!(changes[3].desired, "4 GiB");
+    }
+
+    #[test]
+    fn resource_value_inlines_pending_divergence() {
+        let change = PendingConfigChange {
+            field: "memory",
+            active: "1 GiB".to_string(),
+            desired: "4 GiB".to_string(),
+            effect: "requires restart",
+        };
+
+        assert_eq!(resource_value("4096 MiB", None), "4096 MiB");
+
+        let rendered = resource_value("4096 MiB", Some(&change));
+        let plain = console::strip_ansi_codes(&rendered).to_string();
+        assert_eq!(plain, "1 GiB \u{2192} 4 GiB next start");
+        assert!(rendered.starts_with("1 GiB"));
     }
 
     #[test]

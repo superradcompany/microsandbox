@@ -2069,6 +2069,16 @@ fn sandbox_cli_args(
     visible.push(OsString::from(config.spec.resources.cpus.to_string()));
     visible.push(OsString::from("--memory-mib"));
     visible.push(OsString::from(config.spec.resources.memory_mib.to_string()));
+    if config.spec.resources.max_cpus > config.spec.resources.cpus {
+        visible.push(OsString::from("--max-vcpus"));
+        visible.push(OsString::from(config.spec.resources.max_cpus.to_string()));
+    }
+    if config.spec.resources.max_memory_mib > config.spec.resources.memory_mib {
+        visible.push(OsString::from("--max-memory-mib"));
+        visible.push(OsString::from(
+            config.spec.resources.max_memory_mib.to_string(),
+        ));
+    }
 
     let mut launch = LaunchConfig {
         db_path: db_path.to_path_buf(),

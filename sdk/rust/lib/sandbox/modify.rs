@@ -166,6 +166,10 @@ pub struct SandboxModificationPlan {
 
     /// Non-fatal warnings about the patch or current runtime capabilities.
     pub warnings: Vec<ModificationWarning>,
+
+    /// Live resource resize outcomes, populated by apply when a live change ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resize_status: Vec<ResourceResizeStatus>,
 }
 
 struct DesiredResources {
@@ -538,10 +542,12 @@ impl SandboxModificationBuilder {
             .await?;
         let status = handle.status_snapshot();
         let config = handle.config()?;
+        let active = handle.active_config().ok().flatten();
         Ok(build_plan(
             self.name,
             status,
             &config,
+            active.as_ref(),
             self.patch,
             self.policy,
         ))
@@ -549,12 +555,13 @@ impl SandboxModificationBuilder {
 
     /// Apply supported changes atomically.
     ///
-    /// This first apply slice persists safe desired-config changes (`cpus` and
-    /// `memory_mib`) for stopped sandboxes or `next_start` requests. When the
-    /// policy is `restart`, it uses the existing stop/start lifecycle path to
-    /// make restart-required resource changes active. Runtime live mutation,
-    /// boot-time max-capacity schema updates, and secret store/runtime writes
-    /// are intentionally blocked until their later phases land.
+    /// Live-capable changes apply to the running VM first (CPU count through
+    /// guest CPU hotplug when the target fits inside the active `max_cpus`);
+    /// the desired config is persisted only after the live step succeeds. For
+    /// stopped sandboxes or `next_start` requests, changes persist for the next
+    /// start. When the policy is `restart`, the existing stop/start lifecycle
+    /// path makes restart-required changes active. Live memory resize waits on
+    /// virtio-mem; secret store/runtime writes wait on the secret contract.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         crate::experimental::require_modify("sandbox modify")?;
         let handle = self
@@ -564,12 +571,41 @@ impl SandboxModificationBuilder {
             .await?;
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
-        let mut plan = build_plan(self.name, status, &config, self.patch.clone(), self.policy);
+        let active = handle.active_config().ok().flatten();
+        let mut plan = build_plan(
+            self.name,
+            status,
+            &config,
+            active.as_ref(),
+            self.patch.clone(),
+            self.policy,
+        );
 
         validate_apply_supported(&plan)?;
         let restart_required = plan_requires_restart(&plan) && running_status(status);
         if restart_required {
             handle.stop().await?;
+        }
+        if !restart_required && let Some(target) = live_cpu_target(&plan, &self.patch) {
+            let resized = handle.connect().await?.resize_cpus(target).await?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Cpus,
+                requested: target.to_string(),
+                actual: resized.online.to_string(),
+                enforced: target.to_string(),
+                state: if resized.online == target {
+                    ResourceConvergenceState::Applied
+                } else {
+                    ResourceConvergenceState::GuestRefused
+                },
+            });
+            // The running VM changed: refresh the active snapshot with the CPU
+            // count the guest converged to, so inspect does not report the
+            // already-live change as pending for the next start.
+            if let Some(mut active) = active.clone() {
+                active.spec.resources.cpus = resized.online;
+                persist_active_config(&self.backend, &handle, &active).await?;
+            }
         }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
@@ -591,6 +627,7 @@ fn build_plan(
     name: String,
     status: SandboxStatus,
     config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> SandboxModificationPlan {
@@ -598,7 +635,15 @@ fn build_plan(
     let mut conflicts = Vec::new();
     let mut warnings = Vec::new();
 
-    push_resource_changes(status, config, &patch, policy, &mut changes, &mut warnings);
+    push_resource_changes(
+        status,
+        config,
+        active,
+        &patch,
+        policy,
+        &mut changes,
+        &mut warnings,
+    );
     push_secret_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_resource_conflicts(config, &patch, &mut conflicts);
 
@@ -610,7 +655,21 @@ fn build_plan(
         changes,
         conflicts,
         warnings,
+        resize_status: Vec::new(),
     }
+}
+
+/// The live CPU target, when the plan classified the `cpus` change as live.
+fn live_cpu_target(plan: &SandboxModificationPlan, patch: &SandboxModificationPatch) -> Option<u8> {
+    let live_cpus = plan.changes.iter().any(|change| {
+        matches!(
+            change,
+            PlannedChange::Config(change)
+                if change.field == "cpus"
+                    && matches!(change.disposition, ModificationDisposition::Live)
+        )
+    });
+    if live_cpus { patch.cpus } else { None }
 }
 
 fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResult<()> {
@@ -716,15 +775,49 @@ async fn persist_config(
     Ok(())
 }
 
+async fn persist_active_config(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    active: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let local = handle
+        .local()
+        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+            feature: "modify apply on cloud".into(),
+            available_when: "when cloud modify lands".into(),
+        })?;
+    let local_backend =
+        backend
+            .as_local()
+            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                feature: "modify apply on cloud".into(),
+                available_when: "when cloud modify lands".into(),
+            })?;
+
+    let active_json = serde_json::to_string(active)?;
+    sandbox_entity::ActiveModel {
+        id: Set(local.db_id),
+        active_config: Set(Some(active_json)),
+        updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+        ..Default::default()
+    }
+    .update(local_backend.db().await?.write())
+    .await?;
+
+    Ok(())
+}
+
 async fn start_after_modify(handle: &super::SandboxHandle) -> MicrosandboxResult<()> {
     let sandbox = handle.refresh().await?.start_detached().await?;
     sandbox.detach().await;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_resource_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
@@ -736,15 +829,26 @@ fn push_resource_changes(
     if let Some(cpus) = patch.cpus
         && cpus != resources.cpus
     {
+        // CPUs change live when the target fits inside the capacity the running
+        // VM actually booted with. The active config snapshot is the authority;
+        // older runtimes without one classify as restart-required.
+        let active_max_cpus = active.map(|active| active.spec.resources.max_cpus);
+        let live = active_max_cpus.is_some_and(|max| cpus <= max);
+        let reason = match (resource_disposition(status, policy, live), active_max_cpus) {
+            (ModificationDisposition::RequiresRestart, Some(max)) if cpus > max => Some(format!(
+                "cpus {cpus} exceeds the active max capacity {max}; restart with a larger max_cpus"
+            )),
+            _ => resource_reason(status, policy, live),
+        };
         changes.push(PlannedChange::Config(ConfigPlannedChange {
             field: "cpus".to_string(),
             change: ChangeKind::Updated,
             before: Some(resources.cpus.to_string()),
             after: Some(cpus.to_string()),
-            disposition: resource_disposition(status, policy, false),
-            reason: resource_reason(status, policy, false),
+            disposition: resource_disposition(status, policy, live),
+            reason,
         }));
-        push_live_resize_warning("cpus", status, policy, false, warnings);
+        push_live_resize_warning("cpus", status, policy, live, warnings);
     }
 
     if desired.max_cpus != resources.max_cpus
@@ -1192,6 +1296,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Running,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1220,6 +1325,69 @@ mod tests {
     }
 
     #[test]
+    fn running_cpus_within_active_capacity_classify_live() {
+        // The sandbox booted with reserved capacity: desired and active agree
+        // on max_cpus 8 while only 2 CPUs are online.
+        let mut desired = config(2, 1024);
+        desired.spec.resources.max_cpus = 8;
+        let active = desired.clone();
+        let patch = SandboxModificationPatch {
+            cpus: Some(4),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &desired,
+            Some(&active),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.field, "cpus");
+        assert_eq!(change.disposition, ModificationDisposition::Live);
+        assert!(change.reason.is_none());
+        assert!(validate_apply_supported(&plan).is_ok());
+        assert_eq!(live_cpu_target(&plan, &patch), Some(4));
+    }
+
+    #[test]
+    fn running_cpus_above_active_capacity_require_restart() {
+        let mut active = config(2, 1024);
+        active.spec.resources.max_cpus = 8;
+        let patch = SandboxModificationPatch {
+            cpus: Some(12),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config(2, 1024),
+            Some(&active),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.field, "cpus");
+        assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        assert!(
+            change
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("exceeds the active max capacity 8"))
+        );
+        assert_eq!(live_cpu_target(&plan, &patch), None);
+    }
+
+    #[test]
     fn restart_policy_allows_restart_required_resource_apply() {
         let patch = SandboxModificationPatch {
             cpus: Some(4),
@@ -1231,6 +1399,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Running,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::Restart,
         );
@@ -1250,6 +1419,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Running,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1269,6 +1439,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Stopped,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1297,6 +1468,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Stopped,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1320,6 +1492,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Stopped,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1382,6 +1555,7 @@ mod tests {
             "api".to_string(),
             SandboxStatus::Running,
             &config(2, 1024),
+            None,
             patch,
             ModificationPolicy::NoRestart,
         );
