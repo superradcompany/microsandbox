@@ -1,9 +1,9 @@
-//! Integration tests for the experimental live-resize surface (`msb modify --cpus/--memory`).
+//! Integration tests for the live-resize surface (`msb modify --cpus/--memory`).
 //!
-//! Every test here needs a real VM plus a runtime built with live-resize control ops, so they are double-gated: besides the usual `#[msb_test]` `#[ignore]`, each test skips
-//! cleanly unless BOTH `MSB_EXPERIMENTAL_MODIFY` and `MSB_TEST_LIVE_RESIZE` are set. CI opts in by exporting them once prebuilt libkrunfw artifacts with the
-//! `virtio_msb_cpu` and virtio-mem guest drivers ship; local runs also want `MSB_PATH` pointing at a live-resize-capable `msb`. On macOS that binary must carry the
-//! hypervisor entitlement, and `cargo test` relinks `target/debug/msb` (dropping an ad-hoc signature), so point `MSB_PATH` at a signed copy outside the target dir:
+//! Every test here needs a real VM plus a runtime built with live-resize control ops, so like the other suites in this directory they run under `#[msb_test]`
+//! (`#[tokio::test] #[ignore]`) and boot VMs unconditionally when invoked. CI runs them once prebuilt libkrunfw artifacts with the `virtio_msb_cpu` and virtio-mem guest
+//! drivers ship; local runs also want `MSB_PATH` pointing at a live-resize-capable `msb`. On macOS that binary must carry the hypervisor entitlement, and `cargo test`
+//! relinks `target/debug/msb` (dropping an ad-hoc signature), so point `MSB_PATH` at a signed copy outside the target dir:
 //! `cp target/debug/msb /tmp/msb-signed && codesign --entitlements msb-entitlements.plist -s - --force /tmp/msb-signed`.
 //!
 //! The uncooperative-guest test additionally needs `MSB_TEST_LIVE_RESIZE_OLD_KERNEL` set to a libkrunfw dylib/so WITHOUT the guest drivers (a pre-5.5.0 prebuilt); it is
@@ -23,9 +23,6 @@ use tokio::time::{sleep, timeout};
 
 const IMAGE: &str = "mirror.gcr.io/library/alpine";
 
-/// Opt-in gate for this suite, on top of the experimental-surface gate.
-const GATE_ENV: &str = "MSB_TEST_LIVE_RESIZE";
-
 /// Path to a driverless (pre-virtio_msb_cpu) libkrunfw, for the uncooperative-guest test.
 const OLD_KERNEL_ENV: &str = "MSB_TEST_LIVE_RESIZE_OLD_KERNEL";
 
@@ -35,16 +32,6 @@ const CONVERGE_DEADLINE: Duration = Duration::from_secs(60);
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
-
-/// Whether the suite is opted in. Prints the skip reason so a silent pass is distinguishable from a run.
-fn opted_in() -> bool {
-    let modify = std::env::var_os("MSB_EXPERIMENTAL_MODIFY").is_some();
-    let gate = std::env::var_os(GATE_ENV).is_some();
-    if !(modify && gate) {
-        eprintln!("skipping: live-resize tests need MSB_EXPERIMENTAL_MODIFY and {GATE_ENV} set");
-    }
-    modify && gate
-}
 
 /// Run the freshly built `msb` binary with a hard timeout, capturing output.
 async fn msb(args: &[&str]) -> Output {
@@ -115,9 +102,6 @@ async fn cleanup(name: &str) {
 /// Live CPU grow then shrink on a cooperative guest: the guest driver onlines and offlines CPUs, observable through `nproc`.
 #[msb_test]
 async fn live_cpu_grow_and_shrink_converge() {
-    if !opted_in() {
-        return;
-    }
     let name = "live-resize-cpu";
     cleanup(name).await;
 
@@ -167,9 +151,6 @@ async fn live_cpu_grow_and_shrink_converge() {
 /// Live memory grow on a cooperative guest: virtio-mem plugs blocks and `MemTotal` rises.
 #[msb_test]
 async fn live_memory_grow_converges() {
-    if !opted_in() {
-        return;
-    }
     let name = "live-resize-mem";
     cleanup(name).await;
 
@@ -230,9 +211,6 @@ async fn live_memory_grow_converges() {
 /// A target above the boot-time capacity cannot apply live: the CLI must refuse with a non-zero exit and leave the running guest untouched.
 #[msb_test]
 async fn over_capacity_refusal_exits_nonzero() {
-    if !opted_in() {
-        return;
-    }
     let name = "live-resize-cap";
     cleanup(name).await;
 
@@ -272,9 +250,6 @@ async fn over_capacity_refusal_exits_nonzero() {
 /// own view unchanged, and stay reachable.
 #[msb_test]
 async fn uncooperative_guest_reports_converging() {
-    if !opted_in() {
-        return;
-    }
     let Some(old_kernel) = std::env::var_os(OLD_KERNEL_ENV) else {
         eprintln!("skipping: {OLD_KERNEL_ENV} not set (needs a driverless libkrunfw)");
         return;

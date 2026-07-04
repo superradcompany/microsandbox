@@ -557,6 +557,232 @@ hard: number, };
 
 export type LogSource = "stdout" | "stderr" | "output" | "system";
 
+export type SandboxModificationPatch = {
+/**
+ * Desired effective vCPU count.
+ */
+cpus: number | null,
+/**
+ * Desired boot-time maximum possible vCPU count.
+ */
+max_cpus: number | null,
+/**
+ * Desired effective guest memory in MiB.
+ */
+memory_mib: number | null,
+/**
+ * Desired boot-time maximum hotpluggable memory in MiB.
+ */
+max_memory_mib: number | null,
+/**
+ * Environment variables to set for future execs.
+ */
+env?: Array<EnvVar>,
+/**
+ * Environment variable keys to remove.
+ */
+env_remove?: Array<string>,
+/**
+ * Labels to set.
+ */
+labels?: Array<[string, string]>,
+/**
+ * Label keys to remove.
+ */
+labels_remove?: Array<string>,
+/**
+ * Desired working directory for future execs.
+ */
+workdir: string | null,
+/**
+ * Requested secret modifications.
+ */
+secrets?: Array<SecretModificationPatch>, };
+
+export type ModificationPolicy = "no_restart" | "next_start" | "restart";
+
+export type SecretModificationPatch = {
+/**
+ * Stable secret identity, usually the environment variable name.
+ */
+name: string,
+/**
+ * Requested secret operation.
+ */
+operation: SecretPatchOperation,
+/**
+ * Host-side source reference for add or rotate operations.
+ */
+source: SecretSource | null,
+/**
+ * Guest-visible placeholder/reference, if explicitly requested.
+ */
+placeholder: string | null,
+/**
+ * Allowed host patterns associated with this request.
+ */
+allowed_hosts?: Array<string>, };
+
+export type SecretPatchOperation = "upsert" | "rotate" | "remove" | "update_hosts" | "update_placeholder";
+
+export type SecretSource = { "kind": "env",
+/**
+ * Host environment variable name.
+ */
+var: string, } | { "kind": "store",
+/**
+ * Store-specific secret reference.
+ */
+reference: string, };
+
+export type SandboxModificationPlan = {
+/**
+ * Sandbox being modified.
+ */
+sandbox: string,
+/**
+ * Sandbox status used for classification.
+ */
+status: string,
+/**
+ * Whether the changes were applied.
+ */
+applied: boolean,
+/**
+ * Modification policy used to produce the plan.
+ */
+policy: ModificationPolicy,
+/**
+ * Planned changes.
+ */
+changes: Array<PlannedChange>,
+/**
+ * Conflicts that must be resolved before the patch can apply.
+ */
+conflicts: Array<ModificationConflict>,
+/**
+ * Non-fatal warnings about the patch or current runtime capabilities.
+ */
+warnings: Array<ModificationWarning>,
+/**
+ * Live resource resize outcomes, populated by apply when a live change ran.
+ */
+resize_status?: Array<ResourceResizeStatus>, };
+
+export type PlannedChange = { "kind": "config" } & ConfigPlannedChange | { "kind": "secret" } & SecretPlannedChange;
+
+export type ConfigPlannedChange = {
+/**
+ * Config field being changed.
+ */
+field: string,
+/**
+ * Natural change type for table rendering.
+ */
+change: ChangeKind,
+/**
+ * Previous safe visible state.
+ */
+before: string | null,
+/**
+ * New safe visible state.
+ */
+after: string | null,
+/**
+ * When or whether the change can take effect.
+ */
+disposition: ModificationDisposition,
+/**
+ * Human-readable reason for this classification, when useful.
+ */
+reason: string | null, };
+
+export type SecretPlannedChange = {
+/**
+ * Table field name. This is always `secret`.
+ */
+field: string,
+/**
+ * Stable secret identity, usually the environment variable name.
+ */
+name: string,
+/**
+ * Natural change type for table rendering.
+ */
+change: SecretChangeKind,
+/**
+ * Previous guest-visible reference or placeholder.
+ */
+before_ref: string | null,
+/**
+ * New guest-visible reference or placeholder.
+ */
+after_ref: string | null,
+/**
+ * When or whether the change can take effect.
+ */
+disposition: ModificationDisposition,
+/**
+ * Allowed hosts after the requested change.
+ */
+allow_hosts?: Array<string>,
+/**
+ * Human-readable reason for this classification, when useful.
+ */
+reason: string | null, };
+
+export type ChangeKind = "added" | "updated" | "removed";
+
+export type SecretChangeKind = "added" | "rotated" | "removed" | "renamed" | "hosts updated" | "placeholder updated";
+
+export type ModificationDisposition = "live" | "next start" | "requires restart" | "unsupported";
+
+export type ModificationConflict = {
+/**
+ * Field with the conflict.
+ */
+field: string,
+/**
+ * Human-readable conflict description.
+ */
+message: string, };
+
+export type ModificationWarning = {
+/**
+ * Field associated with the warning.
+ */
+field: string,
+/**
+ * Human-readable warning description.
+ */
+message: string, };
+
+export type ResourceKind = "cpus" | "memory";
+
+export type ResourceConvergenceState = "accepted" | "converging" | "applied" | "guest-refused" | "failed";
+
+export type ResourceResizeStatus = {
+/**
+ * Resource being resized.
+ */
+resource: ResourceKind,
+/**
+ * Requested value.
+ */
+requested: string,
+/**
+ * Actual value observed in the guest/runtime.
+ */
+actual: string,
+/**
+ * Host/VMM-enforced value.
+ */
+enforced: string,
+/**
+ * Convergence state.
+ */
+state: ResourceConvergenceState, };
+
 export type CloudCreateSandboxRequest = {
 /**
  * User-facing sandbox name.

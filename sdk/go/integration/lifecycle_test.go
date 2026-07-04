@@ -60,8 +60,6 @@ func TestSandboxRequestDrain(t *testing.T) {
 // live sandboxes, then proves name-addressed handles do not start stopped
 // sandboxes implicitly.
 func TestSandboxPingTouch(t *testing.T) {
-	// Ping/touch are gated behind the experimental modify surface.
-	t.Setenv("MSB_EXPERIMENTAL_MODIFY", "1")
 	ctx := integrationCtx(t)
 	name := "go-sdk-pingtouch-" + t.Name()
 
@@ -129,8 +127,6 @@ func TestSandboxPingTouch(t *testing.T) {
 // TestSandboxModifyDryRun plans a modification against a live sandbox without
 // applying it, on both the live Sandbox and the name-addressed handle.
 func TestSandboxModifyDryRun(t *testing.T) {
-	// Modify is gated behind the experimental modify surface.
-	t.Setenv("MSB_EXPERIMENTAL_MODIFY", "1")
 	ctx := integrationCtx(t)
 	name := "go-sdk-modify-" + t.Name()
 

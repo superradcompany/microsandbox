@@ -360,9 +360,8 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /**
-   * Plan or apply a sandbox modification (experimental; requires
-   * `MSB_EXPERIMENTAL_MODIFY`). With `dryRun: true` the plan is computed
-   * without applying anything.
+   * Plan or apply a sandbox modification. With `dryRun: true` the plan is
+   * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
     const raw = await withMappedErrors(() =>

@@ -85,8 +85,7 @@ enum Commands {
     /// Create a sandbox and boot it in the background.
     Create(create::CreateArgs),
 
-    /// Modify sandbox configuration (experimental).
-    #[command(hide = !microsandbox_cli::commands::common::experimental_modify_enabled())]
+    /// Modify sandbox configuration.
     Modify(modify::ModifyArgs),
 
     /// Start a stopped sandbox.
@@ -95,16 +94,13 @@ enum Commands {
     /// Stop one or more running sandboxes.
     Stop(stop::StopArgs),
 
-    /// Restart one or more sandboxes (experimental).
-    #[command(hide = !microsandbox_cli::commands::common::experimental_modify_enabled())]
+    /// Restart one or more sandboxes.
     Restart(restart::RestartArgs),
 
-    /// Check whether one or more sandbox agents are reachable (experimental).
-    #[command(hide = !microsandbox_cli::commands::common::experimental_modify_enabled())]
+    /// Check whether one or more sandbox agents are reachable.
     Ping(ping::PingArgs),
 
-    /// Refresh idle activity for one or more running sandboxes (experimental).
-    #[command(hide = !microsandbox_cli::commands::common::experimental_modify_enabled())]
+    /// Refresh idle activity for one or more running sandboxes.
     Touch(touch::TouchArgs),
 
     /// List all sandboxes.

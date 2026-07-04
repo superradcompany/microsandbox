@@ -40,6 +40,7 @@ export type {
   SandboxTouchResult,
 } from "./sandbox.js";
 export type {
+  ChangeKind,
   ConfigPlannedChange,
   ModificationConflict,
   ModificationDisposition,
@@ -47,8 +48,11 @@ export type {
   ModificationWarning,
   ModifyOptions,
   PlannedChange,
+  ResourceConvergenceState,
+  ResourceKind,
   ResourceResizeStatus,
   SandboxModificationPlan,
+  SecretChangeKind,
   SecretPlannedChange,
 } from "./modify.js";
 export { SandboxHandle } from "./sandbox-handle.js";

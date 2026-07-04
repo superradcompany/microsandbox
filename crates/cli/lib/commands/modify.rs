@@ -87,7 +87,6 @@ pub struct ModifyArgs {
 
 /// Execute the `msb modify` command.
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
-    super::common::require_experimental_modify("msb modify")?;
     let json = args.format.as_deref() == Some("json");
     let handle = Sandbox::get(&args.name).await?;
     let mut builder = handle.modify();

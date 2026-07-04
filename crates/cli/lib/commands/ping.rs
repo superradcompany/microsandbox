@@ -40,7 +40,6 @@ pub struct PingArgs {
 
 /// Execute the `msb ping` command.
 pub async fn run(args: PingArgs) -> anyhow::Result<()> {
-    common::require_experimental_modify("msb ping")?;
     let names = common::resolve_bulk_targets(&args.names, &args.label, args.quiet).await?;
     let mut failed = false;
 

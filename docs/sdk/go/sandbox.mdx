@@ -722,7 +722,7 @@ for {
 func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error)
 ```
 
-Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
 
 <p className="msb-label">Returns</p>
 
@@ -754,7 +754,7 @@ fmt.Printf("%s: %s\n", health.Name, health.Latency)
 func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error)
 ```
 
-Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `MaxDuration`. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `MaxDuration`.
 
 <p className="msb-label">Returns</p>
 
@@ -1223,7 +1223,7 @@ Set the guest memory limit in MiB. This is a limit, not an upfront reservation. 
 func WithMaxMemory(mebibytes uint32) SandboxOption
 ```
 
-Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself.
 
 <p className="msb-label">Parameters</p>
 
@@ -1263,7 +1263,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 func WithMaxCPUs(cpus uint8) SandboxOption
 ```
 
-Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself.
 
 <p className="msb-label">Parameters</p>
 

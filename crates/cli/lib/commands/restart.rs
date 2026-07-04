@@ -52,7 +52,6 @@ enum RestartAction {
 
 /// Execute the `msb restart` command.
 pub async fn run(args: RestartArgs) -> anyhow::Result<()> {
-    common::require_experimental_modify("msb restart")?;
     let names = common::resolve_bulk_targets(&args.names, &args.label, args.quiet).await?;
     let mut failed = false;
 

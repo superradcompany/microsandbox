@@ -594,7 +594,7 @@ for await (const e of stream) {
 ping(): Promise<SandboxPingResult>
 ```
 
-Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
 
 <p className="msb-label">Returns</p>
 
@@ -623,7 +623,7 @@ console.log(`${health.name}: ${health.latencyMs.toFixed(1)} ms`);
 touch(): Promise<SandboxTouchResult>
 ```
 
-Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDuration`. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDuration`.
 
 <p className="msb-label">Returns</p>
 
@@ -943,7 +943,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation.
 maxCpus(n: number): this
 ```
 
-Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself.
 
 <p className="msb-label">Parameters</p>
 
@@ -1462,7 +1462,7 @@ Set the guest memory size in MiB. Physical pages are only allocated as the guest
 maxMemory(mib: number): this
 ```
 
-Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself.
 
 <p className="msb-label">Parameters</p>
 

@@ -42,32 +42,6 @@ pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBac
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Experimental gating
-//--------------------------------------------------------------------------------------------------
-
-/// Whether the experimental sandbox modification surface is enabled.
-pub fn experimental_modify_enabled() -> bool {
-    microsandbox::experimental::modify_enabled()
-}
-
-/// Fail with a rendered error unless the experimental modify surface is enabled.
-pub fn require_experimental_modify(command: &str) -> anyhow::Result<()> {
-    if experimental_modify_enabled() {
-        return Ok(());
-    }
-
-    let hint = format!(
-        "set {}=1 to enable experimental sandbox modification commands",
-        microsandbox::experimental::MODIFY_ENV
-    );
-    ui::error_with_lines(
-        &format!("`{command}` is experimental"),
-        &[ui::ErrorLine::Hint(&hint)],
-    );
-    Err(ui::AlreadyRenderedError.into())
-}
-
-//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -82,16 +56,16 @@ pub struct SandboxOpts {
     #[arg(short = 'c', long)]
     pub cpus: Option<u8>,
 
-    /// Boot-time maximum possible virtual CPUs (experimental).
-    #[arg(long = "max-cpus", hide = !experimental_modify_enabled())]
+    /// Boot-time maximum possible virtual CPUs.
+    #[arg(long = "max-cpus")]
     pub max_cpus: Option<u8>,
 
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
 
-    /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G) (experimental).
-    #[arg(long = "max-memory", value_name = "SIZE", hide = !experimental_modify_enabled())]
+    /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
+    #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).

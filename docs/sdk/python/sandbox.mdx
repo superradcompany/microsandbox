@@ -556,7 +556,7 @@ await sb.attach_shell()
 async def ping(self) -> SandboxPingResult
 ```
 
-Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and raises an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and raises an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
 
 <p className="msb-label">Returns</p>
 
@@ -585,7 +585,7 @@ print(f"{health.name}: {health.latency_ms:.1f} ms")
 async def touch(self) -> SandboxTouchResult
 ```
 
-Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `max_duration`. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `max_duration`.
 
 <p className="msb-label">Returns</p>
 
@@ -1202,9 +1202,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | image | `str \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
 | snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
-| max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
+| max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
-| max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
+| max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
 | security | [`SecurityProfile`](#securityprofile) `\| str` | `"default"` | In-guest security profile. `"restricted"` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |

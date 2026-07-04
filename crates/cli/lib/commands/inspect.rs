@@ -10,8 +10,6 @@ use serde::Serialize;
 
 use crate::ui;
 
-use super::common;
-
 /// Render a non-default mount policy suffix for `msb inspect` output.
 ///
 /// Returns an empty string when both policies are at their conservative
@@ -97,14 +95,12 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
         });
-        if common::experimental_modify_enabled() {
-            let active_config_json = handle
-                .active_config_json()
-                .map(|json| serde_json::from_str(json).unwrap_or(serde_json::Value::Null))
-                .unwrap_or(serde_json::Value::Null);
-            json["active_config"] = active_config_json;
-            json["pending_changes"] = serde_json::to_value(&pending_changes)?;
-        }
+        let active_config_json = handle
+            .active_config_json()
+            .map(|json| serde_json::from_str(json).unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null);
+        json["active_config"] = active_config_json;
+        json["pending_changes"] = serde_json::to_value(&pending_changes)?;
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -135,22 +131,19 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
         }
 
-        let show_experimental = common::experimental_modify_enabled();
         let change_for = |field: &str| pending_changes.iter().find(|c| c.field == field);
         ui::detail_header("Resources");
         ui::detail_kv_indent(
             "CPUs",
             &resource_value(&config.spec.resources.cpus.to_string(), change_for("cpus")),
         );
-        if show_experimental {
-            ui::detail_kv_indent(
-                "Max CPUs",
-                &resource_value(
-                    &config.spec.resources.max_cpus.to_string(),
-                    change_for("max_cpus"),
-                ),
-            );
-        }
+        ui::detail_kv_indent(
+            "Max CPUs",
+            &resource_value(
+                &config.spec.resources.max_cpus.to_string(),
+                change_for("max_cpus"),
+            ),
+        );
         ui::detail_kv_indent(
             "Memory",
             &resource_value(
@@ -158,15 +151,13 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                 change_for("memory"),
             ),
         );
-        if show_experimental {
-            ui::detail_kv_indent(
-                "Max Memory",
-                &resource_value(
-                    &format!("{} MiB", config.spec.resources.max_memory_mib),
-                    change_for("max_memory"),
-                ),
-            );
-        }
+        ui::detail_kv_indent(
+            "Max Memory",
+            &resource_value(
+                &format!("{} MiB", config.spec.resources.max_memory_mib),
+                change_for("max_memory"),
+            ),
+        );
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",

@@ -1,6 +1,6 @@
 package microsandbox
 
-// Sandbox modification (experimental; requires MSB_EXPERIMENTAL_MODIFY).
+// Sandbox modification.
 //
 // Modify funnels through the Rust core's canonical patch/plan contract: the
 // options below serialize into a SandboxModificationPatch, the core plans or

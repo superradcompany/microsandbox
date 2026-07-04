@@ -5,8 +5,6 @@ import type { PullProgress } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
-// Ping/touch are gated behind the experimental modify surface.
-process.env.MSB_EXPERIMENTAL_MODIFY = "1";
 
 async function waitForSandboxMetrics(sb: Sandbox) {
   let lastError: unknown;

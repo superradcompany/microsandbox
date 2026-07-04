@@ -598,7 +598,7 @@ let recent = handle.logs(&LogOptions {
 async fn ping(&self) -> MicrosandboxResult<SandboxPingResult>
 ```
 
-Check whether the running sandbox's guest agent is reachable. This sends `core.ping`, returns the SDK-measured round-trip latency, and does not refresh the sandbox idle timer. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Check whether the running sandbox's guest agent is reachable. This sends `core.ping`, returns the SDK-measured round-trip latency, and does not refresh the sandbox idle timer.
 
 <p className="msb-label">Returns</p>
 
@@ -627,7 +627,7 @@ println!("{} reachable in {:?}", result.name, result.latency);
 async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult>
 ```
 
-Explicitly refresh the running sandbox's idle timer. This sends `core.touch`; use it when keeping an idle sandbox alive is intentional. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Explicitly refresh the running sandbox's idle timer. This sends `core.touch`; use it when keeping an idle sandbox alive is intentional.
 
 <p className="msb-label">Returns</p>
 
@@ -876,7 +876,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 fn max_cpus(self, count: u8) -> Self
 ```
 
-Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself.
 
 <p className="msb-label">Parameters</p>
 
@@ -1232,7 +1232,7 @@ Set the guest memory size. Physical pages are only allocated as the guest touche
 fn max_memory(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Set the boot-time maximum hotpluggable guest memory. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+Set the boot-time maximum hotpluggable guest memory. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself.
 
 <p className="msb-label">Parameters</p>
 

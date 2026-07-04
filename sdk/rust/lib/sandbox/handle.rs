@@ -181,13 +181,8 @@ impl SandboxHandle {
     ///
     /// Local handles return `Some` only while a sandbox has started under a
     /// runtime that records active config snapshots. Stopped sandboxes and
-    /// older running sandboxes may return `None`. This surface is part of the
-    /// experimental modify feature set and returns `None` unless
-    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
+    /// older running sandboxes may return `None`.
     pub fn active_config_json(&self) -> Option<&str> {
-        if !crate::experimental::modify_enabled() {
-            return None;
-        }
         match &self.inner {
             SandboxHandleInner::Local(s) => s.active_config_json.as_deref(),
             SandboxHandleInner::Cloud(_) => None,
@@ -213,9 +208,6 @@ impl SandboxHandle {
     }
 
     /// Parse the active configuration snapshot, when one is available.
-    ///
-    /// Part of the experimental modify feature set: returns `Ok(None)` unless
-    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
     pub fn active_config(&self) -> MicrosandboxResult<Option<SandboxConfig>> {
         self.active_config_json()
             .map(serde_json::from_str)

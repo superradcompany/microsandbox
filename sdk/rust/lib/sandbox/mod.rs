@@ -1277,7 +1277,6 @@ impl Sandbox {
     /// round-trip latency. If the sandbox runtime predates protocol generation 6,
     /// this fails before any bytes are sent with an unsupported-operation error.
     pub async fn ping(&self) -> MicrosandboxResult<SandboxPingResult> {
-        crate::experimental::require_modify("sandbox ping")?;
         self.require_local("ping")?;
         ping_agent(&self.name, self.client()).await
     }
@@ -1287,7 +1286,6 @@ impl Sandbox {
     /// Local backend only. The request uses `core.touch`, so callers can keep a
     /// sandbox alive intentionally without relying on unrelated agent traffic.
     pub async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult> {
-        crate::experimental::require_modify("sandbox touch")?;
         self.require_local("touch")?;
         touch_agent(&self.name, self.client()).await
     }

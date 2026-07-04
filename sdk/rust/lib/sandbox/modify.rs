@@ -262,7 +262,6 @@ impl SandboxModificationBuilder {
 
     /// Compute a modification plan without applying anything.
     pub async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan> {
-        crate::experimental::require_modify("sandbox modify")?;
         let handle = self
             .backend
             .sandboxes()
@@ -294,7 +293,6 @@ impl SandboxModificationBuilder {
     /// removal, and allowed-host updates go through the runtime control
     /// socket; the durable config records host-side source references only.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
-        crate::experimental::require_modify("sandbox modify")?;
         let handle = self
             .backend
             .sandboxes()

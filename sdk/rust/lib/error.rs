@@ -194,15 +194,6 @@ pub enum MicrosandboxError {
     #[error("invalid log cursor: {0}")]
     InvalidCursor(String),
 
-    /// A feature is gated behind an experimental environment variable.
-    #[error("{feature} is experimental; set {env}=1 to enable it")]
-    Experimental {
-        /// Feature requested by the caller.
-        feature: String,
-        /// Environment variable that enables the feature.
-        env: &'static str,
-    },
-
     /// A backend does not support a requested SDK feature yet.
     #[error("{feature} is not supported by this backend yet; available {available_when}")]
     Unsupported {

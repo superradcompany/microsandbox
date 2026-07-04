@@ -13,8 +13,6 @@ import {
   Stdin,
 } from "../../dist/index.js";
 
-// maxCpus/maxMemory are gated behind the experimental modify surface.
-process.env.MSB_EXPERIMENTAL_MODIFY = "1";
 
 describe("intoRootfsSource", () => {
   it("treats absolute paths as bind mounts", () => {
