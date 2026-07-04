@@ -270,7 +270,7 @@ impl SandboxModificationBuilder {
             .await?;
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
-        let active = handle.active_config().ok().flatten();
+        let mut active = handle.active_config().ok().flatten();
         let live = live_control(&self.name, status).await;
         let mut plan = build_plan(
             self.name.clone(),
@@ -304,9 +304,9 @@ impl SandboxModificationBuilder {
             // enforced target so inspect does not report the already-live
             // change as pending. The guest driver converges asynchronously;
             // enforcement applies immediately either way.
-            if let Some(mut active) = active.clone() {
+            if let Some(active) = active.as_mut() {
                 active.spec.resources.cpus = target;
-                persist_active_config(&self.backend, &handle, &active).await?;
+                persist_active_config(&self.backend, &handle, active).await?;
             }
         }
         if !restart_required && let Some(target_mib) = live_memory_target(&plan, &self.patch) {
@@ -325,9 +325,9 @@ impl SandboxModificationBuilder {
             // Refresh the active snapshot with the accepted target so inspect
             // does not report the already-live change as pending. Convergence
             // (plugging blocks) continues asynchronously in the guest.
-            if let Some(mut active) = active.clone() {
+            if let Some(active) = active.as_mut() {
                 active.spec.resources.memory_mib = state.target_mib as u32;
-                persist_active_config(&self.backend, &handle, &active).await?;
+                persist_active_config(&self.backend, &handle, active).await?;
             }
         }
         if !restart_required {
@@ -337,9 +337,9 @@ impl SandboxModificationBuilder {
                 // The running network layer changed: mirror the secret patch
                 // into the active snapshot so inspect does not report the
                 // already-live change as pending.
-                if let Some(mut active) = active.clone() {
-                    apply_secret_patch_to_config(&mut active, &self.patch)?;
-                    persist_active_config(&self.backend, &handle, &active).await?;
+                if let Some(active) = active.as_mut() {
+                    apply_secret_patch_to_config(active, &self.patch)?;
+                    persist_active_config(&self.backend, &handle, active).await?;
                 }
             }
         }
