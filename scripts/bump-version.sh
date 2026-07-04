@@ -14,6 +14,7 @@
 #
 # Updates:
 #   - Cargo.toml (workspace.package.version + path-dep `version = "X.Y.Z"`
+#     and exact `version = "=X.Y.Z"` refs for internal crates)
 #     entries across crates/*/Cargo.toml, packages/*/rust/Cargo.toml, and sdk/*/Cargo.toml)
 #   - crates/agentd/Cargo.lock (the agentd sub-workspace ships its own
 #     lockfile that the root `cargo check` won't refresh — targeted sed
@@ -89,8 +90,8 @@ inplace() {
 
 # --- Rust: workspace + every path-dep version reference ------------------
 while IFS= read -r f; do
-  if grep -q "version = \"${OLD}\"" "$f"; then
-    inplace "s/version = \"${OLD}\"/version = \"${NEW}\"/g" "$f"
+  if grep -Eq "version = \"=?${OLD}\"" "$f"; then
+    inplace "s/version = \"=${OLD}\"/version = \"=${NEW}\"/g;s/version = \"${OLD}\"/version = \"${NEW}\"/g" "$f"
     echo "  updated ${f}"
   fi
 done < <(find Cargo.toml crates packages sdk -name Cargo.toml 2>/dev/null)
