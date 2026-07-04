@@ -368,7 +368,7 @@ sb.drain().await?;
 async fn request_drain(&self) -> MicrosandboxResult<()>
 ```
 
-Request graceful drain and return once the request is sent. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs stopped-state observation.
+Request graceful drain and return once the request is sent. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
 
 ---
 
@@ -651,7 +651,7 @@ sb.remove_persisted().await?;
 async fn request_stop(&self) -> MicrosandboxResult<()>
 ```
 
-Request graceful shutdown and return once the request is sent, without waiting for stopped-state observation. Pair with [`wait_until_stopped()`](#sb-wait-until-stopped) when the caller needs the terminal state.
+Request graceful shutdown and return once the request is sent, without waiting for stopped-state observation. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs the terminal state.
 
 ---
 
@@ -692,7 +692,7 @@ Gracefully shut down the sandbox with an explicit timeout before escalation. `Du
 async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
 ```
 
-Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#stop) or [`stop_with_timeout()`](#stop_with_timeout) when the caller only needs stopped-state observation.
+Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#sb-stop) or [`stop_with_timeout()`](#sb-stop_with_timeout) when the caller only needs stopped-state observation.
 
 <p className="msb-label">Returns</p>
 
@@ -1882,7 +1882,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 
 ### SandboxStopResult
 
-Observed terminal sandbox state returned by [`wait_until_stopped()`](#wait_until_stopped).
+Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_until_stopped).
 
 | Field | Type | Description |
 |-------|------|-------------|
