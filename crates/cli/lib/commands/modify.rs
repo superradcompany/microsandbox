@@ -35,6 +35,26 @@ pub struct ModifyArgs {
     #[arg(long = "max-memory")]
     pub max_memory: Option<String>,
 
+    /// Set an environment variable for future execs (`KEY=VALUE`).
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Remove an environment variable by key.
+    #[arg(long = "env-rm", value_name = "KEY")]
+    pub env_remove: Vec<String>,
+
+    /// Set a label (`KEY=VALUE`).
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+
+    /// Remove a label by key.
+    #[arg(long = "label-rm", value_name = "KEY")]
+    pub label_remove: Vec<String>,
+
+    /// Working directory for future execs.
+    #[arg(long, value_name = "PATH")]
+    pub workdir: Option<String>,
+
     /// Add or rotate a secret from a host environment variable (`NAME@HOST`).
     #[arg(long = "secret", value_name = "NAME@HOST")]
     pub secrets: Vec<String>,
@@ -78,6 +98,7 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     }
 
     builder = apply_resource_args(builder, &args)?;
+    builder = apply_spec_args(builder, &args)?;
     builder = apply_secret_args(builder, &args)?;
 
     let plan = builder.clone().dry_run().await?;
@@ -121,6 +142,30 @@ fn apply_resource_args(
     if let Some(max_memory) = &args.max_memory {
         builder =
             builder.max_memory_mib(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    Ok(builder)
+}
+
+fn apply_spec_args(
+    mut builder: SandboxModificationBuilder,
+    args: &ModifyArgs,
+) -> anyhow::Result<SandboxModificationBuilder> {
+    for entry in &args.env {
+        let (key, value) = parse_key_value(entry, "--env")?;
+        builder = builder.env(key, value);
+    }
+    for key in &args.env_remove {
+        builder = builder.remove_env(key);
+    }
+    for entry in &args.labels {
+        let (key, value) = parse_key_value(entry, "--label")?;
+        builder = builder.label(key, value);
+    }
+    for key in &args.label_remove {
+        builder = builder.remove_label(key);
+    }
+    if let Some(workdir) = &args.workdir {
+        builder = builder.workdir(workdir);
     }
     Ok(builder)
 }
@@ -429,6 +474,16 @@ fn parse_secret_spec(spec: &str) -> anyhow::Result<ParsedSecretSpec> {
     })
 }
 
+fn parse_key_value(entry: &str, flag: &str) -> anyhow::Result<(String, String)> {
+    let Some((key, value)) = entry.split_once('=') else {
+        anyhow::bail!("{flag} must be KEY=VALUE");
+    };
+    if key.is_empty() {
+        anyhow::bail!("{flag} key must not be empty");
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
 fn replayed_args(args: &ModifyArgs) -> String {
     let mut rendered = Vec::new();
 
@@ -443,6 +498,21 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
     if let Some(max_memory) = &args.max_memory {
         rendered.push(format!("--max-memory {max_memory}"));
+    }
+    for entry in &args.env {
+        rendered.push(format!("--env {entry}"));
+    }
+    for key in &args.env_remove {
+        rendered.push(format!("--env-rm {key}"));
+    }
+    for entry in &args.labels {
+        rendered.push(format!("--label {entry}"));
+    }
+    for key in &args.label_remove {
+        rendered.push(format!("--label-rm {key}"));
+    }
+    if let Some(workdir) = &args.workdir {
+        rendered.push(format!("--workdir {workdir}"));
     }
     for secret in &args.secrets {
         let sanitized = parse_secret_spec(secret)
@@ -539,6 +609,45 @@ mod tests {
         assert_eq!(args.max_cpus, Some(8));
         assert_eq!(args.max_memory.as_deref(), Some("16G"));
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_env_label_workdir_flags() {
+        let args = parse_modify_args(&[
+            "api",
+            "--env",
+            "MODE=prod",
+            "--env",
+            "NEW=1",
+            "--env-rm",
+            "EXTRA",
+            "--label",
+            "team=infra",
+            "--label-rm",
+            "old",
+            "--workdir",
+            "/srv",
+        ]);
+
+        assert_eq!(args.env, vec!["MODE=prod", "NEW=1"]);
+        assert_eq!(args.env_remove, vec!["EXTRA"]);
+        assert_eq!(args.labels, vec!["team=infra"]);
+        assert_eq!(args.label_remove, vec!["old"]);
+        assert_eq!(args.workdir.as_deref(), Some("/srv"));
+    }
+
+    #[test]
+    fn parses_key_value_entries() {
+        assert_eq!(
+            parse_key_value("MODE=prod", "--env").unwrap(),
+            ("MODE".to_string(), "prod".to_string())
+        );
+        assert_eq!(
+            parse_key_value("URL=http://x?a=b", "--env").unwrap(),
+            ("URL".to_string(), "http://x?a=b".to_string())
+        );
+        assert!(parse_key_value("MODE", "--env").is_err());
+        assert!(parse_key_value("=value", "--label").is_err());
     }
 
     #[test]

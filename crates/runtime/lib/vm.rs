@@ -678,6 +678,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
+    // Serve host-side live control (memory resize) when this VM booted with
+    // hotplug capacity. Failure is non-fatal: the SDK treats a missing socket
+    // as "no live memory resize capability" and classifies restart-required.
+    #[cfg(unix)]
+    {
+        let control = vm.control_handle();
+        if control.memory_resize_supported() {
+            let control_sock_path = config
+                .agent_sock_path
+                .with_file_name(crate::control::CONTROL_SOCKET_NAME);
+            if let Err(e) =
+                crate::control::spawn_control_listener(control_sock_path.clone(), control)
+            {
+                tracing::warn!(
+                    "failed to start runtime control listener at {}: {e}",
+                    control_sock_path.display()
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     {
         if let Some(parent_watchdog) = config.parent_watchdog

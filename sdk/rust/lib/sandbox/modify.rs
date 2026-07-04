@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use microsandbox_types::EnvVar;
 use sea_orm::{ActiveModelTrait, Set};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,14 @@ const LIVE_RESIZE_UNAVAILABLE: &str =
     "live CPU and memory resize are not available in this runtime yet";
 const LIVE_SECRET_RECONFIGURE_UNAVAILABLE: &str =
     "live secret reconfiguration is not available in this runtime yet";
+const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
+    "affects future execs only after restart; live exec-default updates are not available yet";
+const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
+    "live label updates are not available in this runtime yet";
 const SECRET_FIELD: &str = "secret";
+const ENV_FIELD: &str = "env";
+const LABEL_FIELD: &str = "label";
+const WORKDIR_FIELD: &str = "workdir";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -60,6 +68,26 @@ pub struct SandboxModificationPatch {
     /// Desired boot-time maximum hotpluggable memory in MiB.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_memory_mib: Option<u32>,
+
+    /// Environment variables to set for future execs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+
+    /// Environment variable keys to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_remove: Vec<String>,
+
+    /// Labels to set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<(String, String)>,
+
+    /// Label keys to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels_remove: Vec<String>,
+
+    /// Desired working directory for future execs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
 
     /// Requested secret modifications.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -432,6 +460,36 @@ impl SandboxModificationBuilder {
         self
     }
 
+    /// Set an environment variable for future execs.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.patch.env.push(EnvVar::new(key, value));
+        self
+    }
+
+    /// Remove an environment variable.
+    pub fn remove_env(mut self, key: impl Into<String>) -> Self {
+        self.patch.env_remove.push(key.into());
+        self
+    }
+
+    /// Set a sandbox label.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.patch.labels.push((key.into(), value.into()));
+        self
+    }
+
+    /// Remove a sandbox label.
+    pub fn remove_label(mut self, key: impl Into<String>) -> Self {
+        self.patch.labels_remove.push(key.into());
+        self
+    }
+
+    /// Set the working directory for future execs.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.patch.workdir = Some(path.into());
+        self
+    }
+
     /// Persist the requested changes for the next start.
     pub fn next_start(mut self) -> Self {
         self.policy = ModificationPolicy::NextStart;
@@ -532,6 +590,12 @@ impl SandboxModificationBuilder {
         &self.patch
     }
 
+    /// Replace the accumulated patch wholesale. Language bindings deserialize the canonical [`SandboxModificationPatch`] and inject it here instead of replaying the fluent setters.
+    pub fn with_patch(mut self, patch: SandboxModificationPatch) -> Self {
+        self.patch = patch;
+        self
+    }
+
     /// Compute a modification plan without applying anything.
     pub async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan> {
         crate::experimental::require_modify("sandbox modify")?;
@@ -543,11 +607,13 @@ impl SandboxModificationBuilder {
         let status = handle.status_snapshot();
         let config = handle.config()?;
         let active = handle.active_config().ok().flatten();
+        let live_memory = running_status(status) && control_socket_exists(&self.name);
         Ok(build_plan(
             self.name,
             status,
             &config,
             active.as_ref(),
+            live_memory,
             self.patch,
             self.policy,
         ))
@@ -572,11 +638,13 @@ impl SandboxModificationBuilder {
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
         let active = handle.active_config().ok().flatten();
+        let live_memory = running_status(status) && control_socket_exists(&self.name);
         let mut plan = build_plan(
-            self.name,
+            self.name.clone(),
             status,
             &config,
             active.as_ref(),
+            live_memory,
             self.patch.clone(),
             self.policy,
         );
@@ -607,6 +675,27 @@ impl SandboxModificationBuilder {
                 persist_active_config(&self.backend, &handle, &active).await?;
             }
         }
+        if !restart_required && let Some(target_mib) = live_memory_target(&plan, &self.patch) {
+            let response = control_memory_target(&self.name, u64::from(target_mib)).await?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Memory,
+                requested: format_mib(target_mib),
+                actual: format_mib(response.current_mib as u32),
+                enforced: format_mib(response.target_mib as u32),
+                state: if response.current_mib >= response.target_mib {
+                    ResourceConvergenceState::Applied
+                } else {
+                    ResourceConvergenceState::Converging
+                },
+            });
+            // Refresh the active snapshot with the accepted target so inspect
+            // does not report the already-live change as pending. Convergence
+            // (plugging blocks) continues asynchronously in the guest.
+            if let Some(mut active) = active.clone() {
+                active.spec.resources.memory_mib = response.target_mib as u32;
+                persist_active_config(&self.backend, &handle, &active).await?;
+            }
+        }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             persist_config(&self.backend, &handle, &config).await?;
@@ -623,11 +712,13 @@ impl SandboxModificationBuilder {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_plan(
     name: String,
     status: SandboxStatus,
     config: &SandboxConfig,
     active: Option<&SandboxConfig>,
+    live_memory_supported: bool,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> SandboxModificationPlan {
@@ -639,13 +730,16 @@ fn build_plan(
         status,
         config,
         active,
+        live_memory_supported,
         &patch,
         policy,
         &mut changes,
         &mut warnings,
     );
+    push_spec_changes(status, config, &patch, policy, &mut changes);
     push_secret_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_resource_conflicts(config, &patch, &mut conflicts);
+    push_spec_conflicts(&patch, &mut conflicts);
 
     SandboxModificationPlan {
         sandbox: name,
@@ -670,6 +764,84 @@ fn live_cpu_target(plan: &SandboxModificationPlan, patch: &SandboxModificationPa
         )
     });
     if live_cpus { patch.cpus } else { None }
+}
+
+/// The live memory target in MiB, when the plan classified `memory` as live.
+fn live_memory_target(
+    plan: &SandboxModificationPlan,
+    patch: &SandboxModificationPatch,
+) -> Option<u32> {
+    let live_memory = plan.changes.iter().any(|change| {
+        matches!(
+            change,
+            PlannedChange::Config(change)
+                if change.field == "memory"
+                    && matches!(change.disposition, ModificationDisposition::Live)
+        )
+    });
+    if live_memory { patch.memory_mib } else { None }
+}
+
+/// Path of the sandbox's host-side runtime control socket.
+fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
+    Ok(crate::runtime::agent_socket_path(name)?
+        .with_file_name(microsandbox_runtime::control::CONTROL_SOCKET_NAME))
+}
+
+/// Whether the running sandbox exposes the runtime control socket. Its absence
+/// means the runtime predates live memory resize or the VM booted without
+/// hotplug capacity, so `memory` classifies as restart-required.
+fn control_socket_exists(name: &str) -> bool {
+    control_socket_path(name).is_ok_and(|path| path.exists())
+}
+
+/// Ask the sandbox process to converge on `total_mib` of usable guest memory.
+#[cfg(unix)]
+async fn control_memory_target(
+    name: &str,
+    total_mib: u64,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let path = control_socket_path(name)?;
+    let mut stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
+        crate::MicrosandboxError::Runtime(format!(
+            "failed to reach the runtime control socket at {}: {e}",
+            path.display()
+        ))
+    })?;
+    stream
+        .write_all(format!("{{\"op\":\"memory_target\",\"total_mib\":{total_mib}}}\n").as_bytes())
+        .await
+        .map_err(|e| crate::MicrosandboxError::Runtime(format!("control request failed: {e}")))?;
+
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .await
+        .map_err(|e| crate::MicrosandboxError::Runtime(format!("control response failed: {e}")))?;
+    let response: microsandbox_runtime::control::ControlResponse =
+        serde_json::from_str(line.trim())?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "live memory resize refused: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    Ok(response)
+}
+
+#[cfg(not(unix))]
+async fn control_memory_target(
+    _name: &str,
+    _total_mib: u64,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    Err(crate::MicrosandboxError::Unsupported {
+        feature: "live memory resize".into(),
+        available_when: "on unix hosts".into(),
+    })
 }
 
 fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResult<()> {
@@ -740,6 +912,31 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
     }
     if config.spec.resources.max_memory_mib < config.spec.resources.memory_mib {
         config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
+    }
+    for var in &patch.env {
+        if let Some(existing) = config
+            .spec
+            .env
+            .iter_mut()
+            .find(|entry| entry.key == var.key)
+        {
+            existing.value = var.value.clone();
+        } else {
+            config.spec.env.push(var.clone());
+        }
+    }
+    config
+        .spec
+        .env
+        .retain(|entry| !patch.env_remove.contains(&entry.key));
+    for (key, value) in &patch.labels {
+        config.spec.labels.insert(key.clone(), value.clone());
+    }
+    for key in &patch.labels_remove {
+        config.spec.labels.remove(key);
+    }
+    if let Some(workdir) = &patch.workdir {
+        config.spec.runtime.workdir = Some(workdir.clone());
     }
 }
 
@@ -818,6 +1015,7 @@ fn push_resource_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
     active: Option<&SandboxConfig>,
+    live_memory_supported: bool,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
@@ -867,15 +1065,33 @@ fn push_resource_changes(
     if let Some(memory_mib) = patch.memory_mib
         && memory_mib != resources.memory_mib
     {
+        // Memory changes live through virtio-mem when the target fits inside
+        // the active hotpluggable capacity AND the running sandbox exposes a
+        // runtime control socket (older runtimes and Windows do not).
+        let active_max_memory = active.map(|active| active.spec.resources.max_memory_mib);
+        let live = live_memory_supported && active_max_memory.is_some_and(|max| memory_mib <= max);
+        let reason = match (
+            resource_disposition(status, policy, live),
+            active_max_memory,
+        ) {
+            (ModificationDisposition::RequiresRestart, Some(max)) if memory_mib > max => {
+                Some(format!(
+                    "memory {} exceeds the active max capacity {}; restart with a larger max_memory",
+                    format_mib(memory_mib),
+                    format_mib(max)
+                ))
+            }
+            _ => resource_reason(status, policy, live),
+        };
         changes.push(PlannedChange::Config(ConfigPlannedChange {
             field: "memory".to_string(),
             change: ChangeKind::Updated,
             before: Some(format_mib(resources.memory_mib)),
             after: Some(format_mib(memory_mib)),
-            disposition: resource_disposition(status, policy, false),
-            reason: resource_reason(status, policy, false),
+            disposition: resource_disposition(status, policy, live),
+            reason,
         }));
-        push_live_resize_warning("memory", status, policy, false, warnings);
+        push_live_resize_warning("memory", status, policy, live, warnings);
     }
 
     if desired.max_memory_mib != resources.max_memory_mib
@@ -940,6 +1156,121 @@ fn push_secret_changes(
             },
             reason,
         }));
+    }
+}
+
+/// Plan env, label, and workdir changes.
+///
+/// These fields have no live path yet: they persist for the next start when
+/// the sandbox is stopped (or under the next-start policy) and otherwise
+/// require a restart before future execs or metadata queries observe them.
+fn push_spec_changes(
+    status: SandboxStatus,
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+    changes: &mut Vec<PlannedChange>,
+) {
+    for var in &patch.env {
+        let existing = config.spec.env.iter().find(|entry| entry.key == var.key);
+        if existing.is_some_and(|entry| entry.value == var.value) {
+            continue;
+        }
+        changes.push(spec_change(
+            ENV_FIELD,
+            change_kind_for(existing.is_some()),
+            existing.map(format_env_var),
+            Some(format_env_var(var)),
+            status,
+            policy,
+            LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
+        ));
+    }
+
+    for key in &patch.env_remove {
+        let Some(existing) = config.spec.env.iter().find(|entry| entry.key == *key) else {
+            continue;
+        };
+        changes.push(spec_change(
+            ENV_FIELD,
+            ChangeKind::Removed,
+            Some(format_env_var(existing)),
+            None,
+            status,
+            policy,
+            LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
+        ));
+    }
+
+    for (key, value) in &patch.labels {
+        let existing = config.spec.labels.get(key);
+        if existing.is_some_and(|current| current == value) {
+            continue;
+        }
+        changes.push(spec_change(
+            LABEL_FIELD,
+            change_kind_for(existing.is_some()),
+            existing.map(|current| format!("{key}={current}")),
+            Some(format!("{key}={value}")),
+            status,
+            policy,
+            LIVE_LABEL_UPDATE_UNAVAILABLE,
+        ));
+    }
+
+    for key in &patch.labels_remove {
+        let Some(current) = config.spec.labels.get(key) else {
+            continue;
+        };
+        changes.push(spec_change(
+            LABEL_FIELD,
+            ChangeKind::Removed,
+            Some(format!("{key}={current}")),
+            None,
+            status,
+            policy,
+            LIVE_LABEL_UPDATE_UNAVAILABLE,
+        ));
+    }
+
+    if let Some(workdir) = &patch.workdir {
+        let before = config.spec.runtime.workdir.clone();
+        if before.as_deref() != Some(workdir.as_str()) {
+            changes.push(spec_change(
+                WORKDIR_FIELD,
+                change_kind_for(before.is_some()),
+                before,
+                Some(workdir.clone()),
+                status,
+                policy,
+                LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE,
+            ));
+        }
+    }
+}
+
+fn push_spec_conflicts(
+    patch: &SandboxModificationPatch,
+    conflicts: &mut Vec<ModificationConflict>,
+) {
+    for var in &patch.env {
+        if patch.env_remove.contains(&var.key) {
+            conflicts.push(ModificationConflict {
+                field: ENV_FIELD.to_string(),
+                message: format!(
+                    "env {} is both set and removed in the same modification",
+                    var.key
+                ),
+            });
+        }
+    }
+    for (key, _) in &patch.labels {
+        if patch.labels_remove.contains(key) {
+            conflicts.push(ModificationConflict {
+                field: LABEL_FIELD.to_string(),
+                message: format!("label {key} is both set and removed in the same modification"),
+            });
+        }
     }
 }
 
@@ -1076,6 +1407,64 @@ fn boot_capacity_reason(
         )),
         _ => None,
     }
+}
+
+fn spec_change(
+    field: &str,
+    change: ChangeKind,
+    before: Option<String>,
+    after: Option<String>,
+    status: SandboxStatus,
+    policy: ModificationPolicy,
+    running_reason: &str,
+) -> PlannedChange {
+    PlannedChange::Config(ConfigPlannedChange {
+        field: field.to_string(),
+        change,
+        before,
+        after,
+        disposition: spec_disposition(status, policy),
+        reason: spec_reason(status, policy, running_reason),
+    })
+}
+
+fn spec_disposition(status: SandboxStatus, policy: ModificationPolicy) -> ModificationDisposition {
+    if policy == ModificationPolicy::NextStart || stopped_status(status) {
+        return ModificationDisposition::NextStart;
+    }
+    if transitional_status(status) {
+        return ModificationDisposition::Unsupported;
+    }
+    ModificationDisposition::RequiresRestart
+}
+
+fn spec_reason(
+    status: SandboxStatus,
+    policy: ModificationPolicy,
+    running_reason: &str,
+) -> Option<String> {
+    match spec_disposition(status, policy) {
+        ModificationDisposition::RequiresRestart if running_status(status) => {
+            Some(running_reason.to_string())
+        }
+        ModificationDisposition::Unsupported => Some(format!(
+            "cannot modify while sandbox is {}",
+            status_name(status)
+        )),
+        _ => None,
+    }
+}
+
+fn change_kind_for(existing: bool) -> ChangeKind {
+    if existing {
+        ChangeKind::Updated
+    } else {
+        ChangeKind::Added
+    }
+}
+
+fn format_env_var(var: &EnvVar) -> String {
+    format!("{}={}", var.key, var.value)
 }
 
 fn secret_disposition(
@@ -1297,6 +1686,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1341,6 +1731,7 @@ mod tests {
             SandboxStatus::Running,
             &desired,
             Some(&active),
+            false,
             patch.clone(),
             ModificationPolicy::NoRestart,
         );
@@ -1353,6 +1744,42 @@ mod tests {
         assert!(change.reason.is_none());
         assert!(validate_apply_supported(&plan).is_ok());
         assert_eq!(live_cpu_target(&plan, &patch), Some(4));
+    }
+
+    #[test]
+    fn running_memory_within_capacity_classifies_live_only_with_control_socket() {
+        let mut desired = config(2, 512);
+        desired.spec.resources.max_memory_mib = 2048;
+        let active = desired.clone();
+        let patch = SandboxModificationPatch {
+            memory_mib: Some(1024),
+            ..SandboxModificationPatch::default()
+        };
+
+        for (live_memory_supported, expected) in [
+            (true, ModificationDisposition::Live),
+            (false, ModificationDisposition::RequiresRestart),
+        ] {
+            let plan = build_plan(
+                "api".to_string(),
+                SandboxStatus::Running,
+                &desired,
+                Some(&active),
+                live_memory_supported,
+                patch.clone(),
+                ModificationPolicy::NoRestart,
+            );
+            let PlannedChange::Config(change) = &plan.changes[0] else {
+                panic!("expected config change");
+            };
+            assert_eq!(change.field, "memory");
+            assert_eq!(change.disposition, expected);
+            if live_memory_supported {
+                assert_eq!(live_memory_target(&plan, &patch), Some(1024));
+            } else {
+                assert_eq!(live_memory_target(&plan, &patch), None);
+            }
+        }
     }
 
     #[test]
@@ -1369,6 +1796,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             Some(&active),
+            false,
             patch.clone(),
             ModificationPolicy::NoRestart,
         );
@@ -1400,6 +1828,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::Restart,
         );
@@ -1420,6 +1849,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1440,6 +1870,7 @@ mod tests {
             SandboxStatus::Stopped,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1469,6 +1900,7 @@ mod tests {
             SandboxStatus::Stopped,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1493,6 +1925,7 @@ mod tests {
             SandboxStatus::Stopped,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
@@ -1537,6 +1970,211 @@ mod tests {
     }
 
     #[test]
+    fn running_env_label_workdir_changes_require_restart() {
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod")],
+            labels: vec![("team".to_string(), "infra".to_string())],
+            workdir: Some("/srv".to_string()),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config(2, 1024),
+            None,
+            false,
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert_eq!(plan.changes.len(), 3);
+        for change in plan.changes {
+            let PlannedChange::Config(change) = change else {
+                panic!("expected config change");
+            };
+            assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+            assert_eq!(change.change, ChangeKind::Added);
+            match change.field.as_str() {
+                "env" | "workdir" => {
+                    assert_eq!(
+                        change.reason.as_deref(),
+                        Some(LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE)
+                    );
+                }
+                "label" => {
+                    assert_eq!(
+                        change.reason.as_deref(),
+                        Some(LIVE_LABEL_UPDATE_UNAVAILABLE)
+                    );
+                }
+                field => panic!("unexpected field {field}"),
+            }
+        }
+    }
+
+    #[test]
+    fn stopped_env_label_workdir_changes_are_next_start() {
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod")],
+            env_remove: vec!["EXTRA".to_string()],
+            labels: vec![("team".to_string(), "infra".to_string())],
+            labels_remove: vec!["old".to_string()],
+            workdir: Some("/srv".to_string()),
+            ..SandboxModificationPatch::default()
+        };
+
+        let mut current = config(2, 1024);
+        current.spec.env.push(EnvVar::new("EXTRA", "1"));
+        current
+            .spec
+            .labels
+            .insert("old".to_string(), "x".to_string());
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            false,
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert_eq!(plan.changes.len(), 5);
+        assert!(plan.conflicts.is_empty());
+        for change in plan.changes {
+            let PlannedChange::Config(change) = change else {
+                panic!("expected config change");
+            };
+            assert_eq!(change.disposition, ModificationDisposition::NextStart);
+            assert!(change.reason.is_none());
+        }
+    }
+
+    #[test]
+    fn spec_change_kinds_follow_current_config() {
+        let mut current = config(2, 1024);
+        current.spec.env = vec![EnvVar::new("MODE", "dev"), EnvVar::new("EXTRA", "1")];
+        current
+            .spec
+            .labels
+            .insert("team".to_string(), "infra".to_string());
+        current.spec.runtime.workdir = Some("/app".to_string());
+
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod"), EnvVar::new("NEW", "1")],
+            env_remove: vec!["EXTRA".to_string(), "MISSING".to_string()],
+            labels: vec![("tier".to_string(), "gold".to_string())],
+            labels_remove: vec!["team".to_string()],
+            workdir: Some("/srv".to_string()),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            false,
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        let rows: Vec<(&str, ChangeKind, Option<&str>, Option<&str>)> = plan
+            .changes
+            .iter()
+            .map(|change| {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                (
+                    change.field.as_str(),
+                    change.change,
+                    change.before.as_deref(),
+                    change.after.as_deref(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "env",
+                    ChangeKind::Updated,
+                    Some("MODE=dev"),
+                    Some("MODE=prod")
+                ),
+                ("env", ChangeKind::Added, None, Some("NEW=1")),
+                ("env", ChangeKind::Removed, Some("EXTRA=1"), None),
+                ("label", ChangeKind::Added, None, Some("tier=gold")),
+                ("label", ChangeKind::Removed, Some("team=infra"), None),
+                ("workdir", ChangeKind::Updated, Some("/app"), Some("/srv")),
+            ]
+        );
+    }
+
+    #[test]
+    fn applying_env_label_workdir_patch_mutates_config() {
+        let mut current = config(2, 1024);
+        current.spec.env = vec![EnvVar::new("MODE", "dev"), EnvVar::new("EXTRA", "1")];
+        current
+            .spec
+            .labels
+            .insert("team".to_string(), "infra".to_string());
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod"), EnvVar::new("NEW", "1")],
+            env_remove: vec!["EXTRA".to_string()],
+            labels: vec![("tier".to_string(), "gold".to_string())],
+            labels_remove: vec!["team".to_string()],
+            workdir: Some("/srv".to_string()),
+            ..SandboxModificationPatch::default()
+        };
+
+        apply_patch_to_config(&mut current, &patch);
+
+        assert_eq!(
+            current.spec.env,
+            vec![EnvVar::new("MODE", "prod"), EnvVar::new("NEW", "1")]
+        );
+        assert_eq!(
+            current.spec.labels.get("tier").map(String::as_str),
+            Some("gold")
+        );
+        assert!(!current.spec.labels.contains_key("team"));
+        assert_eq!(current.spec.runtime.workdir.as_deref(), Some("/srv"));
+    }
+
+    #[test]
+    fn setting_and_removing_the_same_key_is_a_conflict() {
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "prod")],
+            env_remove: vec!["MODE".to_string()],
+            labels: vec![("team".to_string(), "infra".to_string())],
+            labels_remove: vec!["team".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config(2, 1024),
+            None,
+            false,
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert_eq!(plan.conflicts.len(), 2);
+        assert_eq!(plan.conflicts[0].field, "env");
+        assert!(plan.conflicts[0].message.contains("MODE"));
+        assert_eq!(plan.conflicts[1].field, "label");
+        assert!(plan.conflicts[1].message.contains("team"));
+        assert!(validate_apply_supported(&plan).is_err());
+    }
+
+    #[test]
     fn secret_plan_never_contains_secret_values() {
         let patch = SandboxModificationPatch {
             secrets: vec![SecretModificationPatch {
@@ -1556,6 +2194,7 @@ mod tests {
             SandboxStatus::Running,
             &config(2, 1024),
             None,
+            false,
             patch,
             ModificationPolicy::NoRestart,
         );
