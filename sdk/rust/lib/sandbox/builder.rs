@@ -648,6 +648,29 @@ impl SandboxBuilder {
         self.secret(|s| s.env(&env_var).value(value).allow_host(allowed_host))
     }
 
+    /// Shorthand: add a secret resolved from a host environment variable.
+    ///
+    /// Records a `{kind: env, var: <env_var>}` source reference instead of a
+    /// raw value; the plaintext is read from the host environment at spawn
+    /// time and never persisted in the durable config. Placeholder is
+    /// auto-generated as `$MSB_<env_var>`. Automatically enables TLS
+    /// interception.
+    #[cfg(feature = "net")]
+    pub fn secret_env_source(
+        self,
+        env_var: impl Into<String>,
+        host_env_var: impl Into<String>,
+        allowed_host: impl Into<String>,
+    ) -> Self {
+        use microsandbox_network::secrets::config::SecretSourceRef;
+        let env_var = env_var.into();
+        let source = SecretSourceRef::Env {
+            var: host_env_var.into(),
+        };
+        let allowed_host = allowed_host.into();
+        self.secret(|s| s.env(&env_var).source(source).allow_host(allowed_host))
+    }
+
     /// Set an environment variable visible to all commands in this sandbox.
     /// Can be called multiple times. Per-command env vars (on exec/shell)
     /// are merged on top.
@@ -1638,7 +1661,7 @@ mod tests {
             .image("alpine")
             .secret_entry(SecretEntry {
                 env_var: "API\0KEY".into(),
-                value: "secret".into(),
+                value: zeroize::Zeroizing::new("secret".into()),
                 source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],

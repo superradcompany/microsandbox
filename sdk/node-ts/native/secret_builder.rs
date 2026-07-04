@@ -234,7 +234,7 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
     }
     JsSecretEntry {
         env_var: entry.env_var,
-        value: entry.value,
+        value: entry.value.to_string(),
         placeholder: entry.placeholder,
         allowed_hosts,
         allowed_host_patterns,

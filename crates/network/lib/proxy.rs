@@ -1510,7 +1510,7 @@ mod tests {
         SecretsConfig {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
-                value: value.into(),
+                value: zeroize::Zeroizing::new(value.into()),
                 source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Any],
@@ -1531,7 +1531,7 @@ mod tests {
         SecretsConfig {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
-                value: value.into(),
+                value: zeroize::Zeroizing::new(value.into()),
                 source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Exact(host.into())],
@@ -1715,7 +1715,7 @@ mod tests {
         let secrets = SecretsConfig {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
-                value: "real-secret-value".into(),
+                value: zeroize::Zeroizing::new("real-secret-value".into()),
                 source: None,
                 placeholder: "$MSB_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("example.com".into())],

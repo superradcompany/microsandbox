@@ -92,8 +92,9 @@ pub enum SecretLiveChange {
 
 /// Raw secret material in transit over the control socket. Wrapped so any
 /// `Debug`-formatted request or error path shows `[redacted]` instead of the
-/// value.
-#[derive(Clone, Serialize, Deserialize)]
+/// value, and zeroized on drop so the plaintext does not linger in freed
+/// memory after the rotation batch is applied.
+#[derive(Clone, Serialize, Deserialize, zeroize::ZeroizeOnDrop)]
 #[serde(transparent)]
 pub struct SecretValue(pub String);
 
@@ -353,7 +354,12 @@ fn handle_secrets_update(
 
     for change in changes {
         let result = match change {
-            SecretLiveChange::Rotate { name, value } => secrets.rotate_value(&name, value.0),
+            // `value` owns its plaintext and zeroizes on drop; clone the inner
+            // string into the rotation call (the wrapper cannot be moved out of
+            // a `Drop` type) and let the original wipe itself at arm's end.
+            SecretLiveChange::Rotate { name, value } => {
+                secrets.rotate_value(&name, value.0.clone())
+            }
             SecretLiveChange::Remove { name } => {
                 secrets.remove(&name);
                 Ok(())

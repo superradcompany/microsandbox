@@ -1,6 +1,7 @@
 //! Secret injection configuration types.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -40,8 +41,12 @@ pub struct SecretEntry {
     /// Empty when the entry carries a [`source`](Self::source) reference
     /// instead: reference-model entries resolve the value host-side at spawn
     /// time so the durable sandbox config never stores raw secret material.
-    #[serde(default)]
-    pub value: String,
+    ///
+    /// Wrapped in [`Zeroizing`] so the owned plaintext copy is wiped when the
+    /// entry drops. This only scrubs this in-memory copy; serde/JSON buffers
+    /// that ever carried a legacy inlined value are explicitly out of scope.
+    #[serde(default = "empty_secret_value")]
+    pub value: Zeroizing<String>,
 
     /// Host-side source reference resolved into [`value`](Self::value) at
     /// spawn time. `None` means `value` already carries the material (the
@@ -347,6 +352,10 @@ fn default_true() -> bool {
     true
 }
 
+fn empty_secret_value() -> Zeroizing<String> {
+    Zeroizing::new(String::new())
+}
+
 fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
     if env_var.is_empty() {
         return Err(SecretConfigError::EmptyEnvVar { secret_index });
@@ -395,7 +404,7 @@ mod tests {
     fn valid_secret() -> SecretEntry {
         SecretEntry {
             env_var: "API_KEY".into(),
-            value: "secret".into(),
+            value: Zeroizing::new("secret".into()),
             source: None,
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
@@ -472,7 +481,7 @@ mod tests {
     fn default_require_tls_identity() {
         let entry = SecretEntry {
             env_var: "K".into(),
-            value: "v".into(),
+            value: Zeroizing::new("v".into()),
             source: None,
             placeholder: "$K".into(),
             allowed_hosts: vec![],

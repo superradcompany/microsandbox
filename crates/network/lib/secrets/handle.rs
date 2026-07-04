@@ -61,7 +61,9 @@ impl SecretsHandle {
     /// Replace the value of an existing secret. The guest-visible placeholder
     /// and host allow-list are unchanged.
     pub fn rotate_value(&self, name: &str, value: String) -> Result<(), SecretsUpdateError> {
-        self.update(name, |entry| entry.value = value)
+        self.update(name, |entry| {
+            entry.value = zeroize::Zeroizing::new(value);
+        })
     }
 
     /// Stop resolving and injecting a secret for future connections. Removing
@@ -125,7 +127,7 @@ mod tests {
         SecretsConfig {
             secrets: vec![SecretEntry {
                 env_var: name.to_string(),
-                value: value.to_string(),
+                value: zeroize::Zeroizing::new(value.to_string()),
                 source: None,
                 placeholder: format!("$MSB_{name}"),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
@@ -145,8 +147,8 @@ mod tests {
         handle.rotate_value("API_KEY", "new".into()).unwrap();
 
         // The pre-rotation snapshot is untouched; new loads see the new value.
-        assert_eq!(before.secrets[0].value, "old");
-        assert_eq!(handle.load().secrets[0].value, "new");
+        assert_eq!(before.secrets[0].value.as_str(), "old");
+        assert_eq!(handle.load().secrets[0].value.as_str(), "new");
         assert_eq!(handle.load().secrets[0].placeholder, "$MSB_API_KEY");
     }
 

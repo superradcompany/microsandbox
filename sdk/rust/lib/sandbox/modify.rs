@@ -1163,7 +1163,7 @@ fn apply_secret_patch_entry(
                 .iter_mut()
                 .find(|entry| entry.env_var == patch.name)
             {
-                entry.value = String::new();
+                entry.value = zeroize::Zeroizing::new(String::new());
                 entry.source = Some(source);
                 if let Some(placeholder) = &patch.placeholder {
                     entry.placeholder = placeholder.clone();
@@ -1177,7 +1177,7 @@ fn apply_secret_patch_entry(
                 }
                 secrets.secrets.push(SecretEntry {
                     env_var: patch.name.clone(),
-                    value: String::new(),
+                    value: zeroize::Zeroizing::new(String::new()),
                     source: Some(source),
                     placeholder: patch
                         .placeholder
@@ -2829,7 +2829,7 @@ mod tests {
         let mut network = config.local_network_config().unwrap();
         network.secrets.secrets.push(SecretEntry {
             env_var: name.to_string(),
-            value: value.to_string(),
+            value: zeroize::Zeroizing::new(value.to_string()),
             source: None,
             placeholder: format!("$MSB_{name}"),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
