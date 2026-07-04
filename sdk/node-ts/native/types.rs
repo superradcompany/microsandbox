@@ -17,6 +17,20 @@ pub struct SandboxStopResult {
     pub source: Option<String>,
 }
 
+/// Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`.
+#[napi(object)]
+pub struct SandboxPingResult {
+    pub name: String,
+    pub latency_ms: f64,
+}
+
+/// Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`.
+#[napi(object)]
+pub struct SandboxTouchResult {
+    pub name: String,
+    pub activity_seq: f64,
+}
+
 /// Exit status for an executed command.
 #[napi(object)]
 pub struct ExitStatus {

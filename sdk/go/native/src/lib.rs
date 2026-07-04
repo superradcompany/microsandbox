@@ -746,7 +746,7 @@ pub unsafe extern "C" fn msb_cancel_unregister(id: u64) {
 // Input:
 //   name: null-terminated C string, owned by caller (Go), borrowed for call.
 //   opts_json: JSON object with optional fields (image, memory_mib, cpus,
-//     workdir, env). Owned by caller, borrowed for call.
+//     max_memory_mib, max_cpus, workdir, env). Owned by caller, borrowed for call.
 // Output on success: {"handle": <u64>}
 // The caller MUST eventually call `msb_sandbox_close(handle)` to release.
 // ---------------------------------------------------------------------------
@@ -930,6 +930,8 @@ struct SandboxCreateOpts {
     snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
+    max_memory_mib: Option<u32>,
+    max_cpus: Option<u8>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -1911,6 +1913,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(c) = opts.cpus {
                 builder = builder.cpus(c);
             }
+            if let Some(m) = opts.max_memory_mib {
+                builder = builder.max_memory(m);
+            }
+            if let Some(c) = opts.max_cpus {
+                builder = builder.max_cpus(c);
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -2051,6 +2059,22 @@ fn sandbox_stop_result_json(result: microsandbox::sandbox::SandboxStopResult) ->
         "signal": result.signal,
         "observed_at_unix": result.observed_at.timestamp(),
         "source": source,
+    })
+    .to_string()
+}
+
+fn sandbox_ping_result_json(result: microsandbox::sandbox::SandboxPingResult) -> String {
+    serde_json::json!({
+        "name": result.name,
+        "latency_ms": result.latency.as_secs_f64() * 1000.0,
+    })
+    .to_string()
+}
+
+fn sandbox_touch_result_json(result: microsandbox::sandbox::SandboxTouchResult) -> String {
+    serde_json::json!({
+        "name": result.name,
+        "activity_seq": result.activity_seq,
     })
     .to_string()
 }
@@ -2247,6 +2271,40 @@ pub unsafe extern "C" fn msb_sandbox_handle_wait_until_stopped(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_ping(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.ping().await.map_err(FfiError::from)?;
+            Ok(sandbox_ping_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_touch(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.touch().await.map_err(FfiError::from)?;
+            Ok(sandbox_touch_result_json(result))
         }))
     })
 }
@@ -2477,6 +2535,38 @@ pub unsafe extern "C" fn msb_sandbox_wait_until_stopped(
         Ok(Box::pin(async move {
             let result = sb.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ping(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.ping().await.map_err(FfiError::from)?;
+            Ok(sandbox_ping_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_touch(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.touch().await.map_err(FfiError::from)?;
+            Ok(sandbox_touch_result_json(result))
         }))
     })
 }

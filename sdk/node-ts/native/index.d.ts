@@ -826,6 +826,10 @@ export declare class Sandbox {
   sshServer(options?: SshServerOptions | undefined | null): Promise<JsSshServer>
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
+  /** Check whether agentd is reachable without refreshing idle activity. */
+  ping(): Promise<SandboxPingResult>
+  /** Explicitly refresh this sandbox's idle activity timer. */
+  touch(): Promise<SandboxTouchResult>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /**
@@ -913,8 +917,12 @@ export declare class SandboxBuilder {
   fromSnapshot(pathOrName: string): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
+  /** Boot-time maximum possible virtual CPUs. */
+  maxCpus(count: number): this
   /** Guest memory in MiB. */
   memory(mib: number): this
+  /** Boot-time maximum hotpluggable guest memory in MiB. */
+  maxMemory(mib: number): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1128,6 +1136,20 @@ export declare class SandboxHandle {
   get updatedAt(): number | null
   /** Get point-in-time metrics from the database. */
   metrics(): Promise<SandboxMetrics>
+  /**
+   * Check whether agentd is reachable without refreshing idle activity.
+   *
+   * Connects to an already-running sandbox; stopped sandboxes are not
+   * started implicitly.
+   */
+  ping(): Promise<SandboxPingResult>
+  /**
+   * Explicitly refresh this sandbox's idle activity timer.
+   *
+   * Connects to an already-running sandbox; stopped sandboxes are not
+   * started implicitly.
+   */
+  touch(): Promise<SandboxTouchResult>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1940,6 +1962,12 @@ export interface SandboxMetrics {
   timestampMs: number
 }
 
+/** Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`. */
+export interface SandboxPingResult {
+  name: string
+  latencyMs: number
+}
+
 /** Result of observing a sandbox in a terminal state. */
 export interface SandboxStopResult {
   name: string
@@ -1948,6 +1976,12 @@ export interface SandboxStopResult {
   signal?: number
   observedAt: number
   source?: string
+}
+
+/** Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`. */
+export interface SandboxTouchResult {
+  name: string
+  activitySeq: number
 }
 
 /** Host-scoped upstream CA certificate path. */

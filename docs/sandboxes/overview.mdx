@@ -106,7 +106,9 @@ msb create python --name worker \
 |--------|---------|-------------|
 | `image` | required | OCI image, local rootfs path, or disk image |
 | `cpus` | `1` | Virtual CPU limit |
+| `max_cpus` | same as `cpus` | Boot-time maximum possible virtual CPUs (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
 | `memory` | `512` | Guest memory limit in MiB |
+| `max_memory` | same as `memory` | Boot-time maximum hotpluggable memory in MiB (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
 | `workdir` | image default | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | empty | Environment variables |

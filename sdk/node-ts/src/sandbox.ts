@@ -53,6 +53,16 @@ export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   createWithPullProgress(): Promise<PullProgressCreate>;
 }
 
+export interface SandboxPingResult {
+  readonly name: string;
+  readonly latencyMs: number;
+}
+
+export interface SandboxTouchResult {
+  readonly name: string;
+  readonly activitySeq: number;
+}
+
 /**
  * Pair returned by `SandboxBuilder.createWithPullProgress()` —
  * the per-layer progress event stream plus a method to await the
@@ -327,6 +337,20 @@ export class Sandbox implements AsyncDisposable {
   async metrics(): Promise<SandboxMetrics> {
     const raw = await withMappedErrors(() => this.inner.metrics());
     return metricsFromNapi(raw);
+  }
+
+  /**
+   * Check whether agentd is reachable without refreshing idle activity.
+   */
+  async ping(): Promise<SandboxPingResult> {
+    return await withMappedErrors(() => this.inner.ping());
+  }
+
+  /**
+   * Explicitly refresh this sandbox's idle activity timer.
+   */
+  async touch(): Promise<SandboxTouchResult> {
+    return await withMappedErrors(() => this.inner.touch());
   }
 
   /** Stream metrics snapshots at the given interval (in milliseconds). */

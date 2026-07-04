@@ -107,6 +107,16 @@ char *msb_sandbox_handle_wait_until_stopped(uint64_t cancel_id,
                                             unsigned char *buf,
                                             uintptr_t buf_len);
 
+char *msb_sandbox_handle_ping(uint64_t cancel_id,
+                              const char *name,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_handle_touch(uint64_t cancel_id,
+                               const char *name,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
 char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
@@ -163,6 +173,10 @@ char *msb_sandbox_wait_until_stopped(uint64_t cancel_id,
                                      Handle handle,
                                      unsigned char *buf,
                                      uintptr_t buf_len);
+
+char *msb_sandbox_ping(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_touch(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
  * Reports whether this handle owns the sandbox lifecycle (synchronous).

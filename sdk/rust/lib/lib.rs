@@ -14,6 +14,7 @@ pub mod backend;
 pub mod config;
 #[allow(dead_code)]
 pub(crate) mod db;
+pub mod experimental;
 pub mod image;
 pub mod logs;
 pub mod runtime;
@@ -55,7 +56,12 @@ pub use sandbox::ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use sandbox::{
-    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig, SandboxMetrics,
+    ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
+    ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
+    PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
+    SandboxConfig, SandboxMetrics, SandboxModificationBuilder, SandboxModificationPatch,
+    SandboxModificationPlan, SandboxPingResult, SandboxTouchResult, SecretChangeKind,
+    SecretModificationPatch, SecretPatchOperation, SecretPlannedChange, SecretSource,
     all_sandbox_metrics, all_sandbox_metrics_local, validate_sandbox_name,
 };
 pub use snapshot::{

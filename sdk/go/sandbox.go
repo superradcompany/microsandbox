@@ -53,6 +53,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,
+		MaxMemoryMiB:    o.MaxMemoryMiB,
+		MaxCPUs:         o.MaxCPUs,
 		Workdir:         o.Workdir,
 		Shell:           o.Shell,
 		SecurityProfile: string(o.SecurityProfile),
@@ -201,6 +203,26 @@ func sandboxStopResultFromFFI(result *ffi.SandboxStopResult) *SandboxStopResult 
 		Signal:     result.Signal,
 		ObservedAt: time.Unix(result.ObservedAtUnix, 0),
 		Source:     result.Source,
+	}
+}
+
+func sandboxPingResultFromFFI(result *ffi.SandboxPingResult) *SandboxPingResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxPingResult{
+		Name:    result.Name,
+		Latency: time.Duration(result.LatencyMs * float64(time.Millisecond)),
+	}
+}
+
+func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxTouchResult{
+		Name:        result.Name,
+		ActivitySeq: result.ActivitySeq,
 	}
 }
 
@@ -383,6 +405,18 @@ type SandboxStopResult struct {
 	Source     *string
 }
 
+// SandboxPingResult describes a successful agent reachability check.
+type SandboxPingResult struct {
+	Name    string
+	Latency time.Duration
+}
+
+// SandboxTouchResult describes a successful explicit idle-activity refresh.
+type SandboxTouchResult struct {
+	Name        string
+	ActivitySeq uint64
+}
+
 // WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
 func WithStopTimeout(timeout time.Duration) StopOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
@@ -527,6 +561,28 @@ func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
 		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 		Uptime:                  m.Uptime,
 	}, nil
+}
+
+// Ping checks whether agentd is reachable without refreshing idle activity.
+// It connects to an already-running sandbox and does not start stopped
+// sandboxes implicitly.
+func (h *SandboxHandle) Ping(ctx context.Context) (*SandboxPingResult, error) {
+	result, err := ffi.PingSandboxByName(ctx, h.name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxPingResultFromFFI(result), nil
+}
+
+// Touch explicitly refreshes this sandbox's idle activity timer. It connects
+// to an already-running sandbox and does not start stopped sandboxes
+// implicitly.
+func (h *SandboxHandle) Touch(ctx context.Context) (*SandboxTouchResult, error) {
+	result, err := ffi.TouchSandboxByName(ctx, h.name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxTouchResultFromFFI(result), nil
 }
 
 // Connect reattaches to the running sandbox and returns a live handle.
@@ -720,6 +776,24 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
 		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
 		Uptime:                  m.Uptime,
 	}, nil
+}
+
+// Ping checks whether agentd is reachable without refreshing idle activity.
+func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error) {
+	result, err := s.inner.Ping(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxPingResultFromFFI(result), nil
+}
+
+// Touch explicitly refreshes this sandbox's idle activity timer.
+func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error) {
+	result, err := s.inner.Touch(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxTouchResultFromFFI(result), nil
 }
 
 // MetricsStreamHandle is a live metrics subscription. Obtain via

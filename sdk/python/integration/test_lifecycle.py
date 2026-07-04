@@ -8,7 +8,12 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, stop_and_remove_sandbox
-from microsandbox import Sandbox, SandboxAlreadyExistsError, SandboxNotFoundError
+from microsandbox import (
+    Sandbox,
+    SandboxAlreadyExistsError,
+    SandboxNotFoundError,
+    SandboxNotRunningError,
+)
 
 
 @pytest.mark.asyncio
@@ -27,8 +32,18 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
             "request_kill",
             "request_drain",
             "wait_until_stopped",
+            "ping",
+            "touch",
         ):
             assert hasattr(sandbox, method_name)
+
+        ping = await sandbox.ping()
+        assert ping.name == name
+        assert ping.latency_ms >= 0
+
+        touch = await sandbox.touch()
+        assert touch.name == name
+        assert touch.activity_seq > 0
 
         handles = await Sandbox.list()
         assert any(handle.name == name for handle in handles)
@@ -38,6 +53,12 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         assert handle.status
         assert handle.created_at is not None
         assert json.loads(handle.config_json)
+
+        handle_ping = await handle.ping()
+        assert handle_ping.name == name
+
+        handle_touch = await handle.touch()
+        assert handle_touch.name == name
 
         connected = await handle.connect()
         try:
@@ -53,6 +74,12 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         await sandbox.stop()
         result = await handle.refresh()
         assert result.status == "stopped"
+
+        with pytest.raises(SandboxNotRunningError):
+            await handle.ping()
+        with pytest.raises(SandboxNotRunningError):
+            await result.touch()
+        assert (await handle.refresh()).status == "stopped"
 
         restarted = await Sandbox.start(name)
         try:

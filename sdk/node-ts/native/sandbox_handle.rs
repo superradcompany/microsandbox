@@ -74,6 +74,26 @@ impl JsSandboxHandle {
         Ok(crate::sandbox::metrics_to_js(&m))
     }
 
+    /// Check whether agentd is reachable without refreshing idle activity.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    #[napi]
+    pub async fn ping(&self) -> Result<SandboxPingResult> {
+        let result = self.inner.ping().await.map_err(to_napi_error)?;
+        Ok(crate::sandbox::sandbox_ping_result_to_js(result))
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    #[napi]
+    pub async fn touch(&self) -> Result<SandboxTouchResult> {
+        let result = self.inner.touch().await.map_err(to_napi_error)?;
+        Ok(crate::sandbox::sandbox_touch_result_to_js(result))
+    }
+
     /// Start the sandbox (attached mode) — returns a live Sandbox handle.
     #[napi]
     pub async fn start(&self) -> Result<Sandbox> {

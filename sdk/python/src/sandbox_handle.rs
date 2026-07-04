@@ -6,7 +6,9 @@ use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::metrics::convert_metrics;
-use crate::sandbox::{PySandbox, PySandboxStopResult, optional_duration};
+use crate::sandbox::{
+    PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -110,6 +112,32 @@ impl PySandboxHandle {
             let guard = inner.lock().await;
             let m = guard.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
+        })
+    }
+
+    /// Check whether agentd is reachable without refreshing idle activity.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard.ping().await.map_err(to_py_err)?;
+            Ok(PySandboxPingResult::from_rust(result))
+        })
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    fn touch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard.touch().await.map_err(to_py_err)?;
+            Ok(PySandboxTouchResult::from_rust(result))
         })
     }
 

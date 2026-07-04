@@ -5,6 +5,9 @@ import type { PullProgress } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
+// Ping/touch are gated behind the experimental modify surface.
+process.env.MSB_EXPERIMENTAL_MODIFY = "1";
+
 async function waitForSandboxMetrics(sb: Sandbox) {
   let lastError: unknown;
 
@@ -85,6 +88,20 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     const m = await waitForSandboxMetrics(sb);
     expect(m.timestamp).toBeInstanceOf(Date);
     expect(typeof m.cpuPercent).toBe("number");
+  });
+
+  it("pings and touches the running sandbox", async () => {
+    const ping = await sb.ping();
+    expect(ping.name).toBe(SANDBOX_NAME);
+    expect(ping.latencyMs).toBeGreaterThanOrEqual(0);
+
+    const touch = await sb.touch();
+    expect(touch.name).toBe(SANDBOX_NAME);
+    expect(touch.activitySeq).toBeGreaterThan(0);
+
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    await expect(handle.ping()).resolves.toMatchObject({ name: SANDBOX_NAME });
+    await expect(handle.touch()).resolves.toMatchObject({ name: SANDBOX_NAME });
   });
 });
 

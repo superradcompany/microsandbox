@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import suppress
 from typing import Any
 
@@ -9,6 +10,10 @@ import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, remove_volume, unique_name
 from microsandbox import Sandbox, Volume
+
+# Ping/touch and max CPU/memory capacity are gated behind the experimental
+# modify surface; the integration suite exercises them deliberately.
+os.environ.setdefault("MSB_EXPERIMENTAL_MODIFY", "1")
 
 
 @pytest.fixture

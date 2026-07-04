@@ -112,6 +112,7 @@ mod tests {
             id: Set(id),
             name: Set(format!("sandbox-{id}")),
             config: Set("{}".to_string()),
+            active_config: Set(None),
             status: Set(sandbox::SandboxStatus::Running),
             ephemeral: Set(false),
             created_at: Set(None),

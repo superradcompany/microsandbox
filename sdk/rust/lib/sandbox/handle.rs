@@ -18,7 +18,7 @@ use crate::{
     db::entity::sandbox as sandbox_entity,
 };
 
-use super::{Sandbox, SandboxConfig, SandboxStatus, SandboxStopResult};
+use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -69,6 +69,7 @@ impl SandboxHandle {
                 db_id: model.id,
                 status: model.status,
                 config_json: model.config,
+                active_config_json: model.active_config,
                 created_at: model.created_at.map(|dt| dt.and_utc()),
                 updated_at: model.updated_at.map(|dt| dt.and_utc()),
                 pid,
@@ -176,6 +177,23 @@ impl SandboxHandle {
         }
     }
 
+    /// The serialized configuration used by the active VM, when known.
+    ///
+    /// Local handles return `Some` only while a sandbox has started under a
+    /// runtime that records active config snapshots. Stopped sandboxes and
+    /// older running sandboxes may return `None`. This surface is part of the
+    /// experimental modify feature set and returns `None` unless
+    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
+    pub fn active_config_json(&self) -> Option<&str> {
+        if !crate::experimental::modify_enabled() {
+            return None;
+        }
+        match &self.inner {
+            SandboxHandleInner::Local(s) => s.active_config_json.as_deref(),
+            SandboxHandleInner::Cloud(_) => None,
+        }
+    }
+
     /// Parse the stored configuration. Returns an error if the JSON
     /// is malformed (e.g., schema changed since the sandbox was created).
     ///
@@ -192,6 +210,26 @@ impl SandboxHandle {
                 available_when: "when SandboxConfig is the cloud wire shape".into(),
             }),
         }
+    }
+
+    /// Parse the active configuration snapshot, when one is available.
+    ///
+    /// Part of the experimental modify feature set: returns `Ok(None)` unless
+    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
+    pub fn active_config(&self) -> MicrosandboxResult<Option<SandboxConfig>> {
+        self.active_config_json()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Start planning a sandbox modification from this handle.
+    ///
+    /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
+    /// so planning uses current status and persisted config rather than this
+    /// handle's possibly stale snapshot.
+    pub fn modify(&self) -> SandboxModificationBuilder {
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
     /// Return a fresh handle for the same sandbox name.
@@ -355,6 +393,24 @@ impl SandboxHandle {
             },
             config,
         ))
+    }
+
+    /// Check whether agentd is reachable without refreshing the sandbox idle timer.
+    ///
+    /// Connects to the running sandbox and sends `core.ping`. Stopped sandboxes
+    /// are not started implicitly; call [`start`](Self::start) first when that
+    /// is the desired behavior.
+    pub async fn ping(&self) -> MicrosandboxResult<super::SandboxPingResult> {
+        self.connect().await?.ping().await
+    }
+
+    /// Explicitly refresh the sandbox idle timer.
+    ///
+    /// Connects to the running sandbox and sends `core.touch`. Stopped sandboxes
+    /// are not started implicitly; call [`start`](Self::start) first when that
+    /// is the desired behavior.
+    pub async fn touch(&self) -> MicrosandboxResult<super::SandboxTouchResult> {
+        self.connect().await?.touch().await
     }
 
     /// Snapshot this sandbox to a bare name under the default snapshots

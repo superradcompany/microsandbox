@@ -584,6 +584,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         sandbox_entity::Column::Status,
                         Expr::value(sandbox_entity::SandboxStatus::Stopped),
                     )
+                    .col_expr(
+                        sandbox_entity::Column::ActiveConfig,
+                        Expr::value(Option::<String>::None),
+                    )
                     .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                     .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
                     .exec(&exit_db)

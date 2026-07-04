@@ -35,6 +35,10 @@ pub struct SandboxBuilder {
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
+    /// Whether `max_cpus`/`max_memory` were explicitly requested, as opposed to
+    /// the internal auto-bump that keeps capacity equal to the effective values.
+    /// Explicit capacity requests are gated behind the experimental modify flag.
+    max_capacity_requested: bool,
 }
 
 /// Sub-builder for registry connection settings.
@@ -83,6 +87,7 @@ impl SandboxBuilder {
             detached: false,
             build_error: None,
             pending_snapshot: None,
+            max_capacity_requested: false,
         }
     }
 
@@ -162,6 +167,23 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
+        if self.config.spec.resources.max_cpus < count {
+            self.config.spec.resources.max_cpus = count;
+        }
+        self
+    }
+
+    /// Set the boot-time maximum possible virtual CPUs.
+    ///
+    /// This reserves the CPU hotplug capacity the sandbox may use after live
+    /// resize support lands. It does not increase the effective vCPU count by
+    /// itself; use [`cpus`](Self::cpus) for the initial effective count.
+    ///
+    /// Experimental: building fails unless
+    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
+    pub fn max_cpus(mut self, count: u8) -> Self {
+        self.config.spec.resources.max_cpus = count;
+        self.max_capacity_requested = true;
         self
     }
 
@@ -174,7 +196,25 @@ impl SandboxBuilder {
     /// .memory(1.gib())     // 1 GiB = 1024 MiB
     /// ```
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.config.spec.resources.memory_mib = size.into().as_u32();
+        let memory_mib = size.into().as_u32();
+        self.config.spec.resources.memory_mib = memory_mib;
+        if self.config.spec.resources.max_memory_mib < memory_mib {
+            self.config.spec.resources.max_memory_mib = memory_mib;
+        }
+        self
+    }
+
+    /// Set the boot-time maximum hotpluggable guest memory.
+    ///
+    /// This reserves memory hotplug capacity for future live resize support.
+    /// It does not increase the effective guest memory by itself; use
+    /// [`memory`](Self::memory) for the initial effective memory.
+    ///
+    /// Experimental: building fails unless
+    /// [`experimental::modify_enabled`](crate::experimental::modify_enabled).
+    pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.config.spec.resources.max_memory_mib = size.into().as_u32();
+        self.max_capacity_requested = true;
         self
     }
 
@@ -989,6 +1029,31 @@ impl SandboxBuilder {
                 "memory must be greater than 0".into(),
             ));
         }
+        if self.max_capacity_requested {
+            crate::experimental::require_modify("max CPU/memory capacity")?;
+        }
+        if self.config.spec.resources.max_cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "max_cpus must be greater than 0".into(),
+            ));
+        }
+        if self.config.spec.resources.max_memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "max_memory must be greater than 0".into(),
+            ));
+        }
+        if self.config.spec.resources.max_cpus < self.config.spec.resources.cpus {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "max_cpus {} must be greater than or equal to cpus {}",
+                self.config.spec.resources.max_cpus, self.config.spec.resources.cpus
+            )));
+        }
+        if self.config.spec.resources.max_memory_mib < self.config.spec.resources.memory_mib {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "max_memory {} MiB must be greater than or equal to memory {} MiB",
+                self.config.spec.resources.max_memory_mib, self.config.spec.resources.memory_mib
+            )));
+        }
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.spec.image {
@@ -1080,6 +1145,7 @@ impl From<SandboxConfig> for SandboxBuilder {
             detached: false,
             build_error: None,
             pending_snapshot: None,
+            max_capacity_requested: false,
         }
     }
 }
@@ -1113,12 +1179,21 @@ mod tests {
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Debug));
     }
 
+    fn enable_experimental_modify() {
+        // SAFETY: tests only ever set this process-global opt-in to the same
+        // enabled value, so concurrent reads cannot observe a conflicting state.
+        unsafe { std::env::set_var(crate::experimental::MODIFY_ENV, "1") };
+    }
+
     #[tokio::test]
     async fn test_builder_builds_config_with_shared_spec() {
+        enable_experimental_modify();
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .cpus(2)
+            .max_cpus(4)
             .memory(1024)
+            .max_memory(4096)
             .log_level(LogLevel::Info)
             .env("A", "B")
             .script("setup", "echo hi")
@@ -1129,7 +1204,9 @@ mod tests {
 
         assert_eq!(config.spec.name, "test");
         assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 1024);
+        assert_eq!(config.spec.resources.max_memory_mib, 4096);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
         assert_eq!(config.spec.env.len(), 1);
         assert_eq!(
@@ -1188,6 +1265,40 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("memory must be greater than 0"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_max_cpus_below_effective_cpus() {
+        enable_experimental_modify();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(4)
+            .max_cpus(2)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("max_cpus 2 must be greater than or equal to cpus 4")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_max_memory_below_effective_memory() {
+        enable_experimental_modify();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(2048)
+            .max_memory(1024)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("max_memory 1024 MiB must be greater than or equal to memory 2048 MiB")
+        );
     }
 
     #[tokio::test]

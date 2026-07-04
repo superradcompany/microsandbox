@@ -24,7 +24,7 @@ For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at proces
   <a className="msb-row" href="#m-sdkversion"><span className="msb-rn">m.SDKVersion()</span><span className="msb-rg">pinned release version</span></a>
   <a className="msb-row" href="#m-runtimeversion"><span className="msb-rn">m.RuntimeVersion()</span><span className="msb-rg">loaded FFI version</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *Sandbox<span className="msb-ct">21</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *Sandbox<span className="msb-ct">23</span></p>
   <a className="msb-row" href="#sb-name"><span className="msb-rn">sb.Name()</span><span className="msb-rg">sandbox name</span></a>
   <a className="msb-row" href="/sdk/go/execution"><span className="msb-rn">sb.Exec()</span><span className="msb-rg">run a command</span></a>
   <a className="msb-row" href="/sdk/go/execution"><span className="msb-rn">sb.Shell()</span><span className="msb-rg">run via /bin/sh -c</span></a>
@@ -32,6 +32,8 @@ For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at proces
   <a className="msb-row" href="/sdk/go/ssh"><span className="msb-rn">sb.SSH()</span><span className="msb-rg">SSH client / server</span></a>
   <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.Logs()</span><span className="msb-rg">captured output</span></a>
   <a className="msb-row" href="#sb-logstream"><span className="msb-rn">sb.LogStream()</span><span className="msb-rg">stream output</span></a>
+  <a className="msb-row" href="#sb-ping"><span className="msb-rn">sb.Ping()</span><span className="msb-rg">agent reachability</span></a>
+  <a className="msb-row" href="#sb-touch"><span className="msb-rn">sb.Touch()</span><span className="msb-rg">refresh idle activity</span></a>
   <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.Metrics()</span><span className="msb-rg">resource snapshot</span></a>
   <a className="msb-row" href="#sb-metricsstream"><span className="msb-rn">sb.MetricsStream()</span><span className="msb-rg">stream metrics</span></a>
   <a className="msb-row" href="#sb-attach"><span className="msb-rn">sb.Attach()</span><span className="msb-rg">interactive PTY</span></a>
@@ -47,11 +49,13 @@ For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at proces
   <a className="msb-row" href="#sb-ownslifecycle"><span className="msb-rn">sb.OwnsLifecycle()</span><span className="msb-rg">attached vs detached</span></a>
   <a className="msb-row" href="#sb-ownslifecycleorfalse"><span className="msb-rn">sb.OwnsLifecycleOrFalse()</span><span className="msb-rg">attached, false on error</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">37</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">39</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#withimage">WithImage()</a>
     <a className="msb-chip" href="#withmemory">WithMemory()</a>
+    <a className="msb-chip" href="#withmaxmemory">WithMaxMemory()</a>
     <a className="msb-chip" href="#withcpus">WithCPUs()</a>
+    <a className="msb-chip" href="#withmaxcpus">WithMaxCPUs()</a>
     <a className="msb-chip" href="#withenv">WithEnv()</a>
     <a className="msb-chip" href="#withports">WithPorts()</a>
     <a className="msb-chip" href="#withmounts">WithMounts()</a>
@@ -67,6 +71,8 @@ For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at proces
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
   <div className="msb-chiprow">
     <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
+    <a className="msb-typepill" href="#sandboxpingresult">SandboxPingResult</a>
+    <a className="msb-typepill" href="#sandboxtouchresult">SandboxTouchResult</a>
     <a className="msb-typepill" href="#sandboxfilter">SandboxFilter</a>
     <a className="msb-typepill" href="#sandboxconfig">SandboxConfig</a>
     <a className="msb-typepill" href="#sandboxoption">SandboxOption</a>
@@ -192,7 +198,7 @@ defer func() {
 func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
 ```
 
-Look up a sandbox by name and return a metadata handle without connecting to it. Returns an error with `Kind == ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, `Logs`, and snapshot methods.
+Look up a sandbox by name and return a metadata handle without connecting to it. Returns an error with `Kind == ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Ping`, `Touch`, `Metrics`, `Logs`, and snapshot methods.
 
 <p className="msb-label">Parameters</p>
 
@@ -709,6 +715,70 @@ for {
 
 ---
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Ping()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error)
+```
+
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxpingresult">*SandboxPingResult</a></div>
+    <div className="msb-param-desc">Sandbox name and agent round-trip latency.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+health, err := sb.Ping(ctx)
+if err != nil {
+    return err
+}
+fmt.Printf("%s: %s\n", health.Name, health.Latency)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Touch()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error)
+```
+
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `MaxDuration`. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxtouchresult">*SandboxTouchResult</a></div>
+    <div className="msb-param-desc">Sandbox name and updated activity sequence.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+keepalive, err := sb.Touch(ctx)
+if err != nil {
+    return err
+}
+fmt.Printf("%s: %d\n", keepalive.Name, keepalive.ActivitySeq)
+```
+
+</Accordion>
+
+---
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
@@ -1146,6 +1216,26 @@ Set the guest memory limit in MiB. This is a limit, not an upfront reservation. 
 
 ---
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithMaxMemory()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithMaxMemory(mebibytes uint32) SandboxOption
+```
+
+Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mebibytes</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+---
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithCPUs()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
@@ -1161,6 +1251,26 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
   <div className="msb-param">
     <div className="msb-param-key"><code>cpus</code><span className="msb-type">uint8</span></div>
     <div className="msb-param-desc">Number of vCPUs.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithMaxCPUs()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithMaxCPUs(cpus uint8) SandboxOption
+```
+
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself. Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cpus</code><span className="msb-type">uint8</span></div>
+    <div className="msb-param-desc">Maximum possible vCPUs.</div>
   </div>
 </div>
 
@@ -2081,6 +2191,8 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `CreatedAt()` | `time.Time` | Creation time, zero value if unknown |
 | `UpdatedAt()` | `time.Time` | Last-update time, zero value if unknown |
 | `Refresh(ctx)` | `(*SandboxHandle, error)` | Fresh handle for the same name |
+| `Ping(ctx)` | `(*`[`SandboxPingResult`](#sandboxpingresult)`, error)` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
+| `Touch(ctx)` | `(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)` | Explicitly refresh idle activity; does not start stopped sandboxes |
 | `Metrics(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Point-in-time resource metrics |
 | `Logs(ctx, opts)` | `([]`[`LogEntry`](#logentry)`, error)` | Read captured `exec.log` (works without starting) |
 | `LogStream(ctx, opts)` | `(*`[`LogStreamHandle`](#logstreamhandle)`, error)` | Stream captured output |
@@ -2096,6 +2208,32 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `Remove(ctx)` | `error` | Delete sandbox and persisted state |
 | `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
 | `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox to an explicit path |
+
+### SandboxPingResult
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-ping">Ping()</a></p>
+
+Agent reachability result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Name | `string` | Sandbox name |
+| Latency | `time.Duration` | Round-trip latency |
+
+### SandboxTouchResult
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-touch">Touch()</a></p>
+
+Explicit idle-refresh result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Name | `string` | Sandbox name |
+| ActivitySeq | `uint64` | Monotonic activity sequence after the touch |
 
 ### SandboxFilter
 
@@ -2126,6 +2264,8 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |
+| MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB |
+| MaxCPUs | `uint8` | Boot-time maximum possible virtual CPUs |
 | Workdir | `string` | Default working directory |
 | Shell | `string` | Shell binary used by `Shell` calls |
 | SecurityProfile | [`SecurityProfile`](#securityprofile) | In-guest security profile |

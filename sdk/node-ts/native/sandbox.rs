@@ -332,6 +332,28 @@ impl Sandbox {
         Ok(metrics_to_js(&m))
     }
 
+    //----------------------------------------------------------------------------------------------
+    // Health
+    //----------------------------------------------------------------------------------------------
+
+    /// Check whether agentd is reachable without refreshing idle activity.
+    #[napi]
+    pub async fn ping(&self) -> Result<SandboxPingResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.ping().await.map_err(to_napi_error)?;
+        Ok(sandbox_ping_result_to_js(result))
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    #[napi]
+    pub async fn touch(&self) -> Result<SandboxTouchResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.touch().await.map_err(to_napi_error)?;
+        Ok(sandbox_touch_result_to_js(result))
+    }
+
     /// Stream metrics snapshots at the requested interval (in milliseconds).
     #[napi]
     pub async fn metrics_stream(&self, interval_ms: f64) -> Result<JsMetricsStream> {
@@ -777,6 +799,24 @@ pub fn sandbox_stop_result_to_js(
         signal: result.signal,
         observed_at: datetime_to_ms(&result.observed_at),
         source: result.source,
+    }
+}
+
+pub fn sandbox_ping_result_to_js(
+    result: microsandbox::sandbox::SandboxPingResult,
+) -> SandboxPingResult {
+    SandboxPingResult {
+        name: result.name,
+        latency_ms: result.latency.as_secs_f64() * 1000.0,
+    }
+}
+
+pub fn sandbox_touch_result_to_js(
+    result: microsandbox::sandbox::SandboxTouchResult,
+) -> SandboxTouchResult {
+    SandboxTouchResult {
+        name: result.name,
+        activity_seq: result.activity_seq as f64,
     }
 }
 

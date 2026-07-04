@@ -38,6 +38,20 @@ pub struct PySandboxStopResult {
     source: Option<String>,
 }
 
+/// Result returned by Sandbox.ping() / SandboxHandle.ping().
+#[pyclass(name = "SandboxPingResult")]
+pub struct PySandboxPingResult {
+    name: String,
+    latency_ms: f64,
+}
+
+/// Result returned by Sandbox.touch() / SandboxHandle.touch().
+#[pyclass(name = "SandboxTouchResult")]
+pub struct PySandboxTouchResult {
+    name: String,
+    activity_seq: u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +97,24 @@ impl PySandboxStopResult {
     }
 }
 
+impl PySandboxPingResult {
+    pub fn from_rust(inner: microsandbox::sandbox::SandboxPingResult) -> Self {
+        Self {
+            name: inner.name,
+            latency_ms: inner.latency.as_secs_f64() * 1000.0,
+        }
+    }
+}
+
+impl PySandboxTouchResult {
+    pub fn from_rust(inner: microsandbox::sandbox::SandboxTouchResult) -> Self {
+        Self {
+            name: inner.name,
+            activity_seq: inner.activity_seq,
+        }
+    }
+}
+
 #[pymethods]
 impl PySandboxStopResult {
     #[getter]
@@ -113,6 +145,32 @@ impl PySandboxStopResult {
     #[getter]
     fn source(&self) -> Option<String> {
         self.source.clone()
+    }
+}
+
+#[pymethods]
+impl PySandboxPingResult {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn latency_ms(&self) -> f64 {
+        self.latency_ms
+    }
+}
+
+#[pymethods]
+impl PySandboxTouchResult {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn activity_seq(&self) -> u64 {
+        self.activity_seq
     }
 }
 
@@ -547,6 +605,30 @@ impl PySandbox {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let m = sandbox.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
+        })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Health
+    //----------------------------------------------------------------------------------------------
+
+    /// Check whether agentd is reachable without refreshing idle activity.
+    fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let result = sandbox.ping().await.map_err(to_py_err)?;
+            Ok(PySandboxPingResult::from_rust(result))
+        })
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    fn touch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let result = sandbox.touch().await.map_err(to_py_err)?;
+            Ok(PySandboxTouchResult::from_rust(result))
         })
     }
 

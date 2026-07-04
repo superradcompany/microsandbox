@@ -42,6 +42,32 @@ pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBac
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions: Experimental gating
+//--------------------------------------------------------------------------------------------------
+
+/// Whether the experimental sandbox modification surface is enabled.
+pub fn experimental_modify_enabled() -> bool {
+    microsandbox::experimental::modify_enabled()
+}
+
+/// Fail with a rendered error unless the experimental modify surface is enabled.
+pub fn require_experimental_modify(command: &str) -> anyhow::Result<()> {
+    if experimental_modify_enabled() {
+        return Ok(());
+    }
+
+    let hint = format!(
+        "set {}=1 to enable experimental sandbox modification commands",
+        microsandbox::experimental::MODIFY_ENV
+    );
+    ui::error_with_lines(
+        &format!("`{command}` is experimental"),
+        &[ui::ErrorLine::Hint(&hint)],
+    );
+    Err(ui::AlreadyRenderedError.into())
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -56,9 +82,17 @@ pub struct SandboxOpts {
     #[arg(short = 'c', long)]
     pub cpus: Option<u8>,
 
+    /// Boot-time maximum possible virtual CPUs (experimental).
+    #[arg(long = "max-cpus", hide = !experimental_modify_enabled())]
+    pub max_cpus: Option<u8>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
+
+    /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G) (experimental).
+    #[arg(long = "max-memory", value_name = "SIZE", hide = !experimental_modify_enabled())]
+    pub max_memory: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -439,7 +473,9 @@ impl SandboxOpts {
     /// Returns true if any creation-time configuration flag was set.
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
+            || self.max_cpus.is_some()
             || self.memory.is_some()
+            || self.max_memory.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -514,8 +550,14 @@ pub fn apply_sandbox_opts(
     if let Some(cpus) = opts.cpus {
         builder = builder.cpus(cpus);
     }
+    if let Some(max_cpus) = opts.max_cpus {
+        builder = builder.max_cpus(max_cpus);
+    }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref max_memory) = opts.max_memory {
+        builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);

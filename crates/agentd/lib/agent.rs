@@ -16,8 +16,8 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected,
-    ResolvedUser,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -403,6 +403,33 @@ async fn handle_message(
     config: &AgentdConfig,
 ) -> AgentdResult<()> {
     match msg.t {
+        MessageType::Ping => {
+            let Some(_) = decode_payload_or_core_error::<Ping>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            let reply = Message::with_payload(MessageType::Pong, msg.id, &Pong {})
+                .map_err(|e| AgentdError::ExecSession(format!("encode pong: {e}")))?;
+            codec::encode_to_buf(&reply, out_buf)
+                .map_err(|e| AgentdError::ExecSession(format!("encode pong frame: {e}")))?;
+        }
+
+        MessageType::Touch => {
+            let Some(_) = decode_payload_or_core_error::<Touch>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            activity.record_host_message();
+            let reply = Message::with_payload(
+                MessageType::Touched,
+                msg.id,
+                &Touched {
+                    activity_seq: activity.activity_seq,
+                },
+            )
+            .map_err(|e| AgentdError::ExecSession(format!("encode touched: {e}")))?;
+            codec::encode_to_buf(&reply, out_buf)
+                .map_err(|e| AgentdError::ExecSession(format!("encode touched frame: {e}")))?;
+        }
+
         MessageType::ExecRequest => {
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
@@ -661,10 +688,29 @@ const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 /// Returns whether a host message should refresh the sandbox idle timer.
 ///
-/// Maintenance traffic such as clock synchronization must not count as user
-/// activity, otherwise periodic host tasks would keep an idle sandbox alive.
+/// Maintenance traffic such as clock synchronization and reachability checks
+/// must not count as user activity, otherwise periodic host tasks would keep an
+/// idle sandbox alive. `core.touch` is excluded here too because it refreshes
+/// idleness explicitly in its handler, after its payload has been validated.
 fn message_refreshes_idle_timer(t: &MessageType) -> bool {
-    !matches!(t, MessageType::ClockSync)
+    !matches!(
+        t,
+        MessageType::ClockSync | MessageType::Ping | MessageType::Touch
+    )
+}
+
+/// Returns whether an agent reply should refresh the sandbox idle timer.
+///
+/// Most guest output still represents useful sandbox activity. Maintenance
+/// replies to `core.ping` and `core.touch` are excluded so `ping` is a pure
+/// health check and `touch` advances activity exactly once. `core.error` is
+/// also excluded because valid work already records activity on the incoming
+/// request, while malformed maintenance traffic should not become a keepalive.
+fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
+    !matches!(
+        t,
+        MessageType::Pong | MessageType::Touched | MessageType::CoreError
+    )
 }
 
 /// Spawns the heartbeat pulse on a dedicated OS thread.
@@ -762,9 +808,45 @@ fn record_encoded_guest_messages(out_buf: &[u8], start: usize, activity: &mut Ac
             break;
         }
 
-        activity.record_guest_message();
+        if encoded_guest_message_refreshes_idle_timer(out_buf, offset, frame_len) {
+            activity.record_guest_message();
+        }
         offset += total;
     }
+}
+
+fn encoded_guest_message_refreshes_idle_timer(
+    out_buf: &[u8],
+    offset: usize,
+    frame_len: usize,
+) -> bool {
+    if frame_len < microsandbox_protocol::message::FRAME_HEADER_SIZE {
+        return true;
+    }
+
+    let id_start = offset + 4;
+    let flags_index = id_start + 4;
+    let body_start = flags_index + 1;
+    let body_end = offset + 4 + frame_len;
+    if body_end > out_buf.len() || body_start > body_end {
+        return true;
+    }
+
+    let id = u32::from_be_bytes([
+        out_buf[id_start],
+        out_buf[id_start + 1],
+        out_buf[id_start + 2],
+        out_buf[id_start + 3],
+    ]);
+    let frame = codec::RawFrame {
+        id,
+        flags: out_buf[flags_index],
+        body: out_buf[body_start..body_end].to_vec(),
+    };
+
+    codec::raw_frame_to_message(frame)
+        .map(|msg| guest_message_refreshes_idle_timer(&msg.t))
+        .unwrap_or(true)
 }
 
 fn apply_raw_activity(raw: RawActivity, activity: &mut ActivityTracker) {
@@ -1190,5 +1272,38 @@ mod tests {
         assert_eq!(activity.counters.guest_messages, 2);
         assert_eq!(activity.counters.fs_bytes, 42);
         assert_eq!(activity.counters.tcp_bytes, 7);
+    }
+
+    #[test]
+    fn maintenance_messages_do_not_implicitly_refresh_idle_timer() {
+        assert!(!message_refreshes_idle_timer(&MessageType::ClockSync));
+        assert!(!message_refreshes_idle_timer(&MessageType::Ping));
+        assert!(!message_refreshes_idle_timer(&MessageType::Touch));
+        assert!(message_refreshes_idle_timer(&MessageType::ExecRequest));
+    }
+
+    #[test]
+    fn maintenance_replies_do_not_refresh_idle_timer() {
+        assert!(!guest_message_refreshes_idle_timer(&MessageType::Pong));
+        assert!(!guest_message_refreshes_idle_timer(&MessageType::Touched));
+        assert!(!guest_message_refreshes_idle_timer(&MessageType::CoreError));
+        assert!(guest_message_refreshes_idle_timer(&MessageType::ExecStdout));
+    }
+
+    #[test]
+    fn record_encoded_guest_messages_ignores_pong_and_touched() {
+        let mut out_buf = Vec::new();
+        let pong = Message::with_payload(MessageType::Pong, 1, &Pong {}).unwrap();
+        codec::encode_to_buf(&pong, &mut out_buf).unwrap();
+
+        let touched =
+            Message::with_payload(MessageType::Touched, 2, &Touched { activity_seq: 42 }).unwrap();
+        codec::encode_to_buf(&touched, &mut out_buf).unwrap();
+
+        let mut activity = ActivityTracker::new();
+        record_encoded_guest_messages(&out_buf, 0, &mut activity);
+
+        assert_eq!(activity.activity_seq, 0);
+        assert_eq!(activity.counters.guest_messages, 0);
     }
 }

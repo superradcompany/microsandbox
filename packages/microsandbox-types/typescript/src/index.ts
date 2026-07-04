@@ -469,13 +469,21 @@ lifecycle: SandboxPolicy, };
 
 export type SandboxResources = {
 /**
- * Number of virtual CPUs.
+ * Number of virtual CPUs currently presented to the guest at boot.
  */
 cpus: number,
 /**
- * Guest memory in MiB.
+ * Guest memory currently presented to the guest at boot, in MiB.
  */
-memory_mib: number, };
+memory_mib: number,
+/**
+ * Maximum virtual CPUs the sandbox may expose after boot-time hotplug support lands.
+ */
+max_cpus: number,
+/**
+ * Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
+ */
+max_memory_mib: number, };
 
 export type SandboxRuntimeOptions = {
 /**

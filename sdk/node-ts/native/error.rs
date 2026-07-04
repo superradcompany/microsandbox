@@ -55,6 +55,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::MetricsUnavailable(_) => "MetricsUnavailable",
         MicrosandboxError::MissedRotation { .. } => "MissedRotation",
         MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
+        MicrosandboxError::Experimental { .. } => "Experimental",
         MicrosandboxError::Unsupported { .. } => "Unsupported",
         MicrosandboxError::Custom(_) => "Custom",
     }

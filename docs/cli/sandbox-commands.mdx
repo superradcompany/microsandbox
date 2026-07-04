@@ -40,7 +40,9 @@ Common flags:
 |------|-------------|
 | `-n`, `--name` | Sandbox name. If omitted, the sandbox is ephemeral |
 | `-c`, `--cpus` | Virtual CPU limit |
+| `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
+| `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` (experimental, requires `MSB_EXPERIMENTAL_MODIFY=1`) |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
@@ -153,6 +155,73 @@ themselves.
 | `--label` | Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
 | `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-q`, `--quiet` | Suppress progress output |
+
+## msb restart
+
+<Note>
+Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment. The command is hidden from `msb --help` otherwise.
+</Note>
+
+Stop and start one or more sandboxes. Running, draining, and paused sandboxes are stopped first, then started from their persisted configuration. Stopped, crashed, and created sandboxes skip the stop phase and are started directly.
+
+```bash
+msb restart devbox
+msb restart api worker
+msb restart --label app=engine
+msb restart --force devbox
+msb restart -t 30 devbox
+```
+
+`msb restart` uses the same stop controls as `msb stop`: `--force` kills immediately, and `--timeout` controls how long graceful shutdown gets before force-kill escalation.
+
+| Flag | Description |
+|------|-------------|
+| `--label` | Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
+| `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
+| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-q`, `--quiet` | Suppress progress output |
+
+## msb ping
+
+<Note>
+Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment. The command is hidden from `msb --help` otherwise.
+</Note>
+
+Check whether one or more running sandbox agents are reachable. `msb ping` talks to `agentd` with `core.ping` and does not refresh the sandbox idle timer.
+
+```bash
+msb ping devbox
+msb ping api worker
+msb ping --label app=engine
+msb ping api --touch
+```
+
+Use `--touch` when a successful health check should also refresh the idle timer. Without `--touch`, ping is a pure reachability check.
+
+| Flag | Description |
+|------|-------------|
+| `--label` | Ping every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
+| `--touch` | Refresh the sandbox idle timer after a successful ping |
+| `-q`, `--quiet` | Suppress progress output |
+
+## msb touch
+
+<Note>
+Experimental: requires `MSB_EXPERIMENTAL_MODIFY=1` in the environment. The command is hidden from `msb --help` otherwise.
+</Note>
+
+Explicitly refresh the idle timer for one or more running sandboxes. `msb touch` sends `core.touch`; it is the intentional keepalive command for long-lived idle sandboxes.
+
+```bash
+msb touch devbox
+msb touch api worker
+msb touch --label app=engine
+```
+
+| Flag | Description |
+|------|-------------|
+| `--label` | Touch every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb exec

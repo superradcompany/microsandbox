@@ -400,6 +400,17 @@ pub fn format_status(status: &str) -> String {
     }
 }
 
+/// Format a modification disposition with status-badge colors.
+pub fn format_disposition(disposition: &str) -> String {
+    match disposition {
+        "live" => format!("{}", style("live").green().bold()),
+        "requires restart" => format!("{}", style("requires restart").yellow().bold()),
+        "next start" => format!("{}", style("next start").dim()),
+        "unsupported" => format!("{}", style("unsupported").red().bold()),
+        other => other.to_lowercase(),
+    }
+}
+
 /// Print a section header in detail views.
 pub fn detail_header(title: &str) {
     println!();

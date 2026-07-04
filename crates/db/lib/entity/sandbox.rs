@@ -53,7 +53,10 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(unique)]
     pub name: String,
+    /// Desired sandbox configuration used for the next start.
     pub config: String,
+    /// Configuration actually used by the currently running VM, when active.
+    pub active_config: Option<String>,
     pub status: SandboxStatus,
     /// Denormalized copy of `config.policy.ephemeral`.
     ///
