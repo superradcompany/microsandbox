@@ -1,4 +1,10 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
+import {
+  modificationPlanFromJson,
+  modifyOptionsToNapi,
+  type ModifyOptions,
+  type SandboxModificationPlan,
+} from "./modify.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import type { NapiSandboxConfig, NapiSandboxHandle } from "./internal/napi.js";
 import {
@@ -82,6 +88,18 @@ export class SandboxHandle {
    */
   async touch(): Promise<SandboxTouchResult> {
     return await withMappedErrors(() => this.inner.touch());
+  }
+
+  /**
+   * Plan or apply a sandbox modification (experimental; requires
+   * `MSB_EXPERIMENTAL_MODIFY`). With `dryRun: true` the plan is computed
+   * without applying anything.
+   */
+  async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    const raw = await withMappedErrors(() =>
+      this.inner.modify(modifyOptionsToNapi(opts)),
+    );
+    return modificationPlanFromJson(raw);
   }
 
   /** Resume in attached mode. */

@@ -632,6 +632,53 @@ impl PySandbox {
         })
     }
 
+    /// Plan or apply a sandbox modification. Returns the plan as a dict.
+    ///
+    /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
+    /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
+    /// plan is computed without applying anything.
+    #[pyo3(signature = (
+        *,
+        cpus = None,
+        max_cpus = None,
+        memory = None,
+        max_memory = None,
+        env = None,
+        env_rm = None,
+        labels = None,
+        labels_rm = None,
+        workdir = None,
+        policy = None,
+        dry_run = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn modify<'py>(
+        &self,
+        py: Python<'py>,
+        cpus: Option<u8>,
+        max_cpus: Option<u8>,
+        memory: Option<u32>,
+        max_memory: Option<u32>,
+        env: Option<HashMap<String, String>>,
+        env_rm: Option<Vec<String>>,
+        labels: Option<HashMap<String, String>>,
+        labels_rm: Option<Vec<String>>,
+        workdir: Option<String>,
+        policy: Option<String>,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let patch = build_modify_patch(
+            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir,
+        );
+        let policy = parse_modify_policy(policy.as_deref())?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let builder = apply_modify_policy(sandbox.modify().with_patch(patch), policy);
+            run_modify(builder, dry_run).await
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Logs
     //----------------------------------------------------------------------------------------------
@@ -876,6 +923,91 @@ impl PySandbox {
             Ok(false) // don't suppress exceptions
         })
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Modification
+//--------------------------------------------------------------------------------------------------
+
+/// Build the canonical modification patch from `modify(...)` kwargs.
+///
+/// Mapping keys are sorted so repeated calls with the same arguments produce
+/// the same patch (and therefore the same plan ordering).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_modify_patch(
+    cpus: Option<u8>,
+    max_cpus: Option<u8>,
+    memory: Option<u32>,
+    max_memory: Option<u32>,
+    env: Option<HashMap<String, String>>,
+    env_rm: Option<Vec<String>>,
+    labels: Option<HashMap<String, String>>,
+    labels_rm: Option<Vec<String>>,
+    workdir: Option<String>,
+) -> microsandbox::sandbox::SandboxModificationPatch {
+    let mut env_pairs: Vec<_> = env.unwrap_or_default().into_iter().collect();
+    env_pairs.sort();
+    let mut label_pairs: Vec<_> = labels.unwrap_or_default().into_iter().collect();
+    label_pairs.sort();
+
+    microsandbox::sandbox::SandboxModificationPatch {
+        cpus,
+        max_cpus,
+        memory_mib: memory,
+        max_memory_mib: max_memory,
+        env: env_pairs
+            .into_iter()
+            .map(|(key, value)| microsandbox::sandbox::EnvVar::new(key, value))
+            .collect(),
+        env_remove: env_rm.unwrap_or_default(),
+        labels: label_pairs,
+        labels_remove: labels_rm.unwrap_or_default(),
+        workdir,
+        secrets: Vec::new(),
+    }
+}
+
+/// Parse the `policy=` kwarg into the core modification policy.
+pub(crate) fn parse_modify_policy(
+    policy: Option<&str>,
+) -> PyResult<microsandbox::sandbox::ModificationPolicy> {
+    use microsandbox::sandbox::ModificationPolicy;
+    match policy.unwrap_or("no_restart") {
+        "no_restart" => Ok(ModificationPolicy::NoRestart),
+        "next_start" => Ok(ModificationPolicy::NextStart),
+        "restart" => Ok(ModificationPolicy::Restart),
+        other => Err(PyValueError::new_err(format!(
+            "unknown policy {other:?}; expected \"no_restart\", \"next_start\", or \"restart\""
+        ))),
+    }
+}
+
+pub(crate) fn apply_modify_policy(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    policy: microsandbox::sandbox::ModificationPolicy,
+) -> microsandbox::sandbox::SandboxModificationBuilder {
+    use microsandbox::sandbox::ModificationPolicy;
+    match policy {
+        ModificationPolicy::NoRestart => builder,
+        ModificationPolicy::NextStart => builder.next_start(),
+        ModificationPolicy::Restart => builder.restart(),
+    }
+}
+
+/// Drive dry-run or apply and convert the resulting plan into a Python dict.
+pub(crate) async fn run_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    dry_run: bool,
+) -> PyResult<PyObject> {
+    let plan = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(to_py_err)?;
+    let value = serde_json::to_value(&plan)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Python::with_gil(|py| crate::sandbox_handle::json_value_to_py(py, value))
 }
 
 //--------------------------------------------------------------------------------------------------

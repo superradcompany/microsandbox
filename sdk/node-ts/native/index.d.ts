@@ -830,6 +830,11 @@ export declare class Sandbox {
   ping(): Promise<SandboxPingResult>
   /** Explicitly refresh this sandbox's idle activity timer. */
   touch(): Promise<SandboxTouchResult>
+  /**
+   * Plan or apply a sandbox modification. Returns the plan as a JSON
+   * string; the TS wrapper parses it into a `SandboxModificationPlan`.
+   */
+  modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /**
@@ -1150,6 +1155,11 @@ export declare class SandboxHandle {
    * started implicitly.
    */
   touch(): Promise<SandboxTouchResult>
+  /**
+   * Plan or apply a sandbox modification. Returns the plan as a JSON
+   * string; the TS wrapper parses it into a `SandboxModificationPlan`.
+   */
+  modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1960,6 +1970,27 @@ export interface SandboxMetrics {
   uptimeMs: number
   /** Timestamp as milliseconds since Unix epoch. */
   timestampMs: number
+}
+
+/**
+ * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
+ *
+ * `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+ * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
+ * is computed without applying anything.
+ */
+export interface SandboxModifyOptions {
+  cpus?: number
+  maxCpus?: number
+  memoryMib?: number
+  maxMemoryMib?: number
+  env?: Record<string, string>
+  envRemove?: Array<string>
+  labels?: Record<string, string>
+  labelsRemove?: Array<string>
+  workdir?: string
+  policy?: string
+  dryRun?: boolean
 }
 
 /** Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`. */

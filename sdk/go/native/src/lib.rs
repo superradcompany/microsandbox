@@ -2079,6 +2079,65 @@ fn sandbox_touch_result_json(result: microsandbox::sandbox::SandboxTouchResult) 
     .to_string()
 }
 
+/// Wire shape for `msb_sandbox_modify` / `msb_sandbox_handle_modify`. The
+/// patch is the canonical serde shape of `SandboxModificationPatch`.
+#[derive(serde::Deserialize)]
+struct SandboxModifyOpts {
+    #[serde(default)]
+    patch: microsandbox::sandbox::SandboxModificationPatch,
+    #[serde(default)]
+    policy: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+fn parse_sandbox_modify_opts(raw: &str) -> Result<SandboxModifyOpts, FfiError> {
+    serde_json::from_str(raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid modify opts JSON: {e}")))
+}
+
+fn parse_modify_policy(
+    policy: Option<&str>,
+) -> Result<microsandbox::sandbox::ModificationPolicy, FfiError> {
+    use microsandbox::sandbox::ModificationPolicy;
+    match policy.unwrap_or("no_restart") {
+        "no_restart" => Ok(ModificationPolicy::NoRestart),
+        "next_start" => Ok(ModificationPolicy::NextStart),
+        "restart" => Ok(ModificationPolicy::Restart),
+        other => Err(FfiError::invalid_argument(format!(
+            "unknown modify policy {other:?}; expected \"no_restart\", \"next_start\", or \"restart\""
+        ))),
+    }
+}
+
+fn configure_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    patch: microsandbox::sandbox::SandboxModificationPatch,
+    policy: microsandbox::sandbox::ModificationPolicy,
+) -> microsandbox::sandbox::SandboxModificationBuilder {
+    use microsandbox::sandbox::ModificationPolicy;
+    let builder = builder.with_patch(patch);
+    match policy {
+        ModificationPolicy::NoRestart => builder,
+        ModificationPolicy::NextStart => builder.next_start(),
+        ModificationPolicy::Restart => builder.restart(),
+    }
+}
+
+async fn run_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    dry_run: bool,
+) -> Result<String, FfiError> {
+    let plan = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(FfiError::from)?;
+    serde_json::to_string(&plan)
+        .map_err(|e| FfiError::internal(format!("serialize modification plan: {e}")))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_lookup(
     cancel_id: u64,
@@ -2305,6 +2364,29 @@ pub unsafe extern "C" fn msb_sandbox_handle_touch(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let result = h.touch().await.map_err(FfiError::from)?;
             Ok(sandbox_touch_result_json(result))
+        }))
+    })
+}
+
+/// Plan or apply a sandbox modification by name.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_modify(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let builder = configure_modify(h.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
         }))
     })
 }
@@ -2567,6 +2649,28 @@ pub unsafe extern "C" fn msb_sandbox_touch(
         Ok(Box::pin(async move {
             let result = sb.touch().await.map_err(FfiError::from)?;
             Ok(sandbox_touch_result_json(result))
+        }))
+    })
+}
+
+/// Plan or apply a modification on a live sandbox handle.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_modify(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let builder = configure_modify(sb.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
         }))
     })
 }

@@ -103,6 +103,28 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     await expect(handle.ping()).resolves.toMatchObject({ name: SANDBOX_NAME });
     await expect(handle.touch()).resolves.toMatchObject({ name: SANDBOX_NAME });
   });
+
+  it("plans a dry-run modification without applying it", async () => {
+    const plan = await sb.modify({
+      cpus: 2,
+      labels: { tier: "gold" },
+      dryRun: true,
+    });
+    expect(plan.sandbox).toBe(SANDBOX_NAME);
+    expect(plan.applied).toBe(false);
+    expect(plan.policy).toBe("no_restart");
+    const fields = plan.changes.map((change) => change.field);
+    expect(fields).toContain("cpus");
+    expect(fields).toContain("label");
+
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    const handlePlan = await handle.modify({
+      env: { MODIFIED: "1" },
+      dryRun: true,
+    });
+    expect(handlePlan.sandbox).toBe(SANDBOX_NAME);
+    expect(handlePlan.applied).toBe(false);
+  });
 });
 
 describe("Node.js SDK Pull Progress", () => {

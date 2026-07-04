@@ -16,6 +16,7 @@ describe("native Sandbox lifecycle contract", () => {
       "waitUntilStopped",
       "ping",
       "touch",
+      "modify",
     ]) {
       expect(typeof proto[method], method).toBe("function");
     }
@@ -24,7 +25,7 @@ describe("native Sandbox lifecycle contract", () => {
   it("exports the handle health methods used by the TS wrapper", () => {
     const proto = napi.SandboxHandle.prototype as Record<string, unknown>;
 
-    for (const method of ["ping", "touch"]) {
+    for (const method of ["ping", "touch", "modify"]) {
       expect(typeof proto[method], method).toBe("function");
     }
   });

@@ -1,5 +1,11 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
+  modificationPlanFromJson,
+  modifyOptionsToNapi,
+  type ModifyOptions,
+  type SandboxModificationPlan,
+} from "./modify.js";
+import {
   napi,
   type NapiAttachOptionsBuilder,
   type NapiExecOptionsBuilder,
@@ -351,6 +357,18 @@ export class Sandbox implements AsyncDisposable {
    */
   async touch(): Promise<SandboxTouchResult> {
     return await withMappedErrors(() => this.inner.touch());
+  }
+
+  /**
+   * Plan or apply a sandbox modification (experimental; requires
+   * `MSB_EXPERIMENTAL_MODIFY`). With `dryRun: true` the plan is computed
+   * without applying anything.
+   */
+  async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    const raw = await withMappedErrors(() =>
+      this.inner.modify(modifyOptionsToNapi(opts)),
+    );
+    return modificationPlanFromJson(raw);
   }
 
   /** Stream metrics snapshots at the given interval (in milliseconds). */

@@ -130,6 +130,21 @@ class Sandbox:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def modify(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        policy: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -203,6 +218,21 @@ class SandboxHandle:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def modify(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        policy: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]: ...
     async def logs(
         self,
         tail: int | None = None,

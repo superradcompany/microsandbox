@@ -94,6 +94,14 @@ impl JsSandboxHandle {
         Ok(crate::sandbox::sandbox_touch_result_to_js(result))
     }
 
+    /// Plan or apply a sandbox modification. Returns the plan as a JSON
+    /// string; the TS wrapper parses it into a `SandboxModificationPlan`.
+    #[napi]
+    pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
+        let builder = crate::sandbox::configure_modify(self.inner.modify(), options.as_ref())?;
+        crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
+    }
+
     /// Start the sandbox (attached mode) — returns a live Sandbox handle.
     #[napi]
     pub async fn start(&self) -> Result<Sandbox> {

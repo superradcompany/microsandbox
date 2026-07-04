@@ -39,6 +39,18 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
 } from "./sandbox.js";
+export type {
+  ConfigPlannedChange,
+  ModificationConflict,
+  ModificationDisposition,
+  ModificationPolicy,
+  ModificationWarning,
+  ModifyOptions,
+  PlannedChange,
+  ResourceResizeStatus,
+  SandboxModificationPlan,
+  SecretPlannedChange,
+} from "./modify.js";
 export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 

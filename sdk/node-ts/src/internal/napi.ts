@@ -213,6 +213,7 @@ export interface NapiSandbox {
   metricsStream(intervalMs: number): Promise<NapiMetricsStream>;
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
+  modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
@@ -239,6 +240,7 @@ export interface NapiSandboxHandle {
   metrics(): Promise<NapiSandboxMetrics>;
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
+  modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
@@ -275,6 +277,21 @@ export interface NapiSandboxPingResult {
 export interface NapiSandboxTouchResult {
   readonly name: string;
   readonly activitySeq: number;
+}
+
+/** Native option object accepted by `modify()`. */
+export interface NapiSandboxModifyOptions {
+  cpus?: number;
+  maxCpus?: number;
+  memoryMib?: number;
+  maxMemoryMib?: number;
+  env?: Record<string, string>;
+  envRemove?: string[];
+  labels?: Record<string, string>;
+  labelsRemove?: string[];
+  workdir?: string;
+  policy?: string;
+  dryRun?: boolean;
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */

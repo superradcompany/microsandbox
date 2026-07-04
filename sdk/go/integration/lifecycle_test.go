@@ -126,6 +126,64 @@ func TestSandboxPingTouch(t *testing.T) {
 	}
 }
 
+// TestSandboxModifyDryRun plans a modification against a live sandbox without
+// applying it, on both the live Sandbox and the name-addressed handle.
+func TestSandboxModifyDryRun(t *testing.T) {
+	// Modify is gated behind the experimental modify surface.
+	t.Setenv("MSB_EXPERIMENTAL_MODIFY", "1")
+	ctx := integrationCtx(t)
+	name := "go-sdk-modify-" + t.Name()
+
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+		_ = microsandbox.RemoveSandbox(context.Background(), name)
+	})
+
+	plan, err := sb.Modify(ctx, microsandbox.ModifyOptions{
+		CPUs:   2,
+		Labels: map[string]string{"tier": "gold"},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("Sandbox.Modify: %v", err)
+	}
+	if plan.Sandbox != name || plan.Applied {
+		t.Fatalf("Sandbox.Modify plan = %+v", plan)
+	}
+	if plan.Policy != microsandbox.ModificationPolicyNoRestart {
+		t.Fatalf("Sandbox.Modify policy = %q", plan.Policy)
+	}
+	fields := map[string]bool{}
+	for _, change := range plan.Changes {
+		fields[change.Field] = true
+	}
+	if !fields["cpus"] || !fields["label"] {
+		t.Fatalf("Sandbox.Modify changes = %+v", plan.Changes)
+	}
+
+	handle, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	handlePlan, err := handle.Modify(ctx, microsandbox.ModifyOptions{
+		Env:    map[string]string{"MODIFIED": "1"},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("SandboxHandle.Modify: %v", err)
+	}
+	if handlePlan.Sandbox != name || handlePlan.Applied {
+		t.Fatalf("SandboxHandle.Modify plan = %+v", handlePlan)
+	}
+}
+
 // TestSandboxRemove removes the persisted state of a stopped sandbox.
 func TestSandboxRemove(t *testing.T) {
 	ctx := integrationCtx(t)
