@@ -16,7 +16,7 @@ Install microsandbox with:
 irm https://github.com/superradcompany/microsandbox/releases/latest/download/install.ps1 | iex
 ```
 
-The installer downloads the matching `microsandbox-windows-aarch64.zip` or `microsandbox-windows-x86_64.zip` release bundle, verifies it against `checksums.sha256`, installs into `%USERPROFILE%\.microsandbox` unless `MSB_HOME` is set, adds the install `bin` directory to the current user's PATH when needed, and runs `msb doctor`. If the doctor check reports that Windows Hypervisor Platform is missing, the installer offers to run `msb doctor --fix`, which opens an elevated PowerShell prompt.
+The installer downloads the matching `microsandbox-windows-aarch64.zip` or `microsandbox-windows-x86_64.zip` release bundle and verifies it against `checksums.sha256`. It then installs into `%USERPROFILE%\.microsandbox` unless `MSB_HOME` is set, adds the install `bin` directory to the current user's PATH when needed, and runs `msb doctor`. If the doctor check reports that Windows Hypervisor Platform is missing, the installer offers to run `msb doctor --fix`, which opens an elevated PowerShell prompt.
 
 Start with the doctor command:
 
@@ -119,7 +119,7 @@ For local development, keep published ports bound to `127.0.0.1`. Only allow pri
 
 ## Interactive terminals
 
-Windows Terminal, PowerShell, and cmd are supported for normal interactive attach flows. Run interactive commands from a real console, not from a redirected CI shell or background task, so `msb` can read console input, enter terminal mode, forward resize events, and restore the console when the session exits.
+Windows Terminal, PowerShell, and cmd are supported for normal interactive attach flows. Run interactive commands from a real console, not from a redirected CI shell or background task. This lets `msb` read console input, enter terminal mode, forward resize events, and restore the console when the session exits.
 
 For a quick smoke test:
 

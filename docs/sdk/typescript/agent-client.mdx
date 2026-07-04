@@ -3,7 +3,7 @@ title: Agent client
 description: TypeScript SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/typescript/sandbox), [`exec`](/sdk/typescript/execution), and [`fs`](/sdk/typescript/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
+`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/typescript/sandbox), [`exec`](/sdk/typescript/execution), and [`fs`](/sdk/typescript/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `cbor-x`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 

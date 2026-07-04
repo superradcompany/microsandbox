@@ -139,7 +139,7 @@ For registries using self-signed or internal CA certificates, point `ca_certs` t
 }
 ```
 
-The certificates are added to the default system roots — public registries continue to work normally.
+microsandbox adds these certificates to the default system roots, so public registries continue to work normally.
 
 ### Combined configuration
 
@@ -205,4 +205,4 @@ Layers are content-addressable and deduplicated. If `python:3.12` and `python:3.
 
 Use `msb image prune` to remove cached images that are not used by any sandbox or indexed snapshot and reclaim dangling image artifacts. Prune keeps images referenced by existing sandboxes or snapshots, and cleans up image metadata, unreachable manifests, orphaned layers, layer EROFS artifacts, fsmeta EROFS artifacts, and VMDK descriptor artifacts.
 
-`msb load` accepts Docker image archives and OCI Image Layout archives. `msb save` exports from the materialized EROFS cache as a Docker archive by default, or as an OCI Image Layout archive with `--format oci`. The expanded forms are `msb image load` and `msb image save`. The exported image should run the same way after `msb load`, but it is a regenerated archive: manifest digest and layer digests can differ from the original registry image.
+`msb load` accepts Docker image archives and OCI Image Layout archives. By default, `msb save` exports from the materialized EROFS cache as a Docker archive. Use `--format oci` to export as an OCI Image Layout archive instead. The expanded forms are `msb image load` and `msb image save`. The exported image should run the same way after `msb load`, but it is a regenerated archive: manifest digest and layer digests can differ from the original registry image.

@@ -3,7 +3,7 @@ title: Agent client
 description: Rust SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/rust/sandbox), [`exec`](/sdk/rust/execution), and [`fs`](/sdk/rust/filesystem) instead. Reach for `AgentClient` when you are building a protocol-level integration or an SDK layer. [`AgentBridge`](#agentbridge) wraps the same connection in concrete, FFI-shaped types for the Node, Python, and Go bindings.
+`AgentClient` is the low-level transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/rust/sandbox), [`exec`](/sdk/rust/execution), and [`fs`](/sdk/rust/filesystem) instead. Reach for `AgentClient` when you are building a protocol-level integration or an SDK layer. [`AgentBridge`](#agentbridge) wraps the same connection in concrete, FFI-shaped types for the Node, Python, and Go bindings.
 
 The client has two tiers that share one socket and one background reader task:
 
