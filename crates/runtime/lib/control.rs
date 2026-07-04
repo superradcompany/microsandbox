@@ -187,6 +187,7 @@ pub struct ControlContext {
 //--------------------------------------------------------------------------------------------------
 
 impl ControlContext {
+    #[cfg(unix)]
     fn secrets_update_supported(&self) -> bool {
         #[cfg(feature = "net")]
         {
