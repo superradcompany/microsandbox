@@ -486,6 +486,63 @@ impl SandboxConfig {
     }
 }
 
+/// Resolve reference-model secret entries (host-side `source` references) into
+/// concrete values for this spawn.
+///
+/// The durable sandbox config stores only the source reference; the resolved
+/// value exists in the returned copy, which travels to the sandbox process
+/// over the private launch-config fd and never returns to the database.
+/// Returns `None` when no entry needs resolution so callers can skip the
+/// config clone.
+#[cfg(feature = "net")]
+pub(crate) fn resolve_config_secret_sources(
+    config: &SandboxConfig,
+) -> crate::MicrosandboxResult<Option<SandboxConfig>> {
+    use microsandbox_network::secrets::config::SecretSourceRef;
+
+    if !config.spec.network.enabled {
+        return Ok(None);
+    }
+    let mut network = config.local_network_config()?;
+    let mut resolved_any = false;
+    for secret in &mut network.secrets.secrets {
+        let Some(source) = &secret.source else {
+            continue;
+        };
+        match source {
+            SecretSourceRef::Env { var } => {
+                let value = std::env::var(var).map_err(|_| {
+                    crate::MicrosandboxError::InvalidConfig(format!(
+                        "secret {}: host environment variable {var} is not set",
+                        secret.env_var
+                    ))
+                })?;
+                if value.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "secret {}: host environment variable {var} is empty",
+                        secret.env_var
+                    )));
+                }
+                secret.value = value;
+                resolved_any = true;
+            }
+            SecretSourceRef::Store { .. } => {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "secret {}: store-backed secret sources are not supported yet",
+                    secret.env_var
+                )));
+            }
+        }
+    }
+    if !resolved_any {
+        return Ok(None);
+    }
+
+    let mut resolved = config.clone();
+    resolved.set_local_network_config(network)?;
+    Ok(Some(resolved))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------

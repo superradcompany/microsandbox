@@ -306,10 +306,12 @@ fn unsupported_apply_lines(plan: &SandboxModificationPlan) -> Vec<String> {
                 }
             }
             PlannedChange::Secret(change) => {
-                lines.push(format!(
-                    "secret {} waits on the secret store and runtime contract",
-                    change.name
-                ));
+                if matches!(change.disposition, ModificationDisposition::Unsupported) {
+                    lines.push(match change.reason.as_deref() {
+                        Some(reason) => format!("secret {}: {reason}", change.name),
+                        None => format!("secret {} is unsupported", change.name),
+                    });
+                }
             }
         }
     }

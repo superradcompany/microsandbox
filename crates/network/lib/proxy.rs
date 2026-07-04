@@ -468,7 +468,7 @@ async fn handle_connect_tunnel(
 
     let connect_headers = match sanitize_connect_headers(
         connect_req.header_bytes(),
-        &tls_state.secrets,
+        &tls_state.secrets.load(),
     ) {
         Ok(headers) => headers,
         Err(action) => {
@@ -1511,6 +1511,7 @@ mod tests {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: value.into(),
+                source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Any],
                 injection: SecretInjection {
@@ -1531,6 +1532,7 @@ mod tests {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: value.into(),
+                source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Exact(host.into())],
                 injection: SecretInjection::default(),
@@ -1714,6 +1716,7 @@ mod tests {
             secrets: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: "real-secret-value".into(),
+                source: None,
                 placeholder: "$MSB_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("example.com".into())],
                 injection: SecretInjection {

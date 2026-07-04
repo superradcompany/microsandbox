@@ -261,6 +261,15 @@ pub async fn spawn_sandbox(
     sandbox_id: i32,
     mode: SpawnMode,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+    // Reference-model secrets store only a host-side source reference in the
+    // durable config; resolve the actual values now so they travel to the
+    // sandbox process on the private launch-config fd without ever being
+    // persisted.
+    #[cfg(feature = "net")]
+    let resolved_config = crate::sandbox::config::resolve_config_secret_sources(config)?;
+    #[cfg(feature = "net")]
+    let config = resolved_config.as_ref().unwrap_or(config);
+
     // libkrunfw is process-level (one dylib per process address space). The
     // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
     // then config.paths.libkrunfw, then filesystem fallbacks.

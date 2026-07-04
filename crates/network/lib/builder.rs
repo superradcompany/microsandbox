@@ -185,6 +185,7 @@ impl NetworkBuilder {
         self.config.secrets.secrets.push(SecretEntry {
             env_var: env_var.into(),
             value: value.into(),
+            source: None,
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
             injection: SecretInjection::default(),
@@ -534,6 +535,7 @@ impl SecretBuilder {
         SecretEntry {
             env_var,
             value,
+            source: None,
             placeholder,
             allowed_hosts: self.allowed_hosts,
             injection: self.injection,
@@ -743,6 +745,7 @@ mod tests {
             .secret_entry(SecretEntry {
                 env_var: "API=KEY".into(),
                 value: "secret-value".into(),
+                source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
                 injection: SecretInjection::default(),

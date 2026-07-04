@@ -1,10 +1,15 @@
 //! Host-side runtime control socket.
 //!
-//! Live VM mutations that are host/VMM-owned (currently memory resize through
-//! virtio-mem) cannot go through agentd: the guest is untrusted and the knob
-//! lives in the VMM. The sandbox process serves them instead on a unix socket
-//! next to the agent socket. The protocol is deliberately tiny: one JSON
-//! request line in, one JSON response line out, per connection.
+//! Live VM mutations that are host/VMM-owned (memory resize through
+//! virtio-mem, CPU online targets, and secret reconfiguration in the host
+//! network layer) cannot go through agentd: the guest is untrusted and the
+//! knobs live host-side. The sandbox process serves them instead on a unix
+//! socket next to the agent socket. The protocol is deliberately tiny: one
+//! JSON request line in, one JSON response line out, per connection.
+//!
+//! Secret requests may carry raw secret values (rotation needs the new
+//! material), so request lines are never logged and [`SecretValue`] redacts
+//! itself in `Debug` output; errors carry secret names only.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -24,9 +29,12 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 //--------------------------------------------------------------------------------------------------
 
 /// A control request from the SDK.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Report which live-control operations this sandbox process supports.
+    Capabilities,
+
     /// Ask the guest to converge on this much total usable memory.
     MemoryTarget {
         /// Desired total memory in MiB.
@@ -45,7 +53,49 @@ pub enum ControlRequest {
 
     /// Report the current CPU sizing without changing anything.
     CpuState,
+
+    /// Apply live secret changes to the host network/secrets layer.
+    /// Values never reach agentd or the guest; the placeholders the guest
+    /// already holds keep working against the updated host-side state.
+    SecretsUpdate {
+        /// Ordered changes to apply. The first failure aborts the batch.
+        changes: Vec<SecretLiveChange>,
+    },
 }
+
+/// One live secret change carried by [`ControlRequest::SecretsUpdate`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum SecretLiveChange {
+    /// Replace the host-side value of an existing secret.
+    Rotate {
+        /// Secret identity (the guest environment variable name).
+        name: String,
+        /// New secret material. Redacted in `Debug`; never logged.
+        value: SecretValue,
+    },
+
+    /// Stop resolving and injecting a secret for future connections.
+    Remove {
+        /// Secret identity (the guest environment variable name).
+        name: String,
+    },
+
+    /// Replace the allowed-host patterns of an existing secret.
+    SetAllowedHosts {
+        /// Secret identity (the guest environment variable name).
+        name: String,
+        /// Host patterns (`host`, `*.host`, or `*`).
+        hosts: Vec<String>,
+    },
+}
+
+/// Raw secret material in transit over the control socket. Wrapped so any
+/// `Debug`-formatted request or error path shows `[redacted]` instead of the
+/// value.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretValue(pub String);
 
 /// The reply to any control request.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -64,6 +114,26 @@ pub struct ControlResponse {
     /// CPU sizing, present for CPU requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuControlState>,
+
+    /// Supported operations, present for capability requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ControlCapabilities>,
+}
+
+/// Live-control operations supported by this sandbox process, carried in
+/// [`ControlResponse`]. Runtimes that predate this op only served the socket
+/// when they could resize, so the SDK treats a missing reply as
+/// resize-capable and secrets-incapable.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct ControlCapabilities {
+    /// Live CPU online/offline targets are available.
+    pub cpu_resize: bool,
+
+    /// Live memory targets through virtio-mem are available.
+    pub memory_resize: bool,
+
+    /// Live secret rotation, removal, and allowed-host updates are available.
+    pub secrets_update: bool,
 }
 
 /// Memory sizing carried in [`ControlResponse`], all in MiB.
@@ -98,6 +168,45 @@ pub struct CpuControlState {
     pub enforced: u32,
 }
 
+/// Everything the control listener can reach: the VMM control handle plus the
+/// host network secrets layer when this build carries one.
+pub struct ControlContext {
+    /// Live VM resource control handle.
+    pub vm: msb_krun::VmControl,
+
+    /// Live secrets view of the sandbox's network stack, when networking is
+    /// enabled and the sandbox booted with secrets.
+    #[cfg(feature = "net")]
+    pub secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ControlContext {
+    fn secrets_update_supported(&self) -> bool {
+        #[cfg(feature = "net")]
+        {
+            self.secrets.is_some()
+        }
+        #[cfg(not(feature = "net"))]
+        {
+            false
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -109,11 +218,11 @@ pub fn control_socket_path_for(agent_sock: &std::path::Path) -> PathBuf {
 
 /// Spawn the control listener thread. Non-fatal on failure by design: the
 /// caller logs and continues, and the SDK treats a missing socket as "no live
-/// memory resize capability".
+/// control capability".
 #[cfg(unix)]
 pub fn spawn_control_listener(
     socket_path: PathBuf,
-    control: msb_krun::VmControl,
+    context: ControlContext,
 ) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&socket_path);
     let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
@@ -124,7 +233,7 @@ pub fn spawn_control_listener(
             for stream in listener.incoming() {
                 match stream {
                     Ok(mut stream) => {
-                        if let Err(e) = serve_connection(&mut stream, &control) {
+                        if let Err(e) = serve_connection(&mut stream, &context) {
                             tracing::debug!("control: connection error: {e}");
                         }
                     }
@@ -142,13 +251,13 @@ pub fn spawn_control_listener(
 #[cfg(unix)]
 fn serve_connection(
     stream: &mut std::os::unix::net::UnixStream,
-    control: &msb_krun::VmControl,
+    context: &ControlContext,
 ) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(&mut *stream).read_line(&mut line)?;
 
     let response = match serde_json::from_str::<ControlRequest>(line.trim()) {
-        Ok(request) => handle_request(request, control),
+        Ok(request) => handle_request(request, context),
         Err(e) => ControlResponse {
             ok: false,
             error: Some(format!("invalid control request: {e}")),
@@ -162,7 +271,8 @@ fn serve_connection(
 }
 
 #[cfg(unix)]
-fn handle_request(request: ControlRequest, control: &msb_krun::VmControl) -> ControlResponse {
+fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlResponse {
+    let control = &context.vm;
     let memory = |state: Option<msb_krun::VmMemoryState>| match state {
         Some(state) => ControlResponse {
             ok: true,
@@ -199,6 +309,15 @@ fn handle_request(request: ControlRequest, control: &msb_krun::VmControl) -> Con
     };
 
     match request {
+        ControlRequest::Capabilities => ControlResponse {
+            ok: true,
+            capabilities: Some(ControlCapabilities {
+                cpu_resize: control.cpu_resize_supported(),
+                memory_resize: control.memory_resize_supported(),
+                secrets_update: context.secrets_update_supported(),
+            }),
+            ..Default::default()
+        },
         ControlRequest::MemoryTarget { total_mib } => {
             if control.set_memory_target_mib(total_mib).is_none() {
                 return memory(None);
@@ -213,5 +332,142 @@ fn handle_request(request: ControlRequest, control: &msb_krun::VmControl) -> Con
             cpu(control.cpu_state())
         }
         ControlRequest::CpuState => cpu(control.cpu_state()),
+        ControlRequest::SecretsUpdate { changes } => handle_secrets_update(context, changes),
+    }
+}
+
+#[cfg(all(unix, feature = "net"))]
+fn handle_secrets_update(
+    context: &ControlContext,
+    changes: Vec<SecretLiveChange>,
+) -> ControlResponse {
+    let Some(secrets) = &context.secrets else {
+        return ControlResponse {
+            ok: false,
+            error: Some(
+                "live secret reconfiguration is not available for this sandbox".to_string(),
+            ),
+            ..Default::default()
+        };
+    };
+
+    for change in changes {
+        let result = match change {
+            SecretLiveChange::Rotate { name, value } => secrets.rotate_value(&name, value.0),
+            SecretLiveChange::Remove { name } => {
+                secrets.remove(&name);
+                Ok(())
+            }
+            SecretLiveChange::SetAllowedHosts { name, hosts } => {
+                secrets.set_allowed_hosts(&name, &hosts)
+            }
+        };
+        if let Err(e) = result {
+            // SecretsUpdateError carries secret names only, never values.
+            return ControlResponse {
+                ok: false,
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+    }
+
+    ControlResponse {
+        ok: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(all(unix, not(feature = "net")))]
+fn handle_secrets_update(
+    _context: &ControlContext,
+    _changes: Vec<SecretLiveChange>,
+) -> ControlResponse {
+    ControlResponse {
+        ok: false,
+        error: Some("this runtime was built without network support".to_string()),
+        ..Default::default()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_value_debug_is_redacted() {
+        let request = ControlRequest::SecretsUpdate {
+            changes: vec![SecretLiveChange::Rotate {
+                name: "API_KEY".into(),
+                value: SecretValue("sentinel-secret-value".into()),
+            }],
+        };
+
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("sentinel-secret-value"));
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("API_KEY"));
+    }
+
+    #[test]
+    fn secrets_update_round_trips_through_json() {
+        let request = ControlRequest::SecretsUpdate {
+            changes: vec![
+                SecretLiveChange::Rotate {
+                    name: "API_KEY".into(),
+                    value: SecretValue("new-material".into()),
+                },
+                SecretLiveChange::Remove {
+                    name: "OLD_KEY".into(),
+                },
+                SecretLiveChange::SetAllowedHosts {
+                    name: "API_KEY".into(),
+                    hosts: vec!["api.example.com".into(), "*".into()],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+        let ControlRequest::SecretsUpdate { changes } = parsed else {
+            panic!("expected secrets_update");
+        };
+        assert_eq!(changes.len(), 3);
+        let SecretLiveChange::Rotate { name, value } = &changes[0] else {
+            panic!("expected rotate");
+        };
+        assert_eq!(name, "API_KEY");
+        assert_eq!(value.0, "new-material");
+    }
+
+    #[test]
+    fn capabilities_response_serializes_flags() {
+        let response = ControlResponse {
+            ok: true,
+            capabilities: Some(ControlCapabilities {
+                cpu_resize: true,
+                memory_resize: false,
+                secrets_update: true,
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"secrets_update\":true"));
+        assert!(json.contains("\"memory_resize\":false"));
+
+        let parsed: ControlResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.capabilities.unwrap().secrets_update);
+    }
+
+    #[test]
+    fn legacy_responses_without_capabilities_still_parse() {
+        let parsed: ControlResponse = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(parsed.ok);
+        assert!(parsed.capabilities.is_none());
     }
 }

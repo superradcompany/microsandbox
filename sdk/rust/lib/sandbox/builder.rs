@@ -1639,6 +1639,7 @@ mod tests {
             .secret_entry(SecretEntry {
                 env_var: "API\0KEY".into(),
                 value: "secret".into(),
+                source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
                 injection: SecretInjection::default(),

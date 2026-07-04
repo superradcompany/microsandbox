@@ -349,10 +349,17 @@ type NetworkMetricsHandle = microsandbox_network::network::MetricsHandle;
 #[cfg(not(feature = "net"))]
 type NetworkMetricsHandle = ();
 
+#[cfg(feature = "net")]
+type NetworkSecretsHandle = microsandbox_network::secrets::handle::SecretsHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkSecretsHandle = ();
+
 type VmBuildOutput = (
     msb_krun::Vm,
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
+    Option<NetworkSecretsHandle>,
     BindIdentityMapRegistration,
 );
 
@@ -648,23 +655,28 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         },
         tokio_rt.handle().clone(),
     );
-    let (vm, _network_termination_handle, network_metrics_handle, bind_identity_map) =
-        match build_result {
-            Ok(vm) => vm,
-            Err(e) => {
-                let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
-                // Free the slot: build_vm never started the sampler, so no live
-                // sample is worth preserving. Prefer the writer (already holds
-                // the registry handle) when activation succeeded; otherwise
-                // open the registry once via the handoff fields.
-                if let Some(writer) = metrics_writer.clone() {
-                    let _ = writer.release(ReleaseMode::Free);
-                } else {
-                    release_reserved_metrics_slot(config.metrics_slot.as_ref());
-                }
-                return Err(e);
+    let (
+        vm,
+        _network_termination_handle,
+        network_metrics_handle,
+        _network_secrets_handle,
+        bind_identity_map,
+    ) = match build_result {
+        Ok(vm) => vm,
+        Err(e) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            // Free the slot: build_vm never started the sampler, so no live
+            // sample is worth preserving. Prefer the writer (already holds
+            // the registry handle) when activation succeeded; otherwise
+            // open the registry once via the handoff fields.
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
-        };
+            return Err(e);
+        }
+    };
     #[cfg(unix)]
     {
         relay =
@@ -678,17 +690,28 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
-    // Serve host-side live control (CPU and memory resize) when this VM booted
-    // with reserved capacity. Failure is non-fatal: the SDK treats a missing socket
-    // as "no live memory resize capability" and classifies restart-required.
+    // Serve host-side live control when this VM booted with reserved resize
+    // capacity or with secrets to live-reconfigure. Failure is non-fatal: the
+    // SDK treats a missing socket as "no live control capability" and
+    // classifies restart-required.
     #[cfg(unix)]
     {
         let control = vm.control_handle();
-        if control.memory_resize_supported() || control.cpu_resize_supported() {
+        #[cfg(feature = "net")]
+        let secrets = _network_secrets_handle.clone();
+        #[cfg(not(feature = "net"))]
+        let secrets: Option<()> = None;
+        if control.memory_resize_supported() || control.cpu_resize_supported() || secrets.is_some()
+        {
             let control_sock_path =
                 crate::control::control_socket_path_for(&config.agent_sock_path);
+            let context = crate::control::ControlContext {
+                vm: control,
+                #[cfg(feature = "net")]
+                secrets,
+            };
             if let Err(e) =
-                crate::control::spawn_control_listener(control_sock_path.clone(), control)
+                crate::control::spawn_control_listener(control_sock_path.clone(), context)
             {
                 tracing::warn!(
                     "failed to start runtime control listener at {}: {e}",
@@ -1256,6 +1279,7 @@ fn build_vm(
 
     let mut network_termination_handle = None;
     let mut network_metrics_handle = None;
+    let mut network_secrets_handle = None;
 
     // Network.
     #[cfg(feature = "net")]
@@ -1270,6 +1294,12 @@ fn build_vm(
             microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);
         network_termination_handle = Some(network.termination_handle());
         network_metrics_handle = Some(network.metrics_handle());
+        // Only sandboxes that booted with secrets can be live-reconfigured:
+        // new placeholders cannot be introduced into a running guest, so a
+        // secret-free boot never needs the secrets side of the control socket.
+        if !vm.network.secrets.secrets.is_empty() {
+            network_secrets_handle = Some(network.secrets_handle());
+        }
 
         network.start(tokio_handle.clone());
 
@@ -1351,6 +1381,7 @@ fn build_vm(
         vm,
         network_termination_handle,
         network_metrics_handle,
+        network_secrets_handle,
         bind_identity_map,
     ))
 }

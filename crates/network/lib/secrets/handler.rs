@@ -2979,6 +2979,7 @@ mod tests {
         SecretEntry {
             env_var: "TEST_KEY".into(),
             value: value.into(),
+            source: None,
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(host.into())],
             injection: SecretInjection::default(),
