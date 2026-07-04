@@ -601,11 +601,6 @@ impl SandboxModificationBuilder {
         self
     }
 
-    /// Return the accumulated patch.
-    pub fn patch(&self) -> &SandboxModificationPatch {
-        &self.patch
-    }
-
     /// Replace the accumulated patch wholesale. Language bindings deserialize the canonical [`SandboxModificationPatch`] and inject it here instead of replaying the fluent setters.
     pub fn with_patch(mut self, patch: SandboxModificationPatch) -> Self {
         self.patch = patch;

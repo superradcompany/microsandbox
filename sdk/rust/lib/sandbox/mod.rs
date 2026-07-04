@@ -240,22 +240,6 @@ pub struct SandboxTouchResult {
     pub activity_seq: u64,
 }
 
-/// Result returned by [`Sandbox::resize_cpus`].
-#[derive(Debug, Clone)]
-pub struct SandboxCpuResizeResult {
-    /// Sandbox whose CPUs were resized.
-    pub name: String,
-
-    /// The online CPU count that was requested.
-    pub requested: u8,
-
-    /// CPUs actually online after the attempt.
-    pub online: u8,
-
-    /// CPUs possible in this boot (the live-resize ceiling).
-    pub possible: u8,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods: Static
 //--------------------------------------------------------------------------------------------------
@@ -1306,25 +1290,6 @@ impl Sandbox {
         crate::experimental::require_modify("sandbox touch")?;
         self.require_local("touch")?;
         touch_agent(&self.name, self.client()).await
-    }
-
-    /// Ask the running guest to change how many CPUs are online.
-    ///
-    /// Local backend only. This is the low-level control behind
-    /// [`modify`](Self::modify): the target must fit inside the CPU capacity
-    /// the sandbox booted with (`max_cpus`). The request goes to the sandbox
-    /// process's runtime control socket; the VMM enforces the new ceiling
-    /// immediately while the guest driver converges asynchronously.
-    pub async fn resize_cpus(&self, online: u8) -> MicrosandboxResult<SandboxCpuResizeResult> {
-        crate::experimental::require_modify("sandbox resize_cpus")?;
-        self.require_local("resize_cpus")?;
-        let state = modify::control_cpu_target(&self.name, u32::from(online)).await?;
-        Ok(SandboxCpuResizeResult {
-            name: self.name.clone(),
-            requested: state.requested_online.min(u32::from(u8::MAX)) as u8,
-            online: state.actual_online.min(u32::from(u8::MAX)) as u8,
-            possible: state.possible.min(u32::from(u8::MAX)) as u8,
-        })
     }
 
     /// Low-level access to the guest agent client.
