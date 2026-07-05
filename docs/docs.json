@@ -30,7 +30,6 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "getting-started/windows-troubleshooting",
               "getting-started/agents"
             ]
           },
@@ -74,6 +73,15 @@
             "pages": [
               "images/overview",
               "images/disk-images"
+            ]
+          },
+          {
+            "group": "Troubleshooting",
+            "icon": "screwdriver-wrench",
+            "pages": [
+              "troubleshooting/linux",
+              "troubleshooting/macos",
+              "troubleshooting/windows"
             ]
           }
         ]

@@ -1,0 +1,59 @@
+---
+title: Windows
+description: Diagnose Windows Hypervisor Platform, doctor checks, and terminal setup
+icon: "windows"
+---
+
+Windows support is currently in preview. Windows 11 is the tested path, and local sandboxes require Windows Hypervisor Platform.
+
+## Quick checks
+
+Start with the doctor command:
+
+```powershell
+msb doctor
+```
+
+If the only failure is Windows Hypervisor Platform setup, let `msb` open the elevated fix prompt:
+
+```powershell
+msb doctor --fix
+```
+
+`msb doctor --fix` keeps the normal doctor command read-only. The fix path opens an elevated PowerShell window and applies the supported host setup change.
+
+## Windows Hypervisor Platform
+
+microsandbox uses Windows Hypervisor Platform through libkrun. If you prefer to enable it manually, run this from an elevated PowerShell and reboot after it completes:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
+```
+
+`HypervisorPlatform` is separate from `VirtualMachinePlatform`, which Docker Desktop and WSL2 commonly enable. microsandbox needs `HypervisorPlatform` because that exposes the WHP API used by libkrun.
+
+You can check the feature state with:
+
+```powershell
+Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+If the feature is enabled but `msb doctor` still reports that the hypervisor is unavailable, confirm that virtualization is enabled in firmware/UEFI, then reboot once.
+
+## Runtime path
+
+The default Windows runtime root is `%USERPROFILE%\.microsandbox`. The CLI binary lives under `bin\msb.exe`, and the runtime library lives under `lib\libkrunfw.dll`.
+
+If Windows is finding a stale binary, check the command path:
+
+```powershell
+where.exe msb
+```
+
+If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/macOS override in `MSB_LIBKRUNFW_PATH` or `config.json`, or point it at `libkrunfw.dll`.
+
+## Firewall and terminals
+
+Published ports open a listening socket on the Windows host. Windows Defender Firewall can prompt the first time `msb.exe` opens that listener. For local development, keep published ports bound to `127.0.0.1`; only allow private or public network access when you intentionally bind beyond loopback.
+
+Windows Terminal, PowerShell, and cmd are supported for normal interactive attach flows. Run interactive commands from a real console, not from a redirected CI shell or background task, so `msb` can read input, forward resize events, and restore the console when the session exits.

@@ -480,7 +480,7 @@ Manage the msb installation itself.
 ```bash
 msb doctor                   # Alias for msb self doctor
 msb doctor --fix             # Try supported host setup fixes
-msb self doctor              # Check runtime and host virtualization prerequisites
+msb self doctor              # Check runtime files and supported host prerequisites
 msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
@@ -492,7 +492,7 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
-| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
+| `doctor` (alias: `check`) | Check runtime files and supported host prerequisites, including Windows Hypervisor Platform on Windows |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
