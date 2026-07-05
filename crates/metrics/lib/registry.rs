@@ -21,7 +21,7 @@ use crate::layout::{
     SAMPLE_FLAG_UPPER_FREE, SAMPLE_FLAG_UPPER_HOST_ALLOCATED, SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE,
     SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
 };
-use crate::snapshot::LiveMetric;
+use crate::snapshot::{LiveMetric, LiveMetricState};
 use crate::{MetricsError, MetricsResult};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{
@@ -480,11 +480,39 @@ impl MetricsRegistry {
     fn snapshot_slots(&self, include_stale: bool) -> MetricsResult<Vec<LiveMetric>> {
         let mut out = Vec::new();
         for idx in 0..self.inner.capacity {
-            if let Some(metric) = self.read_slot(idx, include_stale) {
+            if let Some(metric) = self.read_slot_demoting(idx, include_stale) {
                 out.push(metric);
             }
         }
         Ok(out)
+    }
+
+    /// Read a slot, demoting it to `Stale` first when its owner PID is dead.
+    ///
+    /// A runtime that crashes (or is SIGKILLed) never runs its exit observer,
+    /// leaving the slot `Active` forever with a frozen sample. Reserve-time
+    /// reclaim only fires under capacity pressure, so without this readers
+    /// keep reporting the dead sandbox as running. The demotion is
+    /// generation-checked: if the slot was reused between the read and the
+    /// release, the release fails and the (now unrelated) slot is skipped.
+    fn read_slot_demoting(&self, idx: u32, include_stale: bool) -> Option<LiveMetric> {
+        let (mut metric, generation) = self.read_slot(idx, true)?;
+        if metric.state == LiveMetricState::Active
+            && metric.pid > 0
+            && !pid_is_alive(metric.pid)
+        {
+            if self
+                .release_inner(idx, generation, ReleaseMode::Stale, true)
+                .is_err()
+            {
+                return None;
+            }
+            metric.state = LiveMetricState::Stale;
+        }
+        if metric.state == LiveMetricState::Stale && !include_stale {
+            return None;
+        }
+        Some(metric)
     }
 
     /// Lookup the active or stale slot for a sandbox id, if any.
@@ -501,7 +529,7 @@ impl MetricsRegistry {
             // Re-verify identity from the coherent snapshot: the slot could
             // have been released and reused for a different sandbox between
             // the outer filter and the seqlock-protected read.
-            if let Some(metric) = self.read_slot(idx, true)
+            if let Some(metric) = self.read_slot_demoting(idx, true)
                 && metric.sandbox_id == sandbox_id
             {
                 return Ok(Some(metric));
@@ -521,7 +549,7 @@ impl MetricsRegistry {
             if slot.run_id.load(Ordering::Acquire) != run_id {
                 continue;
             }
-            if let Some(metric) = self.read_slot(idx, true)
+            if let Some(metric) = self.read_slot_demoting(idx, true)
                 && metric.run_id == run_id
             {
                 return Ok(Some(metric));
@@ -599,7 +627,10 @@ impl MetricsRegistry {
         Ok(self.slot(idx))
     }
 
-    fn read_slot(&self, idx: u32, include_stale: bool) -> Option<LiveMetric> {
+    /// Read one coherent (metric, generation) pair from a slot. The
+    /// generation is the value observed stable across the seqlock window,
+    /// letting callers perform generation-checked follow-up transitions.
+    fn read_slot(&self, idx: u32, include_stale: bool) -> Option<(LiveMetric, u64)> {
         let slot = self.slot(idx);
         // Try many times to obtain a coherent snapshot. A tight-loop writer
         // can complete a full cycle in <100 ns, so we need a generous budget
@@ -667,8 +698,14 @@ impl MetricsRegistry {
                 .signed_duration_since(started_at)
                 .to_std()
                 .unwrap_or_default();
+            let state = if state_after == SLOT_STALE {
+                LiveMetricState::Stale
+            } else {
+                LiveMetricState::Active
+            };
 
-            return Some(LiveMetric {
+            let metric = LiveMetric {
+                state,
                 sandbox_id,
                 run_id,
                 pid,
@@ -700,7 +737,8 @@ impl MetricsRegistry {
                     SAMPLE_FLAG_UPPER_HOST_ALLOCATED,
                     upper_host_allocated,
                 ),
-            });
+            };
+            return Some((metric, gen_after));
         }
         None
     }
@@ -1380,6 +1418,12 @@ mod tests {
         unlink_region(&cname);
     }
 
+    /// A PID that is guaranteed alive for the duration of the test, so
+    /// readers don't demote the slot as dead-owner.
+    fn alive_pid() -> i32 {
+        std::process::id() as i32
+    }
+
     #[test]
     fn reserve_activate_write_and_snapshot_roundtrip() {
         let name = unique_name("rt");
@@ -1398,7 +1442,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 99,
-                pid: 4242,
+                pid: alive_pid(),
                 started_at,
             })
             .unwrap();
@@ -1425,7 +1469,7 @@ mod tests {
         let item = &snap[0];
         assert_eq!(item.sandbox_id, 7);
         assert_eq!(item.run_id, 99);
-        assert_eq!(item.pid, 4242);
+        assert_eq!(item.pid, alive_pid());
         assert_eq!(item.name, "alpine");
         assert!((item.cpu_percent - 12.5).abs() < 1e-6);
         assert_eq!(item.vcpu_time_ns, 123_456);
@@ -1493,7 +1537,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 99,
-                pid: 4242,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -1540,7 +1584,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 1,
-                pid: 1,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -1617,7 +1661,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 1,
-                pid: 1,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -1741,7 +1785,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 1,
-                pid: 1,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -1794,7 +1838,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 10,
-                pid: 100,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -1833,7 +1877,7 @@ mod tests {
             slot: next.slot,
             generation: next.generation,
             run_id: 11,
-            pid: 101,
+            pid: alive_pid(),
             started_at: Utc::now(),
         })
         .unwrap();
@@ -1868,7 +1912,7 @@ mod tests {
                 slot: next.slot,
                 generation: next.generation,
                 run_id: 20,
-                pid: 200,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2012,7 +2056,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 1,
-                pid: 1,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2038,7 +2082,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 1,
-                pid: 1,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2114,7 +2158,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 10,
-                pid: 100,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2319,7 +2363,7 @@ mod tests {
                 slot: res2.slot,
                 generation: res2.generation,
                 run_id: 20,
-                pid: 200,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2365,7 +2409,7 @@ mod tests {
                 slot: res.slot,
                 generation: res.generation,
                 run_id: 22,
-                pid: 33,
+                pid: alive_pid(),
                 started_at: Utc::now(),
             })
             .unwrap();
@@ -2396,6 +2440,101 @@ mod tests {
             .expect("slot is visible after reopen");
         assert_eq!(found.run_id, 22);
         assert_eq!(found.name, "alpine");
+        cleanup(&name);
+    }
+
+    fn write_minimal_sample(writer: &MetricsSlotWriter, memory_bytes: u64) {
+        writer
+            .write_sample(SampleWrite {
+                sampled_at: Utc::now(),
+                cpu_percent: Some(1.0),
+                vcpu_time_ns: Some(0),
+                memory_bytes: Some(memory_bytes),
+                memory_available_bytes: None,
+                memory_host_resident_bytes: None,
+                disk_read_bytes: 0,
+                disk_write_bytes: 0,
+                net_rx_bytes: 0,
+                net_tx_bytes: 0,
+                upper_used_bytes: None,
+                upper_free_bytes: None,
+                upper_host_allocated_bytes: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn snapshot_demotes_dead_owner_to_stale() {
+        let name = unique_name("demote");
+        let reg = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 10,
+                pid: i32::MAX,
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 7);
+
+        // The owner PID is dead, so the active view must not report it —
+        // and the read itself demotes the slot to Stale.
+        assert!(reg.active_snapshot().unwrap().is_empty());
+
+        let snap = reg.snapshot().unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].state, LiveMetricState::Stale);
+        assert_eq!(snap[0].memory_bytes, 7, "terminal sample is preserved");
+
+        // The demoted slot is reclaimable without capacity pressure.
+        let next = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 2,
+                name: "y",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        assert_eq!(next.slot, res.slot);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn live_metric_reports_slot_state() {
+        let name = unique_name("state");
+        let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 5,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 50,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 1);
+
+        let live = reg.get_by_sandbox_id(5).unwrap().unwrap();
+        assert_eq!(live.state, LiveMetricState::Active);
+
+        writer.release(ReleaseMode::Stale).unwrap();
+        let stale = reg.get_by_sandbox_id(5).unwrap().unwrap();
+        assert_eq!(stale.state, LiveMetricState::Stale);
+        assert!(reg.active_snapshot().unwrap().is_empty());
         cleanup(&name);
     }
 }

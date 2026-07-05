@@ -6,6 +6,16 @@ use std::time::Duration;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Slot state observed when a [`LiveMetric`] was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveMetricState {
+    /// The owning runtime holds the slot and is still sampling.
+    Active,
+    /// The runtime released the slot (or its process died); the metric is the
+    /// preserved terminal sample, not a live reading.
+    Stale,
+}
+
 /// Coherent live sample read from a single registry slot.
 ///
 /// Carries both identity (sandbox_id, run_id, pid, name) and the metric
@@ -14,6 +24,8 @@ use std::time::Duration;
 /// [`SandboxMetricSnapshot::from`].
 #[derive(Clone, Debug)]
 pub struct LiveMetric {
+    /// Slot state at the time of the read.
+    pub state: LiveMetricState,
     /// Catalog sandbox id.
     pub sandbox_id: i32,
     /// Catalog run id.
