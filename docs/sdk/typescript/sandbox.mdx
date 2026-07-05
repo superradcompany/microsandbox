@@ -515,6 +515,57 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
+
+```typescript
+modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
+```
+
+<Accordion title="Example">
+
+```typescript
+// Live resize: applies to the running VM when within the booted capacity
+const plan = await sandbox.modify({ cpus: 4, memory: 4096 });
+for (const r of plan.resizeStatus) {
+  console.log(`${r.resource}: ${r.requested} -> ${r.actual} (${r.state})`);
+}
+
+// Preview a change without applying it
+const preview = await sandbox.modify({ maxMemory: 16384, dryRun: true });
+for (const c of preview.changes) {
+  console.log(`${c.field}: ${c.disposition}`);
+}
+
+// Make an env change active now by restarting
+await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
+```
+
+</Accordion>
+
+Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart-required changes under the default policy rejects without changing anything. `cpus` and `memory` apply live to a running sandbox when the target fits inside the boot-time capacity ([`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory)); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+
+Live resize is not necessarily instant: enforcement applies immediately, and the returned plan's `resizeStatus` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks). See [`SandboxModificationPlan`](#sandboxmodificationplan).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#modifyoptions">ModifyOptions</a></div>
+    <div className="msb-param-desc">Requested changes plus <code>policy</code> and <code>dryRun</code>. Omitted fields are left unchanged.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">Promise&lt;SandboxModificationPlan&gt;</a></div>
+    <div className="msb-param-desc">The modification plan, applied unless <code>dryRun: true</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
 ```typescript
@@ -1983,6 +2034,26 @@ Async stream for receiving periodic metrics snapshots. Implements `AsyncDisposab
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Stop iterating; safe to use with `await using` |
 
+### ModifyOptions
+
+<p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
+
+A requested sandbox modification. Omitted fields are left unchanged. Secret changes are Rust-SDK and CLI only for now.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpus | `number` | Desired effective vCPU count. Live when within the booted `maxCpus` |
+| maxCpus | `number` | Boot-time maximum possible vCPUs (restart-backed) |
+| memory | `number` | Desired effective guest memory in MiB. Live when within the booted `maxMemory` |
+| maxMemory | `number` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| env | `Record<string, string>` | Environment variables to set for future execs |
+| envRemove | `string[]` | Environment variable keys to remove |
+| labels | `Record<string, string>` | Labels to set |
+| labelsRemove | `string[]` | Label keys to remove |
+| workdir | `string` | Working directory for future execs |
+| policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
+| dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
+
 ### PullPolicy
 
 <p className="msb-backref">Used by <a href="#pullpolicy">pullPolicy()</a></p>
@@ -2090,6 +2161,7 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | refresh() | `Promise<`[`SandboxHandle`](#sandboxhandle)`>` | Re-read the handle's state from the database |
 | ping() | `Promise<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | touch() | `Promise<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh idle activity; does not start stopped sandboxes |
+| modify(opts?) | `Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>` | Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes — changes persist for the next boot |
 | metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | logs() | `Promise<`[`LogEntry`](#logentry)`[]>` | Read captured `exec.log` (works without starting) |
 | logStream() | `Promise<`[`LogStream`](#logstream)`>` | Stream captured `exec.log`, with optional follow |
@@ -2108,6 +2180,40 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | remove() | `Promise<void>` | Delete sandbox and state |
 | snapshot(name) | `Promise<Snapshot>` | Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript/snapshots) |
 | snapshotTo(path) | `Promise<Snapshot>` | Snapshot this stopped sandbox to an explicit filesystem path |
+
+### SandboxModificationPlan
+
+<p className="msb-backref">Returned by <a href="#sandbox-modify">modify()</a></p>
+
+Dry-run or apply plan for a sandbox modification. Values never appear in a plan: secret entries carry only guest-visible references.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| sandbox | `string` | Sandbox being modified |
+| status | `string` | Status used for classification (`"running"`, `"stopped"`, ...) |
+| applied | `boolean` | Whether the changes were applied; `false` for dry runs |
+| policy | `"no_restart" \| "next_start" \| "restart"` | Policy used to produce the plan |
+| changes | `PlannedChange[]` | Planned changes, one entry per field or secret (see below) |
+| conflicts | `{ field, message }[]` | Conflicts that must be resolved before the patch can apply |
+| warnings | `{ field, message }[]` | Non-fatal warnings, e.g. the future-execs-only env caveat |
+| resizeStatus | `ResourceResizeStatus[]` | Live resource resize outcomes, populated by apply when a live change ran (see below) |
+
+`PlannedChange` is a discriminated union on `kind`. Both variants carry `field`, `change`, a `disposition` of `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and an optional `reason`:
+
+| Variant | Extra fields | Description |
+|---------|--------------|-------------|
+| `kind: "config"` | `change: "added" \| "updated" \| "removed"`, `before?`, `after?` | Ordinary config change |
+| `kind: "secret"` | `name`, `change: "added" \| "rotated" \| "removed" \| "renamed" \| "hosts updated" \| "placeholder updated"`, `beforeRef?`, `afterRef?`, `allowHosts` | Secret change. Values are omitted by construction; `beforeRef` / `afterRef` are guest-visible references |
+
+`ResourceResizeStatus` reports runtime convergence for a live resize — enforcement applies immediately, the guest converges asynchronously:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| resource | `"cpus" \| "memory"` | Resource being resized |
+| requested | `string` | Requested value |
+| actual | `string` | Actual value observed in the guest/runtime |
+| enforced | `string` | Host/VMM-enforced value |
+| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway) |
 
 ### SandboxPingResult
 
