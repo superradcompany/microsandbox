@@ -130,7 +130,10 @@ pub use fs::{
 };
 pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
-pub use metrics::{SandboxMetrics, all_sandbox_metrics, all_sandbox_metrics_local};
+pub use metrics::{
+    SandboxMetrics, SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics,
+    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+};
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;

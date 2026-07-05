@@ -58,10 +58,12 @@ pub use sandbox::{
     ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
     ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
     PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
-    SandboxConfig, SandboxMetrics, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SandboxPingResult, SandboxTouchResult, SecretChangeKind,
-    SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange, SecretSource,
-    all_sandbox_metrics, all_sandbox_metrics_local, validate_sandbox_name,
+    SandboxConfig, SandboxMetrics, SandboxMetricsReport, SandboxMetricsState,
+    SandboxModificationBuilder, SandboxModificationPatch, SandboxModificationPlan,
+    SandboxPingResult, SandboxTouchResult, SecretChangeKind, SecretModificationPatch,
+    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
+    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    validate_sandbox_name,
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
