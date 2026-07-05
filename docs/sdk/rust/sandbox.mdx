@@ -35,7 +35,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle()</span><span className="msb-rg">attached vs detached</span></a>
   <a className="msb-row" href="#sb-remove_persisted"><span className="msb-rn">sb.remove_persisted()</span><span className="msb-rg">delete persisted state</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">32</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">35</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#image">.image()</a>
     <a className="msb-chip" href="#memory">.memory()</a>
@@ -50,6 +50,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
     <a className="msb-chip" href="#init">.init()</a>
     <a className="msb-chip" href="#patch">.patch()</a>
     <a className="msb-chip" href="#create">.create()</a>
+    <a className="msb-chip" href="#detached">.detached()</a>
     <a className="msb-chip" href="#build">.build()</a>
     <a className="msb-more" href="#build">+ 20 more in the Builder section</a>
   </div>
@@ -67,6 +68,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
     <a className="msb-typepill" href="#sandboxpingresult">SandboxPingResult</a>
     <a className="msb-typepill" href="#sandboxtouchresult">SandboxTouchResult</a>
     <a className="msb-typepill" href="#pullpolicy">PullPolicy</a>
+    <a className="msb-typepill" href="#registryconfigbuilder">RegistryConfigBuilder</a>
     <a className="msb-typepill" href="#registryauth">RegistryAuth</a>
     <a className="msb-typepill" href="/sdk/rust/execution#exitstatus">ExitStatus</a>
     <a className="msb-typepill" href="#patchbuilder">PatchBuilder</a>
@@ -836,7 +838,7 @@ Builder for configuring a sandbox before creation. Obtained via [`Sandbox::build
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if `from_snapshot` was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) or [`create_detached`](#create_detached) instead — they call `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if `from_snapshot` was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) instead; call [`detached(true)`](#detached) first for background mode. `create()` calls `build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -909,6 +911,39 @@ Boot the sandbox in attached mode. The sandbox stops when your process exits.
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">detached()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn detached(self, detached: bool) -> Self
+```
+
+Choose whether the sandbox is created in detached/background mode. Detached sandboxes survive the creating process. Defaults to `false`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>true</code>, create the sandbox in detached mode.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .detached(true)
+    .create()
+    .await?;
+sb.detach().await;
+```
+
+</Accordion>
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">create_detached()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
@@ -916,7 +951,7 @@ Boot the sandbox in attached mode. The sandbox stops when your process exits.
 async fn create_detached(self) -> MicrosandboxResult<Sandbox>
 ```
 
-Boot the sandbox in detached mode. The sandbox survives after your process exits.
+Boot the sandbox in detached mode. This is a compatibility helper for `.detached(true).create()`. Prefer [`detached(true)`](#detached) with [`create()`](#create) for new code so attached and detached creation use the same flow.
 
 <p className="msb-label">Returns</p>
 
@@ -1409,23 +1444,40 @@ Control when the OCI image is pulled from the registry.
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">registry_auth()</span>
+#### <span className="msb-recv">.</span><span className="msb-hn">registry()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
-fn registry_auth(self, auth: RegistryAuth) -> Self
+fn registry(self, f: impl FnOnce(RegistryConfigBuilder) -> RegistryConfigBuilder) -> Self
 ```
 
-Authenticate to a private container registry.
+Configure registry connection settings for the sandbox image pull, including explicit auth, insecure HTTP, and custom CA certificates.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>auth</code><a className="msb-type" href="#registryauth">RegistryAuth</a></div>
-    <div className="msb-param-desc">Registry credentials.</div>
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#registryconfigbuilder">RegistryConfigBuilder</a></div>
+    <div className="msb-param-desc">Closure that configures registry auth and TLS options.</div>
   </div>
 </div>
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{RegistryAuth, Sandbox};
+
+let sb = Sandbox::builder("worker")
+    .image("registry.example.com/team/app:latest")
+    .registry(|r| r.auth(RegistryAuth::Basic {
+        username: "user".into(),
+        password: "token".into(),
+    }))
+    .create()
+    .await?;
+```
+
+</Accordion>
 
 ---
 
@@ -1951,13 +2003,27 @@ Controls when the SDK fetches an OCI image from the registry.
 
 <div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
-<p className="msb-backref">Used by <a href="#registry_auth">registry_auth()</a></p>
+<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
 
 Credentials for authenticating to a private container registry.
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
 | `Basic` | - `username: String` <br/> - `password: String` | Username and password authentication |
+
+### RegistryConfigBuilder
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
+
+Builder passed to [`registry()`](#registry) for per-sandbox registry connection settings.
+
+| Method | Description |
+|--------|-------------|
+| `auth(auth: RegistryAuth)` | Set explicit credentials for the image registry |
+| `insecure()` | Use plain HTTP for the registry |
+| `ca_certs(pem_data: Vec<u8>)` | Trust additional PEM-encoded CA certificates |
 
 ### SandboxConfig
 

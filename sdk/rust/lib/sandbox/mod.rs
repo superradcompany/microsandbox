@@ -2424,9 +2424,9 @@ pub(crate) fn hostname_from_sandbox_name(name: &str) -> String {
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
-/// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry_auth()` (if provided)
+/// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry()` (if provided)
 /// 2. OS keyring / credential store
-/// 3. Global config `registries.auth` matched by registry hostname
+/// 3. Global config `registries.hosts.<host>.auth` matched by registry hostname
 /// 4. Docker credential store/config fallback
 /// 5. Anonymous fallback
 ///

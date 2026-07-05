@@ -221,7 +221,7 @@ A map of registry hostnames to settings. Each host entry can mark the registry a
 
 When pulling from a registry, microsandbox resolves credentials in this order:
 
-1. **Explicit SDK auth** via `.registry_auth()` on the sandbox builder
+1. **Explicit SDK auth** via `.registry(|r| r.auth(...))` on the sandbox builder
 2. **OS keyring** entries created by `msb registry login`
 3. **Config file** `registries.hosts.<host>.auth` entries in `config.json`
 4. **Docker config** `~/.docker/config.json` credential helpers
