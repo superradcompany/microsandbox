@@ -261,21 +261,23 @@ pub async fn all_sandbox_metrics_reports_local(
 
     // A sandbox restarted since its last run can own two slots: the stale
     // one from the previous run and the active one. Keep the active row, or
-    // the freshest stale one.
-    let mut best: HashMap<i32, LiveMetric> = HashMap::new();
+    // the freshest stale one. Keyed by (id, name) so a ghost slot from a
+    // removed sandbox with a recycled id never displaces the real row.
+    let mut best: HashMap<(i32, String), LiveMetric> = HashMap::new();
     for live in snapshot {
-        match best.get(&live.sandbox_id) {
+        let key = (live.sandbox_id, live.name.clone());
+        match best.get(&key) {
             Some(existing)
                 if slot_rank(existing) > slot_rank(&live)
                     || (slot_rank(existing) == slot_rank(&live)
                         && existing.timestamp >= live.timestamp) => {}
             _ => {
-                best.insert(live.sandbox_id, live);
+                best.insert(key, live);
             }
         }
     }
 
-    let ids: Vec<i32> = best.keys().copied().collect();
+    let ids: Vec<i32> = best.keys().map(|(id, _)| *id).collect();
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -284,7 +286,13 @@ pub async fn all_sandbox_metrics_reports_local(
         .filter(sandbox_entity::Column::Id.is_in(ids))
         .all(pools.read())
         .await?;
-    let known: HashSet<i32> = models.iter().map(|model| model.id).collect();
+    // Require the slot's inline name to match the catalog row: ids are
+    // recycled after removal, so a ghost slot from a deleted sandbox can
+    // share an id with (and must not masquerade as) a current sandbox.
+    let known: HashSet<(i32, &str)> = models
+        .iter()
+        .map(|model| (model.id, model.name.as_str()))
+        .collect();
     let configs: HashMap<i32, SandboxConfig> = models
         .iter()
         .filter_map(|model| model_effective_config(model).map(|config| (model.id, config)))
@@ -292,7 +300,7 @@ pub async fn all_sandbox_metrics_reports_local(
 
     let mut reports: Vec<SandboxMetricsReport> = best
         .into_values()
-        .filter(|live| known.contains(&live.sandbox_id))
+        .filter(|live| known.contains(&(live.sandbox_id, live.name.as_str())))
         .map(|live| {
             let config = configs.get(&live.sandbox_id);
             report_from_live(live, config)
@@ -321,8 +329,10 @@ pub async fn sandbox_metrics_report_local(
     let Some(registry) = open_registry(local)? else {
         return Ok(None);
     };
+    // Match on name as well as id: catalog row ids are recycled after
+    // removal, so a ghost slot from a deleted sandbox can share the id.
     let Some(live) = registry
-        .get_by_sandbox_id(model.id)
+        .get_by_sandbox_identity(model.id, Some(&model.name))
         .map_err(metrics_error)?
     else {
         return Ok(None);

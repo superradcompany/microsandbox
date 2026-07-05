@@ -129,13 +129,25 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Rates need two samples; take the second after a short window. CPU is
+    // Rates need two samples spanning at least one sampler tick. A fixed
+    // window can straddle zero new samples (samplers default to 1s), so
+    // retry a few short windows until every running row has a rate. CPU is
     // already delta-derived by the sampler, so it is correct on either read.
     let mut tracker = RateTracker::default();
     tracker.update(&reports);
-    tokio::time::sleep(ONE_SHOT_RATE_WINDOW).await;
-    let mut reports = collect_reports(local, &args).await?;
-    let rates = tracker.update(&reports);
+    let mut reports = reports;
+    let mut rates = HashMap::new();
+    for _ in 0..4 {
+        tokio::time::sleep(ONE_SHOT_RATE_WINDOW).await;
+        reports = collect_reports(local, &args).await?;
+        rates = tracker.update(&reports);
+        let all_rated = reports.iter().all(|report| {
+            report.state != SandboxMetricsState::Running || rates.contains_key(&report.run_id)
+        });
+        if all_rated {
+            break;
+        }
+    }
 
     sort_reports(&mut reports, &args.sort);
     print!("{}", render_table(&reports, &rates));

@@ -514,22 +514,42 @@ impl MetricsRegistry {
 
     /// Lookup the active or stale slot for a sandbox id, if any.
     pub fn get_by_sandbox_id(&self, sandbox_id: i32) -> MetricsResult<Option<LiveMetric>> {
-        for idx in 0..self.inner.capacity {
-            let slot = self.slot(idx);
-            let state = slot.state.load(Ordering::Acquire);
-            if state != SLOT_ACTIVE && state != SLOT_STALE {
-                continue;
-            }
-            if slot.sandbox_id.load(Ordering::Acquire) != sandbox_id {
-                continue;
-            }
-            // Re-verify identity from the coherent snapshot: the slot could
-            // have been released and reused for a different sandbox between
-            // the outer filter and the seqlock-protected read.
-            if let Some(metric) = self.read_slot_demoting(idx, true)
-                && metric.sandbox_id == sandbox_id
-            {
-                return Ok(Some(metric));
+        self.get_by_sandbox_identity(sandbox_id, None)
+    }
+
+    /// Lookup the active or stale slot for a sandbox id, requiring the slot's
+    /// inline name to match when one is given.
+    ///
+    /// Prefers an `Active` slot over a `Stale` one: a sandbox that failed a
+    /// boot or restarted can briefly own two slots with the same id, and the
+    /// current run's slot must win over the preserved terminal sample.
+    ///
+    /// The name check guards against catalog id recycling: a removed
+    /// sandbox's stale slot can survive while its row id is reassigned to a
+    /// newly created sandbox, and id alone would then resolve to the ghost.
+    pub fn get_by_sandbox_identity(
+        &self,
+        sandbox_id: i32,
+        name: Option<&str>,
+    ) -> MetricsResult<Option<LiveMetric>> {
+        for want in [SLOT_ACTIVE, SLOT_STALE] {
+            for idx in 0..self.inner.capacity {
+                let slot = self.slot(idx);
+                if slot.state.load(Ordering::Acquire) != want {
+                    continue;
+                }
+                if slot.sandbox_id.load(Ordering::Acquire) != sandbox_id {
+                    continue;
+                }
+                // Re-verify identity from the coherent snapshot: the slot
+                // could have been released and reused for a different sandbox
+                // between the outer filter and the seqlock-protected read.
+                if let Some(metric) = self.read_slot_demoting(idx, true)
+                    && metric.sandbox_id == sandbox_id
+                    && name.is_none_or(|name| metric.name == name)
+                {
+                    return Ok(Some(metric));
+                }
             }
         }
         Ok(None)
@@ -2500,6 +2520,122 @@ mod tests {
             })
             .unwrap();
         assert_eq!(next.slot, res.slot);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn get_by_sandbox_id_prefers_active_over_stale_slot() {
+        // A failed boot or restart can leave a stale slot with the same
+        // sandbox id at a lower index than the current run's active slot;
+        // the active one must win.
+        let name = unique_name("pref");
+        let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
+
+        let old = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 9,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let old_writer = reg
+            .activate_writer(ActivateSlot {
+                slot: old.slot,
+                generation: old.generation,
+                run_id: 90,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&old_writer, 1);
+        old_writer.release(ReleaseMode::Stale).unwrap();
+
+        let new = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 9,
+                name: "x",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        assert!(new.slot > old.slot, "stale slot must sit at a lower index");
+        let new_writer = reg
+            .activate_writer(ActivateSlot {
+                slot: new.slot,
+                generation: new.generation,
+                run_id: 91,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&new_writer, 2);
+
+        let found = reg.get_by_sandbox_id(9).unwrap().unwrap();
+        assert_eq!(found.state, LiveMetricState::Active);
+        assert_eq!(found.run_id, 91);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn get_by_sandbox_identity_skips_ghost_slot_with_recycled_id() {
+        // Catalog row ids are recycled after removal: a deleted sandbox's
+        // stale slot can share an id with a newly created sandbox. The
+        // name-qualified lookup must skip the ghost.
+        let name = unique_name("ghost");
+        let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
+
+        let ghost = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 4,
+                name: "old-removed",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let ghost_writer = reg
+            .activate_writer(ActivateSlot {
+                slot: ghost.slot,
+                generation: ghost.generation,
+                run_id: 40,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&ghost_writer, 1);
+        ghost_writer.release(ReleaseMode::Stale).unwrap();
+
+        let real = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 4,
+                name: "fresh",
+                memory_limit_bytes: 1,
+            })
+            .unwrap();
+        let real_writer = reg
+            .activate_writer(ActivateSlot {
+                slot: real.slot,
+                generation: real.generation,
+                run_id: 41,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&real_writer, 2);
+        real_writer.release(ReleaseMode::Stale).unwrap();
+
+        let found = reg
+            .get_by_sandbox_identity(4, Some("fresh"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.name, "fresh");
+        assert_eq!(found.run_id, 41);
+
+        // Unqualified lookup still answers (first match), and a name with no
+        // slot returns none.
+        assert!(reg.get_by_sandbox_id(4).unwrap().is_some());
+        assert!(
+            reg.get_by_sandbox_identity(4, Some("never-existed"))
+                .unwrap()
+                .is_none()
+        );
         cleanup(&name);
     }
 
