@@ -694,7 +694,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // capacity or with secrets to live-reconfigure. Failure is non-fatal: the
     // SDK treats a missing socket as "no live control capability" and
     // classifies restart-required.
-    #[cfg(unix)]
     {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
