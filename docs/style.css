@@ -29,14 +29,14 @@ body {
   --msb-code-header: #f6efff;
   --msb-code-header-hover: #f0e4ff;
   --msb-code-header-text: #5f3caf;
-  --msb-code-control-surface: rgba(246, 239, 255, 0.48);
-  --msb-code-control-surface-hover: rgba(240, 228, 255, 0.72);
+  --msb-code-control-surface: rgba(246, 239, 255, 0.34);
+  --msb-code-control-surface-hover: rgba(240, 228, 255, 0.56);
   --msb-code-control-icon: rgba(95, 60, 175, 0.72);
   --msb-code-control-icon-hover: #5f3caf;
-  --msb-code-fade-10: rgba(255, 255, 255, 0.12);
-  --msb-code-fade-25: rgba(255, 255, 255, 0.28);
-  --msb-code-fade-35: rgba(255, 255, 255, 0.46);
-  --msb-code-fade-45: rgba(255, 255, 255, 0.64);
+  --msb-code-fade-10: rgba(255, 255, 255, 0.08);
+  --msb-code-fade-25: rgba(255, 255, 255, 0.2);
+  --msb-code-fade-35: rgba(255, 255, 255, 0.34);
+  --msb-code-fade-45: rgba(255, 255, 255, 0.48);
 }
 
 .dark {
@@ -46,14 +46,14 @@ body {
   --msb-code-header: #211832;
   --msb-code-header-hover: #2a1d40;
   --msb-code-header-text: #d8c0ff;
-  --msb-code-control-surface: rgba(33, 24, 50, 0.44);
-  --msb-code-control-surface-hover: rgba(42, 29, 64, 0.68);
+  --msb-code-control-surface: rgba(33, 24, 50, 0.32);
+  --msb-code-control-surface-hover: rgba(42, 29, 64, 0.52);
   --msb-code-control-icon: rgba(216, 192, 255, 0.72);
   --msb-code-control-icon-hover: #d8c0ff;
-  --msb-code-fade-10: rgba(11, 12, 14, 0.12);
-  --msb-code-fade-25: rgba(11, 12, 14, 0.28);
-  --msb-code-fade-35: rgba(11, 12, 14, 0.46);
-  --msb-code-fade-45: rgba(11, 12, 14, 0.64);
+  --msb-code-fade-10: rgba(11, 12, 14, 0.08);
+  --msb-code-fade-25: rgba(11, 12, 14, 0.2);
+  --msb-code-fade-35: rgba(11, 12, 14, 0.34);
+  --msb-code-fade-45: rgba(11, 12, 14, 0.48);
 }
 
 /* our links shouldn't get Mintlify's prose underline-border */
