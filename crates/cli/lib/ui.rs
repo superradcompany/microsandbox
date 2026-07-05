@@ -210,12 +210,21 @@ impl Table {
     }
 
     /// Print the table to stdout with column alignment.
+    pub fn print(&self) {
+        let rendered = self.render();
+        if !rendered.is_empty() {
+            print!("{rendered}");
+        }
+    }
+
+    /// Render the table to a string with column alignment.
     ///
     /// Uses visible (display) width so ANSI escape codes in cell values
-    /// don't break column alignment.
-    pub fn print(&self) {
+    /// don't break column alignment. Returns an empty string when there
+    /// are no rows.
+    pub fn render(&self) -> String {
         if self.rows.is_empty() {
-            return;
+            return String::new();
         }
 
         let col_count = self.headers.len();
@@ -229,7 +238,7 @@ impl Table {
             }
         }
 
-        // Print headers
+        let mut out = String::new();
         let header: String = self
             .headers
             .iter()
@@ -242,9 +251,9 @@ impl Table {
                 }
             })
             .collect();
-        println!("{}", style(header).cyan().bold());
+        out.push_str(&style(header).cyan().bold().to_string());
+        out.push('\n');
 
-        // Print rows
         for row in &self.rows {
             let line: String = row
                 .iter()
@@ -259,8 +268,10 @@ impl Table {
                     }
                 })
                 .collect();
-            println!("{line}");
+            out.push_str(&line);
+            out.push('\n');
         }
+        out
     }
 }
 
