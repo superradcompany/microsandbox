@@ -56,4 +56,4 @@ If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/mac
 
 Published ports open a listening socket on the Windows host. Windows Defender Firewall can prompt the first time `msb.exe` opens that listener. For local development, keep published ports bound to `127.0.0.1`; only allow private or public network access when you intentionally bind beyond loopback.
 
-Windows Terminal, PowerShell, and cmd are supported for normal interactive attach flows. Run interactive commands from a real console, not from a redirected CI shell or background task, so `msb` can read input, forward resize events, and restore the console when the session exits.
+Windows Terminal, PowerShell, and cmd are supported for normal interactive attach flows. Run interactive commands from a real console, not from a redirected CI shell or background task. That lets `msb` read input, forward resize events, and restore the console when the session exits.
