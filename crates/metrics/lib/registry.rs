@@ -497,10 +497,7 @@ impl MetricsRegistry {
     /// release, the release fails and the (now unrelated) slot is skipped.
     fn read_slot_demoting(&self, idx: u32, include_stale: bool) -> Option<LiveMetric> {
         let (mut metric, generation) = self.read_slot(idx, true)?;
-        if metric.state == LiveMetricState::Active
-            && metric.pid > 0
-            && !pid_is_alive(metric.pid)
-        {
+        if metric.state == LiveMetricState::Active && metric.pid > 0 && !pid_is_alive(metric.pid) {
             if self
                 .release_inner(idx, generation, ReleaseMode::Stale, true)
                 .is_err()

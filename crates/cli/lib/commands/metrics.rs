@@ -334,7 +334,11 @@ fn render_table(reports: &[SandboxMetricsReport], rates: &HashMap<i32, Rates>) -
             dim_if_exited(mem),
             dim_if_exited(disk),
             dim_if_exited(net),
-            if exited { style(uptime).dim().to_string() } else { uptime },
+            if exited {
+                style(uptime).dim().to_string()
+            } else {
+                uptime
+            },
         ]);
     }
 
