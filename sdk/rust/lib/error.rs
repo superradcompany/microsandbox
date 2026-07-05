@@ -57,6 +57,10 @@ pub enum MicrosandboxError {
     #[error("sandbox still running: {0}")]
     SandboxStillRunning(String),
 
+    /// The sandbox exists but is not running.
+    #[error("sandbox {0}")]
+    SandboxNotRunning(String),
+
     /// A runtime error occurred.
     #[error("runtime error: {0}")]
     Runtime(String),

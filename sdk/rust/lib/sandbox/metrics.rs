@@ -1,12 +1,14 @@
 //! Sandbox metrics APIs backed by the shared-memory live registry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use futures::stream;
 use microsandbox_db::DbReadConnection;
-use microsandbox_metrics::{LiveMetric, MetricsRegistry};
+use microsandbox_metrics::{LiveMetric, LiveMetricState, MetricsRegistry};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
@@ -54,6 +56,41 @@ pub struct SandboxMetrics {
     pub uptime: Duration,
     /// Timestamp of the sample.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Presentation-level state of a sandbox metrics row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxMetricsState {
+    /// The runtime owns its slot, is alive, and its sample is fresh.
+    Running,
+    /// The runtime is alive but no sample landed within three sampling
+    /// intervals — the sampler is wedged or the host is starved.
+    Stalled,
+    /// The runtime exited (cleanly or not); the metrics are the preserved
+    /// terminal sample, not a live reading.
+    Exited,
+}
+
+/// One sandbox's live metrics joined with catalog config context.
+///
+/// Unlike a bare [`SandboxMetrics`], a report resolves the allocation
+/// denominators (`cpus`, `memory_limit_bytes`) from the catalog's *active*
+/// config, so live resizes are reflected without re-stamping the
+/// shared-memory slot.
+#[derive(Clone, Debug)]
+pub struct SandboxMetricsReport {
+    /// Sandbox name.
+    pub name: String,
+    /// Catalog sandbox id.
+    pub sandbox_id: i32,
+    /// Catalog run id that produced the sample.
+    pub run_id: i32,
+    /// Row state derived from slot state, owner liveness, and sample age.
+    pub state: SandboxMetricsState,
+    /// vCPUs allocated per the catalog config, when resolvable.
+    pub cpus: Option<u32>,
+    /// The metrics sample.
+    pub metrics: SandboxMetrics,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -110,7 +147,10 @@ pub(crate) async fn local_metrics(
         .one(pools.read())
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
-    metrics_for_sandbox(pools.read(), local, model.id, config).await
+    // Prefer the catalog's active config over the caller-supplied one so
+    // limits reflect accepted live resizes, not the boot-time spec.
+    let effective = model_effective_config(&model).unwrap_or_else(|| config.clone());
+    metrics_for_sandbox(pools.read(), local, model.id, &effective).await
 }
 
 /// Local-backend streaming metrics. Called from the
@@ -146,7 +186,9 @@ pub(crate) fn local_metrics_stream(
                         .await
                     {
                         Ok(Some(model)) => {
-                            metrics_for_sandbox(pools.read(), local, model.id, &config).await
+                            let effective =
+                                model_effective_config(&model).unwrap_or_else(|| config.clone());
+                            metrics_for_sandbox(pools.read(), local, model.id, &effective).await
                         }
                         Ok(None) => Err(MicrosandboxError::SandboxNotFound(name.clone())),
                         Err(e) => Err(e.into()),
@@ -195,6 +237,108 @@ pub async fn all_sandbox_metrics_local(
             (live.name, metrics)
         })
         .collect())
+}
+
+/// Build a metrics report for every sandbox present in the live registry,
+/// joining each row with its catalog config.
+///
+/// `include_exited` keeps rows whose slot is stale — exited sandboxes whose
+/// terminal sample is preserved until the slot is reused. Rows for sandboxes
+/// that were removed from the catalog are always dropped.
+pub async fn all_sandbox_metrics_reports_local(
+    local: &LocalBackend,
+    include_exited: bool,
+) -> MicrosandboxResult<Vec<SandboxMetricsReport>> {
+    let Some(registry) = open_registry(local)? else {
+        return Ok(Vec::new());
+    };
+    let snapshot = if include_exited {
+        registry.snapshot()
+    } else {
+        registry.active_snapshot()
+    }
+    .map_err(metrics_error)?;
+
+    // A sandbox restarted since its last run can own two slots: the stale
+    // one from the previous run and the active one. Keep the active row, or
+    // the freshest stale one. Keyed by (id, name) so a ghost slot from a
+    // removed sandbox with a recycled id never displaces the real row.
+    let mut best: HashMap<(i32, String), LiveMetric> = HashMap::new();
+    for live in snapshot {
+        let key = (live.sandbox_id, live.name.clone());
+        match best.get(&key) {
+            Some(existing)
+                if slot_rank(existing) > slot_rank(&live)
+                    || (slot_rank(existing) == slot_rank(&live)
+                        && existing.timestamp >= live.timestamp) => {}
+            _ => {
+                best.insert(key, live);
+            }
+        }
+    }
+
+    let ids: Vec<i32> = best.keys().map(|(id, _)| *id).collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pools = local.db().await?;
+    let models = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Id.is_in(ids))
+        .all(pools.read())
+        .await?;
+    // Require the slot's inline name to match the catalog row: ids are
+    // recycled after removal, so a ghost slot from a deleted sandbox can
+    // share an id with (and must not masquerade as) a current sandbox.
+    let known: HashSet<(i32, &str)> = models
+        .iter()
+        .map(|model| (model.id, model.name.as_str()))
+        .collect();
+    let configs: HashMap<i32, SandboxConfig> = models
+        .iter()
+        .filter_map(|model| model_effective_config(model).map(|config| (model.id, config)))
+        .collect();
+
+    let mut reports: Vec<SandboxMetricsReport> = best
+        .into_values()
+        .filter(|live| known.contains(&(live.sandbox_id, live.name.as_str())))
+        .map(|live| {
+            let config = configs.get(&live.sandbox_id);
+            report_from_live(live, config)
+        })
+        .collect();
+    reports.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(reports)
+}
+
+/// Build a metrics report for one sandbox by name, in any state.
+///
+/// Unlike [`Sandbox::metrics`], this answers for exited sandboxes too (the
+/// report's state says so). Returns `Ok(None)` when the sandbox exists but
+/// has no slot in the registry — never sampled, or the slot was reused.
+pub async fn sandbox_metrics_report_local(
+    local: &LocalBackend,
+    name: &str,
+) -> MicrosandboxResult<Option<SandboxMetricsReport>> {
+    let pools = local.db().await?;
+    let model = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
+
+    let Some(registry) = open_registry(local)? else {
+        return Ok(None);
+    };
+    // Match on name as well as id: catalog row ids are recycled after
+    // removal, so a ghost slot from a deleted sandbox can share the id.
+    let Some(live) = registry
+        .get_by_sandbox_identity(model.id, Some(&model.name))
+        .map_err(metrics_error)?
+    else {
+        return Ok(None);
+    };
+    let config = model_effective_config(&model);
+    Ok(Some(report_from_live(live, config.as_ref())))
 }
 
 pub(super) async fn metrics_for_sandbox(
@@ -248,9 +392,11 @@ fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> Sand
         memory_bytes: live.memory_bytes,
         memory_available_bytes: live.memory_available_bytes,
         memory_host_resident_bytes: live.memory_host_resident_bytes,
-        memory_limit_bytes: match (live.memory_limit_bytes, config) {
-            (0, Some(config)) => memory_limit_bytes(config),
-            (bytes, _) => bytes,
+        // The slot value is stamped once at reservation, so it goes stale
+        // after a live resize; the catalog config wins when resolvable.
+        memory_limit_bytes: match config.map(memory_limit_bytes).filter(|&limit| limit != 0) {
+            Some(limit) => limit,
+            None => live.memory_limit_bytes,
         },
         disk_read_bytes: live.disk_read_bytes,
         disk_write_bytes: live.disk_write_bytes,
@@ -270,6 +416,61 @@ fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
 
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
     u64::from(config.spec.resources.memory_mib) * 1024 * 1024
+}
+
+/// Parse the config that best describes the sandbox's current allocation:
+/// the active-config snapshot when one is recorded, else the desired config.
+fn model_effective_config(model: &sandbox_entity::Model) -> Option<SandboxConfig> {
+    model
+        .active_config
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .or_else(|| serde_json::from_str(&model.config).ok())
+}
+
+fn slot_rank(live: &LiveMetric) -> u8 {
+    match live.state {
+        LiveMetricState::Active => 1,
+        LiveMetricState::Stale => 0,
+    }
+}
+
+fn report_from_live(live: LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetricsReport {
+    let state = classify_state(&live, config);
+    let cpus = config.map(|config| u32::from(config.spec.resources.vcpus));
+    let metrics = to_sandbox_metrics(&live, config);
+    SandboxMetricsReport {
+        name: live.name,
+        sandbox_id: live.sandbox_id,
+        run_id: live.run_id,
+        state,
+        cpus,
+        metrics,
+    }
+}
+
+/// Derive the row state. Stale slots are exited by definition; active slots
+/// are stalled when no sample landed within three sampling intervals
+/// (minimum 3s), mirroring the sampler's own guest-freshness policy.
+fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetricsState {
+    match live.state {
+        LiveMetricState::Stale => SandboxMetricsState::Exited,
+        LiveMetricState::Active => {
+            let interval_ms = config
+                .and_then(|config| config.effective_metrics_interval())
+                .map(NonZero::get)
+                .unwrap_or(1000);
+            let stall_after_ms = interval_ms.saturating_mul(3).max(3000);
+            let age_ms = Utc::now()
+                .signed_duration_since(live.timestamp)
+                .num_milliseconds();
+            if age_ms > stall_after_ms as i64 {
+                SandboxMetricsState::Stalled
+            } else {
+                SandboxMetricsState::Running
+            }
+        }
+    }
 }
 
 #[cfg(test)]

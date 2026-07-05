@@ -640,6 +640,10 @@ async fn reconcile_stale_active(
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
             let result = sandbox_entity::Entity::update_many()
                 .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
+                .col_expr(
+                    sandbox_entity::Column::ActiveConfig,
+                    Expr::value(Option::<String>::None),
+                )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
                 .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Draining))
@@ -681,6 +685,10 @@ async fn reconcile_stale_active(
     // is not clobbered.
     let result = sandbox_entity::Entity::update_many()
         .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
+        .col_expr(
+            sandbox_entity::Column::ActiveConfig,
+            Expr::value(Option::<String>::None),
+        )
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Status.is_in([

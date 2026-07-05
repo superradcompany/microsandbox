@@ -93,6 +93,8 @@ pub struct SandboxHandleLocalState {
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
     pub config_json: String,
+    /// Serialized `SandboxConfig` used by the active VM, when known.
+    pub active_config_json: Option<String>,
     /// When this sandbox was first created, if recorded.
     pub created_at: Option<DateTime<Utc>>,
     /// When this sandbox's database record was last modified.

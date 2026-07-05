@@ -221,7 +221,9 @@ enum ChunkedBodyEvent<'a> {
 /// A secret that passed host matching for this connection.
 struct EligibleSecret {
     placeholder: String,
-    value: String,
+    /// Resolved plaintext, wiped on drop so per-connection copies do not
+    /// linger in freed memory.
+    value: zeroize::Zeroizing<String>,
     inject_headers: bool,
     inject_basic_auth: bool,
     inject_query_params: bool,
@@ -2978,7 +2980,8 @@ mod tests {
     fn make_secret(placeholder: &str, value: &str, host: &str) -> SecretEntry {
         SecretEntry {
             env_var: "TEST_KEY".into(),
-            value: value.into(),
+            value: zeroize::Zeroizing::new(value.into()),
+            source: None,
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(host.into())],
             injection: SecretInjection::default(),

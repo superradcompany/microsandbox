@@ -28,7 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-ts-rs = { version = "12.0.1", optional = true }
+ts-rs = { workspace = true, optional = true }
 utoipa = { version = "5", optional = true, features = ["chrono"] }
+zeroize.workspace = true
 
 [dev-dependencies]

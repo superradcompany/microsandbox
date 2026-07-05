@@ -63,7 +63,9 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         name,
         image=IMAGE,
         cpus=1,
+        max_cpus=4,
         memory=512,
+        max_memory=2048,
         hostname="py-sdk-config-host",
         workdir="/var",
         shell="/bin/sh",
@@ -91,7 +93,9 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
 
         assert config["name"] == name
         assert config["resources"]["cpus"] == 1
+        assert config["resources"]["max_cpus"] == 4
         assert config["resources"]["memory_mib"] == 512
+        assert config["resources"]["max_memory_mib"] == 2048
         assert config["runtime"]["hostname"] == "py-sdk-config-host"
         assert config["runtime"]["workdir"] == "/var"
         assert config["runtime"]["shell"] == "/bin/sh"

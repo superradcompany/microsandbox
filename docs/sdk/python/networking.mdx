@@ -779,18 +779,6 @@ TlsConfig(
 )
 ```
 
-```python
-ScopedUpstreamCACert(
-    pattern: str,
-    path: str,
-)
-
-ScopedVerifyUpstream(
-    pattern: str,
-    verify: bool,
-)
-```
-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | bypass | `tuple[str, ...]` | `()` | Domains to skip interception. Use for domains with certificate pinning |
@@ -803,6 +791,46 @@ ScopedVerifyUpstream(
 | ca_cert | `str \| None` | `None` | Path to a custom interception CA certificate PEM file |
 | ca_key | `str \| None` | `None` | Path to a custom interception CA private key PEM file |
 | ca_cn | `str \| None` | `None` | Common name for the generated interception CA |
+
+### ScopedUpstreamCACert
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#tlsconfig">TlsConfig(scoped_upstream_ca_certs=...)</a></p>
+
+A CA bundle trusted only for upstream hosts matching a pattern.
+
+```python
+ScopedUpstreamCACert(
+    pattern: str,
+    path: str,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| pattern | `str` | Exact host or `*.suffix` wildcard |
+| path | `str` | CA bundle path trusted for matching upstream hosts |
+
+### ScopedVerifyUpstream
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#tlsconfig">TlsConfig(scoped_verify_upstream=...)</a></p>
+
+A per-host override for upstream certificate verification.
+
+```python
+ScopedVerifyUpstream(
+    pattern: str,
+    verify: bool,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| pattern | `str` | Exact host or `*.suffix` wildcard |
+| verify | `bool` | Whether to verify certificates for matching upstream hosts |
 
 ### Action
 

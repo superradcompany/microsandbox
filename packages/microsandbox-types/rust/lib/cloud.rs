@@ -294,6 +294,11 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
         let resources = SandboxResources {
             vcpus: spec.resources.vcpus,
             memory_mib: spec.resources.memory_mib,
+            // The cloud wire type has no boot-capacity fields yet; treat the
+            // effective resources as the maximum (mirrors SandboxResources
+            // deserialization for legacy configs).
+            max_vcpus: spec.resources.vcpus,
+            max_memory_mib: spec.resources.memory_mib,
         };
 
         Ok(Self {

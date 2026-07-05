@@ -15,6 +15,7 @@ use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
 use crate::config::NetworkConfig;
+use crate::secrets::handle::SecretsHandle;
 use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
 use crate::stack::{self, GatewayIps, PollLoopConfig};
 use crate::tls::state::TlsState;
@@ -58,6 +59,9 @@ pub struct SmoltcpNetwork {
 
     // TLS state (if enabled). Created in new(), used for ca_cert_pem().
     tls_state: Option<Arc<TlsState>>,
+
+    // Live-swappable secrets view shared with the poll loop and TLS state.
+    secrets: SecretsHandle,
 }
 
 /// Handle for installing host-side termination behavior into the network stack.
@@ -143,11 +147,9 @@ impl SmoltcpNetwork {
         let shared = Arc::new(SharedState::new(queue_capacity));
         let backend = SmoltcpBackend::new(shared.clone());
 
+        let secrets = SecretsHandle::new(config.secrets.clone());
         let tls_state = if config.tls.enabled {
-            Some(Arc::new(TlsState::new(
-                config.tls.clone(),
-                config.secrets.clone(),
-            )))
+            Some(Arc::new(TlsState::new(config.tls.clone(), secrets.clone())))
         } else {
             None
         };
@@ -165,6 +167,7 @@ impl SmoltcpNetwork {
             guest_ipv6,
             gateway_ipv6,
             tls_state,
+            secrets,
         }
     }
 
@@ -195,7 +198,7 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
-        let secrets = Arc::new(self.config.secrets.clone());
+        let secrets = self.secrets.clone();
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -299,6 +302,13 @@ impl SmoltcpNetwork {
         MetricsHandle {
             shared: self.shared.clone(),
         }
+    }
+
+    /// Live-swappable view of the secrets configuration. The runtime control
+    /// socket uses it to apply secret rotation, removal, and allowed-host
+    /// updates without restarting the sandbox.
+    pub fn secrets_handle(&self) -> SecretsHandle {
+        self.secrets.clone()
     }
 }
 

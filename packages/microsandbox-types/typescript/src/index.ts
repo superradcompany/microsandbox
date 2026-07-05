@@ -323,8 +323,21 @@ export type SecretEntry = {
 env_var: string,
 /**
  * The actual secret value (never enters the sandbox).
+ *
+ * Empty when the entry carries a [`source`](Self::source) reference
+ * instead: reference-model entries resolve the value host-side at spawn
+ * time so the durable sandbox config never stores raw secret material.
+ *
+ * Wrapped in [`Zeroizing`] so the owned plaintext copy is wiped when the
+ * entry drops.
  */
 value: string,
+/**
+ * Host-side source reference resolved into [`value`](Self::value) at
+ * spawn time. `None` means `value` already carries the material (the
+ * inline model used by value-based secrets).
+ */
+source?: SecretSource | null,
 /**
  * Placeholder string the sandbox sees instead of the real value.
  *
@@ -698,13 +711,21 @@ lifecycle: SandboxPolicy, };
 
 export type SandboxResources = {
 /**
- * Number of virtual CPUs.
+ * Number of virtual CPUs currently presented to the guest at boot.
  */
 vcpus: number,
 /**
- * Guest memory in MiB.
+ * Guest memory currently presented to the guest at boot, in MiB.
  */
-memory_mib: number, };
+memory_mib: number,
+/**
+ * Maximum virtual CPUs the sandbox may expose after boot-time hotplug support lands.
+ */
+max_vcpus: number,
+/**
+ * Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
+ */
+max_memory_mib: number, };
 
 export type SandboxRuntimeOptions = {
 /**
@@ -775,6 +796,241 @@ soft: number,
  * Hard limit (ceiling, requires privileges to raise).
  */
 hard: number, };
+
+export type SandboxModificationPatch = {
+/**
+ * Desired effective vCPU count.
+ */
+vcpus: number | null,
+/**
+ * Desired boot-time maximum possible vCPU count.
+ */
+max_vcpus: number | null,
+/**
+ * Desired effective guest memory in MiB.
+ */
+memory_mib: number | null,
+/**
+ * Desired boot-time maximum hotpluggable memory in MiB.
+ */
+max_memory_mib: number | null,
+/**
+ * Environment variables to set for future execs.
+ */
+env?: Array<EnvVar>,
+/**
+ * Environment variable keys to remove.
+ */
+env_remove?: Array<string>,
+/**
+ * Labels to set.
+ */
+labels?: Array<[string, string]>,
+/**
+ * Label keys to remove.
+ */
+labels_remove?: Array<string>,
+/**
+ * Desired working directory for future execs.
+ */
+workdir: string | null,
+/**
+ * Desired secret specs, keyed by secret name. The planner diffs each
+ * spec against the existing config to infer what changes.
+ */
+secrets?: Array<SecretModificationPatch>,
+/**
+ * Secret names to remove. Removal is explicit: absence of a name from
+ * `secrets` never means removal.
+ */
+secrets_remove?: Array<string>, };
+
+export type ModificationPolicy = "no_restart" | "next_start" | "restart";
+
+export type SecretModificationPatch = {
+/**
+ * Stable secret identity, usually the environment variable name.
+ */
+name: string,
+/**
+ * Host-side source reference to resolve the value from. Mutually
+ * exclusive with `value`.
+ */
+source: SecretSource | null,
+/**
+ * Raw secret value supplied by the caller, for embedders that hold only
+ * a value (e.g. from their own vault). Mutually exclusive with `source`.
+ * A value-based apply persists the value into the durable config until a
+ * later source-based rotate migrates the entry to a reference.
+ */
+value?: string,
+/**
+ * Guest-visible placeholder/reference, if explicitly requested.
+ */
+placeholder: string | null,
+/**
+ * Desired allowed host patterns. Empty means "leave unchanged" for an
+ * existing secret; a new secret needs at least one.
+ */
+allowed_hosts?: Array<string>, };
+
+export type SecretSource = { "kind": "env",
+/**
+ * Host environment variable name.
+ */
+var: string, } | { "kind": "store",
+/**
+ * Store-specific secret reference.
+ */
+reference: string, };
+
+export type SandboxModificationPlan = {
+/**
+ * Sandbox being modified.
+ */
+sandbox: string,
+/**
+ * Sandbox status used for classification.
+ */
+status: string,
+/**
+ * Whether the changes were applied.
+ */
+applied: boolean,
+/**
+ * Modification policy used to produce the plan.
+ */
+policy: ModificationPolicy,
+/**
+ * Planned changes.
+ */
+changes: Array<PlannedChange>,
+/**
+ * Conflicts that must be resolved before the patch can apply.
+ */
+conflicts: Array<ModificationConflict>,
+/**
+ * Non-fatal warnings about the patch or current runtime capabilities.
+ */
+warnings: Array<ModificationWarning>,
+/**
+ * Live resource resize outcomes, populated by apply when a live change ran.
+ */
+resize_status?: Array<ResourceResizeStatus>, };
+
+export type PlannedChange = { "kind": "config" } & ConfigPlannedChange | { "kind": "secret" } & SecretPlannedChange;
+
+export type ConfigPlannedChange = {
+/**
+ * Config field being changed.
+ */
+field: string,
+/**
+ * Natural change type for table rendering.
+ */
+change: ChangeKind,
+/**
+ * Previous safe visible state.
+ */
+before: string | null,
+/**
+ * New safe visible state.
+ */
+after: string | null,
+/**
+ * When or whether the change can take effect.
+ */
+disposition: ModificationDisposition,
+/**
+ * Human-readable reason for this classification, when useful.
+ */
+reason: string | null, };
+
+export type SecretPlannedChange = {
+/**
+ * Table field name. This is always `secret`.
+ */
+field: string,
+/**
+ * Stable secret identity, usually the environment variable name.
+ */
+name: string,
+/**
+ * Natural change type for table rendering.
+ */
+change: SecretChangeKind,
+/**
+ * Previous guest-visible reference or placeholder.
+ */
+before_ref: string | null,
+/**
+ * New guest-visible reference or placeholder.
+ */
+after_ref: string | null,
+/**
+ * When or whether the change can take effect.
+ */
+disposition: ModificationDisposition,
+/**
+ * Allowed hosts after the requested change.
+ */
+allow_hosts?: Array<string>,
+/**
+ * Human-readable reason for this classification, when useful.
+ */
+reason: string | null, };
+
+export type ChangeKind = "added" | "updated" | "removed";
+
+export type SecretChangeKind = "added" | "rotated" | "removed" | "renamed" | "hosts updated" | "placeholder updated";
+
+export type ModificationDisposition = "live" | "next start" | "requires restart" | "unsupported";
+
+export type ModificationConflict = {
+/**
+ * Field with the conflict.
+ */
+field: string,
+/**
+ * Human-readable conflict description.
+ */
+message: string, };
+
+export type ModificationWarning = {
+/**
+ * Field associated with the warning.
+ */
+field: string,
+/**
+ * Human-readable warning description.
+ */
+message: string, };
+
+export type ResourceKind = "cpus" | "memory";
+
+export type ResourceConvergenceState = "accepted" | "converging" | "applied" | "guest-refused" | "failed";
+
+export type ResourceResizeStatus = {
+/**
+ * Resource being resized.
+ */
+resource: ResourceKind,
+/**
+ * Requested value.
+ */
+requested: string,
+/**
+ * Actual value observed in the guest/runtime.
+ */
+actual: string,
+/**
+ * Host/VMM-enforced value.
+ */
+enforced: string,
+/**
+ * Convergence state.
+ */
+state: ResourceConvergenceState, };
 
 export type CloudRootfsSource = { "bind": string } | { "oci": {
 /**

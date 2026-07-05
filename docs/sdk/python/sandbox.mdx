@@ -21,7 +21,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle</span><span className="msb-rg">attached vs detached (async)</span></a>
   <a className="msb-row" href="#sb-fs"><span className="msb-rn">sb.fs</span><span className="msb-rg">read / write files</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">18</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">20</span></p>
   <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run a command</span></a>
   <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.exec_stream()</span><span className="msb-rg">run, stream events</span></a>
   <a className="msb-row" href="/sdk/python/execution"><span className="msb-rn">sb.shell()</span><span className="msb-rg">run through a shell</span></a>
@@ -29,6 +29,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="/sdk/python/ssh"><span className="msb-rn">sb.ssh()</span><span className="msb-rg">SSH client / server</span></a>
   <a className="msb-row" href="#sb-attach"><span className="msb-rn">sb.attach()</span><span className="msb-rg">interactive PTY session</span></a>
   <a className="msb-row" href="#sb-attach_shell"><span className="msb-rn">sb.attach_shell()</span><span className="msb-rg">attach to the shell</span></a>
+  <a className="msb-row" href="#sb-ping"><span className="msb-rn">sb.ping()</span><span className="msb-rg">agent reachability</span></a>
+  <a className="msb-row" href="#sb-touch"><span className="msb-rn">sb.touch()</span><span className="msb-rg">refresh idle activity</span></a>
   <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.metrics()</span><span className="msb-rg">resource snapshot</span></a>
   <a className="msb-row" href="#sb-metrics_stream"><span className="msb-rn">sb.metrics_stream()</span><span className="msb-rg">stream metrics</span></a>
   <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.logs()</span><span className="msb-rg">captured output</span></a>
@@ -58,6 +60,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
     <a className="msb-typepill" href="#initconfig">InitConfig</a>
     <a className="msb-typepill" href="#securityprofile">SecurityProfile</a>
     <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
+    <a className="msb-typepill" href="#sandboxpingresult">SandboxPingResult</a>
+    <a className="msb-typepill" href="#sandboxtouchresult">SandboxTouchResult</a>
     <a className="msb-typepill" href="#sandboxstopresult">SandboxStopResult</a>
     <a className="msb-typepill" href="#sandboxstatus">SandboxStatus</a>
     <a className="msb-typepill" href="#sandboxmetrics">SandboxMetrics</a>
@@ -539,6 +543,64 @@ Attach your terminal to the sandbox's default shell for an interactive session.
 
 ```python
 await sb.attach_shell()
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ping()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def ping(self) -> SandboxPingResult
+```
+
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and raises an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxpingresult">SandboxPingResult</a></div>
+    <div className="msb-param-desc">Sandbox name and agent round-trip latency.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+health = await sb.ping()
+print(f"{health.name}: {health.latency_ms:.1f} ms")
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">touch()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```python
+async def touch(self) -> SandboxTouchResult
+```
+
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `max_duration`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxtouchresult">SandboxTouchResult</a></div>
+    <div className="msb-param-desc">Sandbox name and updated activity sequence.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+keepalive = await sb.touch()
+print(f"{keepalive.name}: {keepalive.activity_seq}")
 ```
 
 </Accordion>
@@ -1140,7 +1202,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | image | `str \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
 | snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
+| max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
+| max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
 | security | [`SecurityProfile`](#securityprofile) `\| str` | `"default"` | In-guest security profile. `"restricted"` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
@@ -1234,6 +1298,8 @@ A lightweight handle to an existing sandbox (running or stopped). Provides statu
 | updated_at | `float \| None` | Last update timestamp (ms since epoch) |
 | config() | `dict[str, Any]` | Parsed configuration |
 | refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
+| ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
+| touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
 | connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
 | stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
@@ -1248,6 +1314,32 @@ A lightweight handle to an existing sandbox (running or stopped). Provides statu
 | log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
 | snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
 | snapshot_to(path) | `Awaitable[Snapshot]` | Create a [snapshot](/sdk/python/snapshots) at a path |
+
+### SandboxPingResult
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-ping">ping()</a></p>
+
+Agent reachability result.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| name | `str` | Sandbox name |
+| latency_ms | `float` | Round-trip latency in milliseconds |
+
+### SandboxTouchResult
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-touch">touch()</a></p>
+
+Explicit idle-refresh result.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| name | `str` | Sandbox name |
+| activity_seq | `int` | Monotonic activity sequence after the touch |
 
 ### SandboxStopResult
 

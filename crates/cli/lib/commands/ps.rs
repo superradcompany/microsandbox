@@ -39,6 +39,8 @@ struct StatusRow {
     name: String,
     image: String,
     command: String,
+    cpus: String,
+    mem: String,
     status: String,
     ports: String,
 }
@@ -85,12 +87,14 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["NAME", "IMAGE", "COMMAND", "STATUS", "PORTS"]);
+    let mut table = ui::Table::new(&["NAME", "IMAGE", "COMMAND", "CPUS", "MEM", "STATUS", "PORTS"]);
     for row in handles.iter().map(status_row) {
         table.add_row(vec![
             row.name,
             row.image,
             row.command,
+            row.cpus,
+            row.mem,
             row.status,
             row.ports,
         ]);
@@ -130,11 +134,18 @@ fn status_row(handle: &SandboxHandle) -> StatusRow {
         .map(format_ports)
         .unwrap_or_else(|| "-".to_string());
     let status = format!("{:?}", handle.status_snapshot());
+    let resources = resource_config(handle, config.as_ref());
+    let (cpus, mem) = resources
+        .as_ref()
+        .map(format_resources)
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
 
     StatusRow {
         name: handle.name().to_string(),
         image,
         command,
+        cpus,
+        mem,
         status: ui::format_status(&status),
         ports,
     }
@@ -143,14 +154,59 @@ fn status_row(handle: &SandboxHandle) -> StatusRow {
 fn status_json(handle: &SandboxHandle) -> serde_json::Value {
     let config = serde_json::from_str::<SandboxConfig>(handle.config_json()).ok();
     let status = format!("{:?}", handle.status_snapshot());
+    let resources = resource_config(handle, config.as_ref());
+    let resources = resources.as_ref().map(|c| &c.spec.resources);
 
     serde_json::json!({
         "name": handle.name(),
         "status": status,
         "image": config.as_ref().map(extract_image_raw).unwrap_or_else(|| "-".to_string()),
         "command": config.as_ref().map(format_command_raw).unwrap_or_else(|| "-".to_string()),
+        "cpus": resources.map(|r| r.vcpus),
+        "max_cpus": resources.map(|r| r.max_vcpus.max(r.vcpus)),
+        "memory_mib": resources.map(|r| r.memory_mib),
+        "max_memory_mib": resources.map(|r| r.max_memory_mib.max(r.memory_mib)),
         "ports": config.as_ref().map(format_ports_raw).unwrap_or_default(),
     })
+}
+
+/// Resolve the config whose resource allocations describe the sandbox now:
+/// the active-config snapshot for running sandboxes (tracks live resizes),
+/// falling back to the desired config.
+fn resource_config(
+    handle: &SandboxHandle,
+    desired: Option<&SandboxConfig>,
+) -> Option<SandboxConfig> {
+    handle
+        .active_config()
+        .ok()
+        .flatten()
+        .or_else(|| desired.cloned())
+}
+
+/// Render `(CPUS, MEM)` cells as `effective / max`, where max is the boot-time
+/// hotplug ceiling — the headroom available to a live resize.
+fn format_resources(config: &SandboxConfig) -> (String, String) {
+    let resources = &config.spec.resources;
+    let cpus = format!(
+        "{} / {}",
+        resources.vcpus,
+        resources.max_vcpus.max(resources.vcpus)
+    );
+    let mem = format!(
+        "{} / {}",
+        format_mem_mib(resources.memory_mib),
+        format_mem_mib(resources.max_memory_mib.max(resources.memory_mib)),
+    );
+    (cpus, mem)
+}
+
+fn format_mem_mib(mib: u32) -> String {
+    if mib >= 1024 && mib.is_multiple_of(1024) {
+        format!("{} GiB", mib / 1024)
+    } else {
+        format!("{mib} MiB")
+    }
 }
 
 fn extract_image(config: &SandboxConfig) -> String {

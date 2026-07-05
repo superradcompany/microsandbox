@@ -6,7 +6,9 @@ use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::metrics::convert_metrics;
-use crate::sandbox::{PySandbox, PySandboxStopResult, optional_duration};
+use crate::sandbox::{
+    PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -110,6 +112,81 @@ impl PySandboxHandle {
             let guard = inner.lock().await;
             let m = guard.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
+        })
+    }
+
+    /// Check whether agentd is reachable without refreshing idle activity.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard.ping().await.map_err(to_py_err)?;
+            Ok(PySandboxPingResult::from_rust(result))
+        })
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    ///
+    /// Connects to an already-running sandbox; stopped sandboxes are not
+    /// started implicitly.
+    fn touch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard.touch().await.map_err(to_py_err)?;
+            Ok(PySandboxTouchResult::from_rust(result))
+        })
+    }
+
+    /// Plan or apply a sandbox modification. Returns the plan as a dict.
+    ///
+    /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
+    /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
+    /// plan is computed without applying anything.
+    #[pyo3(signature = (
+        *,
+        cpus = None,
+        max_cpus = None,
+        memory = None,
+        max_memory = None,
+        env = None,
+        env_rm = None,
+        labels = None,
+        labels_rm = None,
+        workdir = None,
+        policy = None,
+        dry_run = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn modify<'py>(
+        &self,
+        py: Python<'py>,
+        cpus: Option<u8>,
+        max_cpus: Option<u8>,
+        memory: Option<u32>,
+        max_memory: Option<u32>,
+        env: Option<std::collections::HashMap<String, String>>,
+        env_rm: Option<Vec<String>>,
+        labels: Option<std::collections::HashMap<String, String>>,
+        labels_rm: Option<Vec<String>>,
+        workdir: Option<String>,
+        policy: Option<String>,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let patch = crate::sandbox::build_modify_patch(
+            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir,
+        );
+        let policy = crate::sandbox::parse_modify_policy(policy.as_deref())?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let builder =
+                crate::sandbox::apply_modify_policy(guard.modify().with_patch(patch), policy);
+            drop(guard);
+            crate::sandbox::run_modify(builder, dry_run).await
         })
     }
 
@@ -319,7 +396,7 @@ impl PySandboxHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+pub(crate) fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(value) => Ok(PyBool::new(py, value).to_owned().unbind().into()),

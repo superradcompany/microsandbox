@@ -1043,7 +1043,19 @@ function Invoke-BuildMsb {
     }
 
     $profileArg = if ($Mode -eq "release") { "--release" } else { "" }
-    Invoke-MsvcCommand -CommandLine "cargo build -p microsandbox-cli --target $($target.RustTarget) $profileArg"
+    $previousRustflags = $env:RUSTFLAGS
+    if ($Mode -eq "release") {
+        # Match release CI so installed Windows builds do not require a separate VC++ runtime.
+        $env:RUSTFLAGS = (@($previousRustflags, "-C target-feature=+crt-static") | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            }) -join " "
+    }
+
+    try {
+        Invoke-MsvcCommand -CommandLine "cargo build -p microsandbox-cli --target $($target.RustTarget) $profileArg"
+    } finally {
+        $env:RUSTFLAGS = $previousRustflags
+    }
 
     $profile = if ($Mode -eq "release") { "release" } else { "debug" }
     $msbSource = Join-Path $RepoRoot "target\$($target.RustTarget)\$profile\msb.exe"

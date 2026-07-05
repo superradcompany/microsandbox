@@ -5,6 +5,7 @@
 mod cloud;
 mod domain;
 mod error;
+pub mod modify;
 mod validation;
 
 #[cfg(feature = "ts")]
@@ -32,6 +33,12 @@ pub use domain::{
     ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
+pub use modify::{
+    ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
+    ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
+    SecretModificationPatch, SecretPlannedChange, SecretSource,
+};
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
     validate_sandbox_name,

@@ -8,7 +8,7 @@
 
 pub use microsandbox_types::{
     HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretConfigError, SecretEntry, SecretInjection,
-    SecretsConfig, ViolationAction,
+    SecretSource, SecretsConfig, ViolationAction,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -61,7 +61,8 @@ mod tests {
     fn secret(require_tls_identity: bool, hosts: Vec<HostPattern>) -> SecretEntry {
         SecretEntry {
             env_var: "API_KEY".into(),
-            value: "secret".into(),
+            value: zeroize::Zeroizing::new("secret".into()),
+            source: None,
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: hosts,
             injection: SecretInjection::default(),

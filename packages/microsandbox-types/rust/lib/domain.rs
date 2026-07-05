@@ -8,6 +8,9 @@ use std::str::FromStr;
 
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::modify::SecretSource;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -502,7 +505,22 @@ pub struct SecretEntry {
     pub env_var: String,
 
     /// The actual secret value (never enters the sandbox).
-    pub value: String,
+    ///
+    /// Empty when the entry carries a [`source`](Self::source) reference
+    /// instead: reference-model entries resolve the value host-side at spawn
+    /// time so the durable sandbox config never stores raw secret material.
+    ///
+    /// Wrapped in [`Zeroizing`] so the owned plaintext copy is wiped when the
+    /// entry drops.
+    #[serde(default = "empty_secret_value")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub value: Zeroizing<String>,
+
+    /// Host-side source reference resolved into [`value`](Self::value) at
+    /// spawn time. `None` means `value` already carries the material (the
+    /// inline model used by value-based secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SecretSource>,
 
     /// Placeholder string the sandbox sees instead of the real value.
     ///
@@ -691,6 +709,7 @@ impl fmt::Debug for SecretEntry {
         f.debug_struct("SecretEntry")
             .field("env_var", &self.env_var)
             .field("value", &"[REDACTED]")
+            .field("source", &self.source)
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .field("injection", &self.injection)
@@ -701,6 +720,18 @@ impl fmt::Debug for SecretEntry {
 }
 
 impl HostPattern {
+    /// Parse a user-facing host string: `*` is any host, `*.`-prefixed
+    /// strings are wildcards, everything else matches exactly.
+    pub fn parse(host: &str) -> Self {
+        if host == "*" {
+            HostPattern::Any
+        } else if host.starts_with("*.") {
+            HostPattern::Wildcard(host.to_string())
+        } else {
+            HostPattern::Exact(host.to_string())
+        }
+    }
+
     /// Check if a hostname matches this pattern.
     ///
     /// Uses ASCII case-insensitive comparison to avoid `to_lowercase()`
@@ -1378,16 +1409,21 @@ pub struct SandboxSpec {
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(default)]
 pub struct SandboxResources {
-    /// Number of virtual CPUs.
+    /// Number of virtual CPUs currently presented to the guest at boot.
     pub vcpus: u8,
 
-    /// Guest memory in MiB.
+    /// Guest memory currently presented to the guest at boot, in MiB.
     pub memory_mib: u32,
+
+    /// Maximum virtual CPUs the sandbox may expose after boot-time hotplug support lands.
+    pub max_vcpus: u8,
+
+    /// Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
+    pub max_memory_mib: u32,
 }
 
 /// Guest runtime options for a sandbox.
@@ -1808,7 +1844,37 @@ impl Default for SandboxResources {
         Self {
             vcpus: DEFAULT_SANDBOX_VCPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            max_vcpus: DEFAULT_SANDBOX_VCPUS,
+            max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxResources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawResources {
+            #[serde(default = "default_sandbox_vcpus")]
+            vcpus: u8,
+            #[serde(default = "default_sandbox_memory_mib")]
+            memory_mib: u32,
+            max_vcpus: Option<u8>,
+            max_memory_mib: Option<u32>,
+        }
+
+        let raw = RawResources::deserialize(deserializer)?;
+        Ok(Self {
+            vcpus: raw.vcpus,
+            memory_mib: raw.memory_mib,
+            // Legacy configs predate boot-capacity fields. Treat their effective
+            // resources as their maximum capacity so old sandboxes do not
+            // deserialize into an impossible vcpus > max_vcpus state.
+            max_vcpus: raw.max_vcpus.unwrap_or(raw.vcpus),
+            max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
+        })
     }
 }
 
@@ -1911,6 +1977,22 @@ impl TryFrom<&str> for RlimitResource {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn default_sandbox_vcpus() -> u8 {
+    DEFAULT_SANDBOX_VCPUS
+}
+
+fn default_sandbox_memory_mib() -> u32 {
+    DEFAULT_SANDBOX_MEMORY_MIB
+}
+
+fn empty_secret_value() -> Zeroizing<String> {
+    Zeroizing::new(String::new())
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -1961,6 +2043,17 @@ mod tests {
         );
         assert_eq!(DiskImageFormat::from_extension("ext4"), None);
         assert_eq!(DiskImageFormat::from_extension(""), None);
+    }
+
+    #[test]
+    fn sandbox_resources_deserialize_legacy_capacity_from_effective_values() {
+        let resources: SandboxResources =
+            serde_json::from_str(r#"{"vcpus":4,"memory_mib":2048}"#).unwrap();
+
+        assert_eq!(resources.vcpus, 4);
+        assert_eq!(resources.max_vcpus, 4);
+        assert_eq!(resources.memory_mib, 2048);
+        assert_eq!(resources.max_memory_mib, 2048);
     }
 
     #[test]
@@ -2072,7 +2165,8 @@ mod secret_tests {
     fn valid_secret() -> SecretEntry {
         SecretEntry {
             env_var: "API_KEY".into(),
-            value: "secret".into(),
+            value: "secret".to_string().into(),
+            source: None,
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
             injection: SecretInjection::default(),
@@ -2228,7 +2322,7 @@ mod secret_tests {
     #[test]
     fn secret_entry_debug_redacts_value() {
         let mut entry = valid_secret();
-        entry.value = "uniq-sensitive-12345".into();
+        entry.value = "uniq-sensitive-12345".to_string().into();
         let dbg = format!("{entry:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("uniq-sensitive-12345"));

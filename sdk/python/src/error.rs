@@ -26,6 +26,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
+            SandboxNotRunning(_) => ("SandboxNotRunningError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),

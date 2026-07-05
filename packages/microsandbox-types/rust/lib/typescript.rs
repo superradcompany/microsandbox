@@ -3,16 +3,20 @@
 use ts_rs::TS;
 
 use crate::{
-    Action, CertCacheConfig, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudRootfsSource, CloudSandboxResources,
-    CloudSandboxSpec, CloudSandboxStatus, Destination, DestinationGroup, Direction,
-    DiskImageFormat, DnsConfig, EnvVar, HandoffInit, HostPattern, HostPermissions,
-    InterceptCaConfig, InterfaceOverrides, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PortRange, Protocol,
-    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, Rule, SandboxLogLevel,
+    Action, CertCacheConfig, ChangeKind, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudRootfsSource,
+    CloudSandboxResources, CloudSandboxSpec, CloudSandboxStatus, ConfigPlannedChange, Destination,
+    DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, HandoffInit, HostPattern,
+    HostPermissions, InterceptCaConfig, InterfaceOverrides, ModificationConflict,
+    ModificationDisposition, ModificationPolicy, ModificationWarning, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch,
+    PlannedChange, PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Rlimit, RlimitResource,
+    RootfsSource, Rule, SandboxLogLevel, SandboxModificationPatch, SandboxModificationPlan,
     SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert,
-    ScopedVerifyUpstream, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile,
-    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
+    ScopedVerifyUpstream, SecretChangeKind, SecretEntry, SecretInjection, SecretModificationPatch,
+    SecretPlannedChange, SecretSource, SecretsConfig, SecurityProfile, StatVirtualization,
+    TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -91,6 +95,22 @@ pub fn declarations() -> Vec<String> {
         SandboxLogLevel::decl(&cfg),
         RlimitResource::decl(&cfg),
         Rlimit::decl(&cfg),
+        SandboxModificationPatch::decl(&cfg),
+        ModificationPolicy::decl(&cfg),
+        SecretModificationPatch::decl(&cfg),
+        SecretSource::decl(&cfg),
+        SandboxModificationPlan::decl(&cfg),
+        PlannedChange::decl(&cfg),
+        ConfigPlannedChange::decl(&cfg),
+        SecretPlannedChange::decl(&cfg),
+        ChangeKind::decl(&cfg),
+        SecretChangeKind::decl(&cfg),
+        ModificationDisposition::decl(&cfg),
+        ModificationConflict::decl(&cfg),
+        ModificationWarning::decl(&cfg),
+        ResourceKind::decl(&cfg),
+        ResourceConvergenceState::decl(&cfg),
+        ResourceResizeStatus::decl(&cfg),
         CloudRootfsSource::decl(&cfg),
         CloudSandboxResources::decl(&cfg),
         CloudSandboxSpec::decl(&cfg),
@@ -168,7 +188,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 55);
+        assert_eq!(declarations.len(), 71);
         assert!(
             declarations
                 .iter()
