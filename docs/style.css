@@ -7,13 +7,12 @@ body {
  * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
  * content is a narrow column with large dead zones. The TOC column to its right
  * is only 19rem wide (#table-of-contents-layout, with its own pl-10 gap), so
- * that 28rem reserve leaves ~9rem unused. Drop the 36rem cap and reserve only
- * 20rem on the right, so the content fills nearly to the TOC; mx-auto keeps a
- * small symmetric margin. Applied on xl+ where that width applies. This sets a
- * definite width (no auto-margins), so the flex layout can't collapse.
+ * that 28rem reserve leaves ~9rem unused. Restore the wider-but-bounded 72rem
+ * content max and reserve only 20rem on the right, so tables and code get room
+ * without prose stretching indefinitely on very wide screens.
  * -------------------------------------------------------------------------- */
 @media (min-width: 1280px) {
-  #content-area { max-width: none !important; width: calc(100% - 20rem) !important; }
+  #content-area { max-width: 72rem !important; width: calc(100% - 20rem) !important; }
 }
 
 /*
