@@ -24,14 +24,14 @@ body {
  */
 
 :root {
-  --msb-code-surface: #fbf8ff;
-  --msb-code-surface-strong: #f6f0ff;
-  --msb-code-border: rgba(109, 75, 196, 0.18);
+  --msb-code-surface: #fdfbff;
+  --msb-code-surface-strong: #faf5ff;
+  --msb-code-border: rgba(109, 75, 196, 0.16);
 }
 
 .dark {
-  --msb-code-surface: #130f1b;
-  --msb-code-surface-strong: #171020;
+  --msb-code-surface: #171221;
+  --msb-code-surface-strong: #1b1428;
   --msb-code-border: rgba(191, 132, 254, 0.24);
 }
 
