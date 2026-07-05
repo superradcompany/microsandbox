@@ -13,7 +13,7 @@ import (
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
 
-func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
+func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	ctx := integrationCtx(t)
 	baseName := uniqueIntegrationName(t, "go-sdk-snapshot-base")
 	forkName := uniqueIntegrationName(t, "go-sdk-snapshot-fork")
@@ -96,9 +96,9 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 		t.Fatalf("Snapshot.List did not include digest %q", artifact.Digest())
 	}
 
-	fork, err := createSandbox(t, ctx, forkName, microsandbox.WithSnapshot(snapshotName))
+	fork, err := createSandbox(t, ctx, forkName, microsandbox.WithFromSnapshot(snapshotName))
 	if err != nil {
-		t.Fatalf("CreateSandbox with WithSnapshot: %v", err)
+		t.Fatalf("CreateSandbox with WithFromSnapshot: %v", err)
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -109,7 +109,7 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 
 	// Verify the fork is a working sandbox sourced from the snapshot:
 	// /etc/alpine-release exists in the alpine image's rootfs, so reading
-	// it back via the fork confirms WithSnapshot resolved + mounted the
+	// it back via the fork confirms WithFromSnapshot resolved + mounted the
 	// snapshot's rootfs rather than handing back an empty fs.
 	got, err := fork.FS().ReadString(ctx, "/etc/alpine-release")
 	if err != nil {
@@ -124,14 +124,14 @@ func TestSandboxHandleSnapshotAndWithSnapshotFork(t *testing.T) {
 	// to prove the snapshot captured user data, not just the image.
 }
 
-func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
+func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	ctx := integrationCtx(t)
-	baseName := uniqueIntegrationName(t, "go-sdk-snapshotto-base")
-	snapshotDir := filepath.Join(t.TempDir(), "artifact")
+	baseName := uniqueIntegrationName(t, "go-sdk-snapcreate-base")
+	snapshotName := uniqueIntegrationName(t, "go-sdk-snapcreate")
 
 	t.Cleanup(func() {
 		removeSandboxBestEffort(baseName)
-		removeSnapshotBestEffort(snapshotDir)
+		removeSnapshotBestEffort(snapshotName)
 	})
 
 	base, err := createSandbox(t, ctx, baseName, microsandbox.WithImage(goIntegrationImage))
@@ -145,16 +145,16 @@ func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Close base: %v", err)
 	}
 
-	baseHandle, err := microsandbox.GetSandbox(ctx, baseName)
+	artifact, err := microsandbox.Snapshot.Create(ctx, microsandbox.SnapshotCreateOptions{
+		Name:        snapshotName,
+		FromSandbox: baseName,
+	})
 	if err != nil {
-		t.Fatalf("GetSandbox base: %v", err)
+		t.Fatalf("Snapshot.Create: %v", err)
 	}
-	artifact, err := baseHandle.SnapshotTo(ctx, snapshotDir)
-	if err != nil {
-		t.Fatalf("SandboxHandle.SnapshotTo: %v", err)
-	}
-	if artifact.Path() != snapshotDir {
-		t.Fatalf("SnapshotTo path = %q, want %q", artifact.Path(), snapshotDir)
+	snapshotDir := artifact.Path()
+	if filepath.Base(snapshotDir) != snapshotName {
+		t.Fatalf("Snapshot.Create path = %q, want basename %q", snapshotDir, snapshotName)
 	}
 
 	opened, err := microsandbox.Snapshot.Open(ctx, snapshotDir)
@@ -189,21 +189,21 @@ func TestSandboxHandleSnapshotToAndSnapshotDirectoryOps(t *testing.T) {
 	}
 
 	archivePath := filepath.Join(t.TempDir(), "snapshot.tar")
-	if err := microsandbox.Snapshot.Export(ctx, snapshotDir, archivePath,
-		microsandbox.SnapshotExportOptions{PlainTar: true}); err != nil {
-		t.Fatalf("Snapshot.Export: %v", err)
+	if err := microsandbox.Snapshot.Save(ctx, snapshotName, archivePath,
+		microsandbox.SnapshotSaveOptions{PlainTar: true}); err != nil {
+		t.Fatalf("Snapshot.Save: %v", err)
 	}
 
 	importDir := filepath.Join(t.TempDir(), "imported")
-	imported, err := microsandbox.Snapshot.Import(ctx, archivePath, importDir)
+	imported, err := microsandbox.Snapshot.Load(ctx, archivePath, importDir)
 	if err != nil {
-		t.Fatalf("Snapshot.Import: %v", err)
+		t.Fatalf("Snapshot.Load: %v", err)
 	}
 	t.Cleanup(func() {
 		removeSnapshotBestEffort(imported.Path())
 	})
 	if imported.Digest() != artifact.Digest() {
-		t.Fatalf("Snapshot.Import digest = %q, want %q", imported.Digest(), artifact.Digest())
+		t.Fatalf("Snapshot.Load digest = %q, want %q", imported.Digest(), artifact.Digest())
 	}
 }
 

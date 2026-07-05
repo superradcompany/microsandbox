@@ -172,7 +172,6 @@ typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, c
 typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_handle_snapshot_fn)(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len);
-typedef char *(*msb_sandbox_handle_snapshot_to_fn)(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_create_fn)(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_open_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_verify_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
@@ -322,7 +321,6 @@ static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
 static msb_image_load_fn           ptr_msb_image_load           = NULL;
 static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
-static msb_sandbox_handle_snapshot_to_fn ptr_msb_sandbox_handle_snapshot_to = NULL;
 static msb_snapshot_create_fn      ptr_msb_snapshot_create      = NULL;
 static msb_snapshot_open_fn        ptr_msb_snapshot_open        = NULL;
 static msb_snapshot_verify_fn      ptr_msb_snapshot_verify      = NULL;
@@ -483,7 +481,6 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_load);
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
-	RESOLVE(msb_sandbox_handle_snapshot_to);
 	RESOLVE(msb_snapshot_create);
 	RESOLVE(msb_snapshot_open);
 	RESOLVE(msb_snapshot_verify);
@@ -857,9 +854,6 @@ char *call_msb_image_save(uint64_t cancel_id, const char *references_json, const
 }
 char *call_msb_sandbox_handle_snapshot(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_snapshot ? ptr_msb_sandbox_handle_snapshot(cancel_id, sandbox_name, snapshot_name, buf, buf_len) : NULL;
-}
-char *call_msb_sandbox_handle_snapshot_to(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_handle_snapshot_to ? ptr_msb_sandbox_handle_snapshot_to(cancel_id, sandbox_name, path, buf, buf_len) : NULL;
 }
 char *call_msb_snapshot_create(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_create ? ptr_msb_snapshot_create(cancel_id, source_sandbox, opts_json, buf, buf_len) : NULL;
@@ -4228,6 +4222,7 @@ type SnapshotInfo struct {
 	SizeBytes           uint64            `json:"size_bytes"`
 	ImageRef            string            `json:"image_ref"`
 	ImageManifestDigest string            `json:"image_manifest_digest"`
+	Scope               string            `json:"scope"`
 	Format              string            `json:"format"`
 	Fstype              string            `json:"fstype"`
 	Parent              *string           `json:"parent"`
@@ -4241,6 +4236,7 @@ type SnapshotHandleInfo struct {
 	Name          *string `json:"name"`
 	ParentDigest  *string `json:"parent_digest"`
 	ImageRef      string  `json:"image_ref"`
+	Scope         string  `json:"scope"`
 	Format        string  `json:"format"`
 	SizeBytes     *uint64 `json:"size_bytes"`
 	CreatedAtUnix int64   `json:"created_at_unix"`
@@ -4259,13 +4255,14 @@ type SnapshotVerifyReport struct {
 
 type SnapshotCreateOptions struct {
 	Name            string            `json:"name,omitempty"`
-	Path            string            `json:"path,omitempty"`
+	DestDir         string            `json:"dest_dir,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Force           bool              `json:"force,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
+	Resumable       bool              `json:"resumable,omitempty"`
 }
 
-type SnapshotExportOptions struct {
+type SnapshotSaveOptions struct {
 	WithParents bool `json:"with_parents,omitempty"`
 	WithImage   bool `json:"with_image,omitempty"`
 	PlainTar    bool `json:"plain_tar,omitempty"`
@@ -4281,27 +4278,6 @@ func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string
 	defer C.free(unsafe.Pointer(cSnapshot))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_handle_snapshot(cancelID, cSandbox, cSnapshot, buf, bufLen)
-	})
-	if err != nil {
-		return nil, err
-	}
-	var info SnapshotInfo
-	if err := json.Unmarshal([]byte(out), &info); err != nil {
-		return nil, fmt.Errorf("parse snapshot: %w", err)
-	}
-	return &info, nil
-}
-
-func SandboxHandleSnapshotTo(ctx context.Context, sandboxName, path string) (*SnapshotInfo, error) {
-	if err := ensureLoaded(); err != nil {
-		return nil, err
-	}
-	cSandbox := C.CString(sandboxName)
-	defer C.free(unsafe.Pointer(cSandbox))
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_handle_snapshot_to(cancelID, cSandbox, cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -4464,7 +4440,7 @@ func SnapshotReindex(ctx context.Context, dir string) (uint32, error) {
 	return raw.Indexed, nil
 }
 
-func SnapshotExport(ctx context.Context, nameOrPath, outPath string, opts SnapshotExportOptions) error {
+func SnapshotSave(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
@@ -4484,7 +4460,7 @@ func SnapshotExport(ctx context.Context, nameOrPath, outPath string, opts Snapsh
 	return err
 }
 
-func SnapshotImport(ctx context.Context, archive, dest string) (*SnapshotHandleInfo, error) {
+func SnapshotLoad(ctx context.Context, archive, dest string) (*SnapshotHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -4500,7 +4476,7 @@ func SnapshotImport(ctx context.Context, archive, dest string) (*SnapshotHandleI
 	}
 	var info SnapshotHandleInfo
 	if err := json.Unmarshal([]byte(out), &info); err != nil {
-		return nil, fmt.Errorf("parse snapshot import: %w", err)
+		return nil, fmt.Errorf("parse snapshot load: %w", err)
 	}
 	return &info, nil
 }

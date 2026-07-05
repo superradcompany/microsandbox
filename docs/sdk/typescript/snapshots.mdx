@@ -7,7 +7,7 @@ Capture the disk state of a stopped sandbox into a portable artifact, then boot 
 
 ```typescript
 import { Sandbox, Snapshot, SnapshotHandle } from "microsandbox";
-import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
+import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox";
 ```
 
 <Note>
@@ -16,10 +16,9 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
 
 <div className="msb-glance">
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Capture &amp; boot<span className="msb-ct">3</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Capture &amp; boot<span className="msb-ct">2</span></p>
   <a className="msb-row" href="/sdk/typescript/sandbox#fromsnapshot"><span className="msb-rn">.fromSnapshot()</span><span className="msb-rg">boot a sandbox from a snapshot</span></a>
   <a className="msb-row" href="#handle-snapshot"><span className="msb-rn">handle.snapshot()</span><span className="msb-rg">snapshot a stopped sandbox by name</span></a>
-  <a className="msb-row" href="#handle-snapshotto"><span className="msb-rn">handle.snapshotTo()</span><span className="msb-rg">snapshot to an explicit path</span></a>
 
   <p className="msb-gl"><span className="msb-dot static"></span>Snapshot · static<span className="msb-ct">9</span></p>
   <a className="msb-row" href="#snapshotbuilder"><span className="msb-rn">Snapshot.builder()</span><span className="msb-rg">configure a new snapshot</span></a>
@@ -29,16 +28,17 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
   <a className="msb-row" href="#snapshot-listdir"><span className="msb-rn">Snapshot.listDir()</span><span className="msb-rg">parse a directory, no index</span></a>
   <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.remove()</span><span className="msb-rg">delete an artifact</span></a>
   <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.reindex()</span><span className="msb-rg">rebuild the local index</span></a>
-  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.export()</span><span className="msb-rg">bundle into an archive</span></a>
-  <a className="msb-row" href="#snapshot-import"><span className="msb-rn">Snapshot.import()</span><span className="msb-rg">unpack an archive</span></a>
+  <a className="msb-row" href="#snapshot-save"><span className="msb-rn">Snapshot.save()</span><span className="msb-rg">bundle into an archive</span></a>
+  <a className="msb-row" href="#snapshot-load"><span className="msb-rn">Snapshot.load()</span><span className="msb-rg">unpack an archive</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Snapshot · instance<span className="msb-ct">12</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Snapshot · instance<span className="msb-ct">13</span></p>
   <a className="msb-row" href="#snap-path"><span className="msb-rn">snap.path</span><span className="msb-rg">artifact directory</span></a>
   <a className="msb-row" href="#snap-digest"><span className="msb-rn">snap.digest</span><span className="msb-rg">canonical content digest</span></a>
   <a className="msb-row" href="#snap-sizebytes"><span className="msb-rn">snap.sizeBytes</span><span className="msb-rg">apparent upper-layer size</span></a>
   <a className="msb-row" href="#snap-imageref"><span className="msb-rn">snap.imageRef</span><span className="msb-rg">source image reference</span></a>
   <a className="msb-row" href="#snap-imagemanifestdigest"><span className="msb-rn">snap.imageManifestDigest</span><span className="msb-rg">pinned image manifest digest</span></a>
   <a className="msb-row" href="#snap-format"><span className="msb-rn">snap.format</span><span className="msb-rg">upper-layer on-disk format</span></a>
+  <a className="msb-row" href="#snap-scope"><span className="msb-rn">snap.scope</span><span className="msb-rg">snapshot scope</span></a>
   <a className="msb-row" href="#snap-fstype"><span className="msb-rn">snap.fstype</span><span className="msb-rg">upper-layer filesystem type</span></a>
   <a className="msb-row" href="#snap-parent"><span className="msb-rn">snap.parent</span><span className="msb-rg">parent digest, or null</span></a>
   <a className="msb-row" href="#snap-createdat"><span className="msb-rn">snap.createdAt</span><span className="msb-rg">creation timestamp</span></a>
@@ -46,13 +46,14 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
   <a className="msb-row" href="#snap-sourcesandbox"><span className="msb-rn">snap.sourceSandbox</span><span className="msb-rg">recorded source sandbox</span></a>
   <a className="msb-row" href="#snap-verify"><span className="msb-rn">snap.verify()</span><span className="msb-rg">recheck content hash</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SnapshotBuilder<span className="msb-ct">6</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SnapshotBuilder<span className="msb-ct">7</span></p>
   <div className="msb-chiprow">
-    <a className="msb-chip" href="#name">.name()</a>
-    <a className="msb-chip" href="#path">.path()</a>
+    <a className="msb-chip" href="#fromsandbox">.fromSandbox()</a>
+    <a className="msb-chip" href="#destdir">.destDir()</a>
     <a className="msb-chip" href="#label">.label()</a>
     <a className="msb-chip" href="#force">.force()</a>
     <a className="msb-chip" href="#recordintegrity">.recordIntegrity()</a>
+    <a className="msb-chip" href="#resumable">.resumable()</a>
     <a className="msb-chip" href="#create">.create()</a>
   </div>
 
@@ -63,7 +64,8 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
   <div className="msb-chiprow">
     <a className="msb-typepill" href="#snapshothandle-class">SnapshotHandle</a>
-    <a className="msb-typepill" href="#exportopts-interface">ExportOpts</a>
+    <a className="msb-typepill" href="#saveopts-interface">SaveOpts</a>
+    <a className="msb-typepill" href="#snapshotscope-type">SnapshotScope</a>
     <a className="msb-typepill" href="#snapshotverifyreport-union">SnapshotVerifyReport</a>
   </div>
 
@@ -77,8 +79,8 @@ import { Sandbox, Snapshot } from "microsandbox";
 // 1. capture: stop the sandbox, then snapshot its disk
 const sb = await Sandbox.get("baseline");
 await sb.stop();
-const snap = await Snapshot.builder("baseline")
-  .name("after-pip-install")     // bare name in the default dir
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")       // sandbox to capture
   .recordIntegrity()             // hash the upper layer
   .create();
 
@@ -140,7 +142,7 @@ const sb = await Sandbox.builder("worker")
 snapshot(name: string): Promise<Snapshot>
 ```
 
-Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed; running sandboxes are rejected with a `SnapshotSandboxRunning` error. For an explicit filesystem destination, see [`snapshotTo()`](#handle-snapshotto).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed; running sandboxes are rejected with a `SnapshotSandboxRunning` error. To place the artifact elsewhere, use [`Snapshot.save()`](#snapshot-save) / [`Snapshot.load()`](#snapshot-load) or move the self-contained artifact directory.
 
 <p className="msb-label">Parameters</p>
 
@@ -172,43 +174,6 @@ const snap = await h.snapshot("after-pip-install");
 
 ---
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshotTo()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
-
-```typescript
-snapshotTo(path: string): Promise<Snapshot>
-```
-
-Snapshot this sandbox to an explicit filesystem path. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Destination artifact directory path.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
-    <div className="msb-param-desc">The created snapshot artifact.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
-
-```typescript
-const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
-```
-
-</Accordion>
-
----
-
 ## Snapshot static methods
 
 ---
@@ -217,17 +182,17 @@ const snap = await h.snapshotTo("/data/snapshots/baseline-v2");
 <div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
-static builder(sourceSandbox: string): SnapshotBuilder
+static builder(name: string): SnapshotBuilder
 ```
 
-Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fluent builder is what powers the CLI internally. The bare-name and explicit-path destinations are mutually exclusive — call exactly one of [`.name()`](#name) or [`.path()`](#path). See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
+Begin building a new snapshot named `name`, resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`) or under [`.destDir()`](#destdir) when set. The fluent builder is what powers the CLI internally. The source sandbox is set with [`.fromSandbox()`](#fromsandbox), which is required. See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>sourceSandbox</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Name of the stopped sandbox to capture.</div>
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare snapshot name; becomes the artifact directory under the default snapshots dir.</div>
   </div>
 </div>
 
@@ -243,8 +208,8 @@ Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fl
 <Accordion title="Example">
 
 ```typescript
-const snap = await Snapshot.builder("baseline")
-  .name("after-pip-install")
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
   .label("stage", "post-deps")
   .recordIntegrity()
   .create();
@@ -367,7 +332,7 @@ for (const h of await Snapshot.list()) {
 static listDir(dir: string): Promise<Snapshot[]>
 ```
 
-Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections that were never imported. Skips entries that don't look like snapshot artifacts.
+Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections that were never loaded. Skips entries that don't look like snapshot artifacts.
 
 <p className="msb-label">Parameters</p>
 
@@ -468,14 +433,14 @@ console.log(`reindexed ${count} snapshots`);
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">export()</span>
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">save()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
-static export(nameOrPath: string, out: string, opts?: ExportOpts): Promise<void>
+static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity hash yet, one is computed and embedded in the bundled manifest so the receiver can verify. See [`ExportOpts`](#exportopts-interface) for bundling options.
+Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity hash yet, one is computed and embedded in the bundled manifest so the receiver can verify. See [`SaveOpts`](#saveopts-interface) for bundling options.
 
 <p className="msb-label">Parameters</p>
 
@@ -489,7 +454,7 @@ Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity 
     <div className="msb-param-desc">Output archive path.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#exportopts-interface">ExportOpts</a></div>
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#saveopts-interface">SaveOpts</a></div>
     <div className="msb-param-desc">Bundling options. All fields default to <code>false</code>.</div>
   </div>
 </div>
@@ -497,7 +462,7 @@ Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity 
 <Accordion title="Example">
 
 ```typescript
-await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
+await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
   withImage: true,
 });
 ```
@@ -506,11 +471,11 @@ await Snapshot.export("after-pip-install", "./baseline.tar.zst", {
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">import()</span>
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
-static import(archive: string, dest?: string): Promise<SnapshotHandle>
+static load(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
 
 Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
@@ -533,15 +498,15 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, v
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#snapshothandle-class">Promise&lt;SnapshotHandle&gt;</a></div>
-    <div className="msb-param-desc">Handle to the imported snapshot.</div>
+    <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
 
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.import("./baseline.tar.zst");
-console.log("imported", h.digest);
+const h = await Snapshot.load("./baseline.tar.zst");
+console.log("loaded", h.digest);
 ```
 
 </Accordion>
@@ -550,7 +515,7 @@ console.log("imported", h.digest);
 
 ## Snapshot instance members {#snapshot-instance}
 
-A `Snapshot` is a snapshot artifact on disk. The artifact is a directory containing `manifest.json` and the captured `upper.ext4`. The directory is the source of truth; the local DB index is just a rebuildable cache. Returned by [`Snapshot.builder().create()`](#snapshotbuilder), [`Snapshot.open()`](#snapshot-open), [`handle.snapshot()`](#handle-snapshot), and [`handle.snapshotTo()`](#handle-snapshotto).
+A `Snapshot` is a snapshot artifact on disk. The artifact is a directory containing the `snapshot.json` descriptor and the captured `upper.ext4`. The directory is the source of truth; the local DB index is just a rebuildable cache. Returned by [`Snapshot.builder().create()`](#snapshotbuilder), [`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
 
 ---
 
@@ -617,6 +582,17 @@ get format(): "raw" | "qcow2"
 ```
 
 On-disk format of the upper layer.
+
+---
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
+<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
+
+```typescript
+get scope(): SnapshotScope
+```
+
+Snapshot scope: `"disk"` for a disk-only snapshot, `"resumable"` once resumable snapshots land. Always `"disk"` today. See [`SnapshotScope`](#snapshotscope-type).
 
 ---
 
@@ -710,45 +686,45 @@ if (report.upper.kind === "verified") {
 
 ## SnapshotBuilder
 
-Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. Pick exactly one destination: [`.name()`](#name) or [`.path()`](#path).
+Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">.</span><span className="msb-hn">fromSandbox()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-name(name: string): this
+fromSandbox(sourceSandbox: string): this
 ```
 
-Set a bare name; the artifact lands under the default snapshots directory. Mutually exclusive with [`.path()`](#path).
+Set the sandbox to capture. Required; [`.create()`](#create) fails without it.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare snapshot name.</div>
+    <div className="msb-param-key"><code>sourceSandbox</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Name of the stopped sandbox to capture.</div>
   </div>
 </div>
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">path()</span>
+#### <span className="msb-recv">.</span><span className="msb-hn">destDir()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-path(path: string): this
+destDir(destDir: string): this
 ```
 
-Set an explicit filesystem path for the artifact. Mutually exclusive with [`.name()`](#name).
+Create the artifact under this parent directory instead of the default snapshots store. The artifact directory is `destDir/<name>`; the name stays the snapshot's identity either way.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Destination artifact directory path.</div>
+    <div className="msb-param-key"><code>destDir</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Parent directory to create the artifact in (e.g. a larger volume).</div>
   </div>
 </div>
 
@@ -785,7 +761,7 @@ Add a `key=value` label to the snapshot manifest. May be called repeatedly.
 force(): this
 ```
 
-Overwrite an existing artifact at the destination instead of failing on conflict.
+Overwrite an existing artifact with the same name instead of failing on conflict.
 
 ---
 
@@ -797,6 +773,17 @@ recordIntegrity(): this
 ```
 
 Compute and record a content-integrity hash of the upper layer at creation time, so the snapshot can be verified later or across a trust boundary.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+resumable(): this
+```
+
+Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, but [`.create()`](#create) currently returns an `Unsupported` error — resumable snapshots have not landed yet.
 
 ---
 
@@ -821,8 +808,8 @@ Capture the configured snapshot and return the resulting artifact.
 <Accordion title="Example">
 
 ```typescript
-const snap = await Snapshot.builder("baseline")
-  .path("/data/snapshots/baseline-v2")
+const snap = await Snapshot.builder("baseline-v2")
+  .fromSandbox("baseline")
   .force()
   .recordIntegrity()
   .create();
@@ -840,13 +827,14 @@ const snap = await Snapshot.builder("baseline")
 
 Lightweight handle backed by an index row. Values are snapshotted from the index at construction time — call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
 
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-import">Snapshot.import()</a></p>
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 
 | Member | Type | Description |
 |--------|------|-------------|
 | `digest` | `string` | Manifest digest (`sha256:hex`), the canonical identity. |
 | `name` | `string \| null` | Convenience name; `null` for digest-only entries. |
 | `parentDigest` | `string \| null` | Parent snapshot's manifest digest, or `null` for a root. |
+| `scope` | [`SnapshotScope`](#snapshotscope-type) | Snapshot payload scope (`"disk"` today). |
 | `imageRef` | `string` | Image reference the snapshot was taken from. |
 | `format` | `"raw" \| "qcow2"` | On-disk format of the upper layer. |
 | `sizeBytes` | `bigint \| null` | Apparent size of the upper file at index time. |
@@ -879,17 +867,29 @@ await h.remove({ force: false });     // refuse if it has children
 
 ---
 
-### ExportOpts <span className="msb-tag is-type">interface</span>
+### SaveOpts <span className="msb-tag is-type">interface</span>
 
-Bundle options for [`Snapshot.export()`](#snapshot-export). All fields default to `false`.
+Bundle options for [`Snapshot.save()`](#snapshot-save). All fields default to `false`.
 
-<p className="msb-backref">Used by <a href="#snapshot-export">Snapshot.export()</a></p>
+<p className="msb-backref">Used by <a href="#snapshot-save">Snapshot.save()</a></p>
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `withParents` | `boolean` | Walk the parent chain and include each ancestor (no-op in v1). |
 | `withImage` | `boolean` | Include the OCI image cache so the archive boots offline. |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar`. |
+
+---
+
+### SnapshotScope <span className="msb-tag is-type">type</span>
+
+Scope of what a snapshot captures. Every snapshot today is `"disk"`; `"resumable"` (disk plus VM state) is reserved for resumable snapshots.
+
+<p className="msb-backref">Returned by <a href="#snap-scope">snap.scope</a> · <a href="#snapshothandle">SnapshotHandle.scope</a></p>
+
+```typescript
+type SnapshotScope = "disk" | "resumable";
+```
 
 ---
 

@@ -248,23 +248,11 @@ impl JsSandboxHandle {
 
     /// Snapshot this (stopped) sandbox under a bare name.
     ///
-    /// Resolves under `~/.microsandbox/snapshots/<name>/`. Use
-    /// [`snapshotTo`](Self::snapshot_to) for an explicit filesystem
-    /// destination.
+    /// Resolves under `~/.microsandbox/snapshots/<name>/`. Move
+    /// artifacts with `Snapshot.save`/`Snapshot.load`.
     #[napi]
     pub async fn snapshot(&self, name: String) -> Result<crate::snapshot::JsSnapshot> {
         let snap = self.inner.snapshot(&name).await.map_err(to_napi_error)?;
-        Ok(crate::snapshot::JsSnapshot::from_rust(snap))
-    }
-
-    /// Snapshot this (stopped) sandbox to an explicit filesystem path.
-    #[napi(js_name = "snapshotTo")]
-    pub async fn snapshot_to(&self, path: String) -> Result<crate::snapshot::JsSnapshot> {
-        let snap = self
-            .inner
-            .snapshot_to(std::path::PathBuf::from(path))
-            .await
-            .map_err(to_napi_error)?;
         Ok(crate::snapshot::JsSnapshot::from_rust(snap))
     }
 }

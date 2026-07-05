@@ -293,8 +293,8 @@ func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithSnapshot(t *testing.T) {
-	got := marshalCreateOptions(t, WithSnapshot("after-pip-install"))
+func TestFFIWireShape_WithFromSnapshot(t *testing.T) {
+	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"))
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
 		t.Fatalf("snapshot = %v, want %q", v, "after-pip-install")
 	}

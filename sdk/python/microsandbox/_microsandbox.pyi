@@ -285,7 +285,6 @@ class SandboxHandle:
     async def wait_until_stopped(self) -> SandboxStopResult: ...
     async def remove(self) -> None: ...
     async def snapshot(self, name: str) -> Snapshot: ...
-    async def snapshot_to(self, path: str | os.PathLike[str]) -> Snapshot: ...
 
 class ExecOutput:
     @property
@@ -657,13 +656,14 @@ class ImagePruneReport:
 class Snapshot:
     @staticmethod
     async def create(
-        source_sandbox: str,
+        name: str,
         *,
-        name: str | None = None,
-        path: str | os.PathLike[str] | None = None,
+        from_sandbox: str,
+        dest_dir: str | os.PathLike[str] | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
+        resumable: bool = False,
     ) -> Snapshot: ...
     @staticmethod
     async def open(path_or_name: str) -> Snapshot: ...
@@ -678,7 +678,7 @@ class Snapshot:
     @staticmethod
     async def reindex(dir: str | os.PathLike[str] | None = None) -> int: ...
     @staticmethod
-    async def export(
+    async def save(
         name_or_path: str,
         out: str | os.PathLike[str],
         *,
@@ -687,7 +687,7 @@ class Snapshot:
         plain_tar: bool = False,
     ) -> None: ...
     @staticmethod
-    async def import_(
+    async def load(
         archive: str | os.PathLike[str],
         *,
         dest: str | os.PathLike[str] | None = None,
@@ -709,6 +709,8 @@ class Snapshot:
     @property
     def parent(self) -> str | None: ...
     @property
+    def scope(self) -> str: ...
+    @property
     def created_at(self) -> str: ...
     @property
     def labels(self) -> dict[str, str]: ...
@@ -723,6 +725,8 @@ class SnapshotHandle:
     def name(self) -> str | None: ...
     @property
     def parent_digest(self) -> str | None: ...
+    @property
+    def scope(self) -> str: ...
     @property
     def image_ref(self) -> str: ...
     @property

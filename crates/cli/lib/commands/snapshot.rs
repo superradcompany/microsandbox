@@ -1,7 +1,7 @@
 //! `msb snapshot` command — manage disk snapshots.
 
 use clap::{Args, Subcommand};
-use microsandbox::{Snapshot, SnapshotDestination};
+use microsandbox::Snapshot;
 
 use crate::ui;
 
@@ -40,23 +40,28 @@ pub enum SnapshotCommands {
     /// Rebuild the local index from artifacts on disk.
     Reindex(SnapshotReindexArgs),
 
-    /// Bundle a snapshot into a `.tar.zst` archive.
-    Export(SnapshotExportArgs),
+    /// Save a snapshot into a `.tar.zst` archive.
+    Save(SnapshotSaveArgs),
 
-    /// Unpack a snapshot archive into the snapshots directory.
-    Import(SnapshotImportArgs),
+    /// Load a snapshot archive into the snapshots directory.
+    Load(SnapshotLoadArgs),
 }
 
 /// Arguments for `msb snapshot create`.
 #[derive(Debug, Args)]
 pub struct SnapshotCreateArgs {
-    /// Destination — bare name (resolved under `~/.microsandbox/snapshots/`)
-    /// or an explicit path to an artifact directory.
-    pub destination: String,
+    /// Snapshot name, resolved under `~/.microsandbox/snapshots/<name>/`
+    /// (or under `--dest-dir` when given).
+    pub name: String,
 
     /// Source sandbox name. Must be stopped (or crashed).
     #[arg(long, value_name = "SANDBOX")]
     pub from: String,
+
+    /// Parent directory to create the artifact in, instead of the
+    /// default snapshots directory. The artifact lands at `DIR/<name>`.
+    #[arg(long = "dest-dir", value_name = "DIR")]
+    pub dest_dir: Option<std::path::PathBuf>,
 
     /// Add a `key=value` label. May be repeated.
     #[arg(long = "label", value_name = "K=V")]
@@ -69,6 +74,14 @@ pub struct SnapshotCreateArgs {
     /// Compute and record content integrity while creating the snapshot.
     #[arg(long)]
     pub integrity: bool,
+
+    /// Request a resumable snapshot with memory/device state.
+    ///
+    /// This flag is reserved by the public contract. Current runtimes
+    /// return an unsupported-feature error instead of creating a
+    /// misleading disk-only artifact.
+    #[arg(long)]
+    pub resumable: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -128,10 +141,10 @@ pub struct SnapshotReindexArgs {
     pub dir: Option<std::path::PathBuf>,
 }
 
-/// Arguments for `msb snapshot export`.
+/// Arguments for `msb snapshot save`.
 #[derive(Debug, Args)]
-pub struct SnapshotExportArgs {
-    /// Snapshot to export (path, name, or digest).
+pub struct SnapshotSaveArgs {
+    /// Snapshot to save (path, name, or digest).
     pub snapshot: String,
 
     /// Output archive path (`.tar.zst` recommended).
@@ -152,9 +165,9 @@ pub struct SnapshotExportArgs {
     pub plain_tar: bool,
 }
 
-/// Arguments for `msb snapshot import`.
+/// Arguments for `msb snapshot load`.
 #[derive(Debug, Args)]
-pub struct SnapshotImportArgs {
+pub struct SnapshotLoadArgs {
     /// Archive to unpack.
     pub archive: std::path::PathBuf,
 
@@ -175,15 +188,16 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Verify(args) => verify(args).await,
         SnapshotCommands::Remove(args) => remove(args).await,
         SnapshotCommands::Reindex(args) => reindex(args).await,
-        SnapshotCommands::Export(args) => export(args).await,
-        SnapshotCommands::Import(args) => import(args).await,
+        SnapshotCommands::Save(args) => save(args).await,
+        SnapshotCommands::Load(args) => load(args).await,
     }
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let dest = parse_destination(&args.destination)?;
-
-    let mut builder = Snapshot::builder(&args.from).destination(dest);
+    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from);
+    if let Some(ref dest_dir) = args.dest_dir {
+        builder = builder.dest_dir(dest_dir);
+    }
     for label in &args.labels {
         let (k, v) = label
             .split_once('=')
@@ -195,6 +209,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     }
     if args.integrity {
         builder = builder.record_integrity();
+    }
+    if args.resumable {
+        builder = builder.resumable();
     }
 
     let spinner = if args.quiet {
@@ -229,8 +246,9 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                 serde_json::json!({
                     "digest": s.digest(),
                     "name": s.name(),
-                    "image_ref": s.image_ref(),
                     "parent_digest": s.parent_digest(),
+                    "scope": format_scope(s.scope()),
+                    "image_ref": s.image_ref(),
                     "format": format_str(s.format()),
                     "size_bytes": s.size_bytes(),
                     "created_at": ui::format_json_datetime(&s.created_at().and_utc()),
@@ -254,7 +272,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["NAME", "IMAGE", "SIZE", "CREATED", "DIGEST"]);
+    let mut table = ui::Table::new(&["NAME", "SCOPE", "IMAGE", "SIZE", "CREATED", "DIGEST"]);
     for s in &snapshots {
         let name = s.name().unwrap_or("-").to_string();
         let size = s
@@ -263,7 +281,14 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| "-".to_string());
         let created = ui::format_datetime(&s.created_at().and_utc());
         let digest = short_digest(s.digest());
-        table.add_row(vec![name, s.image_ref().to_string(), size, created, digest]);
+        table.add_row(vec![
+            name,
+            format_scope(s.scope()).to_string(),
+            s.image_ref().to_string(),
+            size,
+            created,
+            digest,
+        ]);
     }
     table.print();
     Ok(())
@@ -277,6 +302,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Path", &snap.path().display().to_string());
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
+    ui::detail_kv("Scope", format_scope(m.scope));
     ui::detail_kv("Format", format_str(snap.manifest().format));
     ui::detail_kv("Filesystem", &m.fstype);
     ui::detail_kv("Parent", m.parent.as_deref().unwrap_or("-"));
@@ -351,19 +377,19 @@ async fn reindex(args: SnapshotReindexArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn export(args: SnapshotExportArgs) -> anyhow::Result<()> {
-    let opts = microsandbox::snapshot::ExportOpts {
+async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
+    let opts = microsandbox::snapshot::SaveOpts {
         with_parents: args.with_parents,
         with_image: args.with_image,
         plain_tar: args.plain_tar,
     };
-    Snapshot::export(&args.snapshot, &args.out, opts).await?;
+    Snapshot::save(&args.snapshot, &args.out, opts).await?;
     println!("{}", args.out.display());
     Ok(())
 }
 
-async fn import(args: SnapshotImportArgs) -> anyhow::Result<()> {
-    let handle = Snapshot::import(&args.archive, args.dest.as_deref()).await?;
+async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
+    let handle = Snapshot::load(&args.archive, args.dest.as_deref()).await?;
     println!("{}", handle.digest());
     println!("{}", handle.path().display());
     Ok(())
@@ -373,21 +399,17 @@ async fn import(args: SnapshotImportArgs) -> anyhow::Result<()> {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn parse_destination(s: &str) -> anyhow::Result<SnapshotDestination> {
-    if s.is_empty() {
-        anyhow::bail!("destination must not be empty");
-    }
-    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
-        Ok(SnapshotDestination::Path(std::path::PathBuf::from(s)))
-    } else {
-        Ok(SnapshotDestination::Name(s.to_string()))
-    }
-}
-
 fn format_str(f: microsandbox::SnapshotFormat) -> &'static str {
     match f {
         microsandbox::SnapshotFormat::Raw => "raw",
         microsandbox::SnapshotFormat::Qcow2 => "qcow2",
+    }
+}
+
+fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
+    match scope {
+        microsandbox::SnapshotScope::Disk => "disk",
+        microsandbox::SnapshotScope::Resumable => "resumable",
     }
 }
 
@@ -429,5 +451,86 @@ fn format_verify_status(status: &microsandbox::snapshot::UpperVerifyStatus) -> S
         microsandbox::snapshot::UpperVerifyStatus::Verified { algorithm, digest } => {
             format!("verified ({algorithm} {digest})")
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: SnapshotArgs,
+    }
+
+    fn parse_snapshot_args(args: &[&str]) -> SnapshotArgs {
+        TestCli::parse_from(std::iter::once("msb").chain(args.iter().copied())).args
+    }
+
+    #[test]
+    fn create_parses_resumable_contract_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--resumable"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.name, "clean");
+        assert_eq!(args.from, "box");
+        assert!(args.resumable);
+    }
+
+    #[test]
+    fn create_parses_dest_dir() {
+        let args =
+            parse_snapshot_args(&["create", "clean", "--from", "box", "--dest-dir", "/mnt/big"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            args.dest_dir.as_deref(),
+            Some(std::path::Path::new("/mnt/big"))
+        );
+    }
+
+    #[test]
+    fn reindex_parses_dir() {
+        let parsed = parse_snapshot_args(&["reindex", "/tmp/snaps"]);
+        let SnapshotCommands::Reindex(args) = parsed.command else {
+            panic!("expected reindex command");
+        };
+        assert_eq!(
+            args.dir.as_deref(),
+            Some(std::path::Path::new("/tmp/snaps"))
+        );
+    }
+
+    #[test]
+    fn save_parses_args() {
+        let parsed = parse_snapshot_args(&["save", "clean", "bundle.tar", "--plain-tar"]);
+        let SnapshotCommands::Save(args) = parsed.command else {
+            panic!("expected save command");
+        };
+        assert_eq!(args.snapshot, "clean");
+        assert_eq!(args.out, std::path::PathBuf::from("bundle.tar"));
+        assert!(args.plain_tar);
+    }
+
+    #[test]
+    fn load_parses_args() {
+        let parsed = parse_snapshot_args(&["load", "bundle.tar", "/tmp/snaps"]);
+        let SnapshotCommands::Load(args) = parsed.command else {
+            panic!("expected load command");
+        };
+        assert_eq!(args.archive, std::path::PathBuf::from("bundle.tar"));
+        assert_eq!(
+            args.dest.as_deref(),
+            Some(std::path::Path::new("/tmp/snaps"))
+        );
     }
 }

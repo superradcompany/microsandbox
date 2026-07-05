@@ -23,20 +23,20 @@ pub fn sandbox_builder_from_args(
 ) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or snapshot= is required",
+            "image= or from_snapshot= is required",
         ));
     };
 
     let image_present = kwargs.get_item("image")?.is_some();
-    let snapshot_present = kwargs.get_item("snapshot")?.is_some();
+    let snapshot_present = kwargs.get_item("from_snapshot")?.is_some();
     if image_present && snapshot_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "pass either image= or snapshot=, not both",
+            "pass either image= or from_snapshot=, not both",
         ));
     }
     if !image_present && !snapshot_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or snapshot= is required",
+            "image= or from_snapshot= is required",
         ));
     }
 
@@ -44,14 +44,14 @@ pub fn sandbox_builder_from_args(
 
     if snapshot_present {
         // Boot from a snapshot. Accept str or PathLike.
-        let snap_obj = kwargs.get_item("snapshot")?.unwrap();
+        let snap_obj = kwargs.get_item("from_snapshot")?.unwrap();
         let snap_str: String = if let Ok(s) = snap_obj.extract::<String>() {
             s
         } else if let Ok(fspath) = snap_obj.call_method0("__fspath__") {
             fspath.extract()?
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
-                "snapshot must be str or os.PathLike",
+                "from_snapshot must be str or os.PathLike",
             ));
         };
         // Resolve the snapshot synchronously: read the manifest and
@@ -67,18 +67,23 @@ pub fn sandbox_builder_from_args(
             )));
         }
         let manifest_bytes = std::fs::read(
-            snap_dir.join(microsandbox::snapshot::MANIFEST_FILENAME),
+            snap_dir.join(microsandbox::snapshot::DESCRIPTOR_FILENAME),
         )
         .map_err(|e| {
             pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot manifest not readable at {}: {e}",
+                "snapshot descriptor not readable at {}: {e}",
                 snap_dir.display(),
             ))
         })?;
         let manifest =
             microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("snapshot manifest invalid: {e}"))
+                pyo3::exceptions::PyValueError::new_err(format!("snapshot descriptor invalid: {e}"))
             })?;
+        if manifest.scope != microsandbox::snapshot::SnapshotScope::Disk {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "restoring non-disk snapshots is not supported by this runtime",
+            ));
+        }
         let upper_path = snap_dir.join(&manifest.upper.file);
         if !upper_path.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(

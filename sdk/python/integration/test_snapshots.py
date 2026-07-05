@@ -45,7 +45,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
 
         fork = await Sandbox.create(
             fork_name,
-            snapshot=snapshot_name,
+            from_snapshot=snapshot_name,
             cpus=1,
             memory=512,
             replace=True,

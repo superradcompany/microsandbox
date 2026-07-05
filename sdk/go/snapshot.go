@@ -14,19 +14,33 @@ type snapshotFactory struct{}
 
 // SnapshotCreateOptions configures Snapshot.Create.
 type SnapshotCreateOptions struct {
-	Name            string
-	Path            string
+	// Snapshot name, resolved under the default snapshots directory
+	// (or under DestDir when set).
+	Name string
+	// Source sandbox to snapshot. Must be stopped. Required.
+	FromSandbox string
+	// Parent directory to create the artifact in; empty = the default
+	// snapshots directory. The artifact lands at DestDir/<name>.
+	DestDir         string
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
+	Resumable       bool
 }
 
-// SnapshotExportOptions configures Snapshot.Export.
-type SnapshotExportOptions struct {
+// SnapshotSaveOptions configures Snapshot.Save.
+type SnapshotSaveOptions struct {
 	WithParents bool
 	WithImage   bool
 	PlainTar    bool
 }
+
+// Snapshot payload scope values, as reported by SnapshotArtifact.Scope
+// and SnapshotHandle.Scope.
+const (
+	SnapshotScopeDisk      = "disk"
+	SnapshotScopeResumable = "resumable"
+)
 
 // SnapshotVerifyReport is returned by SnapshotArtifact.Verify.
 type SnapshotVerifyReport struct {
@@ -48,6 +62,7 @@ type SnapshotArtifact struct {
 	sizeBytes           uint64
 	imageRef            string
 	imageManifestDigest string
+	scope               string
 	format              string
 	fstype              string
 	parent              *string
@@ -63,6 +78,7 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 		sizeBytes:           info.SizeBytes,
 		imageRef:            info.ImageRef,
 		imageManifestDigest: info.ImageManifestDigest,
+		scope:               normalizeSnapshotScope(info.Scope),
 		format:              info.Format,
 		fstype:              info.Fstype,
 		parent:              info.Parent,
@@ -77,6 +93,7 @@ func (s *SnapshotArtifact) Digest() string              { return s.digest }
 func (s *SnapshotArtifact) SizeBytes() uint64           { return s.sizeBytes }
 func (s *SnapshotArtifact) ImageRef() string            { return s.imageRef }
 func (s *SnapshotArtifact) ImageManifestDigest() string { return s.imageManifestDigest }
+func (s *SnapshotArtifact) Scope() string               { return s.scope }
 func (s *SnapshotArtifact) Format() string              { return s.format }
 func (s *SnapshotArtifact) Fstype() string              { return s.fstype }
 func (s *SnapshotArtifact) Parent() *string             { return cloneStringPtr(s.parent) }
@@ -98,6 +115,7 @@ type SnapshotHandle struct {
 	digest        string
 	name          *string
 	parentDigest  *string
+	scope         string
 	imageRef      string
 	format        string
 	sizeBytes     *uint64
@@ -110,6 +128,7 @@ func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 		digest:        info.Digest,
 		name:          info.Name,
 		parentDigest:  info.ParentDigest,
+		scope:         normalizeSnapshotScope(info.Scope),
 		imageRef:      info.ImageRef,
 		format:        info.Format,
 		sizeBytes:     info.SizeBytes,
@@ -121,6 +140,7 @@ func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 func (h *SnapshotHandle) Digest() string        { return h.digest }
 func (h *SnapshotHandle) Name() *string         { return cloneStringPtr(h.name) }
 func (h *SnapshotHandle) ParentDigest() *string { return cloneStringPtr(h.parentDigest) }
+func (h *SnapshotHandle) Scope() string         { return h.scope }
 func (h *SnapshotHandle) ImageRef() string      { return h.imageRef }
 func (h *SnapshotHandle) Format() string        { return h.format }
 func (h *SnapshotHandle) SizeBytes() *uint64    { return cloneUint64Ptr(h.sizeBytes) }
@@ -135,13 +155,14 @@ func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
 	return Snapshot.Remove(ctx, h.digest, force)
 }
 
-func (snapshotFactory) Create(ctx context.Context, sourceSandbox string, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
-	info, err := ffi.SnapshotCreate(ctx, sourceSandbox, ffi.SnapshotCreateOptions{
+func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
+	info, err := ffi.SnapshotCreate(ctx, opts.FromSandbox, ffi.SnapshotCreateOptions{
 		Name:            opts.Name,
-		Path:            opts.Path,
+		DestDir:         opts.DestDir,
 		Labels:          opts.Labels,
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
+		Resumable:       opts.Resumable,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -198,20 +219,27 @@ func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error) 
 	return n, wrapFFI(err)
 }
 
-func (snapshotFactory) Export(ctx context.Context, nameOrPath, outPath string, opts SnapshotExportOptions) error {
-	return wrapFFI(ffi.SnapshotExport(ctx, nameOrPath, outPath, ffi.SnapshotExportOptions{
+func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
+	return wrapFFI(ffi.SnapshotSave(ctx, nameOrPath, outPath, ffi.SnapshotSaveOptions{
 		WithParents: opts.WithParents,
 		WithImage:   opts.WithImage,
 		PlainTar:    opts.PlainTar,
 	}))
 }
 
-func (snapshotFactory) Import(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
-	info, err := ffi.SnapshotImport(ctx, archive, dest)
+func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
+	info, err := ffi.SnapshotLoad(ctx, archive, dest)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return snapshotHandleFromInfo(info), nil
+}
+
+func normalizeSnapshotScope(scope string) string {
+	if scope == "" {
+		return SnapshotScopeDisk
+	}
+	return scope
 }
 
 func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerifyReport {

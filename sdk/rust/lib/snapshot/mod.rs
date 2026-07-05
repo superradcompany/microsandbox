@@ -6,7 +6,7 @@
 //! artifact is the source of truth; the local DB index is just a
 //! cache of "snapshots I happen to know about on this machine."
 //!
-//! See `planning/microsandbox/implementation/snapshots.md` for the
+//! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
 //! full design. Today snapshots are stopped-sandbox / raw-format only;
 //! the manifest schema and DB columns are forward-compatible with
 //! qcow2 backing chains landing later.
@@ -28,7 +28,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 ///
 /// Returned by [`Snapshot::create`] and [`Snapshot::open`]. The
 /// directory at [`path()`](Snapshot::path) holds the canonical
-/// `manifest.json` and the captured upper file.
+/// `snapshot.json` and the captured upper file.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     path: PathBuf,
@@ -37,12 +37,18 @@ pub struct Snapshot {
 }
 
 /// Builder for [`SnapshotConfig`].
+///
+/// Constructed via [`Snapshot::builder`]. The snapshot name is fixed at
+/// construction; the source sandbox is set with
+/// [`from_sandbox`](Self::from_sandbox) and is required.
 pub struct SnapshotBuilder {
-    source_sandbox: String,
-    destination: Option<SnapshotDestination>,
+    name: String,
+    source_sandbox: Option<String>,
+    dest_dir: Option<PathBuf>,
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
+    resumable: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -50,20 +56,31 @@ pub struct SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl Snapshot {
-    /// Start configuring a new snapshot of `source_sandbox`.
-    pub fn builder(source_sandbox: impl Into<String>) -> SnapshotBuilder {
+    /// Start configuring a snapshot named `name`, stored under the
+    /// default snapshots directory.
+    ///
+    /// The source sandbox is required:
+    /// `Snapshot::builder("clean").from_sandbox("box").create()`.
+    ///
+    /// The name is the artifact's identity; by default the artifact is
+    /// created in the snapshots store, and [`dest_dir`](SnapshotBuilder::dest_dir)
+    /// selects a different parent directory. Archive movement happens
+    /// through [`save`](Self::save)/[`load`](Self::load).
+    pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
         SnapshotBuilder {
-            source_sandbox: source_sandbox.into(),
-            destination: None,
+            name: name.into(),
+            source_sandbox: None,
+            dest_dir: None,
             labels: Vec::new(),
             force: false,
             record_integrity: false,
+            resumable: false,
         }
     }
 
     /// Create a snapshot artifact from a stopped sandbox.
     ///
-    /// Writes `manifest.json` and the captured `upper.ext4` into the
+    /// Writes `snapshot.json` and the captured `upper.ext4` into the
     /// destination directory atomically (manifest renamed last). On
     /// success, also upserts a row into the local `snapshot_index`
     /// cache; index failures are logged but do not fail the call —
@@ -160,25 +177,25 @@ impl Snapshot {
     }
 
     /// Bundle a snapshot into a `.tar.zst` archive.
-    pub async fn export(
+    pub async fn save(
         name_or_path: &str,
         out: &Path,
-        opts: archive::ExportOpts,
+        opts: archive::SaveOpts,
     ) -> MicrosandboxResult<()> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
-        archive::export_snapshot(local, name_or_path, out, opts).await
+        archive::save_snapshot(local, name_or_path, out, opts).await
     }
 
     /// Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
     /// snapshots dir, registering anything found in the index.
-    pub async fn import(
+    pub async fn load(
         archive_path: &Path,
         dest: Option<&Path>,
     ) -> MicrosandboxResult<SnapshotHandle> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
-        archive::import_snapshot(local, archive_path, dest).await
+        archive::load_snapshot(local, archive_path, dest).await
     }
 }
 
@@ -201,6 +218,7 @@ pub struct SnapshotHandle {
     pub(crate) digest: String,
     pub(crate) name: Option<String>,
     pub(crate) parent_digest: Option<String>,
+    pub(crate) scope: SnapshotScope,
     pub(crate) image_ref: String,
     pub(crate) format: SnapshotFormat,
     pub(crate) size_bytes: Option<u64>,
@@ -222,6 +240,11 @@ impl SnapshotHandle {
     /// Parent snapshot's digest, or `None` for a root.
     pub fn parent_digest(&self) -> Option<&str> {
         self.parent_digest.as_deref()
+    }
+
+    /// Snapshot payload scope.
+    pub fn scope(&self) -> SnapshotScope {
+        self.scope
     }
 
     /// Image reference the snapshot was taken from.
@@ -261,23 +284,17 @@ impl SnapshotHandle {
 }
 
 impl SnapshotBuilder {
-    /// Place the artifact at the given path or under the default
-    /// snapshots directory by name.
-    pub fn destination(mut self, dest: SnapshotDestination) -> Self {
-        self.destination = Some(dest);
+    /// Set the source sandbox to snapshot. Required.
+    pub fn from_sandbox(mut self, source_sandbox: impl Into<String>) -> Self {
+        self.source_sandbox = Some(source_sandbox.into());
         self
     }
 
-    /// Convenience: use a bare name resolved under the default
-    /// snapshots directory.
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.destination = Some(SnapshotDestination::Name(name.into()));
-        self
-    }
-
-    /// Convenience: write the artifact to an explicit path.
-    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.destination = Some(SnapshotDestination::Path(path.into()));
+    /// Create the artifact under this parent directory instead of the
+    /// default snapshots store. The artifact directory is
+    /// `dest_dir/<name>`; the name stays the snapshot's identity.
+    pub fn dest_dir(mut self, dest_dir: impl Into<PathBuf>) -> Self {
+        self.dest_dir = Some(dest_dir.into());
         self
     }
 
@@ -299,19 +316,30 @@ impl SnapshotBuilder {
         self
     }
 
+    /// Request a future resumable snapshot.
+    ///
+    /// The builder accepts this stable option now, but creation returns
+    /// `Unsupported` until VM pause/resume capture is implemented.
+    pub fn resumable(mut self) -> Self {
+        self.resumable = true;
+        self
+    }
+
     /// Build the [`SnapshotConfig`].
     pub fn build(self) -> MicrosandboxResult<SnapshotConfig> {
-        let destination = self.destination.ok_or_else(|| {
+        let source_sandbox = self.source_sandbox.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "snapshot builder requires a destination (.name() or .path())".into(),
+                "snapshot builder requires a source sandbox (.from_sandbox())".into(),
             )
         })?;
         Ok(SnapshotConfig {
-            source_sandbox: self.source_sandbox,
-            destination,
+            name: self.name,
+            dest_dir: self.dest_dir,
+            source_sandbox,
             labels: self.labels,
             force: self.force,
             record_integrity: self.record_integrity,
+            resumable: self.resumable,
         })
     }
 
@@ -325,13 +353,14 @@ impl SnapshotBuilder {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use archive::ExportOpts;
+pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
-    ImageRef, MANIFEST_FILENAME, Manifest, SnapshotFormat, UpperIntegrity, UpperLayer,
+    DESCRIPTOR_FILENAME, ImageRef, Manifest, SnapshotFormat, SnapshotScope, UpperIntegrity,
+    UpperLayer,
 };
-pub use microsandbox_types::{SnapshotDestination, SnapshotSpec, SnapshotSpec as SnapshotConfig};
+pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------

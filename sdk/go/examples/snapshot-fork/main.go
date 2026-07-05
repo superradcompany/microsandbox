@@ -78,7 +78,7 @@ func main() {
 	}
 	fmt.Printf("snapshot index entry: name=%s digest=%s\n", name, handle.Digest())
 
-	fork, err := microsandbox.CreateSandbox(ctx, forkName, microsandbox.WithSnapshot(snapshotName))
+	fork, err := microsandbox.CreateSandbox(ctx, forkName, microsandbox.WithFromSnapshot(snapshotName))
 	if err != nil {
 		log.Fatalf("CreateSandbox fork: %v", err)
 	}

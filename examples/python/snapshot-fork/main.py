@@ -23,11 +23,11 @@ async def main():
     print(f"created snapshot: {snap.digest}")
     print(f"                  {snap.path}")
 
-    # `snapshot=` is a peer of `image=`; the fork starts with the captured
-    # upper layer in place.
+    # `from_snapshot=` is a peer of `image=`; the fork starts with the
+    # captured upper layer in place.
     fork = await Sandbox.create(
         "snapshot-fork",
-        snapshot="snapshot-baseline-state",
+        from_snapshot="snapshot-baseline-state",
         replace=True,
     )
     output = await fork.shell("cat /root/marker.txt")

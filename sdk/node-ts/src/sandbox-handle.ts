@@ -214,19 +214,13 @@ export class SandboxHandle {
   /**
    * Snapshot this (stopped) sandbox under a bare name. Resolves under
    * `~/.microsandbox/snapshots/<name>/`. For an explicit filesystem
-   * destination, see `snapshotTo`.
+   * destination, move the artifact with `Snapshot.save`/`Snapshot.load`.
    *
    * The sandbox must be stopped (or crashed); running sandboxes are
    * rejected with a `SnapshotSandboxRunning` error.
    */
   async snapshot(name: string): Promise<Snapshot> {
     const raw = await withMappedErrors(() => this.inner.snapshot(name));
-    return new Snapshot(raw);
-  }
-
-  /** Snapshot this (stopped) sandbox to an explicit filesystem path. */
-  async snapshotTo(path: string): Promise<Snapshot> {
-    const raw = await withMappedErrors(() => this.inner.snapshotTo(path));
     return new Snapshot(raw);
   }
 }

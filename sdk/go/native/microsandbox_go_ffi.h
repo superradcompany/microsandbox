@@ -663,12 +663,6 @@ char *msb_sandbox_handle_snapshot(uint64_t cancel_id,
                                   unsigned char *buf,
                                   uintptr_t buf_len);
 
-char *msb_sandbox_handle_snapshot_to(uint64_t cancel_id,
-                                     const char *sandbox_name,
-                                     const char *path,
-                                     unsigned char *buf,
-                                     uintptr_t buf_len);
-
 char *msb_snapshot_create(uint64_t cancel_id,
                           const char *source_sandbox,
                           const char *opts_json,

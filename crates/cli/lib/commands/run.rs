@@ -18,17 +18,20 @@ use crate::ui;
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
-    /// Mutually exclusive with `--snapshot`; one of the two is required.
-    #[arg(required_unless_present = "snapshot", conflicts_with = "snapshot")]
+    /// Mutually exclusive with `--from-snapshot`; one of the two is required.
+    #[arg(
+        required_unless_present = "from_snapshot",
+        conflicts_with = "from_snapshot"
+    )]
     pub image: Option<String>,
 
     /// Boot a fresh sandbox from a snapshot artifact (path or name).
     ///
-    /// The snapshot pins the image; passing `--snapshot` is equivalent
+    /// The snapshot pins the image; passing `--from-snapshot` is equivalent
     /// to specifying the snapshot's image plus pre-populating the
     /// upper layer from the artifact.
-    #[arg(long, value_name = "PATH_OR_NAME")]
-    pub snapshot: Option<String>,
+    #[arg(long = "from-snapshot", value_name = "PATH_OR_NAME")]
+    pub from_snapshot: Option<String>,
 
     /// Start the sandbox in the background and print its name.
     ///
@@ -162,12 +165,12 @@ async fn run_new(
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
     let mut builder = Sandbox::builder(&name);
-    if let Some(ref snap) = args.snapshot {
+    if let Some(ref snap) = args.from_snapshot {
         builder = builder.from_snapshot(snap.clone());
     } else if let Some(ref image) = args.image {
         builder = builder.image(image.as_str());
     } else {
-        anyhow::bail!("either an image or --snapshot is required");
+        anyhow::bail!("either an image or --from-snapshot is required");
     }
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
@@ -197,7 +200,7 @@ async fn run_new(
     };
 
     let display_label = args
-        .snapshot
+        .from_snapshot
         .clone()
         .or_else(|| args.image.clone())
         .unwrap_or_else(|| name.clone());
@@ -337,9 +340,12 @@ fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
 /// Describe creation-only inputs that are ignored when reusing an
 /// existing named sandbox.
 fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
-    match (args.snapshot.is_some(), args.sandbox.has_creation_flags()) {
-        (true, true) => Some("--snapshot and creation flags"),
-        (true, false) => Some("--snapshot"),
+    match (
+        args.from_snapshot.is_some(),
+        args.sandbox.has_creation_flags(),
+    ) {
+        (true, true) => Some("--from-snapshot and creation flags"),
+        (true, false) => Some("--from-snapshot"),
         (false, true) => Some("creation flags"),
         (false, false) => None,
     }
@@ -418,18 +424,25 @@ mod tests {
 
     #[test]
     fn existing_reuse_warns_for_snapshot() {
-        let args = parse_run_args(&["--name", "box", "--detach", "--snapshot", "clean"]);
+        let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
 
-        assert_eq!(ignored_existing_inputs(&args), Some("--snapshot"));
+        assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
     }
 
     #[test]
     fn existing_reuse_warns_for_snapshot_and_creation_flags() {
-        let args = parse_run_args(&["--name", "box", "--memory", "1G", "--snapshot", "clean"]);
+        let args = parse_run_args(&[
+            "--name",
+            "box",
+            "--memory",
+            "1G",
+            "--from-snapshot",
+            "clean",
+        ]);
 
         assert_eq!(
             ignored_existing_inputs(&args),
-            Some("--snapshot and creation flags")
+            Some("--from-snapshot and creation flags")
         );
     }
 }

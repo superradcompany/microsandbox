@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use microsandbox_image::snapshot::{MANIFEST_FILENAME, Manifest};
+use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
@@ -13,7 +13,7 @@ use crate::backend::LocalBackend;
 use crate::db::entity::snapshot as snapshot_entity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Snapshot, SnapshotFormat, SnapshotHandle};
+use super::{Snapshot, SnapshotFormat, SnapshotHandle, SnapshotScope};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -46,7 +46,7 @@ pub(super) async fn open_snapshot(
         ));
     }
 
-    let manifest_path = dir.join(MANIFEST_FILENAME);
+    let manifest_path = dir.join(DESCRIPTOR_FILENAME);
     let bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
         MicrosandboxError::SnapshotNotFound(format!("{}: {e}", manifest_path.display()))
     })?;
@@ -141,11 +141,16 @@ pub(super) async fn index_upsert(
         microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
         microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
     };
+    let scope_str = match manifest.scope {
+        SnapshotScope::Disk => "disk",
+        SnapshotScope::Resumable => "resumable",
+    };
 
     let row = snapshot_entity::ActiveModel {
         digest: Set(digest.to_string()),
         name: Set(artifact_name),
         parent_digest: Set(manifest.parent.clone()),
+        scope: Set(scope_str.into()),
         image_ref: Set(manifest.image.reference.clone()),
         image_manifest_digest: Set(manifest.image.manifest_digest.clone()),
         format: Set(format_str.into()),
@@ -219,7 +224,7 @@ pub(super) async fn list_dir(
         if !path.is_dir() {
             continue;
         }
-        if !path.join(MANIFEST_FILENAME).exists() {
+        if !path.join(DESCRIPTOR_FILENAME).exists() {
             continue;
         }
         match open_snapshot(local, path.to_string_lossy().as_ref()).await {
@@ -373,10 +378,19 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         "qcow2" => SnapshotFormat::Qcow2,
         _ => SnapshotFormat::Raw,
     };
+    let scope = match m.scope.as_str() {
+        "disk" => SnapshotScope::Disk,
+        "resumable" => SnapshotScope::Resumable,
+        other => {
+            tracing::warn!(digest = %m.digest, scope = other, "unknown snapshot scope in index; treating as disk");
+            SnapshotScope::Disk
+        }
+    };
     SnapshotHandle {
         digest: m.digest,
         name: m.name,
         parent_digest: m.parent_digest,
+        scope,
         image_ref: m.image_ref,
         format,
         size_bytes: m.size_bytes.map(|n| n as u64),

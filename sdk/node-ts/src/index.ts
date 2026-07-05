@@ -97,18 +97,22 @@ export {
 export { Snapshot } from "./snapshot.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
- * Native fluent builder for a snapshot. `new SnapshotBuilder(sourceSandbox)`
- * is equivalent to `Snapshot.builder(sourceSandbox)`.
+ * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
+ * is equivalent to `Snapshot.builder(name)`.
  */
 export const SnapshotBuilder = function SnapshotBuilder(
   this: unknown,
-  sourceSandbox: string,
+  name: string,
 ) {
-  return _Snapshot.builder(sourceSandbox);
-} as unknown as new (sourceSandbox: string) => _SnapBT;
+  return _Snapshot.builder(name);
+} as unknown as new (name: string) => _SnapBT;
 export type SnapshotBuilder = _SnapBT;
 export { SnapshotHandle } from "./snapshot-handle.js";
-export type { ExportOpts, SnapshotVerifyReport } from "./snapshot.js";
+export type {
+  SaveOpts,
+  SnapshotScope,
+  SnapshotVerifyReport,
+} from "./snapshot.js";
 
 // Image management
 export { Image, ImageHandle } from "./image.js";

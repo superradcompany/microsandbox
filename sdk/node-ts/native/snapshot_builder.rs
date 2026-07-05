@@ -1,9 +1,4 @@
-use std::path::PathBuf;
-
-use microsandbox::snapshot::{
-    Snapshot as RustSnapshot, SnapshotBuilder as RustSnapshotBuilder,
-    SnapshotDestination as RustSnapshotDestination,
-};
+use microsandbox::snapshot::{Snapshot as RustSnapshot, SnapshotBuilder as RustSnapshotBuilder};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -18,12 +13,13 @@ use crate::snapshot::JsSnapshot;
 #[derive(Clone)]
 #[napi(object, js_name = "SnapshotConfig")]
 pub struct JsSnapshotConfig {
-    pub source_sandbox: String,
-    pub destination_kind: String, // "name" | "path" | "unset"
-    pub destination_value: Option<String>,
+    pub name: String,
+    pub source_sandbox: Option<String>,
+    pub dest_dir: Option<String>,
     pub labels: Vec<JsSnapshotLabel>,
     pub force: bool,
     pub record_integrity: bool,
+    pub resumable: bool,
 }
 
 #[derive(Clone)]
@@ -34,14 +30,17 @@ pub struct JsSnapshotLabel {
 }
 
 /// Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
+/// The source sandbox is set with `fromSandbox()` and is required.
 #[napi(js_name = "SnapshotBuilder")]
 pub struct JsSnapshotBuilder {
     inner: Option<RustSnapshotBuilder>,
-    source_sandbox: String,
-    destination: Option<RustSnapshotDestination>,
+    name: String,
+    source_sandbox: Option<String>,
+    dest_dir: Option<String>,
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
+    resumable: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -51,33 +50,38 @@ pub struct JsSnapshotBuilder {
 #[napi]
 impl JsSnapshotBuilder {
     #[napi(constructor)]
-    pub fn new(source_sandbox: String) -> Self {
+    pub fn new(name: String) -> Self {
         Self {
-            inner: Some(RustSnapshot::builder(&source_sandbox)),
-            source_sandbox,
-            destination: None,
+            inner: Some(RustSnapshot::builder(&name)),
+            name,
+            source_sandbox: None,
+            dest_dir: None,
             labels: Vec::new(),
             force: false,
             record_integrity: false,
+            resumable: false,
         }
     }
 
-    /// Set a bare name (resolved under the default snapshots dir).
-    #[napi]
-    pub fn name(&mut self, name: String) -> &Self {
+    /// Create the artifact under this parent directory instead of the
+    /// default snapshots store. The artifact lands at `destDir/<name>`.
+    #[napi(js_name = "destDir")]
+    pub fn dest_dir(&mut self, dest_dir: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.name(name.clone()));
-        self.destination = Some(RustSnapshotDestination::Name(name));
+        self.inner = Some(prev.dest_dir(&dest_dir));
+        self.dest_dir = Some(dest_dir);
         self
     }
 
-    /// Set an explicit destination path.
-    #[napi]
-    pub fn path(&mut self, path: String) -> &Self {
+    /// Set the source sandbox to snapshot. Required.
+    // `from_*` normally takes no self, but napi setters mutate in place and
+    // the JS-facing name `fromSandbox` is the contract.
+    #[allow(clippy::wrong_self_convention)]
+    #[napi(js_name = "fromSandbox")]
+    pub fn from_sandbox(&mut self, source_sandbox: String) -> &Self {
         let prev = self.take_inner();
-        let buf = PathBuf::from(&path);
-        self.inner = Some(prev.path(buf.clone()));
-        self.destination = Some(RustSnapshotDestination::Path(buf));
+        self.inner = Some(prev.from_sandbox(source_sandbox.clone()));
+        self.source_sandbox = Some(source_sandbox);
         self
     }
 
@@ -108,20 +112,22 @@ impl JsSnapshotBuilder {
         self
     }
 
+    /// Request a future resumable snapshot.
+    #[napi]
+    pub fn resumable(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.resumable());
+        self.resumable = true;
+        self
+    }
+
     /// Snapshot the accumulated configuration.
     #[napi]
     pub fn build(&self) -> JsSnapshotConfig {
-        let (kind, value) = match &self.destination {
-            Some(RustSnapshotDestination::Name(n)) => ("name".into(), Some(n.clone())),
-            Some(RustSnapshotDestination::Path(p)) => {
-                ("path".into(), Some(p.display().to_string()))
-            }
-            None => ("unset".into(), None),
-        };
         JsSnapshotConfig {
+            name: self.name.clone(),
             source_sandbox: self.source_sandbox.clone(),
-            destination_kind: kind,
-            destination_value: value,
+            dest_dir: self.dest_dir.clone(),
             labels: self
                 .labels
                 .iter()
@@ -132,6 +138,7 @@ impl JsSnapshotBuilder {
                 .collect(),
             force: self.force,
             record_integrity: self.record_integrity,
+            resumable: self.resumable,
         }
     }
 

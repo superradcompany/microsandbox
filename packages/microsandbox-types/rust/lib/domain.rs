@@ -599,30 +599,26 @@ pub struct SandboxPolicy {
 // Types: Snapshots
 //--------------------------------------------------------------------------------------------------
 
-/// Where to place a new snapshot artifact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub enum SnapshotDestination {
-    /// Bare name resolved under the default snapshots directory.
-    Name(String),
-
-    /// Explicit absolute or relative path to the artifact directory.
-    Path(
-        /// Destination path.
-        #[cfg_attr(feature = "ts", ts(type = "string"))]
-        PathBuf,
-    ),
-}
-
 /// Inputs to create a snapshot.
+///
+/// The snapshot's name is its identity; the artifact directory is
+/// `dest_dir.join(name)`, with `dest_dir` defaulting to the snapshots
+/// store. Archive movement happens through save/load (the artifact
+/// directory is also self-contained and safe to move directly).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SnapshotSpec {
+    /// Snapshot name. Always the artifact directory's basename.
+    pub name: String,
+
+    /// Parent directory to create the artifact in. `None` = the default
+    /// snapshots directory.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    pub dest_dir: Option<PathBuf>,
+
     /// Name of the source sandbox. Must be stopped.
     pub source_sandbox: String,
-
-    /// Where to write the artifact.
-    pub destination: SnapshotDestination,
 
     /// User-supplied labels.
     pub labels: Vec<(String, String)>,
@@ -632,6 +628,14 @@ pub struct SnapshotSpec {
 
     /// Compute and record upper-layer content integrity at creation time.
     pub record_integrity: bool,
+
+    /// Request a future resumable snapshot that includes memory/device state.
+    ///
+    /// This is part of the public contract now so callers can validate shape
+    /// early. The local runtime returns an unsupported-feature error until VM
+    /// pause/resume capture lands.
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 //--------------------------------------------------------------------------------------------------

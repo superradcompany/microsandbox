@@ -439,27 +439,9 @@ impl SandboxHandle {
                 available_when: "when cloud snapshots land".into(),
             });
         }
-        use super::super::snapshot::{Snapshot, SnapshotDestination};
-        Snapshot::builder(&self.name)
-            .destination(SnapshotDestination::Name(name.to_string()))
-            .create()
-            .await
-    }
-
-    /// Snapshot this sandbox to an explicit filesystem path. **Local handles only.**
-    pub async fn snapshot_to(
-        &self,
-        path: impl AsRef<std::path::Path>,
-    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
-        if self.local().is_none() {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::snapshot_to on cloud".into(),
-                available_when: "when cloud snapshots land".into(),
-            });
-        }
-        use super::super::snapshot::{Snapshot, SnapshotDestination};
-        Snapshot::builder(&self.name)
-            .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
+        use super::super::snapshot::Snapshot;
+        Snapshot::builder(name)
+            .from_sandbox(&self.name)
             .create()
             .await
     }

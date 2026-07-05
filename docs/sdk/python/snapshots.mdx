@@ -7,13 +7,12 @@ Capture the disk state of a stopped sandbox as a reusable artifact, then boot fr
 
 <div className="msb-glance">
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Take a snapshot<span className="msb-ct">3</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Take a snapshot<span className="msb-ct">2</span></p>
   <a className="msb-row" href="#handle-snapshot"><span className="msb-rn">handle.snapshot()</span><span className="msb-rg">snapshot under a name</span></a>
-  <a className="msb-row" href="#handle-snapshot_to"><span className="msb-rn">handle.snapshot_to()</span><span className="msb-rg">snapshot to a path</span></a>
   <a className="msb-row" href="#snapshot-create"><span className="msb-rn">Snapshot.create()</span><span className="msb-rg">snapshot a stopped sandbox by name</span></a>
 
   <p className="msb-gl"><span className="msb-dot static"></span>Boot from a snapshot<span className="msb-ct">1</span></p>
-  <a className="msb-row" href="#sandbox-create"><span className="msb-rn">Sandbox.create(snapshot=...)</span><span className="msb-rg">boot a fresh sandbox from an artifact</span></a>
+  <a className="msb-row" href="#sandbox-create"><span className="msb-rn">Sandbox.create(from_snapshot=...)</span><span className="msb-rg">boot a fresh sandbox from an artifact</span></a>
 
   <p className="msb-gl"><span className="msb-dot static"></span>Manage artifacts<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#snapshot-open"><span className="msb-rn">Snapshot.open()</span><span className="msb-rg">open an artifact by name or path</span></a>
@@ -22,10 +21,10 @@ Capture the disk state of a stopped sandbox as a reusable artifact, then boot fr
   <a className="msb-row" href="#snapshot-list_dir"><span className="msb-rn">Snapshot.list_dir()</span><span className="msb-rg">parse a directory of artifacts</span></a>
   <a className="msb-row" href="#snapshot-remove"><span className="msb-rn">Snapshot.remove()</span><span className="msb-rg">delete an artifact</span></a>
   <a className="msb-row" href="#snapshot-reindex"><span className="msb-rn">Snapshot.reindex()</span><span className="msb-rg">rebuild the local index</span></a>
-  <a className="msb-row" href="#snapshot-export"><span className="msb-rn">Snapshot.export()</span><span className="msb-rg">bundle into an archive</span></a>
+  <a className="msb-row" href="#snapshot-save"><span className="msb-rn">Snapshot.save()</span><span className="msb-rg">bundle into an archive</span></a>
 
   <p className="msb-gl"><span className="msb-dot static"></span>Move artifacts<span className="msb-ct">1</span></p>
-  <a className="msb-row" href="#snapshot-import_"><span className="msb-rn">Snapshot.import_()</span><span className="msb-rg">unpack an archive</span></a>
+  <a className="msb-row" href="#snapshot-load"><span className="msb-rn">Snapshot.load()</span><span className="msb-rg">unpack an archive</span></a>
 
   <p className="msb-gl"><span className="msb-dot instance"></span>Inspect<span className="msb-ct">3</span></p>
   <a className="msb-row" href="#snap-verify"><span className="msb-rn">snap.verify()</span><span className="msb-rg">recompute and check integrity</span></a>
@@ -51,11 +50,11 @@ async with await Sandbox.create("baseline", image="python:3.12") as sb:
     await sb.stop()
 
 # Capture its disk state under a name
-snap = await Snapshot.create("baseline", name="after-pip-install")
+snap = await Snapshot.create("after-pip-install", from_sandbox="baseline")
 print(snap.digest)
 
 # Boot a fresh sandbox from the artifact
-sb2 = await Sandbox.create("worker", snapshot="after-pip-install")
+sb2 = await Sandbox.create("worker", from_snapshot="after-pip-install")
 ```
 
 ## Take a snapshot
@@ -69,7 +68,7 @@ sb2 = await Sandbox.create("worker", snapshot="after-pip-install")
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. For an explicit filesystem destination, see [`snapshot_to()`](#handle-snapshot_to). Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. To place the artifact elsewhere, use [`Snapshot.save()`](#snapshot-save) / [`Snapshot.load()`](#snapshot-load) or move the self-contained artifact directory. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
 
 <p className="msb-label">Parameters</p>
 
@@ -101,76 +100,39 @@ print(snap.digest)
 
 ---
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot_to()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SandboxHandle</span><span className="msb-tag is-async">async</span></div>
-
-```python
-async def snapshot_to(self, path: str | os.PathLike) -> Snapshot
-```
-
-Snapshot this sandbox to an explicit filesystem path. The sandbox must be stopped or crashed.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">str | os.PathLike</span></div>
-    <div className="msb-param-desc">Destination artifact directory.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
-    <div className="msb-param-desc">The captured snapshot.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
-
-```python
-handle = await Sandbox.get("baseline")
-snap = await handle.snapshot_to("/data/snapshots/baseline")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def create(
-    source_sandbox: str,
+    name: str,
     *,
-    name: str | None = None,
-    path: str | os.PathLike | None = None,
+    from_sandbox: str,
+    dest_dir: str | os.PathLike[str] | None = None,
     labels: dict[str, str] | None = None,
     force: bool = False,
     record_integrity: bool = False,
+    resumable: bool = False,
 ) -> Snapshot
 ```
 
-Create a snapshot from a stopped or crashed sandbox. Exactly one of `name=` (resolved under the default snapshots directory) or `path=` (explicit filesystem destination) is required.
+Create a snapshot from a stopped or crashed sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>source_sandbox</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Name of the stopped or crashed sandbox to capture.</div>
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Bare snapshot name; resolved under the default snapshots directory.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">str | None</span></div>
-    <div className="msb-param-desc">Snapshot name under the default snapshots directory. Mutually exclusive with <code>path</code>.</div>
+    <div className="msb-param-key"><code>from_sandbox</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Name of the stopped or crashed sandbox to capture. Required.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">str | os.PathLike | None</span></div>
-    <div className="msb-param-desc">Explicit destination directory. Mutually exclusive with <code>name</code>.</div>
+    <div className="msb-param-key"><code>dest_dir</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
+    <div className="msb-param-desc">Parent directory to create the artifact in; the artifact lands at <code>dest_dir/&lt;name&gt;</code>. Defaults to the snapshots directory.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
@@ -178,11 +140,15 @@ Create a snapshot from a stopped or crashed sandbox. Exactly one of `name=` (res
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Overwrite an existing destination. Default <code>False</code>.</div>
+    <div className="msb-param-desc">Overwrite an existing artifact with the same name. Default <code>False</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>record_integrity</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Record an integrity hash in the manifest so the artifact can be verified later. Default <code>False</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Request a <code>"resumable"</code> snapshot (disk plus VM state). Accepted, but currently fails with an <code>Unsupported</code> error; resumable snapshots have not landed yet. Default <code>False</code>.</div>
   </div>
 </div>
 
@@ -199,8 +165,8 @@ Create a snapshot from a stopped or crashed sandbox. Exactly one of `name=` (res
 
 ```python
 snap = await Snapshot.create(
-    "baseline",
-    name="after-pip-install",
+    "after-pip-install",
+    from_sandbox="baseline",
     labels={"stage": "post-deps"},
     record_integrity=True,
 )
@@ -219,10 +185,10 @@ snap = await Snapshot.create(
 
 ```python
 @staticmethod
-async def create(name: str, *, snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
+async def create(name: str, *, from_snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
 ```
 
-Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer of `image=`. The two are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
+Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a peer of `image=`. The two are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
 
 <p className="msb-label">Parameters</p>
 
@@ -232,7 +198,7 @@ Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer o
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
+    <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
     <div className="msb-param-desc">Snapshot bare name or artifact path to boot from instead of <code>image=</code>.</div>
   </div>
 </div>
@@ -250,7 +216,7 @@ Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer o
 
 ```python
 # Boot from a snapshot
-sb = await Sandbox.create("worker", snapshot="after-pip-install")
+sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
 
 # Or from an image (existing flow, unchanged)
 sb = await Sandbox.create("worker", image="python:3.12")
@@ -380,7 +346,7 @@ for h in await Snapshot.list():
 async def list_dir(dir: str | os.PathLike) -> list[Snapshot]
 ```
 
-Walk a directory and parse each subdirectory's manifest. Does not touch the index, useful for inspecting external snapshot collections (e.g. a mounted volume of artifacts that were never imported). Skips entries that don't look like snapshot artifacts.
+Walk a directory and parse each subdirectory's manifest. Does not touch the index, useful for inspecting external snapshot collections (e.g. a mounted volume of artifacts that were never loaded). Skips entries that don't look like snapshot artifacts.
 
 <p className="msb-label">Parameters</p>
 
@@ -483,12 +449,12 @@ print(f"indexed {count} snapshots")
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">export()</span>
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">save()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
-async def export(
+async def save(
     name_or_path: str,
     out: str | os.PathLike,
     *,
@@ -505,7 +471,7 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name_or_path</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot bare name or artifact path to export.</div>
+    <div className="msb-param-desc">Snapshot bare name or artifact path to save.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>out</code><span className="msb-type">str | os.PathLike</span></div>
@@ -528,7 +494,7 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
 <Accordion title="Example">
 
 ```python
-await Snapshot.export(
+await Snapshot.save(
     "after-pip-install",
     "/tmp/after-pip-install.tar.zst",
     with_parents=True,
@@ -543,19 +509,19 @@ await Snapshot.export(
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">import_()</span>
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
-async def import_(
+async def load(
     archive: str | os.PathLike,
     *,
     dest: str | os.PathLike | None = None,
 ) -> SnapshotHandle
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity when present. Compression is detected from magic bytes. The trailing underscore is intentional: `import` is a reserved Python keyword.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity when present. Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
@@ -575,14 +541,14 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, v
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
-    <div className="msb-param-desc">Handle to the imported snapshot.</div>
+    <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
 
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.import_("/tmp/after-pip-install.tar.zst")
+h = await Snapshot.load("/tmp/after-pip-install.tar.zst")
 print(h.path)
 ```
 
@@ -702,7 +668,7 @@ await h.remove(force=False)
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#handle-snapshot_to">snapshot_to()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
 
 A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
 
@@ -714,6 +680,7 @@ A fully-parsed snapshot artifact. Properties are read-only attributes (not async
 | `image_ref` | `str` | Image reference the snapshot was taken from |
 | `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
 | `format` | `str` | `"raw"` or `"qcow2"` (always `"raw"` today) |
+| `scope` | `str` | `"disk"` or `"resumable"` (always `"disk"` today) |
 | `fstype` | `str` | Filesystem type inside the upper (e.g. `"ext4"`) |
 | `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
 | `created_at` | `str` | RFC 3339 timestamp |
@@ -725,7 +692,7 @@ A fully-parsed snapshot artifact. Properties are read-only attributes (not async
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-import_">Snapshot.import_()</a></p>
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-load">Snapshot.load()</a></p>
 
 Lightweight handle backed by an index row. Properties are read-only attributes (not async).
 
@@ -736,6 +703,7 @@ Lightweight handle backed by an index row. Properties are read-only attributes (
 | `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
 | `image_ref` | `str` | Image the snapshot was taken from |
 | `format` | `str` | `"raw"` or `"qcow2"` |
+| `scope` | `str` | `"disk"` or `"resumable"` (always `"disk"` today) |
 | `size_bytes` | `int \| None` | Apparent upper size at index time |
 | `created_at` | `float` | ms since Unix epoch |
 | `path` | `str` | Local artifact directory path |

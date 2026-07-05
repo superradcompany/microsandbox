@@ -271,7 +271,6 @@ export interface NapiSandboxHandle {
   logs(opts?: LogOptions): Promise<LogEntry[]>;
   logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
   snapshot(name: string): Promise<NapiSnapshot>;
-  snapshotTo(path: string): Promise<NapiSnapshot>;
 }
 
 export interface NapiSandboxStopResult {
@@ -502,18 +501,19 @@ export interface NapiSnapshotStatic {
   listDir(dir: string): Promise<NapiSnapshot[]>;
   remove(pathOrName: string, opts?: NapiSnapshotRemoveOptions): Promise<void>;
   reindex(dir?: string): Promise<number>;
-  export(name: string, out: string, opts?: NapiExportOpts): Promise<void>;
-  import(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+  save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
+  load(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
 }
 
-export type NapiSnapshotBuilderCtor = new (sourceSandbox: string) => NapiSnapshotBuilder;
+export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
 
 export interface NapiSnapshotBuilderSetters {
-  name(name: string): this;
-  path(path: string): this;
+  fromSandbox(sourceSandbox: string): this;
+  destDir(destDir: string): this;
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
+  resumable(): this;
 }
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
@@ -529,6 +529,7 @@ export interface NapiSnapshot {
   readonly format: string; // "raw" | "qcow2"
   readonly fstype: string;
   readonly parent: string | null | undefined;
+  readonly scope: string; // "disk" | "resumable"
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
@@ -539,6 +540,7 @@ export interface NapiSnapshotHandle {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
+  readonly scope: string; // "disk" | "resumable"
   readonly imageRef: string;
   readonly format: string;
   readonly sizeBytes: bigint | null | undefined;
@@ -552,6 +554,7 @@ export interface NapiSnapshotInfo {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
+  readonly scope: string; // "disk" | "resumable"
   readonly imageRef: string;
   readonly format: string;
   readonly sizeBytes: number | null | undefined;
@@ -559,7 +562,7 @@ export interface NapiSnapshotInfo {
   readonly path: string;
 }
 
-export interface NapiExportOpts {
+export interface NapiSaveOpts {
   withParents?: boolean;
   withImage?: boolean;
   plainTar?: boolean;

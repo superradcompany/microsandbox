@@ -1,9 +1,9 @@
-//! Snapshot manifest schema and canonical (de)serialization.
+//! Snapshot descriptor schema and canonical (de)serialization.
 //!
-//! The manifest is the source of truth for a snapshot artifact. Its
-//! SHA-256 digest over the canonical byte form is the snapshot's
-//! identity. Canonical form means: no insignificant whitespace, struct
-//! fields in declaration order, map keys sorted, no fields elided.
+//! The descriptor (`snapshot.json`) is the source of truth for a snapshot
+//! artifact. Its SHA-256 digest over the canonical byte form is the
+//! snapshot's identity. Canonical form means: no insignificant whitespace,
+//! struct fields in declaration order, map keys sorted, no fields elided.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -17,12 +17,15 @@ use crate::error::{ImageError, ImageResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Current snapshot manifest schema version. Readers reject unknown
+/// Current snapshot descriptor schema version. Readers reject unknown
 /// schemas with a clear error.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Canonical filename for the manifest inside an artifact directory.
-pub const MANIFEST_FILENAME: &str = "manifest.json";
+/// Canonical filename for the descriptor inside an artifact directory.
+pub const DESCRIPTOR_FILENAME: &str = "snapshot.json";
+
+/// Expected artifact kind for snapshot descriptors.
+pub const SNAPSHOT_ARTIFACT_KIND: &str = "snapshot";
 
 /// Default filename for the upper-layer file when format is `raw`.
 pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
@@ -45,6 +48,19 @@ pub enum SnapshotFormat {
     Raw,
     /// qcow2 with optional backing chain (future).
     Qcow2,
+}
+
+/// Snapshot payload scope.
+///
+/// Parsing accepts every known scope so older runtimes can still list and
+/// inspect artifacts they cannot restore; restore paths enforce support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotScope {
+    /// Disk-only snapshot. Captures the writable filesystem state.
+    Disk,
+    /// Resumable snapshot. Reserved for future memory/device-state capture.
+    Resumable,
 }
 
 /// Reference to the OCI image the snapshot was taken from.
@@ -73,7 +89,7 @@ pub struct UpperLayer {
     /// Optional content integrity descriptor.
     ///
     /// Local hot paths are allowed to leave this as `None`; explicit verify
-    /// and import/export boundaries use it when present.
+    /// and save/load boundaries use it when present.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub integrity: Option<UpperIntegrity>,
 }
@@ -88,22 +104,26 @@ pub struct UpperIntegrity {
     pub digest: String,
 }
 
-/// Snapshot artifact manifest.
+/// Snapshot artifact descriptor.
 ///
 /// Field order matters: it determines the byte layout of the canonical
-/// form, and therefore the manifest digest. Do not reorder.
+/// form, and therefore the descriptor digest. Do not reorder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Schema version of this manifest. Readers reject unknown values.
+    /// Schema version of this descriptor. Readers reject unknown values.
     pub schema: u32,
+    /// Artifact kind. Always `"snapshot"` for snapshot descriptors.
+    pub artifact: String,
+    /// Payload scope. Only disk snapshots are created and restored today.
+    pub scope: SnapshotScope,
     /// On-disk format of the upper layer.
     pub format: SnapshotFormat,
     /// Filesystem type inside the upper (e.g. `ext4`).
     pub fstype: String,
     /// Image the snapshot was taken from.
     pub image: ImageRef,
-    /// Manifest digest of the parent snapshot, or `null` for a root.
+    /// Descriptor digest of the parent snapshot, or `null` for a root.
     /// Always `null` today; populated once chained snapshots land.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub parent: Option<String>,
@@ -123,25 +143,34 @@ pub struct Manifest {
 //--------------------------------------------------------------------------------------------------
 
 impl Manifest {
-    /// Validate basic invariants of a manifest.
+    /// Validate basic invariants of a descriptor.
     ///
     /// Called automatically by `from_bytes`; exposed for callers that
-    /// construct manifests programmatically.
+    /// construct descriptors programmatically. Scope is deliberately not
+    /// restricted here — validation answers "is this a well-formed snapshot
+    /// descriptor", while create/restore paths answer "can this runtime
+    /// handle it".
     pub fn validate(&self) -> ImageResult<()> {
         if self.schema != SCHEMA_VERSION {
             return Err(ImageError::ManifestParse(format!(
-                "snapshot manifest: unsupported schema version {} (expected {})",
+                "snapshot descriptor: unsupported schema version {} (expected {})",
                 self.schema, SCHEMA_VERSION
+            )));
+        }
+        if self.artifact != SNAPSHOT_ARTIFACT_KIND {
+            return Err(ImageError::ManifestParse(format!(
+                "snapshot descriptor: unsupported artifact kind {} (expected {})",
+                self.artifact, SNAPSHOT_ARTIFACT_KIND
             )));
         }
         if self.fstype.is_empty() {
             return Err(ImageError::ManifestParse(
-                "snapshot manifest: empty fstype".into(),
+                "snapshot descriptor: empty fstype".into(),
             ));
         }
         if self.image.reference.is_empty() {
             return Err(ImageError::ManifestParse(
-                "snapshot manifest: empty image.ref".into(),
+                "snapshot descriptor: empty image.ref".into(),
             ));
         }
         validate_digest_form(&self.image.manifest_digest, "image.manifest_digest")?;
@@ -150,14 +179,14 @@ impl Manifest {
         }
         if self.upper.file.is_empty() {
             return Err(ImageError::ManifestParse(
-                "snapshot manifest: empty upper.file".into(),
+                "snapshot descriptor: empty upper.file".into(),
             ));
         }
         validate_artifact_filename(&self.upper.file, "upper.file")?;
         if let Some(ref integrity) = self.upper.integrity {
             if integrity.algorithm.is_empty() {
                 return Err(ImageError::ManifestParse(
-                    "snapshot manifest: empty upper.integrity.algorithm".into(),
+                    "snapshot descriptor: empty upper.integrity.algorithm".into(),
                 ));
             }
             validate_digest_form(&integrity.digest, "upper.integrity.digest")?;
@@ -174,23 +203,23 @@ impl Manifest {
     /// - all fields present (no `skip_serializing_if`).
     pub fn to_canonical_bytes(&self) -> ImageResult<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| {
-            ImageError::ManifestParse(format!("snapshot manifest: serialize failed: {e}"))
+            ImageError::ManifestParse(format!("snapshot descriptor: serialize failed: {e}"))
         })
     }
 
-    /// Parse a manifest from canonical byte form.
+    /// Parse a descriptor from canonical byte form.
     ///
     /// Validates the schema version and required fields. Unknown fields
     /// are rejected so schema mistakes are surfaced immediately.
     pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
         let m: Manifest = serde_json::from_slice(bytes).map_err(|e| {
-            ImageError::ManifestParse(format!("snapshot manifest: parse failed: {e}"))
+            ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {e}"))
         })?;
         m.validate()?;
         Ok(m)
     }
 
-    /// Compute this manifest's content digest (`sha256:hex`).
+    /// Compute this descriptor's content digest (`sha256:hex`).
     ///
     /// Hashes the canonical byte form. Stable across processes,
     /// platforms, and serde_json versions as long as the field set and
@@ -210,12 +239,12 @@ impl Manifest {
 fn validate_digest_form(s: &str, field: &str) -> ImageResult<()> {
     let (algo, hex) = s.split_once(':').ok_or_else(|| {
         ImageError::ManifestParse(format!(
-            "snapshot manifest: {field} is not a digest (missing ':'): {s}"
+            "snapshot descriptor: {field} is not a digest (missing ':'): {s}"
         ))
     })?;
     if algo.is_empty() || hex.is_empty() {
         return Err(ImageError::ManifestParse(format!(
-            "snapshot manifest: {field} has empty component: {s}"
+            "snapshot descriptor: {field} has empty component: {s}"
         )));
     }
     Ok(())
@@ -225,12 +254,12 @@ fn validate_artifact_filename(s: &str, field: &str) -> ImageResult<()> {
     let mut components = Path::new(s).components();
     let Some(Component::Normal(_)) = components.next() else {
         return Err(ImageError::ManifestParse(format!(
-            "snapshot manifest: {field} must be a relative artifact filename: {s}"
+            "snapshot descriptor: {field} must be a relative artifact filename: {s}"
         )));
     };
     if components.next().is_some() {
         return Err(ImageError::ManifestParse(format!(
-            "snapshot manifest: {field} must be a single artifact filename: {s}"
+            "snapshot descriptor: {field} must be a single artifact filename: {s}"
         )));
     }
     Ok(())
@@ -258,6 +287,8 @@ mod tests {
         labels.insert("owner".into(), "alice".into());
         Manifest {
             schema: SCHEMA_VERSION,
+            artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+            scope: SnapshotScope::Disk,
             format: SnapshotFormat::Raw,
             fstype: "ext4".into(),
             image: ImageRef {
@@ -333,6 +364,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_artifact_kind() {
+        let mut m = sample_manifest();
+        m.artifact = "checkpoint".into();
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let err = Manifest::from_bytes(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("unsupported artifact kind"));
+    }
+
+    #[test]
+    fn rejects_descriptor_missing_artifact_and_scope() {
+        let bytes = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296,"integrity":null},"source_sandbox":null}"#;
+        let err = Manifest::from_bytes(bytes).unwrap_err();
+        assert!(format!("{err}").contains("missing field"));
+    }
+
+    #[test]
+    fn parses_resumable_scope() {
+        let mut m = sample_manifest();
+        m.scope = SnapshotScope::Resumable;
+        let bytes = m.to_canonical_bytes().unwrap();
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.scope, SnapshotScope::Resumable);
+    }
+
+    #[test]
     fn rejects_invalid_digest_form() {
         let mut m = sample_manifest();
         m.image.manifest_digest = "not-a-digest".into();
@@ -382,14 +438,14 @@ mod tests {
 
     #[test]
     fn rejects_missing_integrity_field() {
-        let bytes = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296},"source_sandbox":null}"#;
+        let bytes = br#"{"schema":1,"artifact":"snapshot","scope":"disk","format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296},"source_sandbox":null}"#;
         let err = Manifest::from_bytes(bytes).unwrap_err();
         assert!(format!("{err}").contains("integrity"));
     }
 
     #[test]
     fn rejects_legacy_upper_sha256_field() {
-        let bytes = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296,"sha256":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"source_sandbox":null}"#;
+        let bytes = br#"{"schema":1,"artifact":"snapshot","scope":"disk","format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296,"sha256":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"source_sandbox":null}"#;
         let err = Manifest::from_bytes(bytes).unwrap_err();
         assert!(format!("{err}").contains("sha256"));
     }
@@ -400,10 +456,14 @@ mod tests {
         let bytes = m.to_canonical_bytes().unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         let schema_pos = s.find("\"schema\"").unwrap();
+        let artifact_pos = s.find("\"artifact\"").unwrap();
+        let scope_pos = s.find("\"scope\"").unwrap();
         let format_pos = s.find("\"format\"").unwrap();
         let upper_pos = s.find("\"upper\"").unwrap();
         let source_pos = s.find("\"source_sandbox\"").unwrap();
-        assert!(schema_pos < format_pos);
+        assert!(schema_pos < artifact_pos);
+        assert!(artifact_pos < scope_pos);
+        assert!(scope_pos < format_pos);
         assert!(format_pos < upper_pos);
         assert!(upper_pos < source_pos);
     }

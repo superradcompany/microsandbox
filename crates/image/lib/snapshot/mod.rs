@@ -5,7 +5,8 @@
 //! lower (image) it was taken from. The artifact is the source of truth;
 //! databases are caches.
 //!
-//! See `planning/microsandbox/implementation/snapshots.md` for the full design.
+//! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md`
+//! for the full design.
 
 pub mod manifest;
 
@@ -14,6 +15,7 @@ pub mod manifest;
 //--------------------------------------------------------------------------------------------------
 
 pub use manifest::{
-    DEFAULT_UPPER_FILE, ImageRef, MANIFEST_FILENAME, Manifest, SCHEMA_VERSION, SPARSE_SHA256_V1,
-    SnapshotFormat, UpperIntegrity, UpperLayer,
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
+    SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SnapshotFormat, SnapshotScope, UpperIntegrity,
+    UpperLayer,
 };

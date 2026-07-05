@@ -1293,13 +1293,10 @@ export declare class SandboxHandle {
   /**
    * Snapshot this (stopped) sandbox under a bare name.
    *
-   * Resolves under `~/.microsandbox/snapshots/<name>/`. Use
-   * [`snapshotTo`](Self::snapshot_to) for an explicit filesystem
-   * destination.
+   * Resolves under `~/.microsandbox/snapshots/<name>/`. Move
+   * artifacts with `Snapshot.save`/`Snapshot.load`.
    */
   snapshot(name: string): Promise<JsSnapshot>
-  /** Snapshot this (stopped) sandbox to an explicit filesystem path. */
-  snapshotTo(path: string): Promise<JsSnapshot>
 }
 export type JsSandboxHandle = SandboxHandle
 
@@ -1384,7 +1381,7 @@ export declare class Snapshot {
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
   /**
-   * Walk `dir` and parse each subdirectory's `manifest.json`. Does
+   * Walk `dir` and parse each subdirectory's `snapshot.json`. Does
    * not touch the local index — useful for inspecting external
    * snapshot collections (e.g. a mounted volume of artifacts that
    * were never imported).
@@ -1392,8 +1389,8 @@ export declare class Snapshot {
   static listDir(dir: string): Promise<Array<Snapshot>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
   static reindex(dir?: string | undefined | null): Promise<number>
-  static export(nameOrPath: string, out: string, opts?: ExportOpts | undefined | null): Promise<void>
-  static import(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
   get path(): string
   get digest(): string
   get sizeBytes(): bigint
@@ -1402,6 +1399,7 @@ export declare class Snapshot {
   get format(): string
   get fstype(): string
   get parent(): string | null
+  get scope(): SnapshotScope
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
@@ -1409,19 +1407,27 @@ export declare class Snapshot {
 }
 export type JsSnapshot = Snapshot
 
-/** Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`. */
+/**
+ * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
+ * The source sandbox is set with `fromSandbox()` and is required.
+ */
 export declare class SnapshotBuilder {
-  constructor(sourceSandbox: string)
-  /** Set a bare name (resolved under the default snapshots dir). */
-  name(name: string): this
-  /** Set an explicit destination path. */
-  path(path: string): this
+  constructor(name: string)
+  /** Set the source sandbox to snapshot. Required. */
+  fromSandbox(sourceSandbox: string): this
+  /**
+   * Create the artifact under this parent directory instead of the
+   * default snapshots store. The artifact lands at `destDir/<name>`.
+   */
+  destDir(destDir: string): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
   /** Overwrite an existing artifact at the destination. */
   force(): this
   /** Compute and record content integrity at create time. */
   recordIntegrity(): this
+  /** Request a future resumable snapshot. */
+  resumable(): this
   /** Snapshot the accumulated configuration. */
   build(): SnapshotConfig
   /**
@@ -1442,6 +1448,7 @@ export declare class SnapshotHandle {
   get digest(): string
   get name(): string | null
   get parentDigest(): string | null
+  get scope(): SnapshotScope
   get imageRef(): string
   get format(): string
   get sizeBytes(): bigint | null
@@ -1671,8 +1678,11 @@ export interface ExitStatus {
   success: boolean
 }
 
-/** Options for `Snapshot.export()`. */
-export interface ExportOpts {
+/** Snapshot payload scope. */
+export type SnapshotScope = "disk" | "resumable"
+
+/** Options for `Snapshot.save()`. */
+export interface SaveOpts {
   /** Walk the parent chain and include each ancestor (no-op today). */
   withParents?: boolean
   /** Bundle the OCI image cache for offline transport. */
@@ -2184,12 +2194,13 @@ export declare function setRuntimeMsbPath(path: string): void
 
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
-  sourceSandbox: string
-  destinationKind: string
-  destinationValue?: string
-  labels: Array<JsSnapshotLabel>
+  name: string
+  sourceSandbox?: string
+  destDir?: string
+  labels: Array<SnapshotLabel>
   force: boolean
   recordIntegrity: boolean
+  resumable: boolean
 }
 
 /** Snapshot index info from the local DB cache. */
@@ -2198,6 +2209,8 @@ export interface SnapshotInfo {
   name?: string
   parentDigest?: string
   imageRef: string
+  /** `"disk"` today; `"resumable"` once memory/device-state restore lands. */
+  scope: string
   /** `"raw"` or `"qcow2"`. */
   format: string
   sizeBytes?: number

@@ -34,7 +34,7 @@ msb stop baseline
 msb snapshot create after-pip-install --from baseline
 
 # 3. Boot a fresh sandbox from the snapshot
-msb run --name worker --snapshot after-pip-install \
+msb run --name worker --from-snapshot after-pip-install \
     -- python -c "import requests; print(requests.__version__)"
 ```
 
@@ -44,7 +44,7 @@ By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`
 
 ## Snapshot a sandbox
 
-Snapshot under a bare name (resolved to `~/.microsandbox/snapshots/<name>/`) or to an explicit path:
+Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is the snapshot's identity; pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
 
 <CodeGroup>
 ```rust Rust
@@ -52,11 +52,8 @@ use microsandbox::Sandbox;
 
 let h = Sandbox::get("baseline").await?;
 
-// Bare name resolves under ~/.microsandbox/snapshots/<name>/
+// Resolves under ~/.microsandbox/snapshots/<name>/
 let snap = h.snapshot("after-pip-install").await?;
-
-// Or write to an explicit path
-let snap = h.snapshot_to("/tmp/snaps/v1").await?;
 
 println!("{}", snap.digest()); // sha256:...
 ```
@@ -66,11 +63,8 @@ import { Sandbox } from "microsandbox";
 
 const h = await Sandbox.get("baseline");
 
-// Bare name resolves under ~/.microsandbox/snapshots/<name>/
+// Resolves under ~/.microsandbox/snapshots/<name>/
 const snap = await h.snapshot("after-pip-install");
-
-// Or write to an explicit path
-const snap2 = await h.snapshotTo("/tmp/snaps/v1");
 
 console.log(snap.digest); // sha256:...
 ```
@@ -80,11 +74,8 @@ from microsandbox import Sandbox
 
 h = await Sandbox.get("baseline")
 
-# Bare name resolves under ~/.microsandbox/snapshots/<name>/
+# Resolves under ~/.microsandbox/snapshots/<name>/
 snap = await h.snapshot("after-pip-install")
-
-# Or write to an explicit path
-snap2 = await h.snapshot_to("/tmp/snaps/v1")
 
 print(snap.digest)  # sha256:...
 ```
@@ -95,19 +86,18 @@ if err != nil {
     return err
 }
 
-// Bare name resolves under ~/.microsandbox/snapshots/<name>/
+// Resolves under ~/.microsandbox/snapshots/<name>/
 snap, err := h.Snapshot(ctx, "after-pip-install")
-
-// Or write to an explicit path
-snap2, err := h.SnapshotTo(ctx, "/tmp/snaps/v1")
 
 fmt.Println(snap.Digest()) // sha256:...
 ```
 
 ```bash CLI
 msb snapshot create after-pip-install --from baseline
-msb snapshot create ./snaps/v1     --from baseline   # Explicit path
 msb snapshot create after-pip-install --from baseline --label stage=ready
+
+# Create the artifact on another volume: lands at /mnt/big/after-pip-install
+msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 ```
 
 </CodeGroup>
@@ -139,18 +129,18 @@ const sb = await Sandbox.builder("worker")
 ```python Python
 from microsandbox import Sandbox
 
-# `snapshot=` is a peer of `image=` and mutually exclusive with it
-sb = await Sandbox.create("worker", snapshot="after-pip-install")
+# `from_snapshot=` is a peer of `image=` and mutually exclusive with it
+sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithSnapshot("after-pip-install"),
+    m.WithFromSnapshot("after-pip-install"),
 )
 ```
 
 ```bash CLI
-msb run --name worker --snapshot after-pip-install -- python -V
+msb run --name worker --from-snapshot after-pip-install -- python -V
 ```
 
 </CodeGroup>
@@ -224,24 +214,24 @@ msb snapshot reindex
 
 ## Move snapshots between machines
 
-The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or export it as an archive:
+The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or save it as an archive:
 
 ```bash
 # Copy the directory directly with scp (image must be cached or pullable on the target)
 scp -r ~/.microsandbox/snapshots/after-pip-install \
     other-host:~/.microsandbox/snapshots/
 
-# Bundle into a .tar.zst, transport, then import
-msb snapshot export after-pip-install /tmp/snap.tar.zst
+# Bundle into a .tar.zst, transport, then load
+msb snapshot save after-pip-install /tmp/snap.tar.zst
 scp /tmp/snap.tar.zst other-host:
-ssh other-host msb snapshot import /tmp/snap.tar.zst
+ssh other-host msb snapshot load /tmp/snap.tar.zst
 
 # Fully offline: include the OCI image cache so the target needs no network
-msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
-ssh other-host msb snapshot import /tmp/snap.tar.zst
+msb snapshot save after-pip-install /tmp/snap.tar.zst --with-image
+ssh other-host msb snapshot load /tmp/snap.tar.zst
 ```
 
-Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same export and import operations as the CLI.
+Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same save and load operations as the CLI.
 
 ## Integrity verification
 
@@ -252,8 +242,8 @@ By default, snapshot creation records enough metadata to validate the artifact w
 use microsandbox::Snapshot;
 
 // Compute and record an integrity hash at create time
-let snap = Snapshot::builder("baseline")
-    .name("after-pip-install")
+let snap = Snapshot::builder("after-pip-install")
+    .from_sandbox("baseline")
     .record_integrity()
     .create()
     .await?;
@@ -267,8 +257,8 @@ let report = snap.verify().await?;
 import { Snapshot } from "microsandbox";
 
 // Compute and record an integrity hash at create time
-const snap = await Snapshot.builder("baseline")
-  .name("after-pip-install")
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
   .recordIntegrity()
   .create();
 
@@ -281,8 +271,8 @@ from microsandbox import Snapshot
 
 # Compute and record an integrity hash at create time
 snap = await Snapshot.create(
-    "baseline",
-    name="after-pip-install",
+    "after-pip-install",
+    from_sandbox="baseline",
     record_integrity=True,
 )
 
@@ -292,9 +282,10 @@ report = await snap.verify()
 
 ```go Go
 // Compute and record an integrity hash at create time
-snap, err := m.Snapshot.Create(ctx, "baseline",
+snap, err := m.Snapshot.Create(ctx,
     m.SnapshotCreateOptions{
         Name:            "after-pip-install",
+        FromSandbox:     "baseline",
         RecordIntegrity: true,
     },
 )
@@ -314,11 +305,11 @@ msb snapshot inspect after-pip-install --verify
 
 </CodeGroup>
 
-`msb snapshot export` bundles the snapshot as it exists on disk. `msb snapshot import` verifies recorded integrity when the archive includes it, so create snapshots with `--integrity` before exporting across a trust boundary.
+`msb snapshot save` bundles the snapshot as it exists on disk. `msb snapshot load` verifies recorded integrity when the archive includes it, so create snapshots with `--integrity` before saving across a trust boundary.
 
 ## Use cases
 
-- **Reusable build state.** Install dependencies once, snapshot, then `msb run --snapshot ...` repeatedly without paying the install cost. Common pattern for CI, agent workloads, and reproducible dev environments.
+- **Reusable build state.** Install dependencies once, snapshot, then `msb run --from-snapshot ...` repeatedly without paying the install cost. Common pattern for CI, agent workloads, and reproducible dev environments.
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
-- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --snapshot` from the pre-migration artifact.
+- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --from-snapshot` from the pre-migration artifact.

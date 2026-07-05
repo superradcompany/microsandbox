@@ -492,14 +492,14 @@ func WithImageDisk(path string, fstype string) SandboxOption {
 // WithBindRootfs uses a host directory directly as the sandbox root filesystem
 // (a bind rootfs): the directory's contents become the guest root filesystem
 // as-is, with no OCI pull and no overlay. Mutually exclusive with WithImage,
-// WithImageDisk, and WithSnapshot.
+// WithImageDisk, and WithFromSnapshot.
 func WithBindRootfs(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
-// WithSnapshot boots from a snapshot artifact by bare name or filesystem path.
+// WithFromSnapshot boots from a snapshot artifact by bare name or filesystem path.
 // It is mutually exclusive with WithImage.
-func WithSnapshot(pathOrName string) SandboxOption {
+func WithFromSnapshot(pathOrName string) SandboxOption {
 	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
 }
 

@@ -14,6 +14,7 @@ mod m20260606_000001_named_volume_kinds;
 mod m20260621_000001_add_sandbox_ephemeral;
 mod m20260621_000002_create_maintenance_lease;
 mod m20260703_000001_add_sandbox_active_config;
+mod m20260705_000001_add_snapshot_scope;
 mod m20260708_000001_migrate_bind_rootfs_source;
 mod m20260710_000001_migrate_root_disk;
 pub mod schema_metadata;
@@ -55,6 +56,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260621_000001_add_sandbox_ephemeral::Migration),
             Box::new(m20260621_000002_create_maintenance_lease::Migration),
             Box::new(m20260703_000001_add_sandbox_active_config::Migration),
+            Box::new(m20260705_000001_add_snapshot_scope::Migration),
             Box::new(m20260708_000001_migrate_bind_rootfs_source::Migration),
             Box::new(m20260710_000001_migrate_root_disk::Migration),
         ]

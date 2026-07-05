@@ -12,9 +12,14 @@ import {
 } from "./snapshot-handle.js";
 
 /**
- * Bundle options for `Snapshot.export`.
+ * Snapshot payload scope.
  */
-export interface ExportOpts {
+export type SnapshotScope = "disk" | "resumable";
+
+/**
+ * Bundle options for `Snapshot.save`.
+ */
+export interface SaveOpts {
   /** Walk the parent chain and include each ancestor (no-op in v1). */
   withParents?: boolean;
   /** Include the OCI image cache so the archive boots offline. */
@@ -59,9 +64,9 @@ export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
  * A snapshot artifact on disk.
  *
  * Returned by `Snapshot.builder(name).create()`, `Snapshot.open(...)`,
- * `SandboxHandle.snapshot(name)`, and `SandboxHandle.snapshotTo(path)`.
+ * and `SandboxHandle.snapshot(name)`.
  *
- * The artifact is a directory containing `manifest.json` and the
+ * The artifact is a directory containing `snapshot.json` and the
  * captured `upper.ext4`. The directory is the source of truth; the
  * local DB index (used for queries like `Snapshot.list()`) is just a
  * cache and is rebuildable via `Snapshot.reindex()`.
@@ -76,19 +81,18 @@ export class Snapshot {
   }
 
   /**
-   * Begin building a new snapshot of `sourceSandbox` (must be stopped).
+   * Begin building a snapshot named `name`, stored under the default
+   * snapshots directory.
    *
-   * The bare-name and explicit-path destinations are mutually
-   * exclusive — call exactly one of `.name(s)` or `.path(p)`.
+   * The source sandbox is required:
+   * `Snapshot.builder("clean").fromSandbox("box").create()`.
+   *
+   * Snapshots are always created in the snapshots store. To place an
+   * artifact elsewhere, use `save()`/`load()`, or move the
+   * self-contained artifact directory directly.
    */
-  static builder(sourceSandbox: string): SnapshotBuilder {
-    const nb = new napi.SnapshotBuilder(sourceSandbox);
-    const origCreate = nb.create.bind(nb);
-    (nb as unknown as { create: () => Promise<Snapshot> }).create = async () => {
-      const inner = await withMappedErrors(() => origCreate());
-      return new Snapshot(inner);
-    };
-    return nb as unknown as SnapshotBuilder;
+  static builder(name: string): SnapshotBuilder {
+    return wrapBuilder(new napi.SnapshotBuilder(name));
   }
 
   /**
@@ -153,12 +157,12 @@ export class Snapshot {
    * has no integrity hash yet, one is computed and embedded in the
    * bundled manifest so the receiver can verify.
    */
-  static async export(
+  static async save(
     nameOrPath: string,
     out: string,
-    opts?: ExportOpts,
+    opts?: SaveOpts,
   ): Promise<void> {
-    await withMappedErrors(() => napi.Snapshot.export(nameOrPath, out, opts));
+    await withMappedErrors(() => napi.Snapshot.save(nameOrPath, out, opts));
   }
 
   /**
@@ -166,8 +170,8 @@ export class Snapshot {
    * snapshots directory, verifying recorded integrity on the way in.
    * Compression is detected from magic bytes.
    */
-  static async import(archive: string, dest?: string): Promise<SnapshotHandle> {
-    const raw = await withMappedErrors(() => napi.Snapshot.import(archive, dest));
+  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
     return new SnapshotHandle(raw);
   }
 
@@ -215,6 +219,11 @@ export class Snapshot {
     return this.inner.parent ?? null;
   }
 
+  /** Snapshot payload scope. */
+  get scope(): SnapshotScope {
+    return this.inner.scope as SnapshotScope;
+  }
+
   /** RFC 3339 timestamp when the snapshot was created. */
   get createdAt(): string {
     return this.inner.createdAt;
@@ -242,6 +251,16 @@ export class Snapshot {
     const r = await withMappedErrors(() => this.inner.verify());
     return verifyReportToTs(r);
   }
+}
+
+/** @internal */
+function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBuilder {
+  const origCreate = nb.create.bind(nb);
+  (nb as unknown as { create: () => Promise<Snapshot> }).create = async () => {
+    const inner = await withMappedErrors(() => origCreate());
+    return new Snapshot(inner);
+  };
+  return nb as unknown as SnapshotBuilder;
 }
 
 /** @internal */

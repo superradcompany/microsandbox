@@ -1,11 +1,11 @@
-//! Snapshot export / import via `.tar.zst` bundles.
+//! Snapshot save / load via `.tar.zst` bundles.
 //!
-//! Default archive format is zstd-compressed tar. Regular files with holes — notably the sparse `upper.ext4`, whose logical size is the configured upper cap rather than the data
-//! written — are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so export cost scales with the data a sandbox actually wrote instead of
-//! the upper layer's logical size. Dense files keep plain regular entries. Plain `.tar` archives are also accepted on import.
+//! Default archive format is zstd-compressed tar. Regular files with holes, notably the sparse `upper.ext4` whose logical size is the configured upper cap rather than the data
+//! written, are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so save cost scales with the data a sandbox actually wrote instead of
+//! the upper layer's logical size. Dense files keep plain regular entries. Plain `.tar` archives are also accepted on load.
 //!
-//! Import walks the tar records itself rather than going through `tokio_tar::Archive`: the entry grammar is closed (regular files, directories, and old-GNU sparse entries at fixed
-//! depths, produced by our own exporter), and owning the walk lets sparse entries be restored map-driven — data runs copied straight off the wire, holes never written and kept
+//! Load walks the tar records itself rather than going through `tokio_tar::Archive`: the entry grammar is closed (regular files, directories, and old-GNU sparse entries at fixed
+//! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
 use std::collections::HashSet;
@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
-use microsandbox_image::snapshot::MANIFEST_FILENAME;
+use microsandbox_image::snapshot::DESCRIPTOR_FILENAME;
 use microsandbox_utils::extent::{self, ExtentMap};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -28,9 +28,9 @@ use super::{Snapshot, SnapshotHandle, store};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Options for [`super::Snapshot::export`].
+/// Options for [`super::Snapshot::save`].
 #[derive(Debug, Clone, Default)]
-pub struct ExportOpts {
+pub struct SaveOpts {
     /// Walk parent chain and include each ancestor in the archive.
     pub with_parents: bool,
     /// Include the OCI image artifacts (EROFS layers, VMDK descriptor)
@@ -74,11 +74,11 @@ impl SparseMap {
 
 /// Bundle a snapshot artifact (and optionally its ancestors / image
 /// cache) into an archive at `out`.
-pub(super) async fn export_snapshot(
+pub(super) async fn save_snapshot(
     local: &LocalBackend,
     name_or_path: &str,
     out: &Path,
-    opts: ExportOpts,
+    opts: SaveOpts,
 ) -> MicrosandboxResult<()> {
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via parent_digest.
@@ -182,7 +182,7 @@ pub(super) async fn export_snapshot(
 /// Unpack an archive into `dest` (defaults to the configured snapshots
 /// dir). Image-cache entries (`cache/...`) are routed into the global
 /// cache. Returns a handle for the head (last-listed) snapshot.
-pub(super) async fn import_snapshot(
+pub(super) async fn load_snapshot(
     local: &LocalBackend,
     archive: &Path,
     dest: Option<&Path>,
@@ -251,6 +251,7 @@ pub(super) async fn import_snapshot(
             .and_then(|s| s.to_str())
             .map(|s| s.to_string()),
         parent_digest: snap.manifest().parent.clone(),
+        scope: snap.manifest().scope,
         image_ref: snap.manifest().image.reference.clone(),
         format,
         size_bytes: Some(snap.manifest().upper.size_bytes),
@@ -274,12 +275,12 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
     for (dir, prefix) in dirs {
-        // Append manifest first so import can recognize the layout
+        // Append the descriptor first so load can recognize the layout
         // even on a truncated read.
-        let manifest_src = dir.join(MANIFEST_FILENAME);
+        let manifest_src = dir.join(DESCRIPTOR_FILENAME);
         if manifest_src.exists() {
             builder
-                .append_path_with_name(&manifest_src, format!("{prefix}/{MANIFEST_FILENAME}"))
+                .append_path_with_name(&manifest_src, format!("{prefix}/{DESCRIPTOR_FILENAME}"))
                 .await?;
         }
         let mut entries = tokio::fs::read_dir(dir).await?;
@@ -289,7 +290,7 @@ where
             let name_str = name
                 .to_str()
                 .ok_or_else(|| MicrosandboxError::Custom("non-utf8 artifact filename".into()))?;
-            if name_str == MANIFEST_FILENAME {
+            if name_str == DESCRIPTOR_FILENAME {
                 continue;
             }
             append_artifact_file(builder, &path, format!("{prefix}/{name_str}")).await?;
@@ -572,7 +573,7 @@ where
         if path_in_archive
             .file_name()
             .and_then(|s| s.to_str())
-            .map(|n| n == MANIFEST_FILENAME)
+            .map(|n| n == DESCRIPTOR_FILENAME)
             .unwrap_or(false)
             && !is_cache_entry
             && let Some(parent) = target.parent()
@@ -1323,7 +1324,7 @@ async fn resolve_parent_artifact(
         return Ok(handle.artifact_path);
     }
     Err(MicrosandboxError::SnapshotNotFound(format!(
-        "parent {parent_digest} not in local index; ship it alongside or re-export with --with-parents"
+        "parent {parent_digest} not in local index; ship it alongside or re-save with --with-parents"
     )))
 }
 

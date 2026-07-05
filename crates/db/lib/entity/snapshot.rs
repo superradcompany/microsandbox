@@ -1,7 +1,7 @@
 //! Entity definition for the `snapshot_index` table.
 //!
 //! This table is a local cache that mirrors snapshot artifacts on disk.
-//! The artifact (`manifest.json` + upper file) is the source of truth;
+//! The artifact (`snapshot.json` + upper file) is the source of truth;
 //! these rows exist for fast queries and parent-edge bookkeeping.
 
 use sea_orm::entity::prelude::*;
@@ -21,6 +21,8 @@ pub struct Model {
     pub name: Option<String>,
     /// Manifest digest of the parent snapshot, or NULL for a root.
     pub parent_digest: Option<String>,
+    /// Snapshot payload scope (`disk` today, `resumable` in the future).
+    pub scope: String,
     /// Human-readable image reference.
     pub image_ref: String,
     /// OCI manifest digest of the image.

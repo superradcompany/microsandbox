@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, ImageRef, MANIFEST_FILENAME, Manifest, SCHEMA_VERSION, SnapshotFormat,
-    UpperLayer,
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
+    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperLayer,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -15,8 +15,8 @@ use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::store::{index_upsert, looks_like_path};
-use super::{Snapshot, SnapshotConfig, SnapshotDestination};
+use super::store::index_upsert;
+use super::{Snapshot, SnapshotConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -27,12 +27,21 @@ pub(super) async fn create_snapshot(
     config: SnapshotConfig,
 ) -> MicrosandboxResult<Snapshot> {
     let SnapshotConfig {
+        name,
+        dest_dir,
         source_sandbox,
-        destination,
         labels,
         force,
         record_integrity,
+        resumable,
     } = config;
+
+    if resumable {
+        return Err(MicrosandboxError::Unsupported {
+            feature: "Resumable snapshots".into(),
+            available_when: "after VM pause/resume and resumable restore support land".into(),
+        });
+    }
 
     let db = local.db().await?.read();
 
@@ -76,7 +85,7 @@ pub(super) async fn create_snapshot(
     }
 
     // Resolve and prepare the destination directory.
-    let dest_dir = resolve_destination(local, &destination)?;
+    let dest_dir = resolve_destination(local, &name, dest_dir)?;
     if dest_dir.exists() {
         if !force {
             return Err(MicrosandboxError::SnapshotAlreadyExists(
@@ -123,6 +132,8 @@ pub(super) async fn create_snapshot(
 
     let manifest = Manifest {
         schema: SCHEMA_VERSION,
+        artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+        scope: SnapshotScope::Disk,
         format: SnapshotFormat::Raw,
         fstype: "ext4".into(),
         image: ImageRef {
@@ -147,9 +158,9 @@ pub(super) async fn create_snapshot(
         .digest()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest digest: {e}")))?;
 
-    // Atomic manifest write: stage as `.tmp`, fsync, rename.
-    let manifest_path = dest_dir.join(MANIFEST_FILENAME);
-    let tmp_path = dest_dir.join(format!("{MANIFEST_FILENAME}.tmp"));
+    // Atomic descriptor write: stage as `.tmp`, fsync, rename.
+    let manifest_path = dest_dir.join(DESCRIPTOR_FILENAME);
+    let tmp_path = dest_dir.join(format!("{DESCRIPTOR_FILENAME}.tmp"));
     tokio::fs::write(&tmp_path, &canonical).await?;
     let tmp_path_for_sync = tmp_path.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -206,24 +217,20 @@ fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
 
 fn resolve_destination(
     local: &LocalBackend,
-    dest: &SnapshotDestination,
+    name: &str,
+    dest_dir: Option<PathBuf>,
 ) -> MicrosandboxResult<PathBuf> {
-    match dest {
-        SnapshotDestination::Path(p) => Ok(p.clone()),
-        SnapshotDestination::Name(name) => {
-            if name.is_empty() {
-                return Err(MicrosandboxError::InvalidConfig(
-                    "snapshot name must not be empty".into(),
-                ));
-            }
-            if looks_like_path(name) {
-                return Err(MicrosandboxError::InvalidConfig(format!(
-                    "snapshot name must be a bare identifier, not a path: '{name}'"
-                )));
-            }
-            Ok(local.snapshots_dir().join(name))
-        }
+    if name.is_empty() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot name must not be empty".into(),
+        ));
     }
+    if name.contains('/') || name.starts_with('.') {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot name must be a bare identifier, not a path: '{name}' (use dest_dir to choose a parent directory)"
+        )));
+    }
+    Ok(dest_dir.unwrap_or_else(|| local.snapshots_dir()).join(name))
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -95,9 +95,9 @@ func TestWithImageDisk(t *testing.T) {
 	}
 }
 
-func TestWithSnapshot(t *testing.T) {
+func TestWithFromSnapshot(t *testing.T) {
 	o := SandboxConfig{}
-	WithSnapshot("after-pip-install")(&o)
+	WithFromSnapshot("after-pip-install")(&o)
 	if o.Snapshot != "after-pip-install" {
 		t.Errorf("got %q, want %q", o.Snapshot, "after-pip-install")
 	}

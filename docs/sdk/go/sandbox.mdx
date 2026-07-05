@@ -1119,7 +1119,7 @@ Functional options for [`CreateSandbox`](#m-createsandbox). Map and slice option
 func WithImage(image string) SandboxOption
 ```
 
-Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithSnapshot`](#withsnapshot) is used. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
+Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithFromSnapshot`](#withfromsnapshot) is used. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
 
 <p className="msb-label">Parameters</p>
 
@@ -1176,11 +1176,11 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 
 ---
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithSnapshot()</span>
+#### <span className="msb-recv"></span><span className="msb-hn">WithFromSnapshot()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
 
 ```go
-func WithSnapshot(pathOrName string) SandboxOption
+func WithFromSnapshot(pathOrName string) SandboxOption
 ```
 
 Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
@@ -2207,7 +2207,6 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `WaitUntilStopped(ctx)` | `(*`[`SandboxStopResult`](#sandboxstopresult)`, error)` | Block until terminal state |
 | `Remove(ctx)` | `error` | Delete sandbox and persisted state |
 | `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
-| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox to an explicit path |
 
 ### SandboxPingResult
 

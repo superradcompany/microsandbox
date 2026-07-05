@@ -676,15 +676,6 @@ func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArt
 	return snapshotFromInfo(info), nil
 }
 
-// SnapshotTo captures this stopped sandbox to an explicit artifact directory.
-func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error) {
-	info, err := ffi.SandboxHandleSnapshotTo(ctx, h.name, path)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return snapshotFromInfo(info), nil
-}
-
 // ---------------------------------------------------------------------------
 // Live sandbox methods
 // ---------------------------------------------------------------------------
