@@ -23,6 +23,18 @@ body {
  * Light is the default; `.dark` (toggled by Mintlify on <html>) overrides.
  */
 
+:root {
+  --msb-code-surface: #fbf8ff;
+  --msb-code-surface-strong: #f6f0ff;
+  --msb-code-border: rgba(109, 75, 196, 0.18);
+}
+
+.dark {
+  --msb-code-surface: #130f1b;
+  --msb-code-surface-strong: #171020;
+  --msb-code-border: rgba(191, 132, 254, 0.24);
+}
+
 /* our links shouldn't get Mintlify's prose underline-border */
 .msb-backref a, .msb-type { border-bottom: 0 !important; }
 
@@ -80,6 +92,30 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 :has(> table) { overflow-x: auto; max-width: 100%; }
 table { table-layout: auto; }
 table th, table td { vertical-align: top; white-space: nowrap; }
+
+/* ----------------------------------------------------------------------------
+ * Code surfaces — Mintlify's default dark code background is nearly neutral and
+ * can read greenish against the microsandbox palette. Tint standalone code
+ * blocks, code groups, and SDK example accordions toward the purple brand color
+ * while keeping the contrast restrained in both themes.
+ * -------------------------------------------------------------------------- */
+.code-block, .code-group {
+  border-color: var(--msb-code-border) !important;
+}
+
+.code-block-background[data-component-part="code-block-root"],
+html.dark body .code-block-background[data-component-part="code-block-root"] {
+  background-color: var(--msb-code-surface) !important;
+}
+
+.code-group {
+  background-color: var(--msb-code-surface-strong) !important;
+}
+
+details.accordion:has(.code-block) {
+  background-color: var(--msb-code-surface) !important;
+  border-color: var(--msb-code-border) !important;
+}
 
 /* ----------------------------------------------------------------------------
  * Example collapsibles — Mintlify wraps the code block in prose margins
