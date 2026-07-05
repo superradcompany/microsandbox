@@ -385,6 +385,8 @@ msb ps --format json      # JSON output
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
+The `CPUS` and `MEM` columns show the sandbox's allocation as `effective / max`, where max is the boot-time hotplug ceiling — the headroom available to a [live resize](/cli/sandbox-commands#msb-modify). Values come from the active config for running sandboxes (so an accepted `msb modify` shows immediately) and from the stored config for stopped ones. For *usage* rather than allocation, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
+
 ## msb metrics
 
 Show live CPU, memory, disk, network, and optional upper disk metrics for running sandboxes.
