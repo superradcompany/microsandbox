@@ -226,7 +226,14 @@ msb modify api --cpus 8 --dry-run          # show the plan, apply nothing
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom — live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
 
-Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column: `applied` (requested, actual, and enforced values match), `converging` (the guest is still onlining CPUs or plugging memory), `guest-refused` (the guest would not cooperate; the host enforces the new limit anyway), and `failed`. JSON output (`--format json`) carries the same states in `resize_status`.
+Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column:
+
+- `applied` — requested, actual, and enforced values match.
+- `converging` — the guest is still onlining CPUs or plugging memory.
+- `guest-refused` — the guest would not cooperate, but the host enforces the new limit anyway.
+- `failed` — the resize did not complete.
+
+JSON output (`--format json`) carries the same states in `resize_status`.
 
 Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment. The plan reports this as a warning.
 
