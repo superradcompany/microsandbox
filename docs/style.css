@@ -27,12 +27,18 @@ body {
   --msb-code-surface: #fdfbff;
   --msb-code-surface-strong: #faf5ff;
   --msb-code-border: rgba(109, 75, 196, 0.16);
+  --msb-code-header: #f6efff;
+  --msb-code-header-hover: #f0e4ff;
+  --msb-code-header-text: #5f3caf;
 }
 
 .dark {
   --msb-code-surface: #171221;
   --msb-code-surface-strong: #1b1428;
   --msb-code-border: rgba(191, 132, 254, 0.24);
+  --msb-code-header: #211832;
+  --msb-code-header-hover: #2a1d40;
+  --msb-code-header-text: #d8c0ff;
 }
 
 /* our links shouldn't get Mintlify's prose underline-border */
@@ -115,6 +121,15 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
 details.accordion:has(.code-block) {
   background-color: var(--msb-code-surface) !important;
   border-color: var(--msb-code-border) !important;
+}
+
+details.accordion:has(.code-block) > summary {
+  background-color: var(--msb-code-header) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+details.accordion:has(.code-block) > summary:hover {
+  background-color: var(--msb-code-header-hover) !important;
 }
 
 /* ----------------------------------------------------------------------------
