@@ -316,12 +316,21 @@ impl ExecSession {
         Ok(())
     }
 
-    /// Sends a signal to the spawned process.
+    /// Sends a signal to the spawned process and everything it started.
+    ///
+    /// The child is made a session leader at spawn (both pipe and PTY modes),
+    /// so signalling the negative pid reaches its whole process group. A bare
+    /// kill(pid) here leaked orphans: killing `sh -c "job &"` took out the
+    /// shell while its backgrounded children survived reparented to init,
+    /// silently accumulating load in the guest.
     pub fn send_signal(&self, signum: i32) -> AgentdResult<()> {
         let sig = Signal::try_from(signum)
             .map_err(|e| AgentdError::ExecSession(format!("invalid signal {signum}: {e}")))?;
-        signal::kill(Pid::from_raw(self.pid), sig)?;
-        Ok(())
+        match signal::kill(Pid::from_raw(-self.pid), sig) {
+            // The group can already be gone when the signal races the exit.
+            Err(nix::errno::Errno::ESRCH) => Ok(()),
+            other => Ok(other?),
+        }
     }
 
     /// Closes the process's stdin.
@@ -559,6 +568,13 @@ impl ExecSession {
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
         unsafe {
             cmd.pre_exec(move || {
+                // Become a session (and process-group) leader so signals sent
+                // to the group reach every descendant the command spawns, not
+                // just the direct child. The PTY path does the same for its
+                // controlling terminal; here it exists purely for group kills.
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
                 if let Some(ref user) = resolved_user {
                     apply_resolved_user(user).map_err(agentd_to_io_error)?;
