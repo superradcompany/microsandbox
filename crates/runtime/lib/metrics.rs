@@ -30,6 +30,12 @@ pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Minimum age after which protected upper filesystem samples are treated as stale.
 const MIN_UPPER_FILESYSTEM_STALE_AFTER: Duration = Duration::from_secs(3);
 
+/// Maximum counter/clock pairing error tolerated for a CPU sample window,
+/// as a fraction of the window's wall time. Normal pairing spread is
+/// microseconds against a 1s window; anything past this ratio means the
+/// sampler was descheduled mid-read and the window's ratio is unusable.
+const MAX_PAIRING_SKEW_RATIO: f64 = 0.05;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -103,14 +109,14 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
-    let mut previous = krun_metrics.aggregate_snapshot();
-    let mut previous_instant = Instant::now();
+    let mut previous = paired_snapshot(&krun_metrics);
     let upper_host_path = upper_host_path.as_deref();
+    let mut last_cpu_percent: Option<f32> = None;
 
     match write_sample(
         &writer,
         None,
-        &previous,
+        &previous.metrics,
         network_metrics.as_deref(),
         upper_host_path,
         upper_stale_after,
@@ -132,25 +138,46 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     loop {
         tokio::time::sleep(interval).await;
 
-        let current = krun_metrics.aggregate_snapshot();
-        let now = Instant::now();
-        let wall_secs = now
-            .checked_duration_since(previous_instant)
+        let current = paired_snapshot(&krun_metrics);
+        let wall_secs = current
+            .at
+            .checked_duration_since(previous.at)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let cpu_percent = clamp_cpu_percent(
-            cpu_percent_from_vcpu_time(
-                current.cpu.vcpu_time_ns,
-                previous.cpu.vcpu_time_ns,
+        // Each window's error bound is half of each endpoint's read spread:
+        // the true counter read lies somewhere inside its bracket.
+        let pairing_skew_secs =
+            (previous.uncertainty.as_secs_f64() + current.uncertainty.as_secs_f64()) / 2.0;
+        let cpu_percent = if pairing_is_reliable(pairing_skew_secs, wall_secs) {
+            let computed = clamp_cpu_percent(
+                cpu_percent_from_vcpu_time(
+                    current.metrics.cpu.vcpu_time_ns,
+                    previous.metrics.cpu.vcpu_time_ns,
+                    wall_secs,
+                ),
+                max_cpus,
+            );
+            if computed.is_some() {
+                last_cpu_percent = computed;
+            }
+            computed
+        } else {
+            // The (counter, timestamp) pairing was disturbed — the sampler
+            // was descheduled mid-read, so this window's ratio is garbage.
+            // Carry the last trustworthy reading instead of publishing it.
+            tracing::debug!(
+                sandbox_id,
+                pairing_skew_secs,
                 wall_secs,
-            ),
-            max_cpus,
-        );
+                "cpu sample window skewed by descheduling; reusing previous reading"
+            );
+            last_cpu_percent
+        };
 
         match write_sample(
             &writer,
             cpu_percent,
-            &current,
+            &current.metrics,
             network_metrics.as_deref(),
             upper_host_path,
             upper_stale_after,
@@ -166,8 +193,41 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         }
 
         previous = current;
-        previous_instant = now;
     }
+}
+
+/// A VMM metrics snapshot paired with the wall-clock moment it describes.
+///
+/// The counter and the clock cannot be read in one atomic step, so the
+/// snapshot is bracketed by two `Instant` reads: `at` is the bracket
+/// midpoint and `uncertainty` its width. Normally the width is microseconds;
+/// when the host deschedules this thread mid-read (observed during a
+/// concurrent VM boot) it grows to whatever the scheduler stole, and the
+/// sample window it bounds must not be trusted for rate math — pairing a
+/// multi-second counter delta with a one-second wall window is exactly how
+/// a 2-vCPU sandbox once read 592% CPU.
+struct PairedSnapshot {
+    metrics: msb_krun::VmMetrics,
+    at: Instant,
+    uncertainty: Duration,
+}
+
+fn paired_snapshot(krun_metrics: &msb_krun::MetricsHandle) -> PairedSnapshot {
+    let before = Instant::now();
+    let metrics = krun_metrics.aggregate_snapshot();
+    let after = Instant::now();
+    let uncertainty = after.saturating_duration_since(before);
+    PairedSnapshot {
+        metrics,
+        at: before + uncertainty / 2,
+        uncertainty,
+    }
+}
+
+/// Whether the counter/clock pairing error is small enough for the window's
+/// vCPU-time-over-wall-time ratio to be meaningful.
+fn pairing_is_reliable(pairing_skew_secs: f64, wall_secs: f64) -> bool {
+    wall_secs > 0.0 && pairing_skew_secs <= wall_secs * MAX_PAIRING_SKEW_RATIO
 }
 
 enum SampleWriteError {
@@ -305,10 +365,10 @@ fn cpu_percent_from_vcpu_time(
 
 /// Clamp a CPU reading to the vCPU hotplug ceiling.
 ///
-/// The VMM's counter aggregation can momentarily pair a vCPU-time delta with
-/// a shorter wall window (observed as a multi-hundred-percent spike while a
-/// concurrent VM boot loaded the host). More vCPU-seconds per second than
-/// vCPUs exist is physically impossible, so cap at `max_cpus * 100`.
+/// Skewed windows are already rejected by the pairing check; this is the
+/// invariant backstop for anything that still slips through — more
+/// vCPU-seconds per second than vCPUs exist is physically impossible, so
+/// cap at `max_cpus * 100`.
 fn clamp_cpu_percent(cpu_percent: Option<f32>, max_cpus: u8) -> Option<f32> {
     let ceiling = f32::from(max_cpus.max(1)) * 100.0;
     cpu_percent.map(|pct| pct.min(ceiling))
@@ -373,6 +433,20 @@ mod tests {
         assert_eq!(clamp_cpu_percent(Some(197.5), 2), Some(197.5));
         assert_eq!(clamp_cpu_percent(Some(150.0), 0), Some(100.0));
         assert_eq!(clamp_cpu_percent(None, 2), None);
+    }
+
+    #[test]
+    fn pairing_gate_rejects_descheduled_windows() {
+        // Normal operation: microsecond read spread against a 1s window.
+        assert!(pairing_is_reliable(0.000_05, 1.0));
+        // Right at the tolerance boundary.
+        assert!(pairing_is_reliable(0.05, 1.0));
+        // A deschedule mid-read (the 592%-on-2-vCPUs incident: ~2s stolen
+        // between the counter read and its timestamp) must be rejected.
+        assert!(!pairing_is_reliable(1.0, 1.0));
+        assert!(!pairing_is_reliable(0.051, 1.0));
+        // Degenerate window.
+        assert!(!pairing_is_reliable(0.0, 0.0));
     }
 
     #[test]
