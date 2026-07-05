@@ -64,21 +64,43 @@ impl NetworkMetrics for microsandbox_network::network::MetricsHandle {
     }
 }
 
+/// Inputs for [`run_metrics_sampler`].
+pub struct MetricsSamplerSpec {
+    /// Slot writer owning the sandbox's registry slot.
+    pub writer: MetricsSlotWriter,
+    /// Catalog sandbox id, used for diagnostics.
+    pub sandbox_id: i32,
+    /// Runtime process id, used for diagnostics.
+    pub pid: u32,
+    /// Sampling interval in milliseconds.
+    pub interval_ms: NonZero<u64>,
+    /// vCPU hotplug ceiling; CPU readings are clamped to `max_cpus * 100`.
+    pub max_cpus: u8,
+    /// VMM metrics source.
+    pub krun_metrics: msb_krun::MetricsHandle,
+    /// Optional runtime network byte counters.
+    pub network_metrics: Option<Box<dyn NetworkMetrics>>,
+    /// Host path of the writable upper image, when one exists.
+    pub upper_host_path: Option<std::path::PathBuf>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Run the background metrics sampler until the sandbox process exits or
 /// the slot is reclaimed.
-pub async fn run_metrics_sampler(
-    writer: MetricsSlotWriter,
-    sandbox_id: i32,
-    pid: u32,
-    interval_ms: NonZero<u64>,
-    krun_metrics: msb_krun::MetricsHandle,
-    network_metrics: Option<Box<dyn NetworkMetrics>>,
-    upper_host_path: Option<std::path::PathBuf>,
-) {
+pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
+    let MetricsSamplerSpec {
+        writer,
+        sandbox_id,
+        pid,
+        interval_ms,
+        max_cpus,
+        krun_metrics,
+        network_metrics,
+        upper_host_path,
+    } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
     let mut previous = krun_metrics.aggregate_snapshot();
@@ -116,10 +138,13 @@ pub async fn run_metrics_sampler(
             .checked_duration_since(previous_instant)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let cpu_percent = cpu_percent_from_vcpu_time(
-            current.cpu.vcpu_time_ns,
-            previous.cpu.vcpu_time_ns,
-            wall_secs,
+        let cpu_percent = clamp_cpu_percent(
+            cpu_percent_from_vcpu_time(
+                current.cpu.vcpu_time_ns,
+                previous.cpu.vcpu_time_ns,
+                wall_secs,
+            ),
+            max_cpus,
         );
 
         match write_sample(
@@ -278,6 +303,17 @@ fn cpu_percent_from_vcpu_time(
     }
 }
 
+/// Clamp a CPU reading to the vCPU hotplug ceiling.
+///
+/// The VMM's counter aggregation can momentarily pair a vCPU-time delta with
+/// a shorter wall window (observed as a multi-hundred-percent spike while a
+/// concurrent VM boot loaded the host). More vCPU-seconds per second than
+/// vCPUs exist is physically impossible, so cap at `max_cpus * 100`.
+fn clamp_cpu_percent(cpu_percent: Option<f32>, max_cpus: u8) -> Option<f32> {
+    let ceiling = f32::from(max_cpus.max(1)) * 100.0;
+    cpu_percent.map(|pct| pct.min(ceiling))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -327,6 +363,16 @@ mod tests {
         );
         assert_eq!(cpu_percent_from_vcpu_time(None, Some(0), 1.0), None);
         assert_eq!(cpu_percent_from_vcpu_time(Some(0), Some(0), 0.0), None);
+    }
+
+    #[test]
+    fn cpu_percent_is_clamped_to_the_vcpu_ceiling() {
+        // A skewed counter window can report more vCPU-seconds per second
+        // than vCPUs exist; the ceiling caps it.
+        assert_eq!(clamp_cpu_percent(Some(592.0), 2), Some(200.0));
+        assert_eq!(clamp_cpu_percent(Some(197.5), 2), Some(197.5));
+        assert_eq!(clamp_cpu_percent(Some(150.0), 0), Some(100.0));
+        assert_eq!(clamp_cpu_percent(None, 2), None);
     }
 
     #[test]

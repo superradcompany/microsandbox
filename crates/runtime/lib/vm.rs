@@ -792,6 +792,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let metrics_sandbox_id = config.sandbox_id;
     let metrics_sandbox_name = config.sandbox_name.clone();
     let metrics_pid = pid;
+    // Same effective ceiling the VMM boots with (max_vcpus is clamped to at
+    // least the online count); used to cap physically impossible CPU spikes.
+    let metrics_max_cpus = config.vm.max_cpus.max(config.vm.vcpus);
 
     // Opportunistic host-runtime lifecycle maintenance: reconcile stale active
     // sandboxes and clean terminal ephemeral leftovers from runtimes that died
@@ -834,15 +837,16 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         interval_ms = interval_ms.get(),
                         "starting metrics sampler after agent ready"
                     );
-                    tokio::spawn(run_metrics_sampler(
+                    tokio::spawn(run_metrics_sampler(crate::metrics::MetricsSamplerSpec {
                         writer,
-                        metrics_sandbox_id,
-                        metrics_pid,
+                        sandbox_id: metrics_sandbox_id,
+                        pid: metrics_pid,
                         interval_ms,
-                        krun_metrics_handle,
-                        network_metrics_handle,
+                        max_cpus: metrics_max_cpus,
+                        krun_metrics: krun_metrics_handle,
+                        network_metrics: network_metrics_handle,
                         upper_host_path,
-                    ));
+                    }));
                 }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
