@@ -84,11 +84,11 @@ table th, table td { vertical-align: top; white-space: nowrap; }
 /* ----------------------------------------------------------------------------
  * Example collapsibles — Mintlify wraps the code block in prose margins
  * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
- * leaves a lot of dead space inside the accordion. Trim it to an even, tight
+ * leaves a lot of dead space inside the accordion. Trim it to a balanced, tight
  * inset. Scoped to accordions that hold a code block so prose accordions are
  * left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block) > *:not(summary) { margin: 0 0.75rem 0.75rem !important; }
+details.accordion:has(.code-block) > *:not(summary) { margin: 0.75rem !important; }
 details.accordion:has(.code-block) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
