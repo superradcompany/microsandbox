@@ -5,135 +5,6 @@ description: TypeScript SDK - Network API reference
 
 Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · NetworkPolicy<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#networkpolicybuilder"><span className="msb-rn">NetworkPolicy.builder()</span><span className="msb-rg">start the fluent builder</span></a>
-  <a className="msb-row" href="#networkpolicy-none"><span className="msb-rn">NetworkPolicy.none()</span><span className="msb-rg">deny everything</span></a>
-  <a className="msb-row" href="#networkpolicy-allowall"><span className="msb-rn">NetworkPolicy.allowAll()</span><span className="msb-rg">allow everything</span></a>
-  <a className="msb-row" href="#networkpolicy-publiconly"><span className="msb-rn">NetworkPolicy.publicOnly()</span><span className="msb-rg">public internet only (default)</span></a>
-  <a className="msb-row" href="#networkpolicy-nonlocal"><span className="msb-rn">NetworkPolicy.nonLocal()</span><span className="msb-rg">public + private, no local</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · Rule / Destination / PortRange<span className="msb-ct">14</span></p>
-  <a className="msb-row" href="#rule-allowegress"><span className="msb-rn">Rule.allowEgress()</span><span className="msb-rg">allow rule, egress</span></a>
-  <a className="msb-row" href="#rule-denyegress"><span className="msb-rn">Rule.denyEgress()</span><span className="msb-rg">deny rule, egress</span></a>
-  <a className="msb-row" href="#rule-allowingress"><span className="msb-rn">Rule.allowIngress()</span><span className="msb-rg">allow rule, ingress</span></a>
-  <a className="msb-row" href="#rule-denyingress"><span className="msb-rn">Rule.denyIngress()</span><span className="msb-rg">deny rule, ingress</span></a>
-  <a className="msb-row" href="#rule-allowany"><span className="msb-rn">Rule.allowAny()</span><span className="msb-rg">allow rule, both directions</span></a>
-  <a className="msb-row" href="#rule-denyany"><span className="msb-rn">Rule.denyAny()</span><span className="msb-rg">deny rule, both directions</span></a>
-  <a className="msb-row" href="#rule-allowdns"><span className="msb-rn">Rule.allowDns()</span><span className="msb-rg">open plain DNS to gateway</span></a>
-  <a className="msb-row" href="#destination-any"><span className="msb-rn">Destination.any()</span><span className="msb-rg">match any destination</span></a>
-  <a className="msb-row" href="#destination-cidr"><span className="msb-rn">Destination.cidr()</span><span className="msb-rg">match an IP range</span></a>
-  <a className="msb-row" href="#destination-domain"><span className="msb-rn">Destination.domain()</span><span className="msb-rg">match an exact domain</span></a>
-  <a className="msb-row" href="#destination-domainsuffix"><span className="msb-rn">Destination.domainSuffix()</span><span className="msb-rg">match apex + subdomains</span></a>
-  <a className="msb-row" href="#destinationgroup"><span className="msb-rn">Destination.group()</span><span className="msb-rg">match an address group</span></a>
-  <a className="msb-row" href="#portrange-single"><span className="msb-rn">PortRange.single()</span><span className="msb-rg">a single port</span></a>
-  <a className="msb-row" href="#portrange-range"><span className="msb-rn">PortRange.range()</span><span className="msb-rg">an inclusive port range</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · NetworkBuilder<span className="msb-ct">18</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#policy">.policy()</a>
-    <a className="msb-chip" href="#port">.port()</a>
-    <a className="msb-chip" href="#portudp">.portUdp()</a>
-    <a className="msb-chip" href="#portbind">.portBind()</a>
-    <a className="msb-chip" href="#portudpbind">.portUdpBind()</a>
-    <a className="msb-chip" href="#dns">.dns()</a>
-    <a className="msb-chip" href="#tls">.tls()</a>
-    <a className="msb-chip" href="#trusthostcas">.trustHostCAs()</a>
-    <a className="msb-chip" href="#maxconnections">.maxConnections()</a>
-    <a className="msb-chip" href="#ipv4pool">.ipv4Pool()</a>
-    <a className="msb-chip" href="#ipv6pool">.ipv6Pool()</a>
-    <a className="msb-chip" href="#nb-interface">.interface()</a>
-    <a className="msb-chip" href="#enabled">.enabled()</a>
-    <a className="msb-chip" href="#onsecretviolation">.onSecretViolation()</a>
-    <a className="msb-chip" href="#nb-secret">.secret()</a>
-    <a className="msb-chip" href="#secretenv">.secretEnv()</a>
-    <a className="msb-chip" href="#secretenvsimple">.secretEnvSimple()</a>
-    <a className="msb-chip" href="#nb-build">.build()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · NetworkPolicyBuilder<span className="msb-ct">9</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#defaultdeny">.defaultDeny()</a>
-    <a className="msb-chip" href="#defaultallow">.defaultAllow()</a>
-    <a className="msb-chip" href="#defaultegress">.defaultEgress()</a>
-    <a className="msb-chip" href="#defaultingress">.defaultIngress()</a>
-    <a className="msb-chip" href="#egress">.egress()</a>
-    <a className="msb-chip" href="#ingress">.ingress()</a>
-    <a className="msb-chip" href="#any">.any()</a>
-    <a className="msb-chip" href="#rule">.rule()</a>
-    <a className="msb-chip" href="#build">.build()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · RuleBuilder<span className="msb-ct">36</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#rb-egress">.egress()</a>
-    <a className="msb-chip" href="#rb-ingress">.ingress()</a>
-    <a className="msb-chip" href="#rb-any">.any()</a>
-    <a className="msb-chip" href="#tcp">.tcp()</a>
-    <a className="msb-chip" href="#udp">.udp()</a>
-    <a className="msb-chip" href="#port-1">.port()</a>
-    <a className="msb-chip" href="#allowpublic">.allowPublic()</a>
-    <a className="msb-chip" href="#allowprivate">.allowPrivate()</a>
-    <a className="msb-chip" href="#allowhost">.allowHost()</a>
-    <a className="msb-chip" href="#allowlocal">.allowLocal()</a>
-    <a className="msb-chip" href="#allowdomains">.allowDomains()</a>
-    <a className="msb-chip" href="#rb-allow">.allow()</a>
-    <a className="msb-chip" href="#rb-deny">.deny()</a>
-    <a className="msb-more" href="#rulebuilder">+ 23 more in the RuleBuilder section</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · RuleDestinationBuilder<span className="msb-ct">6</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#rd-ip">.ip()</a>
-    <a className="msb-chip" href="#rd-cidr">.cidr()</a>
-    <a className="msb-chip" href="#rd-domain">.domain()</a>
-    <a className="msb-chip" href="#rd-domainsuffix">.domainSuffix()</a>
-    <a className="msb-chip" href="#rd-group">.group()</a>
-    <a className="msb-chip" href="#rd-any">.any()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · DnsBuilder · TlsBuilder · ViolationActionBuilder<span className="msb-ct">18</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#nameservers">.nameservers()</a>
-    <a className="msb-chip" href="#querytimeoutms">.queryTimeoutMs()</a>
-    <a className="msb-chip" href="#rebindprotection">.rebindProtection()</a>
-    <a className="msb-chip" href="#bypass">.bypass()</a>
-    <a className="msb-chip" href="#interceptedports">.interceptedPorts()</a>
-    <a className="msb-chip" href="#verifyupstream">.verifyUpstream()</a>
-    <a className="msb-chip" href="#blockquic">.blockQuic()</a>
-    <a className="msb-chip" href="#interceptcacert">.interceptCaCert()</a>
-    <a className="msb-chip" href="#interceptcakey">.interceptCaKey()</a>
-    <a className="msb-chip" href="#upstreamcacert">.upstreamCaCert()</a>
-    <a className="msb-chip" href="#upstreamcacertfor">.upstreamCaCertFor()</a>
-    <a className="msb-chip" href="#verifyupstreamfor">.verifyUpstreamFor()</a>
-    <a className="msb-chip" href="#va-block">.block()</a>
-    <a className="msb-chip" href="#blockandlog">.blockAndLog()</a>
-    <a className="msb-chip" href="#blockandterminate">.blockAndTerminate()</a>
-    <a className="msb-chip" href="#passthroughhost">.passthroughHost()</a>
-    <a className="msb-chip" href="#passthroughhostpattern">.passthroughHostPattern()</a>
-    <a className="msb-chip" href="#passthroughallhosts">.passthroughAllHosts()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#networkconfig">NetworkConfig</a>
-    <a className="msb-typepill" href="#networkpolicy-2">NetworkPolicy</a>
-    <a className="msb-typepill" href="#rule-2">Rule</a>
-    <a className="msb-typepill" href="#action">Action</a>
-    <a className="msb-typepill" href="#direction">Direction</a>
-    <a className="msb-typepill" href="#destination">Destination</a>
-    <a className="msb-typepill" href="#destinationgroup">DestinationGroup</a>
-    <a className="msb-typepill" href="#protocol">Protocol</a>
-    <a className="msb-typepill" href="#portrange-2">PortRange</a>
-    <a className="msb-typepill" href="#publishedport">PublishedPort</a>
-    <a className="msb-typepill" href="#dnsconfig">DnsConfig</a>
-    <a className="msb-typepill" href="#tlsconfig">TlsConfig</a>
-    <a className="msb-typepill" href="/sdk/typescript/secrets#violationaction">ViolationAction</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript
@@ -209,25 +80,11 @@ WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr
 
 Policy literals constructed via `Rule.allowEgress(...)` etc. do not run through the builder and skip this check.
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 builder(): NetworkPolicyBuilder
 ```
-
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces there.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
-    <div className="msb-param-desc">Empty builder.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -242,10 +99,18 @@ const policy = NetworkPolicy.builder()
 
 </Accordion>
 
----
+Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`) are stored raw and parsed at [`build()`](#build), so the chain stays clean and the first parse or validation failure surfaces there.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkpolicybuilder">NetworkPolicyBuilder</a></div>
+    <div className="msb-param-desc">Empty builder.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">none()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 none(): NetworkPolicy
@@ -253,10 +118,7 @@ none(): NetworkPolicy
 
 Deny all traffic in both directions, no rules. The guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">allowAll()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 allowAll(): NetworkPolicy
@@ -264,10 +126,7 @@ allowAll(): NetworkPolicy
 
 Unrestricted network access: allow everything in both directions, no rules. Includes private addresses and the host machine.
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">publicOnly()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 publicOnly(): NetworkPolicy
@@ -275,10 +134,7 @@ publicOnly(): NetworkPolicy
 
 Egress allowed only to public destinations (plus DNS to the gateway); ingress allowed by default. Blocks private address ranges and cloud metadata endpoints. This is the **default** policy.
 
----
-
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">nonLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 nonLocal(): NetworkPolicy
@@ -286,20 +142,25 @@ nonLocal(): NetworkPolicy
 
 Egress allowed to public + private (LAN) destinations (plus DNS); ingress allowed by default. Local groups (loopback, link-local, host, metadata) stay denied.
 
----
-
 ## Rule, Destination, PortRange
 
 Factories for the building blocks of a policy literal. [`Rule`](#rule-2) values pair a [`Destination`](#destination) with a direction and action; [`Destination`](#destination) and [`PortRange`](#portrange-2) construct the matchers.
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allowEgress()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 allowEgress(destination: Destination): Rule
 ```
+
+<Accordion title="Example">
+
+```typescript
+import { Rule, Destination } from "microsandbox";
+
+const r = Rule.allowEgress(Destination.domain("api.example.com"));
+```
+
+</Accordion>
 
 Allow rule with direction `egress`. Empty protocols and ports mean "any".
 
@@ -312,20 +173,7 @@ Allow rule with direction `egress`. Empty protocols and ports mean "any".
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-import { Rule, Destination } from "microsandbox";
-
-const r = Rule.allowEgress(Destination.domain("api.example.com"));
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">denyEgress()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 denyEgress(destination: Destination): Rule
@@ -342,10 +190,7 @@ Deny rule with direction `egress`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allowIngress()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 allowIngress(destination: Destination): Rule
@@ -362,10 +207,7 @@ Allow rule with direction `ingress`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">denyIngress()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 denyIngress(destination: Destination): Rule
@@ -382,10 +224,7 @@ Deny rule with direction `ingress`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allowAny()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 allowAny(destination: Destination): Rule
@@ -402,10 +241,7 @@ Allow rule with direction `any` (matches in either direction).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">denyAny()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 denyAny(destination: Destination): Rule
@@ -422,18 +258,11 @@ Deny rule with direction `any` (matches in either direction).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allowDns()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 allowDns(): Rule
 ```
-
-Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
-
-DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
 
 <Accordion title="Example">
 
@@ -449,10 +278,11 @@ const policy: NetworkPolicy = {
 
 </Accordion>
 
----
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
 
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">any()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 any(): Destination
@@ -460,10 +290,7 @@ any(): Destination
 
 Match any destination.
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">cidr()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 cidr(cidr: string): Destination
@@ -480,10 +307,7 @@ Match an IP range.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">domain()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 domain(domain: string): Destination
@@ -500,10 +324,7 @@ Match an exact domain.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">domainSuffix()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 domainSuffix(suffix: string): Destination
@@ -520,10 +341,7 @@ Match the apex domain and every subdomain.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">group()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 group(group: DestinationGroup): Destination
@@ -540,10 +358,7 @@ Match a predefined address group.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">PortRange.</span><span className="msb-hn">single()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 single(port: number): PortRange
@@ -560,10 +375,7 @@ Match a single port. `start` and `end` are set to the same value.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">PortRange.</span><span className="msb-hn">range()</span>
-<div className="msb-tags"><span className="msb-tag is-static">factory</span></div>
 
 ```typescript
 range(start: number, end: number): PortRange
@@ -584,31 +396,15 @@ Match an inclusive port range.
   </div>
 </div>
 
----
-
 ## NetworkBuilder
 
 Passed to the callback you give `SandboxBuilder.network(...)`. Every setter returns the same builder. The runtime serializes the accumulated config when the sandbox is created.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">policy()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 policy(policy: NetworkPolicy | NetworkPolicyBuilder): this
 ```
-
-Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy-2) literal or factory result, or a [`NetworkPolicyBuilder`](#networkpolicybuilder) (routed through the native bridge so lazy parse/validation errors surface at this call site).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#networkpolicy-2">NetworkPolicy</a></div>
-    <div className="msb-param-desc">Policy literal, factory result, or builder.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -623,10 +419,18 @@ const sb = await Sandbox.builder("api")
 
 </Accordion>
 
----
+Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy-2) literal or factory result, or a [`NetworkPolicyBuilder`](#networkpolicybuilder) (routed through the native bridge so lazy parse/validation errors surface at this call site).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#networkpolicy-2">NetworkPolicy</a></div>
+    <div className="msb-param-desc">Policy literal, factory result, or builder.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 port(host: number, guest: number): this
@@ -647,10 +451,7 @@ Publish a TCP port from the guest to the host. The default host bind address is 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">portBind()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 portBind(bind: string, host: number, guest: number): this
@@ -675,10 +476,7 @@ Publish a TCP port on a specific host bind address, such as `0.0.0.0`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">portUdp()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 portUdp(host: number, guest: number): this
@@ -699,10 +497,7 @@ Publish a UDP port from the guest to the host. The default host bind address is 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">portUdpBind()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 portUdpBind(bind: string, host: number, guest: number): this
@@ -727,14 +522,19 @@ Publish a UDP port on a specific host bind address.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">dns()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 dns(configure: (b: DnsBuilder) => DnsBuilder): this
 ```
+
+<Accordion title="Example">
+
+```typescript
+.network((n) => n.dns((d) => d.rebindProtection(true).queryTimeoutMs(2000)))
+```
+
+</Accordion>
 
 Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
@@ -747,18 +547,7 @@ Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-.network((n) => n.dns((d) => d.rebindProtection(true).queryTimeoutMs(2000)))
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">tls()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 tls(configure: (b: TlsBuilder) => TlsBuilder): this
@@ -775,10 +564,7 @@ Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">trustHostCAs()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 trustHostCAs(enabled: boolean): this
@@ -795,10 +581,7 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">maxConnections()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 maxConnections(max: number): this
@@ -815,10 +598,7 @@ Limit the maximum number of concurrent network connections from the sandbox.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">ipv4Pool()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ipv4Pool(pool: string): this
@@ -835,10 +615,7 @@ Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `1
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">ipv6Pool()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ipv6Pool(pool: string): this
@@ -855,14 +632,19 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="nb-interface">.</span><span className="msb-hn">interface()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 interface(configure: (b: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
 ```
+
+<Accordion title="Example">
+
+```typescript
+.network((n) => n.interface((i) => i.mtu(1400).ipv4("172.16.0.2")))
+```
+
+</Accordion>
 
 Override per-sandbox interface attributes (MAC, MTU, fixed IPv4 / IPv6 address). The [`InterfaceOverridesBuilder`](#interfaceoverridesbuilder) exposes `.mac()`, `.mtu()`, `.ipv4()`, and `.ipv6()`.
 
@@ -875,18 +657,7 @@ Override per-sandbox interface attributes (MAC, MTU, fixed IPv4 / IPv6 address).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-.network((n) => n.interface((i) => i.mtu(1400).ipv4("172.16.0.2")))
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">enabled()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 enabled(enabled: boolean): this
@@ -903,25 +674,11 @@ Enable or disable networking entirely. When `false`, no network interface is cre
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">onSecretViolation()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 onSecretViolation(configure: (b: ViolationActionBuilder) => ViolationActionBuilder): this
 ```
-
-Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
-    <div className="msb-param-desc">Configure the violation action.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -935,12 +692,20 @@ Configure the action taken when a secret reaches a disallowed host. See [`Violat
 
 </Accordion>
 
+Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
+    <div className="msb-param-desc">Configure the violation action.</div>
+  </div>
+</div>
+
 Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
 
----
-
 #### <span className="msb-recv" id="nb-secret">.</span><span className="msb-hn">secret()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 secret(configure: (b: SecretBuilder) => SecretBuilder): this
@@ -957,10 +722,7 @@ Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secr
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">secretEnv()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
@@ -989,14 +751,21 @@ Four-arg explicit-placeholder shorthand for adding a secret without opening a bu
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">secretEnvSimple()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 secretEnvSimple(envVar: string, value: string, allowedHost: string): this
 ```
+
+<Accordion title="Example">
+
+```typescript
+.network((n) =>
+  n.secretEnvSimple("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com"),
+)
+```
+
+</Accordion>
 
 Three-arg auto-placeholder shorthand. Auto-generates the placeholder as `$MSB_<envVar>`, so it is the terse counterpart to [`secretEnv()`](#secretenv) when you do not need a custom placeholder. The full secret API also lives on the [secrets page](/sdk/typescript/secrets#networkbuilder-secretenvsimple).
 
@@ -1017,20 +786,7 @@ Three-arg auto-placeholder shorthand. Auto-generates the placeholder as `$MSB_<e
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-.network((n) =>
-  n.secretEnvSimple("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com"),
-)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv" id="nb-build">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 build(): NetworkConfig
@@ -1047,8 +803,6 @@ Materialize the accumulated state into a [`NetworkConfig`](#networkconfig). The 
   </div>
 </div>
 
----
-
 ## NetworkPolicyBuilder
 
 Fluent builder for [`NetworkPolicy`](#networkpolicy-2). The closure passed to `.rule()` / `.egress()` / `.ingress()` / `.any()` receives a [`RuleBuilder`](#rulebuilder); state setters and rule-adders chain freely. The first parse / validation failure surfaces from [`build()`](#build).
@@ -1063,10 +817,7 @@ const policy = NetworkPolicy.builder()
   .build();
 ```
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">defaultDeny()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 defaultDeny(): this
@@ -1074,10 +825,7 @@ defaultDeny(): this
 
 Set both `defaultEgress` and `defaultIngress` to `"deny"`.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">defaultAllow()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 defaultAllow(): this
@@ -1085,10 +833,7 @@ defaultAllow(): this
 
 Set both `defaultEgress` and `defaultIngress` to `"allow"`.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">defaultEgress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 defaultEgress(action: "allow" | "deny"): this
@@ -1105,10 +850,7 @@ Per-direction override for the egress default action.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">defaultIngress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 defaultIngress(action: "allow" | "deny"): this
@@ -1125,10 +867,7 @@ Per-direction override for the ingress default action.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">egress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 egress(configure: (rb: RuleBuilder) => RuleBuilder): this
@@ -1145,10 +884,7 @@ Sugar for [`rule()`](#rule) with direction pre-set to `egress`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">ingress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ingress(configure: (rb: RuleBuilder) => RuleBuilder): this
@@ -1165,10 +901,7 @@ Sugar for [`rule()`](#rule) with direction pre-set to `ingress`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">any()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 any(configure: (rb: RuleBuilder) => RuleBuilder): this
@@ -1185,10 +918,7 @@ Sugar for [`rule()`](#rule) with direction pre-set to `any`. Rules committed ins
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">rule()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 rule(configure: (rb: RuleBuilder) => RuleBuilder): this
@@ -1205,10 +935,7 @@ Open a multi-rule batch closure. Direction must be set inside via `.egress()`, `
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 build(): NetworkPolicy
@@ -1224,8 +951,6 @@ Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy-2). La
     <div className="msb-param-desc">The materialized policy.</div>
   </div>
 </div>
-
----
 
 ## RuleBuilder
 
@@ -1247,10 +972,7 @@ Use separate `.rule()` / `.egress()` callbacks for rules that need different sta
 
 Last-write-wins. ICMP rule-adders are egress-only at build time.
 
----
-
 #### <span className="msb-recv" id="rb-egress">.</span><span className="msb-hn">egress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 egress(): this
@@ -1258,10 +980,7 @@ egress(): this
 
 Set direction to `egress` for subsequent rule-adders.
 
----
-
 #### <span className="msb-recv" id="rb-ingress">.</span><span className="msb-hn">ingress()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ingress(): this
@@ -1269,10 +988,7 @@ ingress(): this
 
 Set direction to `ingress` for subsequent rule-adders.
 
----
-
 #### <span className="msb-recv" id="rb-any">.</span><span className="msb-hn">any()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 any(): this
@@ -1280,16 +996,11 @@ any(): this
 
 Set direction to `any` for subsequent rule-adders. Rules committed after this apply in both directions.
 
----
-
 ### Protocol setters
 
 Protocols accumulate as a set; duplicates dedupe.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">tcp()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 tcp(): this
@@ -1297,10 +1008,7 @@ tcp(): this
 
 Add `tcp` to the protocols set.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">udp()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 udp(): this
@@ -1308,10 +1016,7 @@ udp(): this
 
 Add `udp` to the protocols set.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">icmpv4()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 icmpv4(): this
@@ -1319,10 +1024,7 @@ icmpv4(): this
 
 Add `icmpv4` to the protocols set. Egress-only; an ICMP rule on an `ingress` or `any` direction fails build.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">icmpv6()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 icmpv6(): this
@@ -1330,16 +1032,11 @@ icmpv6(): this
 
 Add `icmpv6` to the protocols set. Egress-only; same rules as [`icmpv4()`](#icmpv4).
 
----
-
 ### Port setters
 
 Ports accumulate as a set; duplicates dedupe. Always guest-side (egress destination port / ingress listening port).
 
----
-
 #### <span className="msb-recv" id="port-1">.</span><span className="msb-hn">port()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 port(port: number): this
@@ -1356,10 +1053,7 @@ Add a single port to the ports set.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">portRange()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 portRange(lo: number, hi: number): this
@@ -1380,10 +1074,7 @@ Add an inclusive port range. `lo > hi` records an error surfaced at [`build()`](
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">ports()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ports(ports: number[]): this
@@ -1400,16 +1091,11 @@ Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per el
   </div>
 </div>
 
----
-
 ### Group rule-adders
 
 Each adder commits one rule using the current state and the named destination group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowPublic()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowPublic(): this
@@ -1417,10 +1103,7 @@ allowPublic(): this
 
 Allow the `public` group (complement of named categories: every IP not in any other group).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyPublic()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyPublic(): this
@@ -1428,10 +1111,7 @@ denyPublic(): this
 
 Deny the `public` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowPrivate()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowPrivate(): this
@@ -1439,10 +1119,7 @@ allowPrivate(): this
 
 Allow the `private` group (RFC1918 + ULA + CGN).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyPrivate()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyPrivate(): this
@@ -1450,10 +1127,7 @@ denyPrivate(): this
 
 Deny the `private` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowLoopback()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowLoopback(): this
@@ -1461,10 +1135,7 @@ allowLoopback(): this
 
 Allow the `loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allowHost()`](#allowhost) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyLoopback()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyLoopback(): this
@@ -1472,10 +1143,7 @@ denyLoopback(): this
 
 Deny the `loopback` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowLinkLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowLinkLocal(): this
@@ -1483,10 +1151,7 @@ allowLinkLocal(): this
 
 Allow the `link-local` group (`169.254.0.0/16`, `fe80::/10`). Excludes the metadata IP `169.254.169.254`.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyLinkLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyLinkLocal(): this
@@ -1494,10 +1159,7 @@ denyLinkLocal(): this
 
 Deny the `link-local` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowMeta()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowMeta(): this
@@ -1505,10 +1167,7 @@ allowMeta(): this
 
 Allow the `metadata` group (`169.254.169.254`). **Dangerous on cloud hosts** (exposes IAM credentials).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyMeta()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyMeta(): this
@@ -1516,10 +1175,7 @@ denyMeta(): this
 
 Deny the `metadata` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowMulticast()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowMulticast(): this
@@ -1527,10 +1183,7 @@ allowMulticast(): this
 
 Allow the `multicast` group (`224.0.0.0/4`, `ff00::/8`).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyMulticast()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyMulticast(): this
@@ -1538,10 +1191,7 @@ denyMulticast(): this
 
 Deny the `multicast` group.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowHost()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowHost(): this
@@ -1549,10 +1199,7 @@ allowHost(): this
 
 Allow the `host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allowLoopback()`](#allowloopback).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyHost()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyHost(): this
@@ -1560,14 +1207,9 @@ denyHost(): this
 
 Deny the `host` group.
 
----
-
 ### Composite rule-adders
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowLocal(): this
@@ -1575,10 +1217,7 @@ allowLocal(): this
 
 Add three allow rules atomically: `loopback + link-local + host`. Each uses the callback's current state. `metadata` is intentionally not included; opt in via [`allowMeta()`](#allowmeta) separately.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyLocal()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyLocal(): this
@@ -1586,16 +1225,11 @@ denyLocal(): this
 
 Add three deny rules atomically: `loopback + link-local + host`. `metadata` is intentionally not included.
 
----
-
 ### Domain rule-adders
 
 Singular forms add one rule; plural forms add one rule per element.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowDomain()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowDomain(name: string): this
@@ -1612,10 +1246,7 @@ Add one `Destination::Domain` allow rule.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyDomain()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyDomain(name: string): this
@@ -1632,10 +1263,7 @@ Add one `Destination::Domain` deny rule.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowDomains()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowDomains(names: string[]): this
@@ -1652,10 +1280,7 @@ Add one `Destination::Domain` allow rule per name.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyDomains()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyDomains(names: string[]): this
@@ -1672,10 +1297,7 @@ Add one `Destination::Domain` deny rule per name.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowDomainSuffix()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowDomainSuffix(suffix: string): this
@@ -1692,10 +1314,7 @@ Add one `Destination::DomainSuffix` allow rule. Matches the apex and any subdoma
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyDomainSuffix()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyDomainSuffix(suffix: string): this
@@ -1712,10 +1331,7 @@ Add one `Destination::DomainSuffix` deny rule. Matches the apex and any subdomai
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">allowDomainSuffixes()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allowDomainSuffixes(suffixes: string[]): this
@@ -1732,10 +1348,7 @@ Add one `Destination::DomainSuffix` allow rule per suffix.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">denyDomainSuffixes()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 denyDomainSuffixes(suffixes: string[]): this
@@ -1752,8 +1365,6 @@ Add one `Destination::DomainSuffix` deny rule per suffix.
   </div>
 </div>
 
----
-
 ### Explicit-destination rule-adders
 
 `.allow()` / `.deny()` open a [`RuleDestinationBuilder`](#ruledestinationbuilder) callback. Exactly one destination call commits the rule.
@@ -1768,10 +1379,7 @@ NetworkPolicy.builder()
   .build();
 ```
 
----
-
 #### <span className="msb-recv" id="rb-allow">.</span><span className="msb-hn">allow()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 allow(configure: (d: RuleDestinationBuilder) => RuleDestinationBuilder): this
@@ -1788,10 +1396,7 @@ Begin an explicit-destination rule with action `allow`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rb-deny">.</span><span className="msb-hn">deny()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 deny(configure: (d: RuleDestinationBuilder) => RuleDestinationBuilder): this
@@ -1808,16 +1413,11 @@ Begin an explicit-destination rule with action `deny`.
   </div>
 </div>
 
----
-
 ## RuleDestinationBuilder
 
 Returned by [`RuleBuilder`](#rulebuilder)`.allow(d => ...)` / `.deny(d => ...)`. Exactly one destination call commits the rule; dropping without a destination call silently does nothing.
 
----
-
 #### <span className="msb-recv" id="rd-ip">.</span><span className="msb-hn">ip()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 ip(ip: string): this
@@ -1834,10 +1434,7 @@ Commit with `Destination::Cidr` of the IP as `/32` or `/128`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rd-cidr">.</span><span className="msb-hn">cidr()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 cidr(cidr: string): this
@@ -1854,10 +1451,7 @@ Commit with `Destination::Cidr`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rd-domain">.</span><span className="msb-hn">domain()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 domain(domain: string): this
@@ -1874,10 +1468,7 @@ Commit with `Destination::Domain`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rd-domainsuffix">.</span><span className="msb-hn">domainSuffix()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 domainSuffix(suffix: string): this
@@ -1894,10 +1485,7 @@ Commit with `Destination::DomainSuffix`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rd-group">.</span><span className="msb-hn">group()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 group(group: string): this
@@ -1914,10 +1502,7 @@ Commit with `Destination::Group`. `group` is a [`DestinationGroup`](#destination
   </div>
 </div>
 
----
-
 #### <span className="msb-recv" id="rd-any">.</span><span className="msb-hn">any()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 any(): this
@@ -1925,16 +1510,11 @@ any(): this
 
 Commit with `Destination::Any`.
 
----
-
 ## DnsBuilder
 
 Builder for DNS interception settings. Used in `NetworkBuilder.dns(d => ...)`. Owns rebind protection, nameserver pinning, and the per-query timeout.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">rebindProtection()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 rebindProtection(enabled: boolean): this
@@ -1951,10 +1531,7 @@ Toggle DNS rebinding protection. When enabled, DNS responses resolving to privat
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">nameservers()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 nameservers(servers: string[]): this
@@ -1971,10 +1548,7 @@ Override upstream nameservers. Replaces any previously-set nameservers.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">queryTimeoutMs()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 queryTimeoutMs(ms: number): this
@@ -1991,16 +1565,11 @@ Per-DNS-query timeout in milliseconds.
   </div>
 </div>
 
----
-
 ## TlsBuilder
 
 Builder for TLS interception settings. Used in `NetworkBuilder.tls(t => ...)`.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">bypass()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 bypass(pattern: string): this
@@ -2017,10 +1586,7 @@ Skip TLS interception for hosts matching this glob (e.g. `"*.internal.corp"`). U
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">verifyUpstream()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 verifyUpstream(verify: boolean): this
@@ -2037,10 +1603,7 @@ Verify upstream server certificates. Default `true`. Set to `false` only for sel
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">verifyUpstreamFor()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 verifyUpstreamFor(pattern: string, verify: boolean): this
@@ -2048,10 +1611,7 @@ verifyUpstreamFor(pattern: string, verify: boolean): this
 
 Verify upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">interceptedPorts()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 interceptedPorts(ports: number[]): this
@@ -2068,10 +1628,7 @@ TCP ports where interception is active. Default: `[443]`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">blockQuic()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 blockQuic(block: boolean): this
@@ -2088,10 +1645,7 @@ Block QUIC on intercepted ports, forcing TCP/TLS fallback.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">interceptCaCert()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 interceptCaCert(path: string): this
@@ -2108,10 +1662,7 @@ Path to a PEM file used as the intercepting CA's certificate.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">interceptCaKey()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 interceptCaKey(path: string): this
@@ -2128,10 +1679,7 @@ Path to a PEM file used as the intercepting CA's private key.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">upstreamCaCert()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 upstreamCaCert(path: string): this
@@ -2148,10 +1696,7 @@ Path to a PEM file with extra root CAs the proxy should trust when verifying eve
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">upstreamCaCertFor()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 upstreamCaCertFor(pattern: string, path: string): this
@@ -2159,16 +1704,11 @@ upstreamCaCertFor(pattern: string, path: string): this
 
 Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported.
 
----
-
 ## ViolationActionBuilder
 
 Configures the action taken when a secret would be sent to a disallowed host. Used in `NetworkBuilder.onSecretViolation(v => ...)`. Passthrough host calls accumulate; when passthrough hosts are configured, non-matching hosts use the default secret-violation action.
 
----
-
 #### <span className="msb-recv" id="va-block">.</span><span className="msb-hn">block()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 block(): this
@@ -2176,10 +1716,7 @@ block(): this
 
 Block the request silently.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">blockAndLog()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 blockAndLog(): this
@@ -2187,10 +1724,7 @@ blockAndLog(): this
 
 Block the request and emit a warning log.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">blockAndTerminate()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 blockAndTerminate(): this
@@ -2198,10 +1732,7 @@ blockAndTerminate(): this
 
 Block the request and terminate the sandbox.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">passthroughHost()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 passthroughHost(host: string): this
@@ -2218,10 +1749,7 @@ Allow placeholders to pass through unchanged to an exact host. The host receives
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">passthroughHostPattern()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 passthroughHostPattern(pattern: string): this
@@ -2238,10 +1766,7 @@ Allow placeholders to pass through unchanged to matching wildcard hosts.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">passthroughAllHosts()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 passthroughAllHosts(iUnderstand: boolean): this
@@ -2262,8 +1787,6 @@ Allow placeholders to pass through unchanged to any host. The explicit `iUnderst
 
 ### NetworkConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
-
 <p className="msb-backref">Returned by <a href="#nb-build">NetworkBuilder.build()</a></p>
 
 Built network configuration produced by `NetworkBuilder.build()`. Keys are camelCased from the Rust serde output.
@@ -2283,8 +1806,6 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 
 ### NetworkPolicy
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
-
 <p className="msb-backref">Used by <a href="#policy">NetworkBuilder.policy()</a> · returned by <a href="#networkpolicy">NetworkPolicy factories</a></p>
 
 Ordered rule list with per-direction defaults. First-match-wins is evaluated independently for egress and ingress.
@@ -2298,8 +1819,6 @@ interface NetworkPolicy {
 ```
 
 ### Rule
-
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#networkpolicy-2">NetworkPolicy.rules</a> · built via <a href="#rule-allowegress">Rule factories</a></p>
 
@@ -2317,8 +1836,6 @@ interface Rule {
 
 ### Action
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
-
 <p className="msb-backref">Used by <a href="#rule-2">Rule.action</a> · <a href="#networkpolicy-2">NetworkPolicy defaults</a></p>
 
 Action taken on a matching rule (or the per-direction default).
@@ -2329,8 +1846,6 @@ type Action = "allow" | "deny";
 
 ### Direction
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
-
 <p className="msb-backref">Used by <a href="#rule-2">Rule.direction</a></p>
 
 Direction the rule applies to.
@@ -2340,8 +1855,6 @@ type Direction = "egress" | "ingress" | "any";
 ```
 
 ### Destination
-
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Used by <a href="#rule-2">Rule.destination</a> · built via <a href="#destination-any">Destination factories</a></p>
 
@@ -2357,8 +1870,6 @@ type Destination =
 ```
 
 ### DestinationGroup
-
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Used by <a href="#destinationgroup">Destination.group()</a> · <a href="#rd-group">RuleDestinationBuilder.group()</a></p>
 
@@ -2387,8 +1898,6 @@ type DestinationGroup =
 
 ### Protocol
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
-
 <p className="msb-backref">Used by <a href="#rule-2">Rule.protocols</a></p>
 
 Transport protocol filter. Empty `Rule.protocols` means "any protocol".
@@ -2398,8 +1907,6 @@ type Protocol = "tcp" | "udp" | "icmpv4" | "icmpv6";
 ```
 
 ### PortRange
-
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#rule-2">Rule.ports</a> · built via <a href="#portrange-single">PortRange factories</a></p>
 
@@ -2413,8 +1920,6 @@ interface PortRange {
 ```
 
 ### PublishedPort
-
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.ports</a></p>
 
@@ -2431,8 +1936,6 @@ interface PublishedPort {
 
 ### DnsConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
-
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.dns</a></p>
 
 DNS interception configuration.
@@ -2444,8 +1947,6 @@ DNS interception configuration.
 | queryTimeoutMs | `number \| null` | Per-query timeout |
 
 ### TlsConfig
-
-<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.tls</a></p>
 
@@ -2478,8 +1979,6 @@ TLS interception configuration.
 | verify | `boolean` | Whether to verify certificates for matching upstream hosts |
 
 ### InterfaceOverridesBuilder
-
-<div className="msb-tags"><span className="msb-tag is-type">builder</span></div>
 
 <p className="msb-backref">Used by <a href="#nb-interface">NetworkBuilder.interface()</a></p>
 

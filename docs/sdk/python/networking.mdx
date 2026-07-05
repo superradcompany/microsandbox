@@ -5,51 +5,6 @@ description: Python SDK - Network API reference
 
 Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. Pass a [`Network`](#network) as the `network=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · Network<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#network-none"><span className="msb-rn">Network.none()</span><span className="msb-rg">deny everything, no interface</span></a>
-  <a className="msb-row" href="#network-public_only"><span className="msb-rn">Network.public_only()</span><span className="msb-rg">public internet only (default)</span></a>
-  <a className="msb-row" href="#network-allow_all"><span className="msb-rn">Network.allow_all()</span><span className="msb-rg">allow everything</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · Rule<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#rule-allow"><span className="msb-rn">Rule.allow()</span><span className="msb-rg">permit matching traffic</span></a>
-  <a className="msb-row" href="#rule-deny"><span className="msb-rn">Rule.deny()</span><span className="msb-rg">block matching traffic</span></a>
-  <a className="msb-row" href="#rule-allow_dns"><span className="msb-rn">Rule.allow_dns()</span><span className="msb-rg">open plain DNS to gateway</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · Destination<span className="msb-ct">6</span></p>
-  <a className="msb-row" href="#destination-any"><span className="msb-rn">Destination.any()</span><span className="msb-rg">match any destination</span></a>
-  <a className="msb-row" href="#destination-ip"><span className="msb-rn">Destination.ip()</span><span className="msb-rg">match an exact IP</span></a>
-  <a className="msb-row" href="#destination-cidr"><span className="msb-rn">Destination.cidr()</span><span className="msb-rg">match an IP range</span></a>
-  <a className="msb-row" href="#destination-domain"><span className="msb-rn">Destination.domain()</span><span className="msb-rg">match an exact domain</span></a>
-  <a className="msb-row" href="#destination-domain_suffix"><span className="msb-rn">Destination.domain_suffix()</span><span className="msb-rg">match apex + subdomains</span></a>
-  <a className="msb-row" href="#destination-group"><span className="msb-rn">Destination.group()</span><span className="msb-rg">match an address group</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Factory · PortBinding<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#portbinding-tcp"><span className="msb-rn">PortBinding.tcp()</span><span className="msb-rg">published TCP port</span></a>
-  <a className="msb-row" href="#portbinding-udp"><span className="msb-rn">PortBinding.udp()</span><span className="msb-rg">published UDP port</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#network">Network</a>
-    <a className="msb-typepill" href="#networkpolicy">NetworkPolicy</a>
-    <a className="msb-typepill" href="#rule">Rule</a>
-    <a className="msb-typepill" href="#destination">Destination</a>
-    <a className="msb-typepill" href="#networkdestination">NetworkDestination</a>
-    <a className="msb-typepill" href="#portbinding">PortBinding</a>
-    <a className="msb-typepill" href="#dnsconfig">DnsConfig</a>
-    <a className="msb-typepill" href="#tlsconfig">TlsConfig</a>
-    <a className="msb-typepill" href="#action">Action</a>
-    <a className="msb-typepill" href="#direction">Direction</a>
-    <a className="msb-typepill" href="#protocol">Protocol</a>
-    <a className="msb-typepill" href="#portprotocol">PortProtocol</a>
-    <a className="msb-typepill" href="#destgroup">DestGroup</a>
-    <a className="msb-typepill" href="/sdk/python/secrets#violationaction">ViolationAction</a>
-    <a className="msb-typepill" href="/sdk/python/secrets#violationpolicy">ViolationPolicy</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python
@@ -93,15 +48,20 @@ The default policy denies egress except for an implicit allow-public rule, and a
 
 [`Network`](#network) is a frozen dataclass. The presets below return a `Network` for the common policy shapes; construct one directly for custom policies, ports, DNS, or TLS.
 
----
-
 #### <span className="msb-recv">Network.</span><span className="msb-hn">none()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
 def none() -> Network
 ```
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.create("offline", image="python", network=Network.none())
+```
+
+</Accordion>
 
 Deny all traffic. No network interface is created; the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
 
@@ -114,18 +74,7 @@ Deny all traffic. No network interface is created; the guest is fully offline. `
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-sb = await Sandbox.create("offline", image="python", network=Network.none())
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Network.</span><span className="msb-hn">public_only()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -143,10 +92,7 @@ Block private address ranges and cloud metadata endpoints. Allow everything else
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Network.</span><span className="msb-hn">allow_all()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -198,10 +144,7 @@ policy = NetworkPolicy(
 
 Put specific rules before general ones.
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allow()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -213,6 +156,16 @@ def allow(
     destination: str | NetworkDestination | None = None,
 ) -> Rule
 ```
+
+<Accordion title="Example">
+
+```python
+from microsandbox import Destination, Protocol, Rule
+
+r = Rule.allow(protocol=Protocol.TCP, port=443, destination=Destination.domain("api.example.com"))
+```
+
+</Accordion>
 
 Create a rule that permits matching traffic. All filters are keyword-only.
 
@@ -246,20 +199,7 @@ Create a rule that permits matching traffic. All filters are keyword-only.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-from microsandbox import Destination, Protocol, Rule
-
-r = Rule.allow(protocol=Protocol.TCP, port=443, destination=Destination.domain("api.example.com"))
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">deny()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -304,28 +244,12 @@ Create a rule that blocks matching traffic. Same keyword-only filters as [`allow
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allow_dns()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
 def allow_dns() -> tuple[Rule, Rule]
 ```
-
-Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
-
-Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape carries a single protocol; splat into `NetworkPolicy.rules`. DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#rule">tuple[Rule, Rule]</a></div>
-    <div className="msb-param-desc"><code>(udp_rule, tcp_rule)</code> for <code>DestGroup.HOST</code> on port 53.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -347,6 +271,19 @@ policy = NetworkPolicy(
 
 </Accordion>
 
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape carries a single protocol; splat into `NetworkPolicy.rules`. DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#rule">tuple[Rule, Rule]</a></div>
+    <div className="msb-param-desc"><code>(udp_rule, tcp_rule)</code> for <code>DestGroup.HOST</code> on port 53.</div>
+  </div>
+</div>
+
 ## Destination factory
 
 Factory namespace for typed network policy destinations. Typed destinations avoid string-shorthand ambiguity and match the TypeScript SDK shape. Each method returns a [`NetworkDestination`](#networkdestination).
@@ -364,10 +301,7 @@ Destination.group(DestGroup.LINK_LOCAL)
 
 Bare IP strings such as `"1.1.1.1"` remain supported on [`Rule`](#rule) destinations and are parsed like `Destination.ip("1.1.1.1")`. Prefer the typed helper when the value is known to be an IP.
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">any()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -376,10 +310,7 @@ def any() -> NetworkDestination
 
 Match any destination.
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">ip()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -397,10 +328,7 @@ Match an exact IPv4 or IPv6 address. Stored as `/32` for IPv4 or `/128` for IPv6
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">cidr()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -418,10 +346,7 @@ Match a CIDR range.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">domain()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -439,10 +364,7 @@ Match an exact domain. Domain strings are validated at sandbox creation; invalid
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">domain_suffix()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -460,10 +382,7 @@ Match the apex domain and all subdomains.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">group()</span>
-<div className="msb-tags"><span className="msb-tag is-static">staticmethod</span></div>
 
 ```python
 @staticmethod
@@ -492,10 +411,7 @@ PortBinding.udp(5353, 5353, bind="0.0.0.0")
 
 Pass them to `Network(ports=(...))`. A plain `dict[int, int]` is also accepted for the common case, binding TCP to `127.0.0.1`.
 
----
-
 #### <span className="msb-recv">PortBinding.</span><span className="msb-hn">tcp()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -530,10 +446,7 @@ Publish a TCP port from the sandbox to the host.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">PortBinding.</span><span className="msb-hn">udp()</span>
-<div className="msb-tags"><span className="msb-tag is-static">classmethod</span></div>
 
 ```python
 @classmethod
@@ -571,8 +484,6 @@ Publish a UDP port from the sandbox to the host.
 ## Types
 
 ### Network
-
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="/sdk/python/sandbox#sandbox-create">Sandbox.create(network=...)</a></p>
 
@@ -614,8 +525,6 @@ Network(
 
 ### NetworkPolicy
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
-
 <p className="msb-backref">Used by <a href="#network">Network(policy=...)</a></p>
 
 Frozen dataclass: an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins. The defaults are asymmetric to preserve today's behavior: egress falls through to deny (public_only reachability when paired with the implicit allow-public rule); ingress falls through to allow (unfiltered published-port behavior).
@@ -635,8 +544,6 @@ NetworkPolicy(
 | rules | `tuple[`[`Rule`](#rule)`, ...]` | `()` | Rules evaluated first-match-wins per direction |
 
 ### Rule
-
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#networkpolicy">NetworkPolicy(rules=...)</a></p>
 
@@ -670,8 +577,6 @@ Ingress rules carrying ICMP protocols are rejected at sandbox creation; the host
 
 ### Destination
 
-<div className="msb-tags"><span className="msb-tag is-type">factory</span></div>
-
 <p className="msb-backref">Returns <a href="#networkdestination">NetworkDestination</a> · used by <a href="#rule">Rule.allow() / Rule.deny()</a></p>
 
 Factory namespace ([static methods](#destination-factory)) producing typed [`NetworkDestination`](#networkdestination) values.
@@ -686,8 +591,6 @@ Factory namespace ([static methods](#destination-factory)) producing typed [`Net
 | [group(group)](#destination-group) | [`NetworkDestination`](#networkdestination) | Match a [`DestGroup`](#destgroup) value |
 
 ### NetworkDestination
-
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Produced by <a href="#destination">Destination</a> helpers</p>
 
@@ -706,8 +609,6 @@ NetworkDestination(
 | value | `str \| None` | `None` | Variant value, omitted for `Destination.any()` |
 
 ### PortBinding
-
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#network">Network(ports=...)</a></p>
 
@@ -736,8 +637,6 @@ PortBinding(
 
 ### DnsConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
-
 <p className="msb-backref">Used by <a href="#network">Network(dns=...)</a></p>
 
 Frozen dataclass for DNS interception settings. The value type of [`Network.dns`](#network); import it from `microsandbox.types`.
@@ -757,8 +656,6 @@ DnsConfig(
 | query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds. Defaults to `5000` |
 
 ### TlsConfig
-
-<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#network">Network(tls=...)</a></p>
 
@@ -806,8 +703,6 @@ ScopedVerifyUpstream(
 
 ### Action
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
-
 <p className="msb-backref">Used by <a href="#networkpolicy">NetworkPolicy</a> · <a href="#rule">Rule</a></p>
 
 String enum (`StrEnum`) for policy actions, so the string values are accepted directly.
@@ -818,8 +713,6 @@ String enum (`StrEnum`) for policy actions, so the string values are accepted di
 | `"deny"` | Drop the traffic silently |
 
 ### Direction
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#rule">Rule</a></p>
 
@@ -832,8 +725,6 @@ String enum for traffic direction.
 | `"any"` | Rule applies in either direction |
 
 ### Protocol
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#rule">Rule</a></p>
 
@@ -848,8 +739,6 @@ String enum for network protocols in policy rules.
 
 ### PortProtocol
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
-
 <p className="msb-backref">Used by <a href="#portbinding">PortBinding</a></p>
 
 String enum for port-level protocol selection.
@@ -860,8 +749,6 @@ String enum for port-level protocol selection.
 | `"udp"` | UDP port |
 
 ### DestGroup
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 <p className="msb-backref">Used by <a href="#destination">Destination.group()</a></p>
 
