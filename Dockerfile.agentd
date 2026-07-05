@@ -41,6 +41,7 @@ strum = { version = "0.28", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
 ts-rs = "12.0.1"
+zeroize = { version = "1.8", features = ["derive", "serde"] }
 EOF
 
 RUN cargo build --release --manifest-path crates/agentd/Cargo.toml

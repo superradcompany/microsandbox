@@ -16,7 +16,7 @@ use tokio_rustls::TlsConnector;
 use super::ca::CertAuthority;
 use super::certgen::{self, DomainCert, DomainCertError};
 use super::config::TlsConfig;
-use crate::secrets::config::SecretsConfig;
+use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -37,8 +37,9 @@ pub struct TlsState {
     scoped_upstream_connectors: Vec<ScopedUpstreamConnector>,
     /// TLS configuration.
     pub config: TlsConfig,
-    /// Secrets configuration for placeholder substitution.
-    pub secrets: SecretsConfig,
+    /// Live-swappable secrets configuration for placeholder substitution.
+    /// Loaded per connection so live secret updates apply to future traffic.
+    pub secrets: SecretsHandle,
     /// Pre-computed lowercased bypass patterns for efficient matching.
     bypass_patterns: Vec<DomainPattern>,
 }
@@ -85,7 +86,7 @@ impl TlsState {
     /// 1. User-provided paths (`config.intercept_ca.cert_path` + `config.intercept_ca.key_path`)
     /// 2. Microsandbox home TLS path (`$MSB_HOME/tls` or `~/.microsandbox/tls`)
     /// 3. Auto-generate and persist to the microsandbox home TLS path
-    pub fn new(config: TlsConfig, secrets: SecretsConfig) -> Self {
+    pub fn new(config: TlsConfig, secrets: SecretsHandle) -> Self {
         let ca = load_or_generate_ca(&config);
 
         let capacity =
@@ -209,11 +210,15 @@ mod tests {
     use super::*;
 
     use crate::secrets::config::SecretsConfig;
+    use crate::secrets::handle::SecretsHandle;
 
     #[test]
     fn regenerates_cached_domain_cert_when_near_expiry() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+        let state = TlsState::new(
+            TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        );
         let first = state.get_or_generate_cert("openrouter.ai").unwrap();
         let original_expires_at = first.expires_at;
 
@@ -236,7 +241,10 @@ mod tests {
     #[test]
     fn invalid_domain_cert_request_does_not_poison_cache() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+        let state = TlsState::new(
+            TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        );
 
         assert!(state.get_or_generate_cert("snowman.☃").is_err());
         assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
@@ -307,7 +315,7 @@ mod tests {
             pattern: "*.internal".to_string(),
             verify: false,
         });
-        let state = TlsState::new(config, SecretsConfig::default());
+        let state = TlsState::new(config, SecretsHandle::new(SecretsConfig::default()));
 
         let default = &state.connector as *const TlsConnector;
         let scoped = state.upstream_connector_for("api.internal") as *const TlsConnector;

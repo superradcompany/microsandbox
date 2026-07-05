@@ -71,6 +71,7 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 typed-builder.workspace = true
 which.workspace = true
+zeroize.workspace = true
 
 [build-dependencies]
 flate2.workspace = true

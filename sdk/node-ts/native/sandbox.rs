@@ -332,6 +332,40 @@ impl Sandbox {
         Ok(metrics_to_js(&m))
     }
 
+    //----------------------------------------------------------------------------------------------
+    // Health
+    //----------------------------------------------------------------------------------------------
+
+    /// Check whether agentd is reachable without refreshing idle activity.
+    #[napi]
+    pub async fn ping(&self) -> Result<SandboxPingResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.ping().await.map_err(to_napi_error)?;
+        Ok(sandbox_ping_result_to_js(result))
+    }
+
+    /// Explicitly refresh this sandbox's idle activity timer.
+    #[napi]
+    pub async fn touch(&self) -> Result<SandboxTouchResult> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let result = sb.touch().await.map_err(to_napi_error)?;
+        Ok(sandbox_touch_result_to_js(result))
+    }
+
+    /// Plan or apply a sandbox modification. Returns the plan as a JSON
+    /// string; the TS wrapper parses it into a `SandboxModificationPlan`.
+    #[napi]
+    pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
+        let builder = {
+            let guard = self.inner.lock().await;
+            let sb = guard.as_ref().ok_or_else(consumed_error)?;
+            configure_modify(sb.modify(), options.as_ref())?
+        };
+        run_modify(builder, modify_dry_run(options.as_ref())).await
+    }
+
     /// Stream metrics snapshots at the requested interval (in milliseconds).
     #[napi]
     pub async fn metrics_stream(&self, interval_ms: f64) -> Result<JsMetricsStream> {
@@ -778,6 +812,105 @@ pub fn sandbox_stop_result_to_js(
         observed_at: datetime_to_ms(&result.observed_at),
         source: result.source,
     }
+}
+
+pub fn sandbox_ping_result_to_js(
+    result: microsandbox::sandbox::SandboxPingResult,
+) -> SandboxPingResult {
+    SandboxPingResult {
+        name: result.name,
+        latency_ms: result.latency.as_secs_f64() * 1000.0,
+    }
+}
+
+pub fn sandbox_touch_result_to_js(
+    result: microsandbox::sandbox::SandboxTouchResult,
+) -> SandboxTouchResult {
+    SandboxTouchResult {
+        name: result.name,
+        activity_seq: result.activity_seq as f64,
+    }
+}
+
+/// Inject the modify options into a core modification builder.
+///
+/// Map entries are sorted so repeated calls with the same options produce the
+/// same patch (and therefore the same plan ordering).
+pub(crate) fn configure_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    options: Option<&SandboxModifyOptions>,
+) -> Result<microsandbox::sandbox::SandboxModificationBuilder> {
+    use microsandbox::sandbox::{EnvVar, SandboxModificationPatch};
+
+    let Some(options) = options else {
+        return Ok(builder);
+    };
+
+    let mut env_pairs: Vec<_> = options
+        .env
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    env_pairs.sort();
+    let mut label_pairs: Vec<_> = options
+        .labels
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    label_pairs.sort();
+
+    let patch = SandboxModificationPatch {
+        cpus: options.cpus.map(cpu_count_u8).transpose()?,
+        max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
+        memory_mib: options.memory_mib,
+        max_memory_mib: options.max_memory_mib,
+        env: env_pairs
+            .into_iter()
+            .map(|(key, value)| EnvVar::new(key, value))
+            .collect(),
+        env_remove: options.env_remove.clone().unwrap_or_default(),
+        labels: label_pairs,
+        labels_remove: options.labels_remove.clone().unwrap_or_default(),
+        workdir: options.workdir.clone(),
+        secrets: Vec::new(),
+        secrets_remove: Vec::new(),
+    };
+
+    let builder = builder.with_patch(patch);
+    Ok(match options.policy.as_deref().unwrap_or("no_restart") {
+        "no_restart" => builder,
+        "next_start" => builder.next_start(),
+        "restart" => builder.restart(),
+        other => {
+            return Err(Error::from_reason(format!(
+                "unknown policy {other:?}; expected \"no_restart\", \"next_start\", or \"restart\""
+            )));
+        }
+    })
+}
+
+pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {
+    options.and_then(|options| options.dry_run).unwrap_or(false)
+}
+
+/// Drive dry-run or apply and serialize the resulting plan to JSON.
+pub(crate) async fn run_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    dry_run: bool,
+) -> Result<String> {
+    let plan = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(to_napi_error)?;
+    serde_json::to_string(&plan).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+fn cpu_count_u8(cpus: u32) -> Result<u8> {
+    u8::try_from(cpus).map_err(|_| Error::from_reason(format!("cpu count {cpus} exceeds 255")))
 }
 
 pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {

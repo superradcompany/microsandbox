@@ -15,11 +15,13 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sandboxstart_detached"><span className="msb-rn">Sandbox::start_detached()</span><span className="msb-rg">restart detached</span></a>
   <a className="msb-row" href="#sandboxremove"><span className="msb-rn">Sandbox::remove()</span><span className="msb-rg">delete a stopped one</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">16</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">18</span></p>
   <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.exec()</span><span className="msb-rg">run a command</span></a>
   <a className="msb-row" href="/sdk/rust/execution"><span className="msb-rn">sb.shell()</span><span className="msb-rg">interactive shell</span></a>
   <a className="msb-row" href="#sb-fs"><span className="msb-rn">sb.fs()</span><span className="msb-rg">read / write files</span></a>
   <a className="msb-row" href="#sb-logs"><span className="msb-rn">sb.logs()</span><span className="msb-rg">captured output</span></a>
+  <a className="msb-row" href="#sb-ping"><span className="msb-rn">sb.ping()</span><span className="msb-rg">agent reachability</span></a>
+  <a className="msb-row" href="#sb-touch"><span className="msb-rn">sb.touch()</span><span className="msb-rg">refresh idle timer</span></a>
   <a className="msb-row" href="#sb-metrics"><span className="msb-rn">sb.metrics()</span><span className="msb-rg">resource snapshot</span></a>
   <a className="msb-row" href="#sb-metrics_stream"><span className="msb-rn">sb.metrics_stream()</span><span className="msb-rg">stream metrics</span></a>
   <a className="msb-row" href="#sb-stop"><span className="msb-rn">sb.stop()</span><span className="msb-rg">graceful shutdown</span></a>
@@ -37,7 +39,9 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <div className="msb-chiprow">
     <a className="msb-chip" href="#image">.image()</a>
     <a className="msb-chip" href="#memory">.memory()</a>
+    <a className="msb-chip" href="#max_memory">.max_memory()</a>
     <a className="msb-chip" href="#cpus">.cpus()</a>
+    <a className="msb-chip" href="#max_cpus">.max_cpus()</a>
     <a className="msb-chip" href="#port">.port()</a>
     <a className="msb-chip" href="#volume">.volume()</a>
     <a className="msb-chip" href="#env">.env()</a>
@@ -60,6 +64,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
     <a className="msb-typepill" href="#logoptions">LogOptions</a>
     <a className="msb-typepill" href="#logsource">LogSource</a>
     <a className="msb-typepill" href="#loglevel">LogLevel</a>
+    <a className="msb-typepill" href="#sandboxpingresult">SandboxPingResult</a>
+    <a className="msb-typepill" href="#sandboxtouchresult">SandboxTouchResult</a>
     <a className="msb-typepill" href="#pullpolicy">PullPolicy</a>
     <a className="msb-typepill" href="#registryauth">RegistryAuth</a>
     <a className="msb-typepill" href="/sdk/rust/execution#exitstatus">ExitStatus</a>
@@ -585,6 +591,64 @@ let recent = handle.logs(&LogOptions {
 
 ---
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ping()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn ping(&self) -> MicrosandboxResult<SandboxPingResult>
+```
+
+Check whether the running sandbox's guest agent is reachable. This sends `core.ping`, returns the SDK-measured round-trip latency, and does not refresh the sandbox idle timer.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxpingresult">SandboxPingResult</a></div>
+    <div className="msb-param-desc">Sandbox name and ping latency.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let result = sb.ping().await?;
+println!("{} reachable in {:?}", result.name, result.latency);
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">touch()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult>
+```
+
+Explicitly refresh the running sandbox's idle timer. This sends `core.touch`; use it when keeping an idle sandbox alive is intentional.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxtouchresult">SandboxTouchResult</a></div>
+    <div className="msb-param-desc">Sandbox name and agent activity sequence after the touch.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```rust
+let result = sb.touch().await?;
+println!("{} activity seq {}", result.name, result.activity_seq);
+```
+
+</Accordion>
+
+---
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
@@ -800,6 +864,26 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
   <div className="msb-param">
     <div className="msb-param-key"><code>count</code><span className="msb-type">u8</span></div>
     <div className="msb-param-desc">Number of vCPUs.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">max_cpus()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn max_cpus(self, count: u8) -> Self
+```
+
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>count</code><span className="msb-type">u8</span></div>
+    <div className="msb-param-desc">Maximum possible vCPUs.</div>
   </div>
 </div>
 
@@ -1141,6 +1225,26 @@ Set the guest memory size. Physical pages are only allocated as the guest touche
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">max_memory()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn max_memory(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set the boot-time maximum hotpluggable guest memory. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">network()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
@@ -1388,6 +1492,10 @@ fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowe
 ```
 
 Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow_host(allowed_host))`.
+
+<Warning>
+  **Plaintext at rest.** The value is persisted verbatim in the durable sandbox config until a later `modify` rotate migrates the entry to a source reference. Prefer `.secret(|s| s.source(..))` when the value can be referenced; use this path when you hold only a value. A future host-side secret store will switch this method to import-then-reference with no signature change.
+</Warning>
 
 <p className="msb-label">Parameters</p>
 
@@ -1799,6 +1907,32 @@ Tag indicating where a captured log entry came from.
 | `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
 | `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
 
+### SandboxPingResult
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-ping">ping()</a> · <a href="#sandboxhandle">SandboxHandle.ping()</a></p>
+
+Result of a successful agent reachability check.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `String` | Sandbox name that was pinged |
+| latency | `Duration` | SDK-measured round-trip latency |
+
+### SandboxTouchResult
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#sb-touch">touch()</a> · <a href="#sandboxhandle">SandboxHandle.touch()</a></p>
+
+Result of an explicit idle-timer refresh.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `String` | Sandbox name that was touched |
+| activity_seq | `u64` | Agent activity sequence after the touch was recorded |
+
 ### PullPolicy
 
 <div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
@@ -1840,6 +1974,8 @@ The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or bu
 | idle_timeout_secs | `Option<u64>` | Idle timeout |
 | image | `RootfsSource` | Root filesystem source (OCI, bind, or disk image) |
 | max_duration_secs | `Option<u64>` | Maximum lifetime |
+| max_cpus | `u8` | Boot-time maximum possible virtual CPUs |
+| max_memory_mib | `u32` | Boot-time maximum hotpluggable memory in MiB |
 | memory_mib | `u32` | Guest memory in MiB |
 | name | `String` | Sandbox name, up to 128 UTF-8 bytes |
 | patches | `Vec<Patch>` | Rootfs patches |
@@ -1868,6 +2004,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
+| ping() | `Result<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity |
 | remove() | `Result<()>` | Delete sandbox and state |
 | request_drain() | `Result<()>` | Request graceful drain without waiting |
 | request_kill() | `Result<()>` | Request force termination without waiting |
@@ -1877,6 +2014,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | status() | [`SandboxStatus`](#sandboxstatus) | Current status |
 | stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
 | stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
+| touch() | `Result<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh the sandbox idle timer |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
 | wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
 

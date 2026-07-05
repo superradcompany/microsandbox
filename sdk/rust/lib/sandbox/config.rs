@@ -486,6 +486,65 @@ impl SandboxConfig {
     }
 }
 
+/// Resolve reference-model secret entries (host-side `source` references) into
+/// concrete values for this spawn.
+///
+/// The durable sandbox config stores only the source reference; the resolved
+/// value exists in the returned copy, which travels to the sandbox process
+/// over the private launch-config fd and never returns to the database.
+/// Returns `None` when no entry needs resolution so callers can skip the
+/// config clone.
+#[cfg(feature = "net")]
+pub(crate) fn resolve_config_secret_sources(
+    config: &SandboxConfig,
+) -> crate::MicrosandboxResult<Option<SandboxConfig>> {
+    use microsandbox_network::secrets::config::SecretSource;
+
+    if !config.spec.network.enabled {
+        return Ok(None);
+    }
+    let mut network = config.local_network_config()?;
+    let mut resolved_any = false;
+    for secret in &mut network.secrets.secrets {
+        let Some(source) = &secret.source else {
+            continue;
+        };
+        match source {
+            SecretSource::Env { var } => {
+                let value = std::env::var(var).map_err(|_| {
+                    crate::MicrosandboxError::InvalidConfig(format!(
+                        "secret {}: host environment variable {var} is not set",
+                        secret.env_var
+                    ))
+                })?;
+                if value.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "secret {}: host environment variable {var} is empty",
+                        secret.env_var
+                    )));
+                }
+                // Move the plaintext into the zeroizing wrapper; the source
+                // `String` is consumed by the move, leaving no separate copy.
+                secret.value = zeroize::Zeroizing::new(value);
+                resolved_any = true;
+            }
+            SecretSource::Store { .. } => {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "secret {}: store-backed secret sources are not supported yet",
+                    secret.env_var
+                )));
+            }
+        }
+    }
+    if !resolved_any {
+        return Ok(None);
+    }
+
+    let mut resolved = config.clone();
+    resolved.set_local_network_config(network)?;
+    Ok(Some(resolved))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -497,6 +556,8 @@ impl Default for SandboxConfig {
                 resources: SandboxResources {
                     cpus: default_cpus(),
                     memory_mib: default_memory_mib(),
+                    max_cpus: default_cpus(),
+                    max_memory_mib: default_memory_mib(),
                 },
                 runtime: SandboxRuntimeOptions {
                     log_level: default_log_level(),
@@ -1166,6 +1227,8 @@ mod tests {
             resources: SandboxResources {
                 cpus: 2,
                 memory_mib: 1024,
+                max_cpus: 2,
+                max_memory_mib: 1024,
             },
             runtime: SandboxRuntimeOptions {
                 workdir: Some("/app".into()),
@@ -1396,5 +1459,110 @@ mod tests {
         config.apply_runtime_defaults();
 
         assert!(config.spec.mounts.is_empty());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: Secret source references (create path + spawn resolution)
+    //----------------------------------------------------------------------------------------------
+
+    #[cfg(feature = "net")]
+    const SECRET_SENTINEL: &str = "sentinel-secret-value";
+
+    /// Build a network-enabled config carrying one secret. When `source_var`
+    /// is `Some`, the entry is a reference (the create path) resolved from that
+    /// host variable; when `None`, it is a legacy inlined value.
+    #[cfg(feature = "net")]
+    fn config_with_source_secret(source_var: Option<&str>) -> SandboxConfig {
+        use microsandbox_network::secrets::config::{
+            HostPattern, SecretEntry, SecretInjection, SecretSource,
+        };
+
+        let mut config = SandboxConfig::default();
+        config.spec.network.enabled = true;
+        let mut network = config.local_network_config().unwrap();
+        network.secrets.secrets.push(SecretEntry {
+            env_var: "API_KEY".into(),
+            value: if source_var.is_some() {
+                zeroize::Zeroizing::new(String::new())
+            } else {
+                zeroize::Zeroizing::new(SECRET_SENTINEL.into())
+            },
+            source: source_var.map(|var| SecretSource::Env {
+                var: var.to_string(),
+            }),
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            injection: SecretInjection::default(),
+            on_violation: None,
+            require_tls_identity: true,
+        });
+        config.set_local_network_config(network).unwrap();
+        config
+    }
+
+    /// The create path persists a source reference, never the resolved value:
+    /// the durable config JSON and the active_config snapshot carry the
+    /// `{kind: env, var: ...}` reference and zero occurrences of the value.
+    #[cfg(feature = "net")]
+    #[test]
+    fn create_path_persists_reference_not_value() {
+        // No host env is touched: the reference is persisted without ever
+        // reading the value at create time.
+        let config = config_with_source_secret(Some("MSB_TEST_CREATE_SOURCE"));
+        let persisted = serde_json::to_string(&config).unwrap();
+        assert!(
+            !persisted.contains(SECRET_SENTINEL),
+            "persisted config must not contain the secret value"
+        );
+        assert!(persisted.contains("\"var\":\"MSB_TEST_CREATE_SOURCE\""));
+
+        // The active_config snapshot is written from the same config shape at
+        // start, so it inherits the reference and stays value-free.
+        let active = config.clone_for_persistence();
+        let active_json = serde_json::to_string(&active).unwrap();
+        assert!(!active_json.contains(SECRET_SENTINEL));
+        assert!(active_json.contains("\"var\":\"MSB_TEST_CREATE_SOURCE\""));
+    }
+
+    /// The spawn resolver reads the source from the host environment and yields
+    /// a config whose entry carries the value; the durable input is unchanged.
+    #[cfg(feature = "net")]
+    #[test]
+    fn spawn_resolver_reads_source_from_host_env() {
+        // SAFETY: variable name is unique to this test, so no other test
+        // races on it.
+        unsafe { std::env::set_var("MSB_TEST_RESOLVE_SOURCE", SECRET_SENTINEL) };
+
+        let config = config_with_source_secret(Some("MSB_TEST_RESOLVE_SOURCE"));
+        let resolved = super::resolve_config_secret_sources(&config)
+            .unwrap()
+            .expect("a source entry must be resolved");
+
+        let network = resolved.local_network_config().unwrap();
+        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
+        // The durable input still stores only the reference.
+        let durable = config.local_network_config().unwrap();
+        assert!(durable.secrets.secrets[0].value.is_empty());
+
+        // SAFETY: variable name is unique to this test.
+        unsafe { std::env::remove_var("MSB_TEST_RESOLVE_SOURCE") };
+    }
+
+    /// Back-compat: a legacy config that inlined the value (no `source`) still
+    /// spawns. The resolver treats a present non-empty value as the material
+    /// and returns `None` so the caller reuses the config as-is.
+    #[cfg(feature = "net")]
+    #[test]
+    fn spawn_resolver_preserves_legacy_inlined_value() {
+        let config = config_with_source_secret(None);
+        let resolved = super::resolve_config_secret_sources(&config).unwrap();
+        assert!(
+            resolved.is_none(),
+            "legacy inlined values need no resolution"
+        );
+
+        // The legacy value is still usable directly from the durable config.
+        let network = config.local_network_config().unwrap();
+        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
     }
 }

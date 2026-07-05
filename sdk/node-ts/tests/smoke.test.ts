@@ -5,6 +5,7 @@ import type { PullProgress } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
+
 async function waitForSandboxMetrics(sb: Sandbox) {
   let lastError: unknown;
 
@@ -85,6 +86,42 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     const m = await waitForSandboxMetrics(sb);
     expect(m.timestamp).toBeInstanceOf(Date);
     expect(typeof m.cpuPercent).toBe("number");
+  });
+
+  it("pings and touches the running sandbox", async () => {
+    const ping = await sb.ping();
+    expect(ping.name).toBe(SANDBOX_NAME);
+    expect(ping.latencyMs).toBeGreaterThanOrEqual(0);
+
+    const touch = await sb.touch();
+    expect(touch.name).toBe(SANDBOX_NAME);
+    expect(touch.activitySeq).toBeGreaterThan(0);
+
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    await expect(handle.ping()).resolves.toMatchObject({ name: SANDBOX_NAME });
+    await expect(handle.touch()).resolves.toMatchObject({ name: SANDBOX_NAME });
+  });
+
+  it("plans a dry-run modification without applying it", async () => {
+    const plan = await sb.modify({
+      cpus: 2,
+      labels: { tier: "gold" },
+      dryRun: true,
+    });
+    expect(plan.sandbox).toBe(SANDBOX_NAME);
+    expect(plan.applied).toBe(false);
+    expect(plan.policy).toBe("no_restart");
+    const fields = plan.changes.map((change) => change.field);
+    expect(fields).toContain("cpus");
+    expect(fields).toContain("label");
+
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    const handlePlan = await handle.modify({
+      env: { MODIFIED: "1" },
+      dryRun: true,
+    });
+    expect(handlePlan.sandbox).toBe(SANDBOX_NAME);
+    expect(handlePlan.applied).toBe(false);
   });
 });
 

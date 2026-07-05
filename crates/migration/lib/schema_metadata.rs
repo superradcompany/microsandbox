@@ -18,6 +18,9 @@ pub const DOWNGRADE_FLOOR: &str = "0.6.0";
 /// Migration that introduced the DB-backed maintenance lease table.
 pub const MAINTENANCE_LEASE_MIGRATION_ID: &str = "m20260621_000002_create_maintenance_lease";
 
+/// Migration that introduced desired-vs-active sandbox config tracking.
+pub const ACTIVE_CONFIG_MIGRATION_ID: &str = "m20260703_000001_add_sandbox_active_config";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -132,6 +135,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "remove maintenance lease table",
+    },
+    MigrationMetadata {
+        id: ACTIVE_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove active sandbox config snapshots",
     },
 ];
 

@@ -158,6 +158,12 @@ pub fn sandbox_builder_from_args(
     if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
         builder = builder.cpus(cpus);
     }
+    if let Some(max_memory) = extract_opt::<u32>(kwargs, "max_memory")? {
+        builder = builder.max_memory(max_memory);
+    }
+    if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
+        builder = builder.max_cpus(max_cpus);
+    }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
     }

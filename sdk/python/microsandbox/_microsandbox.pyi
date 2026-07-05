@@ -128,6 +128,23 @@ class Sandbox:
     ) -> int: ...
     async def attach_shell(self) -> int: ...
     async def metrics(self) -> SandboxMetrics: ...
+    async def ping(self) -> SandboxPingResult: ...
+    async def touch(self) -> SandboxTouchResult: ...
+    async def modify(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        policy: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -170,6 +187,18 @@ class SandboxStopResult:
     @property
     def source(self) -> str | None: ...
 
+class SandboxPingResult:
+    @property
+    def name(self) -> str: ...
+    @property
+    def latency_ms(self) -> float: ...
+
+class SandboxTouchResult:
+    @property
+    def name(self) -> str: ...
+    @property
+    def activity_seq(self) -> int: ...
+
 class SandboxHandle:
     """Lightweight sandbox metadata handle.
 
@@ -187,6 +216,23 @@ class SandboxHandle:
     @property
     def updated_at(self) -> float | None: ...
     async def metrics(self) -> SandboxMetrics: ...
+    async def ping(self) -> SandboxPingResult: ...
+    async def touch(self) -> SandboxTouchResult: ...
+    async def modify(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        policy: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]: ...
     async def logs(
         self,
         tail: int | None = None,

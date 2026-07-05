@@ -13,6 +13,7 @@ pub mod fs;
 mod handle;
 pub mod init;
 pub(crate) mod metrics;
+mod modify;
 mod patch;
 #[cfg(feature = "ssh")]
 pub mod ssh;
@@ -29,6 +30,7 @@ use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::Registry;
 use microsandbox_protocol::{
+    core::{CoreError, Ping, Pong, Touch, Touched},
     exec::{ExecRequest, ExecRlimit},
     message::MessageType,
 };
@@ -142,6 +144,13 @@ pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
 };
+pub use modify::{
+    ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
+    ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
+    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
+    SecretPlannedChange, SecretSource,
+};
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
@@ -209,6 +218,26 @@ pub struct SandboxStopResult {
 
     /// Description of the observation source.
     pub source: Option<String>,
+}
+
+/// Result returned by [`Sandbox::ping`] and [`SandboxHandle::ping`].
+#[derive(Debug, Clone)]
+pub struct SandboxPingResult {
+    /// Sandbox name that was pinged.
+    pub name: String,
+
+    /// Round-trip latency measured by the SDK.
+    pub latency: std::time::Duration,
+}
+
+/// Result returned by [`Sandbox::touch`] and [`SandboxHandle::touch`].
+#[derive(Debug, Clone)]
+pub struct SandboxTouchResult {
+    /// Sandbox name that was touched.
+    pub name: String,
+
+    /// Agent activity sequence after the explicit touch was recorded.
+    pub activity_seq: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -648,6 +677,16 @@ pub(crate) async fn create_local(
             }
         };
     let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
+    if let Err(err) = update_sandbox_active_config(
+        write_db,
+        sandbox_id,
+        &sandbox.config.clone_for_persistence(),
+    )
+    .await
+    {
+        let _ = sandbox.stop().await;
+        return Err(err);
+    }
 
     if let (Some(_reference), Some(manifest_digest)) = (
         pinned_reference.as_deref(),
@@ -752,7 +791,18 @@ pub(crate) async fn start_local(
 
     match create_inner_local(local_backend, config, model.id, mode).await {
         Ok((local_state, returned_config)) => {
-            Ok(Sandbox::from_local(backend, local_state, returned_config))
+            let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
+            if let Err(err) = update_sandbox_active_config(
+                write_db,
+                model.id,
+                &sandbox.config.clone_for_persistence(),
+            )
+            .await
+            {
+                let _ = sandbox.stop().await;
+                return Err(err);
+            }
+            Ok(sandbox)
         }
         Err(err) => {
             let _ = update_sandbox_status(write_db, model.id, SandboxStatus::Stopped).await;
@@ -1019,6 +1069,50 @@ async fn request_agent_shutdown(
     Ok(())
 }
 
+async fn ping_agent(name: &str, client: &AgentClient) -> MicrosandboxResult<SandboxPingResult> {
+    let started_at = std::time::Instant::now();
+    let msg = client.request(MessageType::Ping, &Ping {}).await?;
+    let latency = started_at.elapsed();
+    if msg.t != MessageType::Pong {
+        return Err(unexpected_agent_response("ping", &msg));
+    }
+
+    let _: Pong = msg.payload()?;
+    Ok(SandboxPingResult {
+        name: name.to_string(),
+        latency,
+    })
+}
+
+async fn touch_agent(name: &str, client: &AgentClient) -> MicrosandboxResult<SandboxTouchResult> {
+    let msg = client.request(MessageType::Touch, &Touch {}).await?;
+    if msg.t != MessageType::Touched {
+        return Err(unexpected_agent_response("touch", &msg));
+    }
+
+    let touched: Touched = msg.payload()?;
+    Ok(SandboxTouchResult {
+        name: name.to_string(),
+        activity_seq: touched.activity_seq,
+    })
+}
+
+fn unexpected_agent_response(
+    operation: &'static str,
+    msg: &microsandbox_protocol::message::Message,
+) -> crate::MicrosandboxError {
+    if msg.t == MessageType::CoreError
+        && let Ok(error) = msg.payload::<CoreError>()
+    {
+        return crate::MicrosandboxError::Runtime(format!(
+            "agent rejected {operation}: {:?}: {}",
+            error.kind, error.message
+        ));
+    }
+
+    crate::MicrosandboxError::Runtime(format!("agent returned {} to {operation}", msg.t.as_str()))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: Instance
 //--------------------------------------------------------------------------------------------------
@@ -1062,6 +1156,15 @@ impl Sandbox {
     /// memory, env, mounts, etc.).
     pub fn config(&self) -> &SandboxConfig {
         &self.config
+    }
+
+    /// Start planning a sandbox modification.
+    ///
+    /// The returned builder owns the canonical SDK patch and dry-run
+    /// classification logic. It does not apply changes until later modify
+    /// phases wire the same plan model into persistence and runtime control.
+    pub fn modify(&self) -> SandboxModificationBuilder {
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
     /// Which backend variant this sandbox is bound to. Returns `Local` or
@@ -1166,6 +1269,25 @@ impl Sandbox {
             .sandboxes()
             .log_stream(self.backend.clone(), &self.name, opts)
             .await
+    }
+
+    /// Check whether agentd is reachable without refreshing the sandbox idle timer.
+    ///
+    /// Local backend only. The request uses `core.ping` and returns the SDK-measured
+    /// round-trip latency. If the sandbox runtime predates protocol generation 6,
+    /// this fails before any bytes are sent with an unsupported-operation error.
+    pub async fn ping(&self) -> MicrosandboxResult<SandboxPingResult> {
+        self.require_local("ping")?;
+        ping_agent(&self.name, self.client()).await
+    }
+
+    /// Explicitly refresh the sandbox idle timer.
+    ///
+    /// Local backend only. The request uses `core.touch`, so callers can keep a
+    /// sandbox alive intentionally without relying on unrelated agent traffic.
+    pub async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult> {
+        self.require_local("touch")?;
+        touch_agent(&self.name, self.client()).await
     }
 
     /// Low-level access to the guest agent client.
@@ -1352,12 +1474,20 @@ impl Sandbox {
             return Ok(stop_result_from_exit_status(&self.name, status));
         }
 
-        self.backend
+        match self
+            .backend
             .sandboxes()
             .get(self.backend.clone(), &self.name)
-            .await?
-            .wait_until_stopped()
             .await
+        {
+            Ok(handle) => handle.wait_until_stopped().await,
+            Err(error)
+                if self.is_local_ephemeral() && sandbox_not_found_for_name(&error, &self.name) =>
+            {
+                Ok(ephemeral_cleanup_stop_result(&self.name))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -1374,6 +1504,10 @@ impl Sandbox {
         }
         // Normal drop runs — client reader task is aborted and
         // ProcessHandle drops without sending SIGTERM.
+    }
+
+    fn is_local_ephemeral(&self) -> bool {
+        self.local().is_some() && self.config.spec.lifecycle.ephemeral
     }
 }
 
@@ -1921,6 +2055,21 @@ fn stop_result_from_exit_status(name: &str, status: ExitStatus) -> SandboxStopRe
     }
 }
 
+pub(super) fn ephemeral_cleanup_stop_result(name: &str) -> SandboxStopResult {
+    SandboxStopResult {
+        name: name.to_string(),
+        status: SandboxStatus::Stopped,
+        exit_code: None,
+        signal: None,
+        observed_at: chrono::Utc::now(),
+        source: Some("ephemeral cleanup removed persisted state".to_string()),
+    }
+}
+
+pub(super) fn sandbox_not_found_for_name(error: &crate::MicrosandboxError, name: &str) -> bool {
+    matches!(error, crate::MicrosandboxError::SandboxNotFound(missing) if missing == name)
+}
+
 /// Update the sandbox status in the database.
 pub(super) async fn update_sandbox_status(
     db: &DbWriteConnection,
@@ -1928,18 +2077,54 @@ pub(super) async fn update_sandbox_status(
     status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
     db.transaction(|txn| async move {
-        sandbox_entity::Entity::update_many()
+        let mut update = sandbox_entity::Entity::update_many()
             .col_expr(sandbox_entity::Column::Status, Expr::value(status))
             .col_expr(
                 sandbox_entity::Column::UpdatedAt,
                 Expr::value(chrono::Utc::now().naive_utc()),
-            )
+            );
+        if sandbox_status_clears_active_config(status) {
+            update = update.col_expr(
+                sandbox_entity::Column::ActiveConfig,
+                Expr::value(Option::<String>::None),
+            );
+        }
+        update
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .exec(&txn)
             .await?;
         Ok((txn, ()))
     })
     .await
+}
+
+pub(super) async fn update_sandbox_active_config(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let config_json = serde_json::to_string(config)?;
+    sandbox_entity::Entity::update_many()
+        .col_expr(
+            sandbox_entity::Column::ActiveConfig,
+            Expr::value(Some(config_json)),
+        )
+        .col_expr(
+            sandbox_entity::Column::UpdatedAt,
+            Expr::value(chrono::Utc::now().naive_utc()),
+        )
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .exec(db)
+        .await?;
+
+    Ok(())
+}
+
+fn sandbox_status_clears_active_config(status: SandboxStatus) -> bool {
+    matches!(
+        status,
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
+    )
 }
 
 async fn mark_sandbox_draining_if_running(
@@ -2125,6 +2310,10 @@ async fn mark_sandbox_runtime_stale(
         // from having its newly-terminal or newly-running status overwritten.
         sandbox_entity::Entity::update_many()
             .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
+            .col_expr(
+                sandbox_entity::Column::ActiveConfig,
+                Expr::value(Option::<String>::None),
+            )
             .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .filter(
@@ -2777,9 +2966,10 @@ mod tests {
 
     use super::{
         MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount, hostname_from_sandbox_name, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, validate_hostname, validate_rootfs_source,
+        SandboxStatus, VolumeMount, ephemeral_cleanup_stop_result, hostname_from_sandbox_name,
+        insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
+        reconcile_sandbox_runtime_state, remove_dir_if_exists, sandbox_not_found_for_name,
+        validate_hostname, validate_rootfs_source,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -2834,6 +3024,36 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[test]
+    fn test_sandbox_not_found_for_name_requires_exact_match() {
+        assert!(sandbox_not_found_for_name(
+            &crate::MicrosandboxError::SandboxNotFound("gone".into()),
+            "gone"
+        ));
+        assert!(!sandbox_not_found_for_name(
+            &crate::MicrosandboxError::SandboxNotFound("other".into()),
+            "gone"
+        ));
+        assert!(!sandbox_not_found_for_name(
+            &crate::MicrosandboxError::Runtime("gone".into()),
+            "gone"
+        ));
+    }
+
+    #[test]
+    fn test_ephemeral_cleanup_stop_result_marks_stopped() {
+        let result = ephemeral_cleanup_stop_result("msb-gone");
+
+        assert_eq!(result.name, "msb-gone");
+        assert_eq!(result.status, SandboxStatus::Stopped);
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.signal, None);
+        assert_eq!(
+            result.source.as_deref(),
+            Some("ephemeral cleanup removed persisted state")
+        );
     }
 
     #[tokio::test]

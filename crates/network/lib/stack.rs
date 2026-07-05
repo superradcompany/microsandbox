@@ -33,9 +33,13 @@ use crate::icmp_relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
-use crate::secrets::config::SecretsConfig;
+use crate::secrets::handle::SecretsHandle;
 use crate::shared::SharedState;
 use crate::tls::{proxy as tls_proxy, state::TlsState};
+use crate::udp_fragments::{
+    Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
+    is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
+};
 use crate::udp_relay::UdpRelay;
 
 //--------------------------------------------------------------------------------------------------
@@ -69,6 +73,15 @@ pub enum FrameAction {
 
     /// DNS query (UDP to port 53) — let smoltcp's bound UDP socket handle it.
     Dns,
+
+    /// IPv4 UDP fragment — reassemble before the UDP relay sees it.
+    Ipv4UdpFragment,
+
+    /// IPv6 UDP fragment — reassemble before the UDP relay sees it.
+    Ipv6UdpFragment,
+
+    /// IPv6 fragment for a protocol this relay cannot safely classify.
+    Ipv6UnsupportedFragment,
 
     /// Everything else (ARP, NDP, ICMP, TCP data/ACK/FIN, etc.) — let
     /// smoltcp process normally.
@@ -212,7 +225,7 @@ pub fn smoltcp_poll_loop(
     published_ports: Vec<PublishedPort>,
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
-    secrets: Arc<SecretsConfig>,
+    secrets: SecretsHandle,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -265,8 +278,11 @@ pub fn smoltcp_poll_loop(
         shared.clone(),
         config.gateway_mac,
         config.guest_mac,
+        config.mtu,
         tokio_handle.clone(),
     );
+    let mut udp_fragments = Ipv4UdpFragmentReassembler::new();
+    let mut ipv6_udp_fragments = Ipv6UdpFragmentReassembler::new();
     let icmp_relay = IcmpRelay::new(
         shared.clone(),
         config.gateway_mac,
@@ -368,61 +384,64 @@ pub fn smoltcp_poll_loop(
                 }
 
                 FrameAction::UdpRelay { src, dst } => {
-                    if port_publisher.relay_udp_outbound(frame, src, dst) {
+                    relay_udp_frame(
+                        frame,
+                        src,
+                        dst,
+                        &config,
+                        &network_policy,
+                        &shared,
+                        &mut port_publisher,
+                        tls_state.as_deref(),
+                        &mut udp_relay,
+                    );
+                    device.drop_staged_frame();
+                }
+
+                FrameAction::Ipv4UdpFragment => {
+                    if let Some(datagram) = udp_fragments.push(frame) {
+                        handle_reassembled_udp_datagram(
+                            datagram,
+                            &mut device,
+                            &mut iface,
+                            now,
+                            &mut sockets,
+                            &config,
+                            &network_policy,
+                            &shared,
+                            &mut port_publisher,
+                            tls_state.as_deref(),
+                            &mut udp_relay,
+                        );
+                    } else {
                         device.drop_staged_frame();
-                        continue;
                     }
+                }
 
-                    // QUIC blocking: drop UDP to intercepted ports when
-                    // TLS interception is active.
-                    if let Some(ref tls) = tls_state
-                        && tls.config.intercepted_ports.contains(&dst.port())
-                        && tls.config.block_quic_on_intercept
-                    {
+                FrameAction::Ipv6UdpFragment => {
+                    if let Some(datagram) = ipv6_udp_fragments.push(frame) {
+                        handle_reassembled_udp_datagram(
+                            datagram,
+                            &mut device,
+                            &mut iface,
+                            now,
+                            &mut sockets,
+                            &config,
+                            &network_policy,
+                            &shared,
+                            &mut port_publisher,
+                            tls_state.as_deref(),
+                            &mut udp_relay,
+                        );
+                    } else {
                         device.drop_staged_frame();
-                        continue;
                     }
+                }
 
-                    match DnsPortType::from_udp(dst.port()) {
-                        // Dns: unreachable here — classify_transport
-                        // routes UDP/53 to FrameAction::Dns, not
-                        // UdpRelay. Defensive drop covers regressions.
-                        DnsPortType::Dns => {
-                            device.drop_staged_frame();
-                            continue;
-                        }
-                        // EncryptedDns: unreachable here —
-                        // `DnsPortType::from_udp` never returns it
-                        // today (DoT is TCP-only; UDP/853 is DoQ and
-                        // returns AlternativeDns). Defensive drop.
-                        DnsPortType::EncryptedDns => {
-                            device.drop_staged_frame();
-                            continue;
-                        }
-                        // Alternative DNS protocols on well-known UDP
-                        // ports are dropped — forces fall-back to UDP/53.
-                        DnsPortType::AlternativeDns => {
-                            tracing::debug!(%dst, "alternative-DNS UDP port dropped; stub should fall back to UDP/53");
-                            device.drop_staged_frame();
-                            continue;
-                        }
-                        DnsPortType::Other => {}
-                    }
-
-                    // Policy check.
-                    if network_policy
-                        .evaluate_egress(dst, Protocol::Udp, &shared)
-                        .is_deny()
-                    {
-                        device.drop_staged_frame();
-                        continue;
-                    }
-
-                    // Resolve the host-side destination for the dial.
-                    // `dst` stays unchanged so reply frames are stamped
-                    // with the IP the guest expects.
-                    let host_dst = resolve_host_dst(dst, config.gateway);
-                    udp_relay.relay_outbound(frame, src, dst, host_dst);
+                FrameAction::Ipv6UnsupportedFragment => {
+                    // Fragmented UDP is only forwarded after reassembly and policy evaluation.
+                    // Other fragmented IPv6 traffic is dropped rather than passed through with
+                    // an unknown transport tuple.
                     device.drop_staged_frame();
                 }
 
@@ -545,7 +564,9 @@ pub fn smoltcp_poll_loop(
                 conn.to_smoltcp,
                 shared.clone(),
                 network_policy.clone(),
-                secrets.clone(),
+                // Load the current snapshot per connection so live secret
+                // updates apply to traffic the guest starts afterwards.
+                secrets.load(),
                 tls_state.clone(),
                 conn.proxy_connect,
             );
@@ -557,6 +578,8 @@ pub fn smoltcp_poll_loop(
             conn_tracker.cleanup_closed(&mut sockets);
             port_publisher.cleanup_closed(&mut sockets);
             udp_relay.cleanup_expired();
+            udp_fragments.cleanup_expired();
+            ipv6_udp_fragments.cleanup_expired();
             shared.cleanup_resolved_hostnames();
             last_cleanup = std::time::Instant::now();
         }
@@ -646,6 +669,93 @@ fn sleep_until_stack_wake_windows(
             token => tracing::warn!(token, "network poll loop: unknown wake token"),
         }
     }
+}
+
+/// Apply the common non-DNS UDP dispatch path to a complete guest datagram.
+#[allow(clippy::too_many_arguments)]
+fn relay_udp_frame(
+    frame: &[u8],
+    src: SocketAddr,
+    dst: SocketAddr,
+    config: &PollLoopConfig,
+    network_policy: &NetworkPolicy,
+    shared: &Arc<SharedState>,
+    port_publisher: &mut PortPublisher,
+    tls_state: Option<&TlsState>,
+    udp_relay: &mut UdpRelay,
+) {
+    if port_publisher.relay_udp_outbound(frame, src, dst) {
+        return;
+    }
+
+    // QUIC blocking: drop UDP to intercepted ports when TLS interception is active.
+    if let Some(tls) = tls_state
+        && tls.config.intercepted_ports.contains(&dst.port())
+        && tls.config.block_quic_on_intercept
+    {
+        return;
+    }
+
+    match DnsPortType::from_udp(dst.port()) {
+        // Dns: unreachable here — classify_transport routes UDP/53 to
+        // FrameAction::Dns, not UdpRelay. Defensive drop covers regressions.
+        DnsPortType::Dns | DnsPortType::EncryptedDns => return,
+        // Alternative DNS protocols on well-known UDP ports are dropped —
+        // forces fall-back to UDP/53.
+        DnsPortType::AlternativeDns => {
+            tracing::debug!(%dst, "alternative-DNS UDP port dropped; stub should fall back to UDP/53");
+            return;
+        }
+        DnsPortType::Other => {}
+    }
+
+    // Policy is applied after reassembly, when the UDP destination port is known.
+    if network_policy
+        .evaluate_egress(dst, Protocol::Udp, shared)
+        .is_deny()
+    {
+        return;
+    }
+
+    // Resolve the host-side destination for the dial. `dst` stays unchanged so
+    // reply frames are stamped with the IP the guest expects.
+    let host_dst = resolve_host_dst(dst, config.gateway);
+    udp_relay.relay_outbound(frame, src, dst, host_dst);
+}
+
+/// Dispatch a complete datagram produced by fragment reassembly.
+#[allow(clippy::too_many_arguments)]
+fn handle_reassembled_udp_datagram(
+    datagram: ReassembledUdpDatagram,
+    device: &mut SmoltcpDevice,
+    iface: &mut Interface,
+    now: Instant,
+    sockets: &mut SocketSet<'_>,
+    config: &PollLoopConfig,
+    network_policy: &NetworkPolicy,
+    shared: &Arc<SharedState>,
+    port_publisher: &mut PortPublisher,
+    tls_state: Option<&TlsState>,
+    udp_relay: &mut UdpRelay,
+) {
+    if DnsPortType::from_udp(datagram.dst.port()) == DnsPortType::Dns {
+        device.replace_staged_frame(datagram.frame);
+        iface.poll_ingress_single(now, device, sockets);
+        return;
+    }
+
+    relay_udp_frame(
+        &datagram.frame,
+        datagram.src,
+        datagram.dst,
+        config,
+        network_policy,
+        shared,
+        port_publisher,
+        tls_state,
+        udp_relay,
+    );
+    device.drop_staged_frame();
 }
 
 /// Map a guest-wire destination to its host-socket equivalent.
@@ -830,6 +940,9 @@ fn classify_ipv4(payload: &[u8]) -> FrameAction {
     let Ok(ipv4) = Ipv4Packet::new_checked(payload) else {
         return FrameAction::Passthrough;
     };
+    if is_ipv4_udp_fragment(&ipv4) {
+        return FrameAction::Ipv4UdpFragment;
+    }
     classify_transport(
         ipv4.next_header(),
         ipv4.src_addr().into(),
@@ -843,6 +956,12 @@ fn classify_ipv6(payload: &[u8]) -> FrameAction {
     let Ok(ipv6) = Ipv6Packet::new_checked(payload) else {
         return FrameAction::Passthrough;
     };
+    if is_ipv6_udp_fragment(&ipv6) {
+        return FrameAction::Ipv6UdpFragment;
+    }
+    if is_ipv6_fragment(&ipv6) {
+        return FrameAction::Ipv6UnsupportedFragment;
+    }
     classify_transport(
         ipv6.next_header(),
         ipv6.src_addr().into(),
@@ -1082,6 +1201,66 @@ mod tests {
             }
             _ => panic!("expected UdpRelay"),
         }
+    }
+
+    #[test]
+    fn classify_ipv4_udp_fragment() {
+        let mut frame = build_udp_frame([10, 0, 0, 2], [8, 8, 8, 8], 12345, 443);
+        frame[14 + 6] = 0x20; // More Fragments flag.
+        assert!(matches!(
+            classify_frame(&frame),
+            FrameAction::Ipv4UdpFragment
+        ));
+    }
+
+    #[test]
+    fn classify_ipv6_udp_fragment() {
+        let mut frame = vec![0u8; 14 + 40 + 8];
+
+        frame[12] = 0x86;
+        frame[13] = 0xdd;
+
+        let ip = &mut frame[14..54];
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        ip[6] = u8::from(IpProtocol::Ipv6Frag);
+        ip[7] = 64;
+        ip[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        ip[24..40].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+
+        let fragment = &mut frame[54..62];
+        fragment[0] = u8::from(IpProtocol::Udp);
+        fragment[3] = 1; // More Fragments flag.
+
+        assert!(matches!(
+            classify_frame(&frame),
+            FrameAction::Ipv6UdpFragment
+        ));
+    }
+
+    #[test]
+    fn classify_ipv6_non_udp_fragment_is_unsupported() {
+        let mut frame = vec![0u8; 14 + 40 + 8];
+
+        frame[12] = 0x86;
+        frame[13] = 0xdd;
+
+        let ip = &mut frame[14..54];
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        ip[6] = u8::from(IpProtocol::Ipv6Frag);
+        ip[7] = 64;
+        ip[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        ip[24..40].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+
+        let fragment = &mut frame[54..62];
+        fragment[0] = u8::from(IpProtocol::Tcp);
+        fragment[3] = 1; // More Fragments flag.
+
+        assert!(matches!(
+            classify_frame(&frame),
+            FrameAction::Ipv6UnsupportedFragment
+        ));
     }
 
     #[test]

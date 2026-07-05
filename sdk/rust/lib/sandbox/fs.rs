@@ -794,8 +794,8 @@ pub(crate) mod local {
 
         match last_error {
             Some(error) => Err(error.into()),
-            None => Err(MicrosandboxError::Runtime(format!(
-                "no agent endpoint found for sandbox {name:?}"
+            None => Err(MicrosandboxError::SandboxNotRunning(format!(
+                "{name:?} has no agent endpoint (is it running?)"
             ))),
         }
     }

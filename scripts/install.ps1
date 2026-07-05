@@ -68,11 +68,42 @@ function Resolve-InstallRoot {
     return [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".microsandbox"))
 }
 
+function Resolve-Architecture {
+    try {
+        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        if ($null -ne $architecture) {
+            return [string]$architecture
+        }
+    } catch {
+        # Some Windows PowerShell/.NET Framework combinations do not expose
+        # RuntimeInformation.OSArchitecture even though the rest of the
+        # installer can run normally.
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        return $env:PROCESSOR_ARCHITEW6432
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITECTURE)) {
+        return $env:PROCESSOR_ARCHITECTURE
+    }
+
+    try {
+        $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ($null -ne $operatingSystem -and -not [string]::IsNullOrWhiteSpace($operatingSystem.OSArchitecture)) {
+            return [string]$operatingSystem.OSArchitecture
+        }
+    } catch {
+    }
+
+    throw "could not determine Windows architecture"
+}
+
 function Resolve-Target {
-    $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    switch ($architecture) {
-        "Arm64" { return "windows-aarch64" }
-        "X64" { return "windows-x86_64" }
+    $architecture = Resolve-Architecture
+    switch -Regex ($architecture.ToUpperInvariant()) {
+        "^(ARM64|AARCH64)$" { return "windows-aarch64" }
+        "^(X64|AMD64|X86_64|64-BIT)$" { return "windows-x86_64" }
         default { throw "unsupported Windows architecture: $architecture" }
     }
 }

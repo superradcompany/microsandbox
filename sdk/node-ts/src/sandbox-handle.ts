@@ -1,4 +1,10 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
+import {
+  modificationPlanFromJson,
+  modifyOptionsToNapi,
+  type ModifyOptions,
+  type SandboxModificationPlan,
+} from "./modify.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import type { NapiSandboxConfig, NapiSandboxHandle } from "./internal/napi.js";
 import {
@@ -10,7 +16,11 @@ import {
   logReadOptionsToNapi,
   logStreamOptionsToNapi,
 } from "./logs.js";
-import { Sandbox } from "./sandbox.js";
+import {
+  Sandbox,
+  type SandboxPingResult,
+  type SandboxTouchResult,
+} from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { Snapshot } from "./snapshot.js";
@@ -58,6 +68,37 @@ export class SandboxHandle {
   async metrics(): Promise<SandboxMetrics> {
     const raw = await withMappedErrors(() => this.inner.metrics());
     return metricsFromNapi(raw);
+  }
+
+  /**
+   * Check whether agentd is reachable without refreshing idle activity.
+   *
+   * This connects to an already-running sandbox and does not start stopped
+   * sandboxes implicitly.
+   */
+  async ping(): Promise<SandboxPingResult> {
+    return await withMappedErrors(() => this.inner.ping());
+  }
+
+  /**
+   * Explicitly refresh this sandbox's idle activity timer.
+   *
+   * This connects to an already-running sandbox and does not start stopped
+   * sandboxes implicitly.
+   */
+  async touch(): Promise<SandboxTouchResult> {
+    return await withMappedErrors(() => this.inner.touch());
+  }
+
+  /**
+   * Plan or apply a sandbox modification. With `dryRun: true` the plan is
+   * computed without applying anything.
+   */
+  async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    const raw = await withMappedErrors(() =>
+      this.inner.modify(modifyOptionsToNapi(opts)),
+    );
+    return modificationPlanFromJson(raw);
   }
 
   /** Resume in attached mode. */

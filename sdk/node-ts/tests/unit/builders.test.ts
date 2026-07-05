@@ -13,6 +13,7 @@ import {
   Stdin,
 } from "../../dist/index.js";
 
+
 describe("intoRootfsSource", () => {
   it("treats absolute paths as bind mounts", () => {
     expect(intoRootfsSource("/srv/rootfs")).toEqual({
@@ -294,8 +295,14 @@ describe("SandboxBuilder.build", () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
       .memory(GiB(2))
+      .maxMemory(GiB(8))
+      .cpus(2)
+      .maxCpus(8)
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
+    expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
+    expect((cfg.resources as { cpus: number }).cpus).toBe(2);
+    expect((cfg.resources as { maxCpus: number }).maxCpus).toBe(8);
   });
 
   it("collects volumes through the MountBuilder callback", async () => {

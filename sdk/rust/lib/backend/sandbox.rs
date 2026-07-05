@@ -96,6 +96,8 @@ pub struct SandboxHandleLocalState {
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
     pub config_json: String,
+    /// Serialized `SandboxConfig` used by the active VM, when known.
+    pub active_config_json: Option<String>,
     /// When this sandbox was first created, if recorded.
     pub created_at: Option<DateTime<Utc>>,
     /// When this sandbox's database record was last modified.
@@ -1101,6 +1103,8 @@ fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
         resources: SandboxResources {
             cpus: cloud.config.vcpus,
             memory_mib: cloud.config.memory_mib,
+            max_cpus: cloud.config.vcpus,
+            max_memory_mib: cloud.config.memory_mib,
         },
         runtime: SandboxRuntimeOptions {
             workdir: cloud.config.workdir.clone(),

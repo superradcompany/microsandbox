@@ -162,6 +162,19 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
+        if self.config.spec.resources.max_cpus < count {
+            self.config.spec.resources.max_cpus = count;
+        }
+        self
+    }
+
+    /// Set the boot-time maximum possible virtual CPUs.
+    ///
+    /// This reserves the CPU hotplug capacity the sandbox may use after live
+    /// resize support lands. It does not increase the effective vCPU count by
+    /// itself; use [`cpus`](Self::cpus) for the initial effective count.
+    pub fn max_cpus(mut self, count: u8) -> Self {
+        self.config.spec.resources.max_cpus = count;
         self
     }
 
@@ -174,7 +187,21 @@ impl SandboxBuilder {
     /// .memory(1.gib())     // 1 GiB = 1024 MiB
     /// ```
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.config.spec.resources.memory_mib = size.into().as_u32();
+        let memory_mib = size.into().as_u32();
+        self.config.spec.resources.memory_mib = memory_mib;
+        if self.config.spec.resources.max_memory_mib < memory_mib {
+            self.config.spec.resources.max_memory_mib = memory_mib;
+        }
+        self
+    }
+
+    /// Set the boot-time maximum hotpluggable guest memory.
+    ///
+    /// This reserves memory hotplug capacity for future live resize support.
+    /// It does not increase the effective guest memory by itself; use
+    /// [`memory`](Self::memory) for the initial effective memory.
+    pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.config.spec.resources.max_memory_mib = size.into().as_u32();
         self
     }
 
@@ -595,6 +622,17 @@ impl SandboxBuilder {
     /// ```ignore
     /// .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
     /// ```
+    ///
+    /// **Plaintext at rest.** The value is persisted verbatim in the durable
+    /// sandbox config and stays there until a later `modify` rotate with a
+    /// source reference migrates the entry. This path exists for embedders
+    /// who hold only a value (e.g. from their own vault); prefer
+    /// `.secret(|s| s.source(..))` when the value can be referenced instead.
+    /// Downstream behavior is identical either way: the guest sees only the
+    /// placeholder, the proxy injects the value for allowed hosts, and
+    /// in-memory copies are zeroized. When a host-side secret store lands,
+    /// this method will import the value and store a reference — same
+    /// signature, no more raw value at rest.
     #[cfg(feature = "net")]
     pub fn secret_env(
         self,
@@ -989,6 +1027,28 @@ impl SandboxBuilder {
                 "memory must be greater than 0".into(),
             ));
         }
+        if self.config.spec.resources.max_cpus == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "max_cpus must be greater than 0".into(),
+            ));
+        }
+        if self.config.spec.resources.max_memory_mib == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "max_memory must be greater than 0".into(),
+            ));
+        }
+        if self.config.spec.resources.max_cpus < self.config.spec.resources.cpus {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "max_cpus {} must be greater than or equal to cpus {}",
+                self.config.spec.resources.max_cpus, self.config.spec.resources.cpus
+            )));
+        }
+        if self.config.spec.resources.max_memory_mib < self.config.spec.resources.memory_mib {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "max_memory {} MiB must be greater than or equal to memory {} MiB",
+                self.config.spec.resources.max_memory_mib, self.config.spec.resources.memory_mib
+            )));
+        }
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.spec.image {
@@ -1118,7 +1178,9 @@ mod tests {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .cpus(2)
+            .max_cpus(4)
             .memory(1024)
+            .max_memory(4096)
             .log_level(LogLevel::Info)
             .env("A", "B")
             .script("setup", "echo hi")
@@ -1129,7 +1191,9 @@ mod tests {
 
         assert_eq!(config.spec.name, "test");
         assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 1024);
+        assert_eq!(config.spec.resources.max_memory_mib, 4096);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
         assert_eq!(config.spec.env.len(), 1);
         assert_eq!(
@@ -1188,6 +1252,38 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("memory must be greater than 0"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_max_cpus_below_effective_cpus() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .cpus(4)
+            .max_cpus(2)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("max_cpus 2 must be greater than or equal to cpus 4")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_max_memory_below_effective_memory() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .memory(2048)
+            .max_memory(1024)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("max_memory 1024 MiB must be greater than or equal to memory 2048 MiB")
+        );
     }
 
     #[tokio::test]
@@ -1527,7 +1623,8 @@ mod tests {
             .image("alpine")
             .secret_entry(SecretEntry {
                 env_var: "API\0KEY".into(),
-                value: "secret".into(),
+                value: zeroize::Zeroizing::new("secret".into()),
+                source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
                 injection: SecretInjection::default(),
