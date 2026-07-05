@@ -485,6 +485,122 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
+
+```python
+async def modify(
+    self,
+    *,
+    cpus: int | None = None,
+    max_cpus: int | None = None,
+    memory: int | None = None,
+    max_memory: int | None = None,
+    env: Mapping[str, str] | None = None,
+    env_rm: list[str] | None = None,
+    labels: Mapping[str, str] | None = None,
+    labels_rm: list[str] | None = None,
+    workdir: str | None = None,
+    policy: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]
+```
+
+<Accordion title="Example">
+
+```python
+# Live resize: applies to the running VM when within the booted capacity
+plan = await sb.modify(cpus=4, memory=4096)
+for r in plan.get("resize_status", []):
+    print(f'{r["resource"]}: {r["requested"]} -> {r["actual"]} ({r["state"]})')
+
+# Preview a change without applying it
+plan = await sb.modify(max_memory=16384, dry_run=True)
+for change in plan["changes"]:
+    print(f'{change["field"]}: {change["disposition"]}')
+
+# Make an env change active now by restarting
+await sb.modify(env={"MODE": "prod"}, policy="restart")
+```
+
+</Accordion>
+
+Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart-required changes under the default policy raises without changing anything. `cpus` and `memory` apply live to a running sandbox when the target fits inside the boot-time capacity (`max_cpus` / `max_memory`); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+
+The returned plan dict mirrors the canonical JSON shape:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `sandbox` | `str` | Sandbox being modified |
+| `status` | `str` | Status used for classification (`"running"`, `"stopped"`, ...) |
+| `applied` | `bool` | Whether the changes were applied; `False` with `dry_run=True` |
+| `policy` | `str` | Policy used to produce the plan |
+| `changes` | `list[dict]` | One entry per field: `field`, `change` (`"added"`, `"updated"`, `"removed"`), `before`, `after`, `disposition`, optional `reason` |
+| `conflicts` | `list[dict]` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
+| `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
+| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"applied"`, `"converging"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
+
+Live resize is not necessarily instant: enforcement applies immediately, and `resize_status` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cpus</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Desired effective vCPU count. Live when within the booted <code>max_cpus</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_cpus</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Boot-time maximum possible vCPUs (restart-backed).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>memory</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Desired effective guest memory in MiB. Live when within the booted <code>max_memory</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_memory</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Boot-time maximum hotpluggable memory in MiB (restart-backed).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Environment variables to set for future execs.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env_rm</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Environment variable keys to remove.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Labels to set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels_rm</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Label keys to remove.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>workdir</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Working directory for future execs.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc"><code>"no_restart"</code> (default) applies only changes that can complete without restarting; <code>"next_start"</code> persists changes for the next start without mutating a running VM; <code>"restart"</code> restarts if needed so restart-required changes become active now.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dry_run</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, compute the plan without applying anything. Default <code>False</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">dict[str, Any]</span></div>
+    <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
 ```python
@@ -1114,6 +1230,7 @@ A lightweight handle to an existing sandbox (running or stopped). Provides statu
 | refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
 | ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
+| modify(...) | `Awaitable[dict[str, Any]]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes — changes persist for the next boot |
 | connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
 | stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |

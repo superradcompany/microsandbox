@@ -519,6 +519,42 @@ Explicitly refresh the running sandbox's idle timer. This sends `core.touch`; us
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
+
+```rust
+fn modify(&self) -> SandboxModificationBuilder
+```
+
+<Accordion title="Example">
+
+```rust
+let plan = sb.modify()
+    .cpus(4)             // live when 4 <= max_cpus
+    .memory(4096)        // live when 4096 MiB <= max_memory
+    .env("MODE", "prod") // future execs only; the plan warns about this
+    .apply()
+    .await?;
+
+for r in &plan.resize_status {
+    println!("{:?}: requested {} · actual {} · {:?}", r.resource, r.requested, r.actual, r.state);
+}
+```
+
+</Accordion>
+
+Start planning a configuration change for this sandbox. The returned builder accumulates a patch — CPUs, memory, env vars, labels, workdir, secrets — and terminates with [`dry_run()`](#dry_run) or [`apply()`](#apply). The resulting [`SandboxModificationPlan`](#sandboxmodificationplan) classifies every requested change as `live`, `next start`, `requires restart`, or `unsupported`, and apply is all-or-nothing. CPU count and memory apply live to a running sandbox when the target fits inside the boot-time capacity ([`max_cpus`](#max_cpus) / [`max_memory`](#max_memory)); raising the capacity itself is restart-backed. See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for the full builder API and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI equivalent.
+
+The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to connect first. It never starts a stopped sandbox; changes on a stopped sandbox persist for the next boot.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationbuilder">SandboxModificationBuilder</a></div>
+    <div className="msb-param-desc">Fluent builder; terminate with <code>dry_run()</code> or <code>apply()</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
 
 ```rust
@@ -1604,6 +1640,335 @@ Write UTF-8 text content at `path`.
   </div>
 </div>
 
+## SandboxModificationBuilder
+
+Fluent builder for changing an existing sandbox's configuration. Obtained via [`sb.modify()`](#sb-modify) or [`SandboxHandle::modify()`](#sandboxhandle). Setters accumulate a patch; nothing happens until the terminal [`dry_run()`](#dry_run) or [`apply()`](#apply) call. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) that classifies every requested change as `live`, `next start`, `requires restart`, or `unsupported`.
+
+Apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart-required changes under the default policy fails without changing anything. CPU count and memory apply live to a running sandbox when the target fits inside the boot-time capacity ([`max_cpus`](#max_cpus) / [`max_memory`](#max_memory)); raising the capacity itself is restart-backed, so pick capacity headroom at create time. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+#### <span className="msb-recv">.</span><span className="msb-hn">apply()</span>
+
+```rust
+async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
+```
+
+Apply the accumulated patch atomically. Live-capable changes mutate the running VM first (CPU hotplug, memory resize, secret rotation through the runtime control socket); the desired config is persisted only after the live step succeeds. For stopped sandboxes or [`next_start()`](#next_start) requests, changes persist for the next start. With [`restart()`](#restart), the existing stop/start lifecycle path makes restart-required changes active.
+
+Live resize is not necessarily instant: when an accepted resize has not fully settled, the returned plan's `resize_status` reports per-resource convergence — see [`ResourceResizeStatus`](#resourceresizestatus).
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The applied plan, with <code>applied: true</code> and live resize outcomes in <code>resize_status</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cpus()</span>
+
+```rust
+fn cpus(self, cpus: u8) -> Self
+```
+
+Set the desired effective vCPU count. Applies live to a running sandbox when the target fits inside the booted `max_cpus`; otherwise it requires a restart.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cpus</code><span className="msb-type">u8</span></div>
+    <div className="msb-param-desc">Number of vCPUs.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">max_cpus()</span>
+
+```rust
+fn max_cpus(self, max_cpus: u8) -> Self
+```
+
+Set the desired boot-time maximum possible vCPU count. Capacity is fixed at boot, so this is always restart-backed on a running sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_cpus</code><span className="msb-type">u8</span></div>
+    <div className="msb-param-desc">Maximum possible vCPUs.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">dry_run()</span>
+
+```rust
+async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan>
+```
+
+<Accordion title="Example">
+
+```rust
+let plan = sb.modify().cpus(8).dry_run().await?;
+
+for change in &plan.changes {
+    if let PlannedChange::Config(c) = change {
+        println!("{}: {:?} -> {:?} ({:?})", c.field, c.before, c.after, c.disposition);
+    }
+}
+```
+
+</Accordion>
+
+Compute the modification plan without applying anything. Use it to preview how each change classifies and whether conflicts block the patch.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The plan, with <code>applied: false</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">env()</span>
+
+```rust
+fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
+```
+
+Set an environment variable for future execs. Can be called multiple times. On a running sandbox this applies to future execs only; running processes keep their current environment.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">remove_env()</span>
+
+```rust
+fn remove_env(self, key: impl Into<String>) -> Self
+```
+
+Remove an environment variable. Same future-execs-only semantics as [`env()`](#env-2).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Variable name to remove.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+
+```rust
+fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
+```
+
+Set a sandbox label. Can be called multiple times.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Label key.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Label value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">remove_label()</span>
+
+```rust
+fn remove_label(self, key: impl Into<String>) -> Self
+```
+
+Remove a sandbox label.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Label key to remove.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">memory()</span>
+
+```rust
+fn memory(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set the desired effective guest memory. Applies live to a running sandbox when the target fits inside the booted `max_memory`; otherwise it requires a restart.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
+    <div className="msb-param-desc">Memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">memory_mib()</span>
+
+```rust
+fn memory_mib(self, memory_mib: u32) -> Self
+```
+
+Set the desired effective guest memory in MiB. Same as [`memory()`](#memory-2) with an explicit unit.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>memory_mib</code><span className="msb-type">u32</span></div>
+    <div className="msb-param-desc">Memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">max_memory()</span>
+
+```rust
+fn max_memory(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set the desired boot-time maximum hotpluggable memory. Capacity is fixed at boot, so this is always restart-backed on a running sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">max_memory_mib()</span>
+
+```rust
+fn max_memory_mib(self, max_memory_mib: u32) -> Self
+```
+
+Set the desired boot-time maximum hotpluggable memory in MiB. Same as [`max_memory()`](#max_memory-2) with an explicit unit.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_memory_mib</code><span className="msb-type">u32</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">next_start()</span>
+
+```rust
+fn next_start(self) -> Self
+```
+
+Persist the requested changes for the next start, leaving any running VM unchanged. Every change classifies as `next start`.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">restart()</span>
+
+```rust
+fn restart(self) -> Self
+```
+
+Plan under restart-backed apply semantics. When the patch contains restart-required changes, [`apply()`](#apply) stops the sandbox, persists the config, and starts it again so the changes become active now.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">secret()</span>
+
+```rust
+fn secret(self, f: impl FnOnce(SecretPatchBuilder) -> SecretPatchBuilder) -> Self
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::sandbox::SecretSource;
+
+let plan = sb.modify()
+    .secret(|s| s
+        .env("API_KEY")
+        .source(SecretSource::Env { var: "API_KEY".into() })
+        .allow_host("api.example.com"))
+    .apply()
+    .await?;
+```
+
+</Accordion>
+
+Declare the desired state of one secret via a closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary, and the planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#remove_secret).
+
+The `SecretPatchBuilder` closure exposes:
+
+| Method | Description |
+|--------|-------------|
+| `env(name)` | Name the secret (required). This is the environment variable that exposes the placeholder inside the guest |
+| `source(source)` | Provide the material as a host-side `SecretSource` reference — `SecretSource::Env { var }` (host environment variable, resolved at apply time) or `SecretSource::Store { reference }`. The durable config records only the reference. Mutually exclusive with `value` |
+| `value(value)` | Provide the material as a raw value, for embedders that hold only a value. Zeroized on drop, redacted from `Debug`, never enters the plan — but a value-based apply persists the value into the durable config until a later source-based rotate migrates it to a reference, the same at-rest property as [`secret_env()`](#secret_env) |
+| `placeholder(text)` | Set the guest-visible placeholder. Placeholder changes cannot reach already-running processes, so they classify as `requires restart` on a running sandbox |
+| `allow_host(host)` | Add an allowed host pattern (`api.example.com`, `*.example.org`, or `*`). A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one |
+
+Prefer `source(..)` over `value(..)` when the value can be referenced — see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><span className="msb-type">FnOnce(SecretPatchBuilder)</span></div>
+    <div className="msb-param-desc">Closure declaring the secret's desired state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">remove_secret()</span>
+
+```rust
+fn remove_secret(self, name: impl Into<String>) -> Self
+```
+
+Remove a secret. Removal is always explicit; omitting a secret from the patch never removes it.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Secret name (its environment variable name).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">workdir()</span>
+
+```rust
+fn workdir(self, path: impl Into<String>) -> Self
+```
+
+Set the working directory for future execs. On a running sandbox this applies to future execs only.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
 ## Types
 
 ### LogEntry
@@ -1755,6 +2120,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| modify() | [`SandboxModificationBuilder`](#sandboxmodificationbuilder) | Start planning a configuration change (works without starting; changes on a stopped sandbox persist for the next boot) |
 | name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
 | ping() | `Result<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity |
 | remove() | `Result<()>` | Delete sandbox and state |
@@ -1769,6 +2135,69 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | touch() | `Result<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh the sandbox idle timer |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
 | wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
+
+### SandboxModificationPlan
+
+<p className="msb-backref">Returned by <a href="#dry_run">dry_run()</a> · <a href="#apply">apply()</a></p>
+
+Dry-run or apply plan for a sandbox modification. Values never appear in a plan: secret entries carry only guest-visible references.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| sandbox | `String` | Sandbox being modified |
+| status | `String` | Sandbox status used for classification (`"running"`, `"stopped"`, ...) |
+| applied | `bool` | Whether the changes were applied; `false` for dry runs |
+| policy | `ModificationPolicy` | Policy used to produce the plan: `NoRestart` (default), `NextStart`, or `Restart` |
+| changes | `Vec<`[`PlannedChange`](#plannedchange)`>` | Planned changes, one entry per field or secret |
+| conflicts | `Vec<ModificationConflict>` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
+| warnings | `Vec<ModificationWarning>` | Non-fatal warnings (`field` + `message`) about the patch or current runtime capabilities, e.g. the future-execs-only env caveat |
+| resize_status | `Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>` | Live resource resize outcomes, populated by `apply()` when a live change ran |
+
+### PlannedChange
+
+<p className="msb-backref">Used by <a href="#sandboxmodificationplan">SandboxModificationPlan.changes</a></p>
+
+One planned modification entry.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Config` | - `field: String` <br/> - `change: ChangeKind` (`Added`, `Updated`, `Removed`) <br/> - `before: Option<String>` <br/> - `after: Option<String>` <br/> - `disposition:` [`ModificationDisposition`](#modificationdisposition) <br/> - `reason: Option<String>` | Ordinary config change |
+| `Secret` | - `field: String` (always `"secret"`) <br/> - `name: String` <br/> - `change: SecretChangeKind` (`Added`, `Rotated`, `Removed`, `Renamed`, `HostsUpdated`, `PlaceholderUpdated`) <br/> - `before_ref: Option<String>` <br/> - `after_ref: Option<String>` <br/> - `disposition:` [`ModificationDisposition`](#modificationdisposition) <br/> - `allow_hosts: Vec<String>` <br/> - `reason: Option<String>` | Secret change. Values are omitted by construction; `before_ref` / `after_ref` are guest-visible references |
+
+### ModificationDisposition
+
+<p className="msb-backref">Used by <a href="#plannedchange">PlannedChange.disposition</a></p>
+
+When or whether a planned change can take effect. Serializes as the quoted strings below.
+
+| Value | Description |
+|-------|-------------|
+| `Live` (`"live"`) | Applies to the running VM now |
+| `NextStart` (`"next start"`) | Persists to the desired config and applies the next time the sandbox starts |
+| `RequiresRestart` (`"requires restart"`) | Needs a restart before it can take effect; `apply()` refuses it unless the [`restart()`](#restart) policy is selected |
+| `Unsupported` (`"unsupported"`) | Cannot be changed by `modify` |
+
+### ResourceResizeStatus
+
+<p className="msb-backref">Used by <a href="#sandboxmodificationplan">SandboxModificationPlan.resize_status</a></p>
+
+Runtime convergence status for a live resource resize. Enforcement applies immediately; the guest converges asynchronously (onlining CPUs, plugging memory blocks).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| resource | `ResourceKind` | `Cpus` or `Memory` |
+| requested | `String` | Requested value |
+| actual | `String` | Actual value observed in the guest/runtime |
+| enforced | `String` | Host/VMM-enforced value |
+| state | `ResourceConvergenceState` | Convergence state, see below |
+
+| State | Description |
+|-------|-------------|
+| `Accepted` | The runtime accepted the request |
+| `Converging` | The guest and VMM are still converging on the requested state |
+| `Applied` | Desired, actual, and enforced state match |
+| `GuestRefused` | The guest would not cooperate; the host enforces the new limit anyway |
+| `Failed` | The resize failed |
 
 ### SandboxStopResult
 

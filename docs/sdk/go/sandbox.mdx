@@ -621,6 +621,66 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Modify()</span>
+
+```go
+func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error)
+```
+
+<Accordion title="Example">
+
+```go
+// Live resize: applies to the running VM when within the booted capacity
+plan, err := sb.Modify(ctx, m.ModifyOptions{CPUs: 4, MemoryMiB: 4096})
+if err != nil {
+    return err
+}
+for _, r := range plan.ResizeStatus {
+    fmt.Printf("%s: %s -> %s (%s)\n", r.Resource, r.Requested, r.Actual, r.State)
+}
+
+// Preview a change without applying it
+preview, err := sb.Modify(ctx, m.ModifyOptions{MaxMemoryMiB: 16384, DryRun: true})
+if err != nil {
+    return err
+}
+for _, c := range preview.Changes {
+    fmt.Printf("%s: %s\n", c.Field, c.Disposition)
+}
+
+// Make an env change active now by restarting
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    Env:    map[string]string{"MODE": "prod"},
+    Policy: m.ModificationPolicyRestart,
+})
+```
+
+</Accordion>
+
+Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart-required changes under the default policy returns an error without changing anything. `CPUs` and `MemoryMiB` apply live to a running sandbox when the target fits inside the boot-time capacity ([`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory)); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+
+Live resize is not necessarily instant: enforcement applies immediately, and the returned plan's `ResizeStatus` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks). See [`SandboxModificationPlan`](#sandboxmodificationplan).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#modifyoptions">ModifyOptions</a></div>
+    <div className="msb-param-desc">Requested changes plus <code>Policy</code> and <code>DryRun</code>. Zero-valued fields are left unchanged.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">*SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The modification plan, applied unless <code>DryRun</code> is set.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
 
 ```go
@@ -1841,6 +1901,7 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `Refresh(ctx)` | `(*SandboxHandle, error)` | Fresh handle for the same name |
 | `Ping(ctx)` | `(*`[`SandboxPingResult`](#sandboxpingresult)`, error)` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | `Touch(ctx)` | `(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)` | Explicitly refresh idle activity; does not start stopped sandboxes |
+| `Modify(ctx, opts)` | `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)` | Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes — changes persist for the next boot |
 | `Metrics(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Point-in-time resource metrics |
 | `Logs(ctx, opts)` | `([]`[`LogEntry`](#logentry)`, error)` | Read captured `exec.log` (works without starting) |
 | `LogStream(ctx, opts)` | `(*`[`LogStreamHandle`](#logstreamhandle)`, error)` | Stream captured output |
@@ -1878,6 +1939,67 @@ Explicit idle-refresh result.
 |-------|------|-------------|
 | Name | `string` | Sandbox name |
 | ActivitySeq | `uint64` | Monotonic activity sequence after the touch |
+
+### ModifyOptions
+
+<p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
+
+A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU or memory size). Secret changes are Rust-SDK and CLI only for now.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| CPUs | `uint8` | Desired effective vCPU count. Live when within the booted `MaxCPUs` |
+| MaxCPUs | `uint8` | Boot-time maximum possible vCPUs (restart-backed) |
+| MemoryMiB | `uint32` | Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB` |
+| MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| Env | `map[string]string` | Environment variables to set for future execs |
+| EnvRemove | `[]string` | Environment variable keys to remove |
+| Labels | `map[string]string` | Labels to set |
+| LabelsRemove | `[]string` | Label keys to remove |
+| Workdir | `string` | Working directory for future execs |
+| Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
+| DryRun | `bool` | Compute the plan without applying anything |
+
+### SandboxModificationPlan
+
+<p className="msb-backref">Returned by <a href="#sb-modify">Modify()</a></p>
+
+Dry-run or apply plan for a sandbox modification. Values never appear in a plan: secret entries carry only guest-visible references.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Sandbox | `string` | Sandbox being modified |
+| Status | `string` | Status used for classification (`"running"`, `"stopped"`, ...) |
+| Applied | `bool` | Whether the changes were applied; `false` for dry runs |
+| Policy | `ModificationPolicy` | Policy used to produce the plan |
+| Changes | `[]PlannedChange` | Planned changes, one entry per field or secret (see below) |
+| Conflicts | `[]ModificationConflict` | Conflicts (`Field` + `Message`) that must be resolved before the patch can apply |
+| Warnings | `[]ModificationWarning` | Non-fatal warnings (`Field` + `Message`), e.g. the future-execs-only env caveat |
+| ResizeStatus | `[]ResourceResizeStatus` | Live resource resize outcomes, populated by apply when a live change ran (see below) |
+
+`PlannedChange` is one planned entry. `Kind` is `"config"` or `"secret"`; config entries carry `Before` / `After` while secret entries carry `Name`, `BeforeRef` / `AfterRef` (guest-visible references, values are omitted by construction), and `AllowHosts`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Kind | `string` | `"config"` or `"secret"` |
+| Field | `string` | Config field being changed; always `"secret"` for secret entries |
+| Name | `string` | Secret name (secret entries only) |
+| Change | `string` | `"added"`, `"updated"`, or `"removed"` for config; `"added"`, `"rotated"`, `"removed"`, `"renamed"`, `"hosts updated"`, or `"placeholder updated"` for secrets |
+| Before / After | `*string` | Previous / new visible state (config entries) |
+| BeforeRef / AfterRef | `*string` | Previous / new guest-visible reference (secret entries) |
+| Disposition | `string` | `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"` |
+| AllowHosts | `[]string` | Allowed hosts after the requested change (secret entries) |
+| Reason | `*string` | Human-readable reason for the classification, when useful |
+
+`ResourceResizeStatus` reports runtime convergence for a live resize — enforcement applies immediately, the guest converges asynchronously:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Resource | `string` | `"cpus"` or `"memory"` |
+| Requested | `string` | Requested value |
+| Actual | `string` | Actual value observed in the guest/runtime |
+| Enforced | `string` | Host/VMM-enforced value |
+| State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
 
 ### SandboxFilter
 
