@@ -1702,20 +1702,6 @@ fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)
     Ok((pattern.to_string(), PathBuf::from(path)))
 }
 
-/// Parse a scoped upstream CA spec: `PATTERN=PATH`.
-#[cfg(feature = "net")]
-fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
-    let (pattern, path) = spec
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("scoped upstream CA must be in format PATTERN=PATH"))?;
-
-    if pattern.is_empty() || path.is_empty() {
-        anyhow::bail!("scoped upstream CA must be in format PATTERN=PATH (both parts required)");
-    }
-
-    Ok((pattern.to_string(), PathBuf::from(path)))
-}
-
 /// Parse a violation action string.
 #[cfg(feature = "net")]
 fn parse_violation_action(
@@ -2187,26 +2173,6 @@ mod tests {
         assert!(parse_secret("API_KEY", "create").is_err());
         assert!(parse_secret("@api.example.com", "create").is_err());
         assert!(parse_secret("API_KEY@", "create").is_err());
-    }
-
-    #[cfg(feature = "net")]
-    #[test]
-    fn parse_scoped_upstream_ca_cert_accepts_pattern_and_path() {
-        let (pattern, path) =
-            parse_scoped_upstream_ca_cert("*.internal=/tmp/internal-ca.pem").unwrap();
-
-        assert_eq!(pattern, "*.internal");
-        assert_eq!(path, PathBuf::from("/tmp/internal-ca.pem"));
-    }
-
-    #[cfg(feature = "net")]
-    #[test]
-    fn parse_scoped_upstream_ca_cert_rejects_missing_separator() {
-        let err = parse_scoped_upstream_ca_cert("*.internal:/tmp/internal-ca.pem")
-            .unwrap_err()
-            .to_string();
-
-        assert_eq!(err, "scoped upstream CA must be in format PATTERN=PATH");
     }
 
     #[cfg(feature = "net")]
