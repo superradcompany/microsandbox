@@ -212,7 +212,7 @@ impl JsSnapshot {
         self.inner.manifest().parent.clone()
     }
 
-    #[napi(getter)]
+    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.manifest().scope).into()
     }
@@ -269,7 +269,7 @@ impl JsSnapshotHandle {
         self.inner.parent_digest().map(|s| s.to_string())
     }
 
-    #[napi(getter)]
+    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.scope()).into()
     }

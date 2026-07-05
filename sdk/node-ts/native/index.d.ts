@@ -1399,7 +1399,7 @@ export declare class Snapshot {
   get format(): string
   get fstype(): string
   get parent(): string | null
-  get scope(): SnapshotScope
+  get scope(): 'disk' | 'resumable'
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
@@ -1413,13 +1413,13 @@ export type JsSnapshot = Snapshot
  */
 export declare class SnapshotBuilder {
   constructor(name: string)
-  /** Set the source sandbox to snapshot. Required. */
-  fromSandbox(sourceSandbox: string): this
   /**
    * Create the artifact under this parent directory instead of the
    * default snapshots store. The artifact lands at `destDir/<name>`.
    */
   destDir(destDir: string): this
+  /** Set the source sandbox to snapshot. Required. */
+  fromSandbox(sourceSandbox: string): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
   /** Overwrite an existing artifact at the destination. */
@@ -1448,7 +1448,7 @@ export declare class SnapshotHandle {
   get digest(): string
   get name(): string | null
   get parentDigest(): string | null
-  get scope(): SnapshotScope
+  get scope(): 'disk' | 'resumable'
   get imageRef(): string
   get format(): string
   get sizeBytes(): bigint | null
@@ -1676,19 +1676,6 @@ export interface ExecOptions {
 export interface ExitStatus {
   code: number
   success: boolean
-}
-
-/** Snapshot payload scope. */
-export type SnapshotScope = "disk" | "resumable"
-
-/** Options for `Snapshot.save()`. */
-export interface SaveOpts {
-  /** Walk the parent chain and include each ancestor (no-op today). */
-  withParents?: boolean
-  /** Bundle the OCI image cache for offline transport. */
-  withImage?: boolean
-  /** Skip zstd compression and write a plain `.tar`. */
-  plainTar?: boolean
 }
 
 /** Filesystem entry metadata returned by `fs.list()`. */
@@ -2114,6 +2101,16 @@ export interface SandboxTouchResult {
   activitySeq: number
 }
 
+/** Options for `Snapshot.save()`. */
+export interface SaveOpts {
+  /** Walk the parent chain and include each ancestor (no-op today). */
+  withParents?: boolean
+  /** Bundle the OCI image cache for offline transport. */
+  withImage?: boolean
+  /** Skip zstd compression and write a plain `.tar`. */
+  plainTar?: boolean
+}
+
 /** Host-scoped upstream CA certificate path. */
 export interface ScopedUpstreamCaCert {
   pattern: string
@@ -2197,7 +2194,7 @@ export interface SnapshotConfig {
   name: string
   sourceSandbox?: string
   destDir?: string
-  labels: Array<SnapshotLabel>
+  labels: Array<JsSnapshotLabel>
   force: boolean
   recordIntegrity: boolean
   resumable: boolean
