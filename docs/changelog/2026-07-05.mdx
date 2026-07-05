@@ -1,0 +1,32 @@
+---
+title: "Week of July 5, 2026"
+description: "msb metrics overhaul: crashed sandboxes no longer report as running, a STATE column, resize-aware CPU/MEM denominators, per-second I/O rates, and live --watch / --follow modes."
+icon: "bolt"
+---
+
+## New features
+
+**Live metrics: `msb metrics --watch` and `--follow`**
+
+`msb metrics` gains a `docker stats`-style live mode. `--watch` refreshes the table in place at a configurable `--interval` (default 1s); `--follow` streams one JSON Lines object per sandbox per tick for scripting. Disk and network columns now render as per-second rates derived from consecutive samples — the one-shot table samples twice ~500 ms apart so it reads identically to a watch frame. `--sort cpu|mem` orders rows by usage.
+
+```bash
+msb metrics --watch --interval 500ms
+msb metrics --follow | jq .cpu_percent
+```
+
+See [msb metrics](/cli/sandbox-commands#msb-metrics).
+
+**Sandbox state in metrics output**
+
+Every metrics row now carries a `STATE`: `running`, `stalled` (runtime alive but the sampler has not written a sample within three sampling intervals), or `exited` (the preserved terminal sample of a stopped sandbox). Named lookups (`msb metrics my-app`) answer in any state instead of pretending an exited sandbox is live, and `--all` opts recently exited sandboxes into the fleet view with their cumulative totals. The Rust SDK exposes the same data via `SandboxMetricsReport` / `all_sandbox_metrics_reports_local`.
+
+**Resize-aware CPU and memory denominators**
+
+The `CPU` column shows cores busy over cores allocated (`0.80 / 2c`) and `MEM` shows usage over the configured limit — both resolved from the catalog's *active* config at read time, so `msb modify --cpus/--memory` on a running sandbox is reflected on the next tick instead of showing the boot-time limit forever.
+
+## Fixes
+
+**Crashed sandboxes no longer report as running**
+
+A runtime killed hard (SIGKILL, OOM, host reboot) never released its shared-memory metrics slot, so `msb metrics` — and the `msb-metrics` collector — kept reporting its frozen last sample as a running sandbox until slot pressure forced a reclaim. Registry readers now verify the slot owner's PID on every read and retire dead entries on the spot: the CLI reports them as `exited`, and collector export streams drop the series on the next tick.
