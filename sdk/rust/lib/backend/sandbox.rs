@@ -96,6 +96,8 @@ pub struct SandboxHandleLocalState {
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
     pub config_json: String,
+    /// Serialized `SandboxConfig` used by the active VM, when known.
+    pub active_config_json: Option<String>,
     /// When this sandbox was first created, if recorded.
     pub created_at: Option<DateTime<Utc>>,
     /// When this sandbox's database record was last modified.
@@ -944,7 +946,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::read")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::read")) })
     }
 
     fn fs_read_stream<'a>(
@@ -953,7 +955,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<FsReadStream>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::read_stream")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::read_stream")) })
     }
 
     fn fs_write<'a>(
@@ -963,7 +965,7 @@ impl SandboxBackend for CloudBackend {
         _path: &'a str,
         _data: Vec<u8>,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::write")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::write")) })
     }
 
     fn fs_write_stream<'a>(
@@ -972,7 +974,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<FsWriteSink>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::write_stream")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::write_stream")) })
     }
 
     fn fs_list<'a>(
@@ -981,7 +983,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::list")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::list")) })
     }
 
     fn fs_stat<'a>(
@@ -990,7 +992,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::stat")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::stat")) })
     }
 
     fn fs_mkdir<'a>(
@@ -999,7 +1001,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::mkdir")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::mkdir")) })
     }
 
     fn fs_remove<'a>(
@@ -1009,7 +1011,7 @@ impl SandboxBackend for CloudBackend {
         _path: &'a str,
         _recursive: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::remove")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::remove")) })
     }
 
     fn fs_copy<'a>(
@@ -1019,7 +1021,7 @@ impl SandboxBackend for CloudBackend {
         _from: &'a str,
         _to: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::copy")) })
     }
 
     fn fs_rename<'a>(
@@ -1029,7 +1031,7 @@ impl SandboxBackend for CloudBackend {
         _from: &'a str,
         _to: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::rename")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::rename")) })
     }
 
     fn fs_exists<'a>(
@@ -1038,7 +1040,7 @@ impl SandboxBackend for CloudBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::exists")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::exists")) })
     }
 
     fn fs_copy_from_host<'a>(
@@ -1048,7 +1050,7 @@ impl SandboxBackend for CloudBackend {
         _host: &'a Path,
         _guest: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy_from_host")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::copy_from_host")) })
     }
 
     fn fs_copy_to_host<'a>(
@@ -1058,7 +1060,7 @@ impl SandboxBackend for CloudBackend {
         _guest: &'a str,
         _host: &'a Path,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy_to_host")) })
+        Box::pin(async move { Err(unsupported_fs("SandboxFsOps::copy_to_host")) })
     }
 }
 
@@ -1101,6 +1103,8 @@ fn sandbox_config_from_cloud(cloud: &CloudSandbox) -> SandboxConfig {
         resources: SandboxResources {
             cpus: cloud.config.vcpus,
             memory_mib: cloud.config.memory_mib,
+            max_cpus: cloud.config.vcpus,
+            max_memory_mib: cloud.config.memory_mib,
         },
         runtime: SandboxRuntimeOptions {
             workdir: cloud.config.workdir.clone(),

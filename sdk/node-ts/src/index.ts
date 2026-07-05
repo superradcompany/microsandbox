@@ -34,7 +34,27 @@ export const SandboxBuilder = function SandboxBuilder(
   return _Sandbox.builder(name);
 } as unknown as new (name: string) => _SBT;
 export type SandboxBuilder = _SBT;
-export type { SandboxConfig } from "./sandbox.js";
+export type {
+  SandboxConfig,
+  SandboxPingResult,
+  SandboxTouchResult,
+} from "./sandbox.js";
+export type {
+  ChangeKind,
+  ConfigPlannedChange,
+  ModificationConflict,
+  ModificationDisposition,
+  ModificationPolicy,
+  ModificationWarning,
+  ModifyOptions,
+  PlannedChange,
+  ResourceConvergenceState,
+  ResourceKind,
+  ResourceResizeStatus,
+  SandboxModificationPlan,
+  SecretChangeKind,
+  SecretPlannedChange,
+} from "./modify.js";
 export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 

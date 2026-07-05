@@ -132,7 +132,7 @@ pub fn all_sandbox_metrics<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> 
                 available_when: "when cloud metrics land".into(),
             })
         })?;
-        let metrics = microsandbox::sandbox::all_sandbox_metrics(local)
+        let metrics = microsandbox::sandbox::all_sandbox_metrics_local(local)
             .await
             .map_err(to_py_err)?;
         let result: std::collections::HashMap<String, PySandboxMetrics> = metrics

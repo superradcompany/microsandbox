@@ -126,6 +126,33 @@ msb stop worker
 
 # Later, resume where you left off
 msb start worker
+
+# Or stop and start in one command
+msb restart worker
+```
+
+</CodeGroup>
+
+`msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
+
+## Ping and touch
+
+Use `ping` to check that a running sandbox's guest agent is reachable, and `touch` to intentionally refresh its idle timer. Ping is a health check only: it does not count as sandbox activity and will not keep an idle sandbox alive by itself. Touch is the explicit keepalive.
+
+<CodeGroup>
+```rust Rust
+let ping = sb.ping().await?;
+println!("agent reachable in {:?}", ping.latency);
+
+sb.touch().await?;
+```
+
+```bash CLI
+msb ping worker
+msb touch worker
+
+# Health check and then keep alive if reachable
+msb ping worker --touch
 ```
 
 </CodeGroup>

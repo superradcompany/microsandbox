@@ -70,7 +70,6 @@ use crate::runtime::handle::WindowsJob;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
-    config,
     db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
@@ -262,13 +261,21 @@ pub async fn spawn_sandbox(
     sandbox_id: i32,
     mode: SpawnMode,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+    // Reference-model secrets store only a host-side source reference in the
+    // durable config; resolve the actual values now so they travel to the
+    // sandbox process on the private launch-config fd without ever being
+    // persisted.
+    #[cfg(feature = "net")]
+    let resolved_config = crate::sandbox::config::resolve_config_secret_sources(config)?;
+    #[cfg(feature = "net")]
+    let config = resolved_config.as_ref().unwrap_or(config);
+
     // libkrunfw is process-level (one dylib per process address space). The
     // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
-    // then config.paths.libkrunfw, then filesystem fallbacks — see
-    // `config::resolve_libkrunfw_path` for the full precedence ladder.
+    // then config.paths.libkrunfw, then filesystem fallbacks.
     let global = local.config();
-    let msb_path = config::resolve_msb_path(global)?;
-    let libkrunfw_path = config::resolve_libkrunfw_path(global)?;
+    let msb_path = global.resolve_msb_path()?;
+    let libkrunfw_path = global.resolve_libkrunfw_path()?;
     #[cfg(windows)]
     crate::setup::verify_windows_host_prerequisites()?;
     tracing::debug!(
@@ -2071,6 +2078,16 @@ fn sandbox_cli_args(
     visible.push(OsString::from(config.spec.resources.cpus.to_string()));
     visible.push(OsString::from("--memory-mib"));
     visible.push(OsString::from(config.spec.resources.memory_mib.to_string()));
+    if config.spec.resources.max_cpus > config.spec.resources.cpus {
+        visible.push(OsString::from("--max-vcpus"));
+        visible.push(OsString::from(config.spec.resources.max_cpus.to_string()));
+    }
+    if config.spec.resources.max_memory_mib > config.spec.resources.memory_mib {
+        visible.push(OsString::from("--max-memory-mib"));
+        visible.push(OsString::from(
+            config.spec.resources.max_memory_mib.to_string(),
+        ));
+    }
 
     let mut launch = LaunchConfig {
         db_path: db_path.to_path_buf(),
@@ -2487,6 +2504,27 @@ mod tests {
             42,
             microsandbox_runtime::vm::CONFIG_FD,
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
+        super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
+            .await
+            .unwrap();
+
+        unsafe {
+            let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+            let rc = libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr());
+            assert_eq!(rc, 0, "failed to read SIGCHLD action");
+
+            let action = action.assume_init();
+            assert_ne!(
+                action.sa_flags & libc::SA_ONSTACK,
+                0,
+                "SIGCHLD handler should run on the alternate signal stack"
+            );
+        }
     }
 
     //----------------------------------------------------------------------------------------------

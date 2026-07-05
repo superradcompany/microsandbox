@@ -27,6 +27,7 @@ ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-protocol.workspace = true
+microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["net"] }
 msb_krun_utils.workspace = true
@@ -59,6 +60,7 @@ time = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 
 # macOS reads DNS servers from SystemConfiguration / SCDynamicStore rather
 # than /etc/resolv.conf. On VPN + split-DNS setups, the file version is

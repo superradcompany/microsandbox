@@ -1,0 +1,270 @@
+---
+title: Images
+description: Rust SDK - Image cache API reference
+---
+
+Inspect, remove, and prune the local OCI image cache: the images that sandbox creation has already pulled. The ambient `Image::*` methods use the active default backend and return `Unsupported` when that backend is cloud. The `*_local` variants take an explicit `LocalBackend` and never consult ambient backend state.
+
+```rust
+use microsandbox::{Image, ImagePruneReport};
+```
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Ambient cache methods<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#image-get"><span className="msb-rn">Image::get()</span><span className="msb-rg">one cached image</span></a>
+  <a className="msb-row" href="#image-list"><span className="msb-rn">Image::list()</span><span className="msb-rg">all cached images</span></a>
+  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image::inspect()</span><span className="msb-rg">config + layer detail</span></a>
+  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image::remove()</span><span className="msb-rg">delete a cached image</span></a>
+  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image::prune()</span><span className="msb-rg">reclaim unused data</span></a>
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Explicit local variants<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#explicit-local-variants"><span className="msb-rn">Image::*_local()</span><span className="msb-rg">operate on a LocalBackend</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
+    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
+    <a className="msb-typepill" href="#imageconfigdetail">ImageConfigDetail</a>
+    <a className="msb-typepill" href="#imagelayerdetail">ImageLayerDetail</a>
+    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```rust
+use microsandbox::Image;
+
+for image in Image::list().await? {
+    println!("{} ({} layers)", image.reference(), image.layer_count());
+}
+
+let detail = Image::inspect("python:3.12").await?;
+println!("{:?}", detail.config.as_ref().and_then(|c| c.working_dir.as_deref()));
+
+let report = Image::prune().await?;
+println!("removed {} refs", report.image_refs_removed);
+```
+
+## Ambient cache methods
+
+These methods resolve the active backend with `microsandbox::backend::default_backend()`. They are convenient for normal local programs and fail with `Unsupported` when the active backend is cloud.
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn get(reference: &str) -> MicrosandboxResult<ImageHandle>
+```
+
+Fetch one cached image by reference. Returns `ImageNotFound` when the reference is not present in the local cache.
+
+<Accordion title="Example">
+
+```rust
+let image = Image::get("python:3.12").await?;
+println!("{:?}", image.manifest_digest());
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn list() -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+Return every cached image, ordered by creation time with newest first.
+
+<Accordion title="Example">
+
+```rust
+for image in Image::list().await? {
+    println!("{}", image.reference());
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">inspect()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail>
+```
+
+Return full detail for a cached image: handle metadata, parsed OCI config fields, and layer metadata.
+
+<Accordion title="Example">
+
+```rust
+let detail = Image::inspect("python:3.12").await?;
+for layer in &detail.layers {
+    println!("{} {}", layer.position, layer.diff_id);
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()>
+```
+
+Delete a cached image. When `force` is `false`, an image still referenced by one or more sandboxes returns `ImageInUse`.
+
+<Accordion title="Example">
+
+```rust
+Image::remove("old:tag", false).await?;
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">prune()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn prune() -> MicrosandboxResult<ImagePruneReport>
+```
+
+Remove cached image data that is not used by any sandbox or indexed snapshot. Prune removes unused image refs, manifests that become unreachable, orphaned layers, image metadata on disk, layer EROFS artifacts, fsmeta EROFS artifacts, and VMDK descriptor artifacts. `bytes_reclaimed` is reported when deleted files could be measured.
+
+<Accordion title="Example">
+
+```rust
+let report = Image::prune().await?;
+println!("{:?}", report.bytes_reclaimed);
+```
+
+</Accordion>
+
+## Explicit local variants
+
+Use these when your program owns a specific `LocalBackend` and should not depend on the process default backend.
+
+```rust
+use microsandbox::{Image, LocalBackend};
+
+let backend = LocalBackend::builder()
+    .home("/tmp/msb-home")
+    .build()
+    .await?;
+
+let image = Image::get_local(&backend, "python:3.12").await?;
+let images = Image::list_local(&backend).await?;
+let detail = Image::inspect_local(&backend, image.reference()).await?;
+Image::remove_local(&backend, detail.handle.reference(), false).await?;
+let report = Image::prune_local(&backend).await?;
+```
+
+| Method | Signature |
+|--------|-----------|
+| `get_local` | `async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>` |
+| `list_local` | `async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>` |
+| `inspect_local` | `async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>` |
+| `remove_local` | `async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>` |
+| `prune_local` | `async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>` |
+
+## Types
+
+### ImageHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+
+A lightweight metadata handle for a cached OCI image.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `reference()` | `&str` | Image reference |
+| `size_bytes()` | `Option<i64>` | Total image size in bytes, when known |
+| `manifest_digest()` | `Option<&str>` | Content-addressable manifest digest |
+| `architecture()` | `Option<&str>` | Resolved architecture |
+| `os()` | `Option<&str>` | Resolved operating system |
+| `layer_count()` | `usize` | Number of layers |
+| `last_used_at()` | `Option<DateTime<Utc>>` | Last referenced time |
+| `created_at()` | `Option<DateTime<Utc>>` | First-pulled time |
+
+### ImageDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a></p>
+
+Full detail for a cached image.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `handle` | [`ImageHandle`](#imagehandle) | Core cached image metadata |
+| `config` | `Option<`[`ImageConfigDetail`](#imageconfigdetail)`>` | Parsed OCI config block |
+| `layers` | `Vec<`[`ImageLayerDetail`](#imagelayerdetail)`>` | Layers in bottom-to-top order |
+
+### ImageConfigDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.config</a></p>
+
+OCI image config fields extracted from the local cache.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `digest` | `String` | Config blob digest |
+| `env` | `Vec<String>` | Environment variables in `KEY=value` form |
+| `cmd` | `Option<Vec<String>>` | Default command |
+| `entrypoint` | `Option<Vec<String>>` | Image entrypoint |
+| `working_dir` | `Option<String>` | Default working directory |
+| `user` | `Option<String>` | Default user |
+| `labels` | `Option<serde_json::Value>` | OCI labels |
+| `stop_signal` | `Option<String>` | Configured stop signal |
+
+### ImageLayerDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.layers</a></p>
+
+Metadata for one image layer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `diff_id` | `String` | Uncompressed diff ID |
+| `blob_digest` | `String` | Compressed blob digest |
+| `media_type` | `Option<String>` | OCI media type |
+| `compressed_size_bytes` | `Option<i64>` | Compressed blob size in bytes |
+| `erofs_size_bytes` | `Option<i64>` | EROFS image size in bytes |
+| `position` | `i32` | Layer position, where `0` is the bottom |
+
+### ImagePruneReport
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
+
+Summary of cached image data removed by [`Image::prune()`](#image-prune).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `image_refs_removed` | `u32` | Cached image references removed from the local image index |
+| `manifests_removed` | `u32` | OCI manifests removed from the local image index |
+| `layers_removed` | `u32` | Layer records removed from the local image index |
+| `fsmeta_removed` | `u32` | Merged fsmeta EROFS artifacts removed from disk |
+| `vmdk_removed` | `u32` | VMDK descriptor artifacts removed from disk |
+| `bytes_reclaimed` | `Option<u64>` | Best-effort measured bytes reclaimed from deleted artifacts |

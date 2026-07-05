@@ -1,10 +1,12 @@
 //! `msb inspect` command — show detailed sandbox information.
 
 use clap::Args;
+use console::style;
 use microsandbox::sandbox::{
-    HostPermissions, MountOptions, Sandbox, SandboxConfig, SecurityProfile, StatVirtualization,
-    VolumeMount,
+    HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus, SecurityProfile,
+    StatVirtualization, VolumeMount,
 };
+use serde::Serialize;
 
 use crate::ui;
 
@@ -60,6 +62,14 @@ pub struct InspectArgs {
     pub format: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct PendingConfigChange {
+    field: &'static str,
+    active: String,
+    desired: String,
+    effect: &'static str,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -67,17 +77,30 @@ pub struct InspectArgs {
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     let handle = Sandbox::get(&args.name).await?;
+    let desired_config = handle.config().ok();
+    let active_config = handle.active_config().ok().flatten();
+    let pending_changes = pending_config_changes(
+        handle.status_snapshot(),
+        desired_config.as_ref(),
+        active_config.as_ref(),
+    );
 
     if args.format.as_deref() == Some("json") {
         let config: serde_json::Value =
             serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "name": handle.name(),
             "status": format!("{:?}", handle.status_snapshot()),
             "config": config,
             "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
         });
+        let active_config_json = handle
+            .active_config_json()
+            .map(|json| serde_json::from_str(json).unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null);
+        json["active_config"] = active_config_json;
+        json["pending_changes"] = serde_json::to_value(&pending_changes)?;
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -95,7 +118,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     }
 
     // Parse and display config details.
-    if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
+    if let Some(config) = desired_config {
         let image = match &config.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
@@ -108,12 +131,34 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
         }
 
+        let change_for = |field: &str| pending_changes.iter().find(|c| c.field == field);
         ui::detail_header("Resources");
-        ui::detail_kv_indent("CPUs", &config.spec.resources.cpus.to_string());
+        ui::detail_kv_indent(
+            "CPUs",
+            &resource_value(&config.spec.resources.cpus.to_string(), change_for("cpus")),
+        );
+        ui::detail_kv_indent(
+            "Max CPUs",
+            &resource_value(
+                &config.spec.resources.max_cpus.to_string(),
+                change_for("max_cpus"),
+            ),
+        );
         ui::detail_kv_indent(
             "Memory",
-            &format!("{} MiB", config.spec.resources.memory_mib),
+            &resource_value(
+                &format!("{} MiB", config.spec.resources.memory_mib),
+                change_for("memory"),
+            ),
         );
+        ui::detail_kv_indent(
+            "Max Memory",
+            &resource_value(
+                &format!("{} MiB", config.spec.resources.max_memory_mib),
+                change_for("max_memory"),
+            ),
+        );
+
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
             SecurityProfile::Restricted => "restricted",
@@ -207,4 +252,150 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn pending_config_changes(
+    status: SandboxStatus,
+    desired: Option<&SandboxConfig>,
+    active: Option<&SandboxConfig>,
+) -> Vec<PendingConfigChange> {
+    if !status_has_active_config(status) {
+        return Vec::new();
+    }
+
+    let (Some(desired), Some(active)) = (desired, active) else {
+        return Vec::new();
+    };
+
+    let mut changes = Vec::new();
+    if desired.spec.resources.cpus != active.spec.resources.cpus {
+        changes.push(PendingConfigChange {
+            field: "cpus",
+            active: active.spec.resources.cpus.to_string(),
+            desired: desired.spec.resources.cpus.to_string(),
+            effect: "requires restart",
+        });
+    }
+    if desired.spec.resources.max_cpus != active.spec.resources.max_cpus {
+        changes.push(PendingConfigChange {
+            field: "max_cpus",
+            active: active.spec.resources.max_cpus.to_string(),
+            desired: desired.spec.resources.max_cpus.to_string(),
+            effect: "requires restart",
+        });
+    }
+    if desired.spec.resources.memory_mib != active.spec.resources.memory_mib {
+        changes.push(PendingConfigChange {
+            field: "memory",
+            active: format_mib(active.spec.resources.memory_mib),
+            desired: format_mib(desired.spec.resources.memory_mib),
+            effect: "requires restart",
+        });
+    }
+    if desired.spec.resources.max_memory_mib != active.spec.resources.max_memory_mib {
+        changes.push(PendingConfigChange {
+            field: "max_memory",
+            active: format_mib(active.spec.resources.max_memory_mib),
+            desired: format_mib(desired.spec.resources.max_memory_mib),
+            effect: "requires restart",
+        });
+    }
+
+    changes
+}
+
+fn status_has_active_config(status: SandboxStatus) -> bool {
+    matches!(
+        status,
+        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+    )
+}
+
+fn format_mib(mib: u32) -> String {
+    if mib >= 1024 && mib.is_multiple_of(1024) {
+        format!("{} GiB", mib / 1024)
+    } else {
+        format!("{mib} MiB")
+    }
+}
+
+/// Render a resource row value, inlining any pending next-start divergence.
+///
+/// With no pending change the plain (desired) value is shown as-is. With one, the ACTIVE value leads and a dim `→ <desired> next start` suffix flags the divergence.
+fn resource_value(plain: &str, change: Option<&PendingConfigChange>) -> String {
+    match change {
+        Some(change) => format!(
+            "{}{}",
+            change.active,
+            style(format!(" \u{2192} {} next start", change.desired)).dim()
+        ),
+        None => plain.to_string(),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
+        let mut config = SandboxConfig::default();
+        config.spec.resources.cpus = cpus;
+        config.spec.resources.memory_mib = memory_mib;
+        config.spec.resources.max_cpus = cpus;
+        config.spec.resources.max_memory_mib = memory_mib;
+        config
+    }
+
+    #[test]
+    fn pending_config_changes_compare_running_active_and_desired_resources() {
+        let desired = config(4, 4096);
+        let active = config(2, 1024);
+
+        let changes = pending_config_changes(SandboxStatus::Running, Some(&desired), Some(&active));
+
+        assert_eq!(changes.len(), 4);
+        assert_eq!(changes[0].field, "cpus");
+        assert_eq!(changes[0].active, "2");
+        assert_eq!(changes[0].desired, "4");
+        assert_eq!(changes[1].field, "max_cpus");
+        assert_eq!(changes[1].active, "2");
+        assert_eq!(changes[1].desired, "4");
+        assert_eq!(changes[2].field, "memory");
+        assert_eq!(changes[2].active, "1 GiB");
+        assert_eq!(changes[2].desired, "4 GiB");
+        assert_eq!(changes[3].field, "max_memory");
+        assert_eq!(changes[3].active, "1 GiB");
+        assert_eq!(changes[3].desired, "4 GiB");
+    }
+
+    #[test]
+    fn resource_value_inlines_pending_divergence() {
+        let change = PendingConfigChange {
+            field: "memory",
+            active: "1 GiB".to_string(),
+            desired: "4 GiB".to_string(),
+            effect: "requires restart",
+        };
+
+        assert_eq!(resource_value("4096 MiB", None), "4096 MiB");
+
+        let rendered = resource_value("4096 MiB", Some(&change));
+        let plain = console::strip_ansi_codes(&rendered).to_string();
+        assert_eq!(plain, "1 GiB \u{2192} 4 GiB next start");
+        assert!(rendered.starts_with("1 GiB"));
+    }
+
+    #[test]
+    fn pending_config_changes_ignore_stopped_sandboxes() {
+        let desired = config(4, 4096);
+        let active = config(2, 1024);
+
+        let changes = pending_config_changes(SandboxStatus::Stopped, Some(&desired), Some(&active));
+
+        assert!(changes.is_empty());
+    }
 }

@@ -21,6 +21,8 @@ type SandboxConfig struct {
 	Snapshot        string
 	MemoryMiB       uint32
 	CPUs            uint8
+	MaxMemoryMiB    uint32
+	MaxCPUs         uint8
 	Workdir         string
 	Shell           string
 	SecurityProfile SecurityProfile
@@ -65,6 +67,9 @@ type persistedSandboxConfig struct {
 	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
 	MemoryMiB       uint32               `json:"memory_mib"`
 	CPUs            uint8                `json:"cpus"`
+	MaxMemoryMiB    uint32               `json:"max_memory_mib"`
+	MaxCPUs         uint8                `json:"max_cpus"`
+	Resources       *persistedResources  `json:"resources"`
 	Workdir         string               `json:"workdir"`
 	Shell           string               `json:"shell"`
 	SecurityProfile SecurityProfile      `json:"security_profile"`
@@ -86,6 +91,13 @@ type persistedInitConfig struct {
 	Cmd  string      `json:"cmd"`
 	Args []string    `json:"args"`
 	Env  [][2]string `json:"env"`
+}
+
+type persistedResources struct {
+	CPUs         uint8  `json:"cpus"`
+	MemoryMiB    uint32 `json:"memory_mib"`
+	MaxCPUs      uint8  `json:"max_cpus"`
+	MaxMemoryMiB uint32 `json:"max_memory_mib"`
 }
 
 type persistedLifecycle struct {
@@ -120,8 +132,10 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		ImageFstype:     imageFstype,
 		OCIUpperSizeMiB: upperSizeMiB,
 		ociUpperSizeSet: upperSizeSet,
-		MemoryMiB:       raw.MemoryMiB,
-		CPUs:            raw.CPUs,
+		MemoryMiB:       raw.memoryMiB(),
+		CPUs:            raw.cpus(),
+		MaxMemoryMiB:    raw.maxMemoryMiB(),
+		MaxCPUs:         raw.maxCPUs(),
 		Workdir:         raw.Workdir,
 		Shell:           raw.Shell,
 		SecurityProfile: raw.SecurityProfile,
@@ -141,6 +155,46 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
+}
+
+func (c persistedSandboxConfig) cpus() uint8 {
+	if c.Resources != nil {
+		return c.Resources.CPUs
+	}
+	return c.CPUs
+}
+
+func (c persistedSandboxConfig) memoryMiB() uint32 {
+	if c.Resources != nil {
+		return c.Resources.MemoryMiB
+	}
+	return c.MemoryMiB
+}
+
+func (c persistedSandboxConfig) maxCPUs() uint8 {
+	if c.Resources != nil {
+		if c.Resources.MaxCPUs != 0 {
+			return c.Resources.MaxCPUs
+		}
+		return c.Resources.CPUs
+	}
+	if c.MaxCPUs != 0 {
+		return c.MaxCPUs
+	}
+	return c.CPUs
+}
+
+func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
+	if c.Resources != nil {
+		if c.Resources.MaxMemoryMiB != 0 {
+			return c.Resources.MaxMemoryMiB
+		}
+		return c.Resources.MemoryMiB
+	}
+	if c.MaxMemoryMiB != 0 {
+		return c.MaxMemoryMiB
+	}
+	return c.MemoryMiB
 }
 
 func (c persistedSandboxConfig) lifecycleEphemeral() bool {
@@ -288,6 +342,16 @@ func WithMemory(mebibytes uint32) SandboxOption {
 // WithCPUs sets the CPU limit in whole cores (default 1).
 func WithCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.CPUs = cpus }
+}
+
+// WithMaxMemory sets the boot-time maximum hotpluggable memory in MiB.
+func WithMaxMemory(mebibytes uint32) SandboxOption {
+	return func(o *SandboxConfig) { o.MaxMemoryMiB = mebibytes }
+}
+
+// WithMaxCPUs sets the boot-time maximum possible vCPU count.
+func WithMaxCPUs(cpus uint8) SandboxOption {
+	return func(o *SandboxConfig) { o.MaxCPUs = cpus }
 }
 
 // WithWorkdir sets the working directory inside the sandbox.

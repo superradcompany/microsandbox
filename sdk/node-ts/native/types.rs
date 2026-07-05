@@ -17,6 +17,41 @@ pub struct SandboxStopResult {
     pub source: Option<String>,
 }
 
+/// Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`.
+#[napi(object)]
+pub struct SandboxPingResult {
+    pub name: String,
+    pub latency_ms: f64,
+}
+
+/// Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`.
+#[napi(object)]
+pub struct SandboxTouchResult {
+    pub name: String,
+    pub activity_seq: f64,
+}
+
+/// Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
+///
+/// `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+/// (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
+/// is computed without applying anything.
+#[napi(object)]
+#[derive(Default)]
+pub struct SandboxModifyOptions {
+    pub cpus: Option<u32>,
+    pub max_cpus: Option<u32>,
+    pub memory_mib: Option<u32>,
+    pub max_memory_mib: Option<u32>,
+    pub env: Option<HashMap<String, String>>,
+    pub env_remove: Option<Vec<String>>,
+    pub labels: Option<HashMap<String, String>>,
+    pub labels_remove: Option<Vec<String>>,
+    pub workdir: Option<String>,
+    pub policy: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
 /// Exit status for an executed command.
 #[napi(object)]
 pub struct ExitStatus {

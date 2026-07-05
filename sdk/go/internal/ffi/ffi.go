@@ -77,6 +77,9 @@ typedef char *(*msb_sandbox_handle_kill_fn)(uint64_t cancel_id, const char *name
 typedef char *(*msb_sandbox_handle_request_kill_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_request_drain_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_wait_until_stopped_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_ping_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_touch_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
@@ -138,6 +141,9 @@ typedef char *(*msb_exec_stdin_close_fn)(uint64_t cancel_id, uint64_t exec_handl
 typedef char *(*msb_sandbox_request_drain_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_wait_until_stopped_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_owns_lifecycle_fn)(uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_ping_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_touch_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -212,6 +218,9 @@ static msb_sandbox_handle_kill_fn ptr_msb_sandbox_handle_kill = NULL;
 static msb_sandbox_handle_request_kill_fn ptr_msb_sandbox_handle_request_kill = NULL;
 static msb_sandbox_handle_request_drain_fn ptr_msb_sandbox_handle_request_drain = NULL;
 static msb_sandbox_handle_wait_until_stopped_fn ptr_msb_sandbox_handle_wait_until_stopped = NULL;
+static msb_sandbox_handle_ping_fn ptr_msb_sandbox_handle_ping = NULL;
+static msb_sandbox_handle_touch_fn ptr_msb_sandbox_handle_touch = NULL;
+static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
@@ -264,6 +273,9 @@ static msb_exec_stdin_close_fn   ptr_msb_exec_stdin_close   = NULL;
 static msb_sandbox_request_drain_fn ptr_msb_sandbox_request_drain = NULL;
 static msb_sandbox_wait_until_stopped_fn ptr_msb_sandbox_wait_until_stopped = NULL;
 static msb_sandbox_owns_lifecycle_fn ptr_msb_sandbox_owns_lifecycle = NULL;
+static msb_sandbox_ping_fn       ptr_msb_sandbox_ping       = NULL;
+static msb_sandbox_touch_fn      ptr_msb_sandbox_touch      = NULL;
+static msb_sandbox_modify_fn     ptr_msb_sandbox_modify     = NULL;
 static msb_exec_collect_fn         ptr_msb_exec_collect         = NULL;
 static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
 static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
@@ -365,6 +377,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_handle_request_kill);
 	RESOLVE(msb_sandbox_handle_request_drain);
 	RESOLVE(msb_sandbox_handle_wait_until_stopped);
+	RESOLVE(msb_sandbox_handle_ping);
+	RESOLVE(msb_sandbox_handle_touch);
+	RESOLVE(msb_sandbox_handle_modify);
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
@@ -417,6 +432,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_request_drain);
 	RESOLVE(msb_sandbox_wait_until_stopped);
 	RESOLVE(msb_sandbox_owns_lifecycle);
+	RESOLVE(msb_sandbox_ping);
+	RESOLVE(msb_sandbox_touch);
+	RESOLVE(msb_sandbox_modify);
 	RESOLVE(msb_exec_collect);
 	RESOLVE(msb_exec_wait);
 	RESOLVE(msb_exec_kill);
@@ -527,6 +545,15 @@ char *call_msb_sandbox_handle_request_drain(uint64_t cancel_id, const char *name
 }
 char *call_msb_sandbox_handle_wait_until_stopped(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_wait_until_stopped ? ptr_msb_sandbox_handle_wait_until_stopped(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_ping(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_ping ? ptr_msb_sandbox_handle_ping(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_touch(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_touch ? ptr_msb_sandbox_handle_touch(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_modify(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_modify ? ptr_msb_sandbox_handle_modify(cancel_id, name, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_close ? ptr_msb_sandbox_close(cancel_id, handle, buf, buf_len) : NULL;
@@ -683,6 +710,15 @@ char *call_msb_sandbox_wait_until_stopped(uint64_t cancel_id, uint64_t handle, u
 }
 char *call_msb_sandbox_owns_lifecycle(uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_owns_lifecycle ? ptr_msb_sandbox_owns_lifecycle(handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_ping(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_ping ? ptr_msb_sandbox_ping(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_touch(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_touch ? ptr_msb_sandbox_touch(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_modify(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_modify ? ptr_msb_sandbox_modify(cancel_id, handle, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_exec_collect(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_collect ? ptr_msb_exec_collect(cancel_id, exec_handle, buf, buf_len) : NULL;
@@ -1005,6 +1041,18 @@ const (
 type Sandbox struct {
 	handle atomic.Uint64
 	name   string
+}
+
+// SandboxPingResult is the FFI shape returned by ping operations.
+type SandboxPingResult struct {
+	Name      string  `json:"name"`
+	LatencyMs float64 `json:"latency_ms"`
+}
+
+// SandboxTouchResult is the FFI shape returned by touch operations.
+type SandboxTouchResult struct {
+	Name        string `json:"name"`
+	ActivitySeq uint64 `json:"activity_seq"`
 }
 
 // AgentFrame is one raw protocol frame from agentd.
@@ -1386,6 +1434,8 @@ type CreateOptions struct {
 	Snapshot             string               `json:"snapshot,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
+	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
+	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -1867,6 +1917,62 @@ func WaitSandboxByNameUntilStopped(ctx context.Context, name string) (*SandboxSt
 	return &result, nil
 }
 
+// PingSandboxByName checks agent reachability without refreshing idle activity.
+func PingSandboxByName(ctx context.Context, name string) (*SandboxPingResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_ping(cancelID, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result SandboxPingResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse ping response: %w", err)
+	}
+	return &result, nil
+}
+
+// TouchSandboxByName explicitly refreshes idle activity for a running sandbox.
+func TouchSandboxByName(ctx context.Context, name string) (*SandboxTouchResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_touch(cancelID, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result SandboxTouchResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse touch response: %w", err)
+	}
+	return &result, nil
+}
+
+// ModifySandboxByName plans or applies a sandbox modification by name.
+// optsJSON carries the canonical patch/policy/dry_run request; the raw
+// modification plan JSON is returned for the public package to decode.
+func ModifySandboxByName(ctx context.Context, name, optsJSON string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cOpts := C.CString(optsJSON)
+	defer C.free(unsafe.Pointer(cOpts))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_modify(cancelID, cName, cOpts, buf, bufLen)
+	})
+}
+
 // OwnsLifecycle reports whether this handle owns the sandbox VM lifecycle.
 // When true, closing or stopping the handle terminates the sandbox.
 func (s *Sandbox) OwnsLifecycle() (bool, error) {
@@ -2013,6 +2119,56 @@ func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, err
 		return nil, fmt.Errorf("parse wait_until_stopped response: %w", err)
 	}
 	return &result, nil
+}
+
+// Ping checks agent reachability without refreshing idle activity.
+func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_ping(cancelID, s.h(), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result SandboxPingResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse ping response: %w", err)
+	}
+	return &result, nil
+}
+
+// Touch explicitly refreshes idle activity for a running sandbox.
+func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_touch(cancelID, s.h(), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result SandboxTouchResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse touch response: %w", err)
+	}
+	return &result, nil
+}
+
+// Modify plans or applies a modification on this live sandbox. optsJSON
+// carries the canonical patch/policy/dry_run request; the raw modification
+// plan JSON is returned for the public package to decode.
+func (s *Sandbox) Modify(ctx context.Context, optsJSON string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cOpts := C.CString(optsJSON)
+	defer C.free(unsafe.Pointer(cOpts))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_modify(cancelID, s.h(), cOpts, buf, bufLen)
+	})
 }
 
 // ListSandboxes returns metadata for all known sandboxes (running or stopped),

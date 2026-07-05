@@ -18,7 +18,7 @@ use crate::{
     db::entity::sandbox as sandbox_entity,
 };
 
-use super::{Sandbox, SandboxConfig, SandboxStatus, SandboxStopResult};
+use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -69,6 +69,7 @@ impl SandboxHandle {
                 db_id: model.id,
                 status: model.status,
                 config_json: model.config,
+                active_config_json: model.active_config,
                 created_at: model.created_at.map(|dt| dt.and_utc()),
                 updated_at: model.updated_at.map(|dt| dt.and_utc()),
                 pid,
@@ -176,6 +177,18 @@ impl SandboxHandle {
         }
     }
 
+    /// The serialized configuration used by the active VM, when known.
+    ///
+    /// Local handles return `Some` only while a sandbox has started under a
+    /// runtime that records active config snapshots. Stopped sandboxes and
+    /// older running sandboxes may return `None`.
+    pub fn active_config_json(&self) -> Option<&str> {
+        match &self.inner {
+            SandboxHandleInner::Local(s) => s.active_config_json.as_deref(),
+            SandboxHandleInner::Cloud(_) => None,
+        }
+    }
+
     /// Parse the stored configuration. Returns an error if the JSON
     /// is malformed (e.g., schema changed since the sandbox was created).
     ///
@@ -192,6 +205,38 @@ impl SandboxHandle {
                 available_when: "when SandboxConfig is the cloud wire shape".into(),
             }),
         }
+    }
+
+    /// Parse the active configuration snapshot, when one is available.
+    pub fn active_config(&self) -> MicrosandboxResult<Option<SandboxConfig>> {
+        self.active_config_json()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Start planning a sandbox modification from this handle.
+    ///
+    /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
+    /// so planning uses current status and persisted config rather than this
+    /// handle's possibly stale snapshot.
+    pub fn modify(&self) -> SandboxModificationBuilder {
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Fail with a typed error when the sandbox is not running.
+    fn require_running(&self, operation: &str) -> MicrosandboxResult<()> {
+        let status = self.status_snapshot();
+        if matches!(
+            status,
+            super::SandboxStatus::Running | super::SandboxStatus::Draining
+        ) {
+            return Ok(());
+        }
+        Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+            "'{}' is not running (status: {status:?}); cannot {operation}",
+            self.name
+        )))
     }
 
     /// Return a fresh handle for the same sandbox name.
@@ -262,8 +307,8 @@ impl SandboxHandle {
             })?;
 
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running (status: {:?})",
+            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+                "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
         }
@@ -325,8 +370,8 @@ impl SandboxHandle {
                 available_when: "when cloud attach lands".into(),
             })?;
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running (status: {:?})",
+            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+                "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
         }
@@ -355,6 +400,26 @@ impl SandboxHandle {
             },
             config,
         ))
+    }
+
+    /// Check whether agentd is reachable without refreshing the sandbox idle timer.
+    ///
+    /// Connects to the running sandbox and sends `core.ping`. Stopped sandboxes
+    /// are not started implicitly; call [`start`](Self::start) first when that
+    /// is the desired behavior.
+    pub async fn ping(&self) -> MicrosandboxResult<super::SandboxPingResult> {
+        self.require_running("ping")?;
+        self.connect().await?.ping().await
+    }
+
+    /// Explicitly refresh the sandbox idle timer.
+    ///
+    /// Connects to the running sandbox and sends `core.touch`. Stopped sandboxes
+    /// are not started implicitly; call [`start`](Self::start) first when that
+    /// is the desired behavior.
+    pub async fn touch(&self) -> MicrosandboxResult<super::SandboxTouchResult> {
+        self.require_running("touch")?;
+        self.connect().await?.touch().await
     }
 
     /// Snapshot this sandbox to a bare name under the default snapshots
@@ -510,7 +575,16 @@ impl SandboxHandle {
     /// Wait until this sandbox is observed in a terminal non-running state.
     pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
         loop {
-            let current = self.refresh().await?;
+            let current = match self.refresh().await {
+                Ok(current) => current,
+                Err(error)
+                    if self.is_local_ephemeral()
+                        && super::sandbox_not_found_for_name(&error, &self.name) =>
+                {
+                    return Ok(super::ephemeral_cleanup_stop_result(&self.name));
+                }
+                Err(error) => return Err(error),
+            };
             let status = current.status_snapshot();
             if sandbox_status_is_terminal(status) {
                 return Ok(SandboxStopResult {
@@ -576,11 +650,25 @@ impl SandboxHandle {
             }
         }
     }
+
+    fn is_local_ephemeral(&self) -> bool {
+        is_local_ephemeral_handle(&self.inner)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
+    let SandboxHandleInner::Local(state) = inner else {
+        return false;
+    };
+
+    serde_json::from_str::<SandboxConfig>(&state.config_json)
+        .map(|config| config.spec.lifecycle.ephemeral)
+        .unwrap_or(false)
+}
 
 fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
     matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)

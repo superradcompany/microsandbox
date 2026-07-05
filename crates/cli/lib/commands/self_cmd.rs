@@ -2464,6 +2464,17 @@ mod tests {
 
         rollback_schema(db.inner(), 1).await.unwrap();
 
+        // The latest migration adds `sandbox.active_config`; rolling back one
+        // step must drop the column while leaving older tables intact.
+        let rows = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM pragma_table_info('sandbox') WHERE name = 'active_config'",
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+
         let rows = db
             .query_all(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -2471,7 +2482,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(rows.is_empty());
+        assert!(!rows.is_empty());
     }
 
     #[tokio::test]

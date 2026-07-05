@@ -826,6 +826,15 @@ export declare class Sandbox {
   sshServer(options?: SshServerOptions | undefined | null): Promise<JsSshServer>
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
+  /** Check whether agentd is reachable without refreshing idle activity. */
+  ping(): Promise<SandboxPingResult>
+  /** Explicitly refresh this sandbox's idle activity timer. */
+  touch(): Promise<SandboxTouchResult>
+  /**
+   * Plan or apply a sandbox modification. Returns the plan as a JSON
+   * string; the TS wrapper parses it into a `SandboxModificationPlan`.
+   */
+  modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /**
@@ -913,8 +922,12 @@ export declare class SandboxBuilder {
   fromSnapshot(pathOrName: string): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
+  /** Boot-time maximum possible virtual CPUs. */
+  maxCpus(count: number): this
   /** Guest memory in MiB. */
   memory(mib: number): this
+  /** Boot-time maximum hotpluggable guest memory in MiB. */
+  maxMemory(mib: number): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1128,6 +1141,25 @@ export declare class SandboxHandle {
   get updatedAt(): number | null
   /** Get point-in-time metrics from the database. */
   metrics(): Promise<SandboxMetrics>
+  /**
+   * Check whether agentd is reachable without refreshing idle activity.
+   *
+   * Connects to an already-running sandbox; stopped sandboxes are not
+   * started implicitly.
+   */
+  ping(): Promise<SandboxPingResult>
+  /**
+   * Explicitly refresh this sandbox's idle activity timer.
+   *
+   * Connects to an already-running sandbox; stopped sandboxes are not
+   * started implicitly.
+   */
+  touch(): Promise<SandboxTouchResult>
+  /**
+   * Plan or apply a sandbox modification. Returns the plan as a JSON
+   * string; the TS wrapper parses it into a `SandboxModificationPlan`.
+   */
+  modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1622,12 +1654,6 @@ export interface ImageDetailJs {
   layers: Array<ImageLayerDetail>
 }
 
-/** Garbage-collect everything reclaimable. Returns the number reclaimed. */
-export declare function imageGc(): Promise<number>
-
-/** Garbage-collect orphaned layers. Returns the number reclaimed. */
-export declare function imageGcLayers(): Promise<number>
-
 /** Look up a cached image by reference. */
 export declare function imageGet(reference: string): Promise<ImageHandle>
 
@@ -1658,6 +1684,19 @@ export interface ImageLayerDetail {
 
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
+
+/** Remove cached image data that is not used by any sandbox or indexed snapshot. */
+export declare function imagePrune(): Promise<ImagePruneReportJs>
+
+/** Summary of artifacts removed by `imagePrune`. */
+export interface ImagePruneReportJs {
+  imageRefsRemoved: number
+  manifestsRemoved: number
+  layersRemoved: number
+  fsmetaRemoved: number
+  vmdkRemoved: number
+  bytesReclaimed?: number
+}
 
 /**
  * Remove a cached image. Pass `force = true` to delete even when a
@@ -1933,6 +1972,33 @@ export interface SandboxMetrics {
   timestampMs: number
 }
 
+/**
+ * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
+ *
+ * `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+ * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
+ * is computed without applying anything.
+ */
+export interface SandboxModifyOptions {
+  cpus?: number
+  maxCpus?: number
+  memoryMib?: number
+  maxMemoryMib?: number
+  env?: Record<string, string>
+  envRemove?: Array<string>
+  labels?: Record<string, string>
+  labelsRemove?: Array<string>
+  workdir?: string
+  policy?: string
+  dryRun?: boolean
+}
+
+/** Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`. */
+export interface SandboxPingResult {
+  name: string
+  latencyMs: number
+}
+
 /** Result of observing a sandbox in a terminal state. */
 export interface SandboxStopResult {
   name: string
@@ -1941,6 +2007,24 @@ export interface SandboxStopResult {
   signal?: number
   observedAt: number
   source?: string
+}
+
+/** Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`. */
+export interface SandboxTouchResult {
+  name: string
+  activitySeq: number
+}
+
+/** Host-scoped upstream CA certificate path. */
+export interface ScopedUpstreamCaCert {
+  pattern: string
+  path: string
+}
+
+/** Host-scoped upstream certificate verification override. */
+export interface ScopedVerifyUpstream {
+  pattern: string
+  verify: boolean
 }
 
 /** A secret entry produced by `SecretBuilder.build()`. */
@@ -2104,22 +2188,10 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
-  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
-  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
+  scopedUpstreamCaCerts: Array<JsScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<JsScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
-}
-
-/** Host-scoped upstream CA certificate path. */
-export interface ScopedUpstreamCaCert {
-  pattern: string
-  path: string
-}
-
-/** Host-scoped upstream certificate verification override. */
-export interface ScopedVerifyUpstream {
-  pattern: string
-  verify: boolean
 }
 
 /** Built volume configuration produced by `VolumeBuilder.build()`. */

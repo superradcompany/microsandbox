@@ -1,0 +1,238 @@
+---
+title: Images
+description: TypeScript SDK - Image cache API reference
+---
+
+Inspect, remove, and prune the local OCI image cache: the images that sandbox creation has already pulled. These APIs are exposed through the public `Image` class and require a local backend; cloud backends report `Unsupported`.
+
+```typescript
+import { Image, ImageHandle } from "microsandbox";
+import type { ImageDetail, ImagePruneReport } from "microsandbox";
+```
+
+<div className="msb-glance">
+
+  <p className="msb-gl"><span className="msb-dot static"></span>Static · Image<span className="msb-ct">5</span></p>
+  <a className="msb-row" href="#image-get"><span className="msb-rn">Image.get()</span><span className="msb-rg">one cached image</span></a>
+  <a className="msb-row" href="#image-list"><span className="msb-rn">Image.list()</span><span className="msb-rg">all cached images</span></a>
+  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.inspect()</span><span className="msb-rg">config + layer detail</span></a>
+  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.remove()</span><span className="msb-rg">delete a cached image</span></a>
+  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.prune()</span><span className="msb-rg">reclaim unused data</span></a>
+
+  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
+  <div className="msb-chiprow">
+    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
+    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
+    <a className="msb-typepill" href="#imageconfigdetail">ImageConfigDetail</a>
+    <a className="msb-typepill" href="#imagelayerdetail">ImageLayerDetail</a>
+    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+  </div>
+
+</div>
+
+<p className="msb-label" id="typical-flow">Typical flow</p>
+
+```typescript
+import { Image } from "microsandbox";
+
+for (const image of await Image.list()) {
+  console.log(image.reference, image.layerCount);
+}
+
+const detail = await Image.inspect("python:3.12");
+console.log(detail.config?.workingDir);
+
+const report = await Image.prune();
+console.log(report.bytesReclaimed);
+```
+
+## Static methods
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static get(reference: string): Promise<ImageHandle>
+```
+
+Fetch one cached image by reference. Throws an image-not-found error when the reference is not present in the local cache.
+
+<Accordion title="Example">
+
+```typescript
+const image = await Image.get("python:3.12");
+console.log(image.manifestDigest);
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">list()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static list(): Promise<ImageHandle[]>
+```
+
+Return every cached image.
+
+<Accordion title="Example">
+
+```typescript
+const images = await Image.list();
+console.log(images.map((image) => image.reference));
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">inspect()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static inspect(reference: string): Promise<ImageDetail>
+```
+
+Return full detail for a cached image: handle metadata, parsed OCI config fields, and layer metadata.
+
+<Accordion title="Example">
+
+```typescript
+const detail = await Image.inspect("python:3.12");
+for (const layer of detail.layers) {
+  console.log(layer.position, layer.diffId);
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">remove()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static remove(reference: string, opts?: { force?: boolean }): Promise<void>
+```
+
+Delete a cached image. When `force` is not set, an image still referenced by one or more sandboxes causes the call to fail.
+
+<Accordion title="Example">
+
+```typescript
+await Image.remove("old:tag", { force: false });
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">prune()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static prune(): Promise<ImagePruneReport>
+```
+
+Remove cached image data that is not used by any sandbox or indexed snapshot. Prune removes unused image refs, manifests that become unreachable, orphaned layers, image metadata on disk, layer EROFS artifacts, fsmeta EROFS artifacts, and VMDK descriptor artifacts. `bytesReclaimed` is reported when deleted files could be measured.
+
+<Accordion title="Example">
+
+```typescript
+const report = await Image.prune();
+console.log(report.imageRefsRemoved, report.bytesReclaimed);
+```
+
+</Accordion>
+
+## Types
+
+### ImageHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+
+A lightweight metadata handle for a cached OCI image. Properties are read-only.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `reference` | `string` | Image reference |
+| `sizeBytes` | `number \| null` | Total image size in bytes, when known |
+| `manifestDigest` | `string \| null` | Content-addressable manifest digest |
+| `architecture` | `string \| null` | Resolved architecture |
+| `os` | `string \| null` | Resolved operating system |
+| `layerCount` | `number` | Number of layers |
+| `lastUsedAt` | `Date \| null` | Last referenced time |
+| `createdAt` | `Date \| null` | First-pulled time |
+
+### ImageDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a></p>
+
+Full detail for a cached image.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `handle` | [`ImageHandle`](#imagehandle) | Core cached image metadata |
+| `config` | [`ImageConfigDetail`](#imageconfigdetail)` \| null` | Parsed OCI config block |
+| `layers` | `readonly ImageLayerDetail[]` | Layers in bottom-to-top order |
+
+### ImageConfigDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.config</a></p>
+
+OCI image config fields extracted from the local cache.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `digest` | `string` | Config blob digest |
+| `env` | `readonly string[]` | Environment variables in `KEY=value` form |
+| `cmd` | `readonly string[] \| null` | Default command |
+| `entrypoint` | `readonly string[] \| null` | Image entrypoint |
+| `workingDir` | `string \| null` | Default working directory |
+| `user` | `string \| null` | Default user |
+| `labels` | `Record<string, unknown> \| null` | OCI labels |
+| `stopSignal` | `string \| null` | Configured stop signal |
+
+### ImageLayerDetail
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.layers</a></p>
+
+Metadata for one image layer.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `diffId` | `string` | Uncompressed diff ID |
+| `blobDigest` | `string` | Compressed blob digest |
+| `mediaType` | `string \| null` | OCI media type |
+| `compressedSizeBytes` | `number \| null` | Compressed blob size in bytes |
+| `erofsSizeBytes` | `number \| null` | EROFS image size in bytes |
+| `position` | `number` | Layer position, where `0` is the bottom |
+
+### ImagePruneReport
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
+
+Summary of cached image data removed by [`Image.prune()`](#image-prune).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `imageRefsRemoved` | `number` | Cached image references removed from the local image index |
+| `manifestsRemoved` | `number` | OCI manifests removed from the local image index |
+| `layersRemoved` | `number` | Layer records removed from the local image index |
+| `fsmetaRemoved` | `number` | Merged fsmeta EROFS artifacts removed from disk |
+| `vmdkRemoved` | `number` | VMDK descriptor artifacts removed from disk |
+| `bytesReclaimed` | `number \| null` | Best-effort measured bytes reclaimed from deleted artifacts |

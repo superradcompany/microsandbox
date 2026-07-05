@@ -92,6 +92,15 @@ impl SmoltcpDevice {
     pub fn drop_staged_frame(&mut self) {
         self.pending_rx = None;
     }
+
+    /// Replace the currently staged frame with a synthetic one for smoltcp.
+    ///
+    /// Fragment reassembly uses this after consuming guest fragments: the
+    /// original fragment must not reach smoltcp, but a completed UDP/53
+    /// datagram should still use the normal DNS socket/interceptor path.
+    pub(crate) fn replace_staged_frame(&mut self, frame: Vec<u8>) {
+        self.pending_rx = Some(frame);
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

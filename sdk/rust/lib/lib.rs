@@ -38,7 +38,9 @@ pub use backend::{
 };
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;
-pub use image::{Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail};
+pub use image::{
+    Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail, ImagePruneReport,
+};
 pub use microsandbox_image::RegistryAuth;
 pub use microsandbox_protocol as protocol;
 pub use microsandbox_runtime::logging::LogLevel;
@@ -48,13 +50,18 @@ pub use sandbox::NetworkPolicy;
 pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
 #[cfg(feature = "ssh")]
 pub use sandbox::ssh::{
-    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
-    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
-    SshStdioStream,
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
+    SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
+    SshServerOptionsBuilder, SshStdioStream,
 };
 pub use sandbox::{
-    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig,
-    validate_sandbox_name,
+    ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
+    ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
+    PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
+    SandboxConfig, SandboxMetrics, SandboxModificationBuilder, SandboxModificationPatch,
+    SandboxModificationPlan, SandboxPingResult, SandboxTouchResult, SecretChangeKind,
+    SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange, SecretSource,
+    all_sandbox_metrics, all_sandbox_metrics_local, validate_sandbox_name,
 };
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,

@@ -247,10 +247,12 @@ pub(crate) async fn intercept_relay(
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
 ) -> io::Result<()> {
+    // Per-connection snapshot: live secret updates apply to later connections.
+    let secrets = tls_state.secrets.load();
     let mut secrets_handler = if via_connect {
-        SecretsHandler::new_tls_intercepted_via_connect(&tls_state.secrets, sni_name)
+        SecretsHandler::new_tls_intercepted_via_connect(&secrets, sni_name)
     } else {
-        SecretsHandler::new_tls_intercepted(&tls_state.secrets, sni_name, guest_dst.ip(), &shared)
+        SecretsHandler::new_tls_intercepted(&secrets, sni_name, guest_dst.ip(), &shared)
     }
     .with_guest_dst(guest_dst);
 

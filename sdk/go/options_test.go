@@ -64,11 +64,27 @@ func TestWithMemory(t *testing.T) {
 	}
 }
 
+func TestWithMaxMemory(t *testing.T) {
+	o := SandboxConfig{}
+	WithMaxMemory(4096)(&o)
+	if o.MaxMemoryMiB != 4096 {
+		t.Errorf("got %d, want 4096", o.MaxMemoryMiB)
+	}
+}
+
 func TestWithCPUs(t *testing.T) {
 	o := SandboxConfig{}
 	WithCPUs(2)(&o)
 	if o.CPUs != 2 {
 		t.Errorf("got %d, want 2", o.CPUs)
+	}
+}
+
+func TestWithMaxCPUs(t *testing.T) {
+	o := SandboxConfig{}
+	WithMaxCPUs(8)(&o)
+	if o.MaxCPUs != 8 {
+		t.Errorf("got %d, want 8", o.MaxCPUs)
 	}
 }
 

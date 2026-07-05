@@ -106,6 +106,7 @@
                   "sdk/rust/networking",
                   "sdk/rust/secrets",
                   "sdk/rust/snapshots",
+                  "sdk/rust/images",
                   "sdk/rust/agent-client"
                 ]
               },
@@ -122,6 +123,7 @@
                   "sdk/typescript/networking",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
+                  "sdk/typescript/images",
                   "sdk/typescript/agent-client"
                 ]
               },

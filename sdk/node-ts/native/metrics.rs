@@ -18,7 +18,7 @@ pub async fn all_sandbox_metrics() -> Result<HashMap<String, SandboxMetrics>> {
     let local = backend.as_local().ok_or_else(|| {
         napi::Error::from_reason("all_sandbox_metrics requires a local backend".to_string())
     })?;
-    let metrics = microsandbox::sandbox::all_sandbox_metrics(local)
+    let metrics = microsandbox::sandbox::all_sandbox_metrics_local(local)
         .await
         .map_err(to_napi_error)?;
     Ok(metrics

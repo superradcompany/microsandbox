@@ -1060,7 +1060,7 @@ mod tests {
         use MessageType::{ExecRequest, FsRequest};
         // (message type, peer generation, expected allowed). Generation 1 is the
         // pre-0.5 legacy runtime (no filesystem); generation 2 introduced the
-        // Fs* types; generation 5 is current.
+        // Fs* types; generation 6 is current.
         let cases = [
             (ExecRequest, 1, true),
             (ExecRequest, 2, true),

@@ -1,7 +1,7 @@
 //! `msb metrics` command — show live sandbox metrics.
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxMetrics, all_sandbox_metrics};
+use microsandbox::sandbox::{Sandbox, SandboxMetrics, all_sandbox_metrics_local};
 use microsandbox_utils::format::{format_bytes, format_duration};
 
 use crate::ui;
@@ -45,7 +45,7 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
 
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
-    let mut metrics = all_sandbox_metrics(local)
+    let mut metrics = all_sandbox_metrics_local(local)
         .await?
         .into_iter()
         .collect::<Vec<(String, SandboxMetrics)>>();

@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
-        copy, create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry,
-        remove, run, self_cmd, snapshot, start, stop, uninstall, volume,
+        copy, create, exec, image, inspect, install, list, logs, metrics, modify, ping, ps, pull,
+        registry, remove, restart, run, self_cmd, snapshot, start, stop, touch, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -21,8 +21,8 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "start", "stop", "list", "status", "metrics", "remove", "exec",
-            "copy", "logs", "ssh", "inspect",
+            "run", "create", "modify", "start", "stop", "restart", "ping", "touch", "list",
+            "status", "metrics", "remove", "exec", "copy", "logs", "ssh", "inspect",
         ],
     },
     CommandGroup {
@@ -85,11 +85,23 @@ enum Commands {
     /// Create a sandbox and boot it in the background.
     Create(create::CreateArgs),
 
+    /// Modify sandbox configuration.
+    Modify(modify::ModifyArgs),
+
     /// Start a stopped sandbox.
     Start(start::StartArgs),
 
     /// Stop one or more running sandboxes.
     Stop(stop::StopArgs),
+
+    /// Restart one or more sandboxes.
+    Restart(restart::RestartArgs),
+
+    /// Check whether one or more sandbox agents are reachable.
+    Ping(ping::PingArgs),
+
+    /// Refresh idle activity for one or more running sandboxes.
+    Touch(touch::TouchArgs),
 
     /// List all sandboxes.
     #[command(visible_alias = "ls")]
@@ -601,8 +613,12 @@ fn run_async_command_anyhow(
 
             Commands::Run(args) => run::run(args, log_level).await,
             Commands::Create(args) => create::run(args, log_level).await,
+            Commands::Modify(args) => modify::run(args).await,
             Commands::Start(args) => start::run(args).await,
             Commands::Stop(args) => stop::run(args).await,
+            Commands::Restart(args) => restart::run(args).await,
+            Commands::Ping(args) => ping::run(args).await,
+            Commands::Touch(args) => touch::run(args).await,
             Commands::List(args) => list::run(args).await,
             Commands::Status(args) => ps::run(args).await,
             Commands::Metrics(args) => metrics::run(args).await,

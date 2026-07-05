@@ -16,7 +16,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sandbox-startdetached"><span className="msb-rn">Sandbox.startDetached()</span><span className="msb-rg">restart detached</span></a>
   <a className="msb-row" href="#sandbox-remove"><span className="msb-rn">Sandbox.remove()</span><span className="msb-rg">delete a stopped one</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">20</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Instance<span className="msb-ct">22</span></p>
   <a className="msb-row" href="/sdk/typescript/execution"><span className="msb-rn">sandbox.exec()</span><span className="msb-rg">run a command</span></a>
   <a className="msb-row" href="/sdk/typescript/execution"><span className="msb-rn">sandbox.shell()</span><span className="msb-rg">run a shell script</span></a>
   <a className="msb-row" href="/sdk/typescript/execution"><span className="msb-rn">sandbox.attach()</span><span className="msb-rg">attach to a foreground process</span></a>
@@ -25,6 +25,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sandbox-config"><span className="msb-rn">sandbox.config()</span><span className="msb-rg">full configuration</span></a>
   <a className="msb-row" href="#sandbox-logs"><span className="msb-rn">sandbox.logs()</span><span className="msb-rg">captured output</span></a>
   <a className="msb-row" href="#sandbox-logstream"><span className="msb-rn">sandbox.logStream()</span><span className="msb-rg">stream captured output</span></a>
+  <a className="msb-row" href="#sandbox-ping"><span className="msb-rn">sandbox.ping()</span><span className="msb-rg">agent reachability</span></a>
+  <a className="msb-row" href="#sandbox-touch"><span className="msb-rn">sandbox.touch()</span><span className="msb-rg">refresh idle activity</span></a>
   <a className="msb-row" href="#sandbox-metrics"><span className="msb-rn">sandbox.metrics()</span><span className="msb-rg">resource snapshot</span></a>
   <a className="msb-row" href="#sandbox-metricsstream"><span className="msb-rn">sandbox.metricsStream()</span><span className="msb-rg">stream metrics</span></a>
   <a className="msb-row" href="#sandbox-stop"><span className="msb-rn">sandbox.stop()</span><span className="msb-rg">graceful shutdown</span></a>
@@ -42,7 +44,9 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <div className="msb-chiprow">
     <a className="msb-chip" href="#image">.image()</a>
     <a className="msb-chip" href="#memory">.memory()</a>
+    <a className="msb-chip" href="#maxmemory">.maxMemory()</a>
     <a className="msb-chip" href="#cpus">.cpus()</a>
+    <a className="msb-chip" href="#maxcpus">.maxCpus()</a>
     <a className="msb-chip" href="#port">.port()</a>
     <a className="msb-chip" href="#volume">.volume()</a>
     <a className="msb-chip" href="#env">.env()</a>
@@ -59,6 +63,8 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <div className="msb-chiprow">
     <a className="msb-typepill" href="#sandboxconfig">SandboxConfig</a>
     <a className="msb-typepill" href="#sandboxhandle">SandboxHandle</a>
+    <a className="msb-typepill" href="#sandboxpingresult">SandboxPingResult</a>
+    <a className="msb-typepill" href="#sandboxtouchresult">SandboxTouchResult</a>
     <a className="msb-typepill" href="#sandboxmetrics">SandboxMetrics</a>
     <a className="msb-typepill" href="#sandboxstatus">SandboxStatus</a>
     <a className="msb-typepill" href="#sandboxstopresult">SandboxStopResult</a>
@@ -581,6 +587,64 @@ for await (const e of stream) {
 
 ---
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">ping()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+ping(): Promise<SandboxPingResult>
+```
+
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxpingresult">Promise&lt;SandboxPingResult&gt;</a></div>
+    <div className="msb-param-desc">Sandbox name and agent round-trip latency.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const health = await sandbox.ping();
+console.log(`${health.name}: ${health.latencyMs.toFixed(1)} ms`);
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">touch()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+touch(): Promise<SandboxTouchResult>
+```
+
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDuration`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxtouchresult">Promise&lt;SandboxTouchResult&gt;</a></div>
+    <div className="msb-param-desc">Sandbox name and updated activity sequence.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const keepalive = await sandbox.touch();
+console.log(`${keepalive.name}: ${keepalive.activitySeq}`);
+```
+
+</Accordion>
+
+---
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 <div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
@@ -867,6 +931,26 @@ Set the number of virtual CPUs. This is a limit, not a reservation.
   <div className="msb-param">
     <div className="msb-param-key"><code>n</code><span className="msb-type">number</span></div>
     <div className="msb-param-desc">Number of vCPUs.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">maxCpus()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+maxCpus(n: number): this
+```
+
+Set the boot-time maximum possible virtual CPU capacity. This reserves the envelope a sandbox can use after restart-backed changes and future live CPU activation; it does not increase the effective vCPU count by itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>n</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Maximum possible vCPUs.</div>
   </div>
 </div>
 
@@ -1366,6 +1450,26 @@ Set the guest memory size in MiB. Physical pages are only allocated as the guest
   <div className="msb-param">
     <div className="msb-param-key"><code>mib</code><span className="msb-type">number</span></div>
     <div className="msb-param-desc">Memory in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">maxMemory()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+maxMemory(mib: number): this
+```
+
+Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the envelope a sandbox can use after restart-backed changes and future live memory activation; it does not increase the effective memory by itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mib</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
   </div>
 </div>
 
@@ -2294,7 +2398,9 @@ Configuration object produced by [`build()`](#build) and returned by [`config()`
 | name | `string` | Sandbox name, up to 128 UTF-8 bytes |
 | image | `RootfsSource` | OCI / bind / disk discriminated union |
 | cpus | `number \| null` | Virtual CPUs |
+| maxCpus | `number \| null` | Boot-time maximum possible virtual CPUs |
 | memoryMib | `number \| null` | Guest memory in MiB |
+| maxMemoryMib | `number \| null` | Boot-time maximum hotpluggable memory in MiB |
 | logLevel | [`LogLevel`](#loglevel)` \| null` | Log verbosity |
 | quietLogs | `boolean` | Suppress log output |
 | workdir | `string \| null` | Default working directory |
@@ -2339,6 +2445,8 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | updatedAt | `Date \| null` | Last update timestamp |
 | config() | [`SandboxConfig`](#sandboxconfig) | Parsed configuration |
 | refresh() | `Promise<`[`SandboxHandle`](#sandboxhandle)`>` | Re-read the handle's state from the database |
+| ping() | `Promise<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
+| touch() | `Promise<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh idle activity; does not start stopped sandboxes |
 | metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | logs() | `Promise<`[`LogEntry`](#logentry)`[]>` | Read captured `exec.log` (works without starting) |
 | logStream() | `Promise<`[`LogStream`](#logstream)`>` | Stream captured `exec.log`, with optional follow |
@@ -2357,6 +2465,32 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | remove() | `Promise<void>` | Delete sandbox and state |
 | snapshot(name) | `Promise<Snapshot>` | Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript/snapshots) |
 | snapshotTo(path) | `Promise<Snapshot>` | Snapshot this stopped sandbox to an explicit filesystem path |
+
+### SandboxPingResult
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-ping">ping()</a></p>
+
+Agent reachability result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `string` | Sandbox name |
+| latencyMs | `number` | Round-trip latency in milliseconds |
+
+### SandboxTouchResult
+
+<div className="msb-tags"><span className="msb-tag is-type">interface</span></div>
+
+<p className="msb-backref">Returned by <a href="#sandbox-touch">touch()</a></p>
+
+Explicit idle-refresh result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `string` | Sandbox name |
+| activitySeq | `number` | Monotonic activity sequence after the touch |
 
 ### SandboxMetrics
 

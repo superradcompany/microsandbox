@@ -23,6 +23,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFound",
         MicrosandboxError::SandboxAlreadyExists(_) => "SandboxAlreadyExists",
         MicrosandboxError::SandboxStillRunning(_) => "SandboxStillRunning",
+        MicrosandboxError::SandboxNotRunning(_) => "SandboxNotRunning",
         MicrosandboxError::Runtime(_) => "Runtime",
         MicrosandboxError::BootStart { .. } => "BootStart",
         MicrosandboxError::Json(_) => "Json",

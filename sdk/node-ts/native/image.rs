@@ -1,5 +1,5 @@
 use microsandbox::image as msb_image;
-use microsandbox::image::{ImageDetail, ImageHandle};
+use microsandbox::image::{ImageDetail, ImageHandle, ImagePruneReport};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -68,6 +68,17 @@ pub struct ImageInfo {
     pub last_used_at: Option<f64>,
 }
 
+/// Summary of artifacts removed by `imagePrune`.
+#[napi(object)]
+pub struct ImagePruneReportJs {
+    pub image_refs_removed: u32,
+    pub manifests_removed: u32,
+    pub layers_removed: u32,
+    pub fsmeta_removed: u32,
+    pub vmdk_removed: u32,
+    pub bytes_reclaimed: Option<f64>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -134,7 +145,7 @@ fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Backend>> {
 pub async fn image_get(reference: String) -> Result<JsImageHandle> {
     let backend = resolve_local()?;
     let local = backend.as_local().expect("checked above");
-    let inner = msb_image::Image::get(local, &reference)
+    let inner = msb_image::Image::get_local(local, &reference)
         .await
         .map_err(to_napi_error)?;
     Ok(JsImageHandle { inner })
@@ -145,7 +156,9 @@ pub async fn image_get(reference: String) -> Result<JsImageHandle> {
 pub async fn image_list() -> Result<Vec<ImageInfo>> {
     let backend = resolve_local()?;
     let local = backend.as_local().expect("checked above");
-    let handles = msb_image::Image::list(local).await.map_err(to_napi_error)?;
+    let handles = msb_image::Image::list_local(local)
+        .await
+        .map_err(to_napi_error)?;
     Ok(handles.iter().map(image_handle_to_info).collect())
 }
 
@@ -154,7 +167,7 @@ pub async fn image_list() -> Result<Vec<ImageInfo>> {
 pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
     let backend = resolve_local()?;
     let local = backend.as_local().expect("checked above");
-    let detail = msb_image::Image::inspect(local, &reference)
+    let detail = msb_image::Image::inspect_local(local, &reference)
         .await
         .map_err(to_napi_error)?;
     Ok(image_detail_to_js(detail))
@@ -166,27 +179,20 @@ pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
 pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> {
     let backend = resolve_local()?;
     let local = backend.as_local().expect("checked above");
-    msb_image::Image::remove(local, &reference, force.unwrap_or(false))
+    msb_image::Image::remove_local(local, &reference, force.unwrap_or(false))
         .await
         .map_err(to_napi_error)
 }
 
-/// Garbage-collect orphaned layers. Returns the number reclaimed.
-#[napi(js_name = "imageGcLayers")]
-pub async fn image_gc_layers() -> Result<u32> {
+/// Remove cached image data that is not used by any sandbox or indexed snapshot.
+#[napi(js_name = "imagePrune")]
+pub async fn image_prune() -> Result<ImagePruneReportJs> {
     let backend = resolve_local()?;
     let local = backend.as_local().expect("checked above");
-    msb_image::Image::gc_layers(local)
+    msb_image::Image::prune_local(local)
         .await
+        .map(image_prune_report_to_js)
         .map_err(to_napi_error)
-}
-
-/// Garbage-collect everything reclaimable. Returns the number reclaimed.
-#[napi(js_name = "imageGc")]
-pub async fn image_gc() -> Result<u32> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    msb_image::Image::gc(local).await.map_err(to_napi_error)
 }
 
 fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
@@ -237,5 +243,16 @@ fn image_detail_to_js(d: ImageDetail) -> ImageDetailJs {
         last_used_at: opt_datetime_to_ms(&h.last_used_at()),
         config,
         layers,
+    }
+}
+
+fn image_prune_report_to_js(report: ImagePruneReport) -> ImagePruneReportJs {
+    ImagePruneReportJs {
+        image_refs_removed: report.image_refs_removed,
+        manifests_removed: report.manifests_removed,
+        layers_removed: report.layers_removed,
+        fsmeta_removed: report.fsmeta_removed,
+        vmdk_removed: report.vmdk_removed,
+        bytes_reclaimed: report.bytes_reclaimed.map(|n| n as f64),
     }
 }

@@ -46,13 +46,14 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
     m.add_class::<sandbox::PySandboxStopResult>()?;
+    m.add_class::<sandbox::PySandboxPingResult>()?;
+    m.add_class::<sandbox::PySandboxTouchResult>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
     m.add_class::<exec::PyExecSink>()?;
     m.add_class::<agent::PyAgentClient>()?;
     m.add_class::<fs::PySandboxFsOps>()?;
-    m.add("SandboxFsOps", m.getattr("SandboxFs")?)?;
     m.add_class::<fs::PyFsReadStream>()?;
     m.add_class::<fs::PyFsWriteSink>()?;
     m.add_class::<image::PyImage>()?;
@@ -167,7 +168,9 @@ fn resolved_msb_path() -> PyResult<String> {
             available_when: "with a local backend".into(),
         })
     })?;
-    microsandbox::config::resolve_msb_path(local.config())
+    local
+        .config()
+        .resolve_msb_path()
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(error::to_py_err)
 }

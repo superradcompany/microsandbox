@@ -22,6 +22,7 @@ env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
+  LIBKRUNFW_VERSION: "5.5.0"
 
 jobs:
   bump:
@@ -47,12 +48,28 @@ jobs:
           node-version: 22
 
       - name: Install build deps for cargo check
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev musl-tools
 
       - name: Bump manifests
         run: ./scripts/bump-version.sh "${{ inputs.version }}"
 
+      - name: Build agentd for local cargo checks
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Build local runtime placeholders for cargo check
+        run: |
+          cargo build --no-default-features --features net,ssh -p microsandbox-cli
+          mkdir -p build
+          cp target/debug/msb build/msb
+          touch "build/libkrunfw.so.${LIBKRUNFW_VERSION}"
+
       - name: Refresh Cargo.lock
+        env:
+          MSB_HOME: ${{ runner.temp }}/msb-release-bump
         run: cargo check --workspace
 
       - name: Refresh npm lockfile

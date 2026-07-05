@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -431,6 +431,7 @@ where
 mod error_kind {
     pub const SANDBOX_NOT_FOUND: &str = "sandbox_not_found";
     pub const SANDBOX_STILL_RUNNING: &str = "sandbox_still_running";
+    pub const SANDBOX_NOT_RUNNING: &str = "sandbox_not_running";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -496,6 +497,7 @@ impl From<MicrosandboxError> for FfiError {
         let kind = match &e {
             MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
             MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
+            MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
@@ -746,7 +748,7 @@ pub unsafe extern "C" fn msb_cancel_unregister(id: u64) {
 // Input:
 //   name: null-terminated C string, owned by caller (Go), borrowed for call.
 //   opts_json: JSON object with optional fields (image, memory_mib, cpus,
-//     workdir, env). Owned by caller, borrowed for call.
+//     max_memory_mib, max_cpus, workdir, env). Owned by caller, borrowed for call.
 // Output on success: {"handle": <u64>}
 // The caller MUST eventually call `msb_sandbox_close(handle)` to release.
 // ---------------------------------------------------------------------------
@@ -930,6 +932,8 @@ struct SandboxCreateOpts {
     snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
+    max_memory_mib: Option<u32>,
+    max_cpus: Option<u8>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -1911,6 +1915,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(c) = opts.cpus {
                 builder = builder.cpus(c);
             }
+            if let Some(m) = opts.max_memory_mib {
+                builder = builder.max_memory(m);
+            }
+            if let Some(c) = opts.max_cpus {
+                builder = builder.max_cpus(c);
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -2053,6 +2063,81 @@ fn sandbox_stop_result_json(result: microsandbox::sandbox::SandboxStopResult) ->
         "source": source,
     })
     .to_string()
+}
+
+fn sandbox_ping_result_json(result: microsandbox::sandbox::SandboxPingResult) -> String {
+    serde_json::json!({
+        "name": result.name,
+        "latency_ms": result.latency.as_secs_f64() * 1000.0,
+    })
+    .to_string()
+}
+
+fn sandbox_touch_result_json(result: microsandbox::sandbox::SandboxTouchResult) -> String {
+    serde_json::json!({
+        "name": result.name,
+        "activity_seq": result.activity_seq,
+    })
+    .to_string()
+}
+
+/// Wire shape for `msb_sandbox_modify` / `msb_sandbox_handle_modify`. The
+/// patch is the canonical serde shape of `SandboxModificationPatch`.
+#[derive(serde::Deserialize)]
+struct SandboxModifyOpts {
+    #[serde(default)]
+    patch: microsandbox::sandbox::SandboxModificationPatch,
+    #[serde(default)]
+    policy: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+fn parse_sandbox_modify_opts(raw: &str) -> Result<SandboxModifyOpts, FfiError> {
+    serde_json::from_str(raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid modify opts JSON: {e}")))
+}
+
+fn parse_modify_policy(
+    policy: Option<&str>,
+) -> Result<microsandbox::sandbox::ModificationPolicy, FfiError> {
+    use microsandbox::sandbox::ModificationPolicy;
+    match policy.unwrap_or("no_restart") {
+        "no_restart" => Ok(ModificationPolicy::NoRestart),
+        "next_start" => Ok(ModificationPolicy::NextStart),
+        "restart" => Ok(ModificationPolicy::Restart),
+        other => Err(FfiError::invalid_argument(format!(
+            "unknown modify policy {other:?}; expected \"no_restart\", \"next_start\", or \"restart\""
+        ))),
+    }
+}
+
+fn configure_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    patch: microsandbox::sandbox::SandboxModificationPatch,
+    policy: microsandbox::sandbox::ModificationPolicy,
+) -> microsandbox::sandbox::SandboxModificationBuilder {
+    use microsandbox::sandbox::ModificationPolicy;
+    let builder = builder.with_patch(patch);
+    match policy {
+        ModificationPolicy::NoRestart => builder,
+        ModificationPolicy::NextStart => builder.next_start(),
+        ModificationPolicy::Restart => builder.restart(),
+    }
+}
+
+async fn run_modify(
+    builder: microsandbox::sandbox::SandboxModificationBuilder,
+    dry_run: bool,
+) -> Result<String, FfiError> {
+    let plan = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(FfiError::from)?;
+    serde_json::to_string(&plan)
+        .map_err(|e| FfiError::internal(format!("serialize modification plan: {e}")))
 }
 
 #[unsafe(no_mangle)]
@@ -2247,6 +2332,63 @@ pub unsafe extern "C" fn msb_sandbox_handle_wait_until_stopped(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_ping(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.ping().await.map_err(FfiError::from)?;
+            Ok(sandbox_ping_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_touch(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let result = h.touch().await.map_err(FfiError::from)?;
+            Ok(sandbox_touch_result_json(result))
+        }))
+    })
+}
+
+/// Plan or apply a sandbox modification by name.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_modify(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let builder = configure_modify(h.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
         }))
     })
 }
@@ -2477,6 +2619,60 @@ pub unsafe extern "C" fn msb_sandbox_wait_until_stopped(
         Ok(Box::pin(async move {
             let result = sb.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ping(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.ping().await.map_err(FfiError::from)?;
+            Ok(sandbox_ping_result_json(result))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_touch(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let result = sb.touch().await.map_err(FfiError::from)?;
+            Ok(sandbox_touch_result_json(result))
+        }))
+    })
+}
+
+/// Plan or apply a modification on a live sandbox handle.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_modify(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let builder = configure_modify(sb.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
         }))
     })
 }
@@ -4487,7 +4683,9 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
-            let map = all_sandbox_metrics(local).await.map_err(FfiError::from)?;
+            let map = all_sandbox_metrics_local(local)
+                .await
+                .map_err(FfiError::from)?;
             let mut sandboxes = serde_json::Map::with_capacity(map.len());
             for (name, metrics) in &map {
                 sandboxes.insert(name.clone(), metrics_json(metrics));
@@ -4621,7 +4819,7 @@ pub unsafe extern "C" fn msb_image_get(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let h = microsandbox::image::Image::get(local, &reference)
+            let h = microsandbox::image::Image::get_local(local, &reference)
                 .await
                 .map_err(FfiError::from)?;
             Ok(image_handle_json(&h).to_string())
@@ -4641,7 +4839,7 @@ pub unsafe extern "C" fn msb_image_list(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let handles = microsandbox::image::Image::list(local)
+            let handles = microsandbox::image::Image::list_local(local)
                 .await
                 .map_err(FfiError::from)?;
             let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
@@ -4664,7 +4862,7 @@ pub unsafe extern "C" fn msb_image_inspect(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let detail = microsandbox::image::Image::inspect(local, &reference)
+            let detail = microsandbox::image::Image::inspect_local(local, &reference)
                 .await
                 .map_err(FfiError::from)?;
             let config = detail.config.as_ref().map(|c| {
@@ -4721,50 +4919,10 @@ pub unsafe extern "C" fn msb_image_remove(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            microsandbox::image::Image::remove(local, &reference, force)
+            microsandbox::image::Image::remove_local(local, &reference, force)
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
-        }))
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc_layers(
-    cancel_id: u64,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let removed = microsandbox::image::Image::gc_layers(local)
-                .await
-                .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
-        }))
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_image_gc(
-    cancel_id: u64,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let removed = microsandbox::image::Image::gc(local)
-                .await
-                .map_err(FfiError::from)?;
-            Ok(format!(r#"{{"removed":{removed}}}"#))
         }))
     })
 }
@@ -4781,7 +4939,7 @@ pub unsafe extern "C" fn msb_image_prune(
             let local = backend
                 .as_local()
                 .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let report = microsandbox::image::Image::prune(local)
+            let report = microsandbox::image::Image::prune_local(local)
                 .await
                 .map_err(FfiError::from)?;
             Ok(serde_json::json!({
