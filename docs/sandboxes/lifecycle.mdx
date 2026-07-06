@@ -135,6 +135,45 @@ msb restart worker
 
 `msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
 
+## Update a running sandbox
+
+`msb modify` and the SDK `modify()` methods change a sandbox's configuration in place: CPUs, memory, env vars, labels, workdir, and secrets. Every requested change is planned first and labeled `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing: if any change cannot be applied under the policy you chose, nothing changes.
+
+CPU and memory changes apply live while the new values stay within the `max_cpus` / `max_memory` ceilings reserved at create time; raising a ceiling requires a restart. The ceilings default to the initial values, which leaves no headroom, so set them higher at create time if the sandbox may need to grow. Env and workdir changes affect future execs only; running processes keep their current environment.
+
+<CodeGroup>
+```rust Rust
+let plan = sb.modify()
+    .cpus(4)
+    .memory(4096)
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({ cpus: 4, memory: 4096 });
+```
+
+```python Python
+plan = await sb.modify(cpus=4, memory=4096)
+```
+
+```go Go
+plan, err := sb.Modify(ctx, m.ModifyOptions{CPUs: 4, MemoryMiB: 4096})
+```
+
+```bash CLI
+msb modify api --cpus 4 --memory 4G
+msb modify api --cpus 8 --dry-run   # show the plan, apply nothing
+```
+</CodeGroup>
+
+Preview any change with a dry run before committing. When a change cannot apply live, pick a policy: next-start saves it for the next boot, restart makes it active now by restarting the sandbox (`--next-start` / `--restart` in the CLI, `policy` in the SDKs).
+
+Modifying a stopped sandbox never starts it; the changes are saved and take effect on the next boot.
+
+See [`msb modify`](/cli/sandbox-commands#msb-modify) for all flags, and the SDK sandbox pages for the full API.
+
 ## Ping and touch
 
 Use `ping` to check that a running sandbox's guest agent is reachable, and `touch` to intentionally refresh its idle timer. Ping is a health check only: it does not count as sandbox activity and will not keep an idle sandbox alive by itself. Touch is the explicit keepalive.
