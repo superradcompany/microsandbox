@@ -148,38 +148,7 @@ carries high-cardinality labels (a commit SHA, a build timestamp); set
 
 ### Selecting sandboxes by label
 
-Labels double as selectors. `list_with` returns sandboxes carrying **all** of
-the given labels (AND-matched), useful when your application owns a subset of
-sandboxes on a shared host. The CLI extends this to bulk operations: `msb stop`,
-`msb start`, and `msb rm` all accept `--label` to act on every match.
-
-<CodeGroup>
-```rust Rust
-use microsandbox::sandbox::{Sandbox, SandboxFilter};
-
-let mine = Sandbox::list_with(SandboxFilter::new().label("app", "engine")).await?;
-```
-
-```typescript TypeScript
-const mine = await Sandbox.listWith({ labels: { app: "engine" } });
-```
-
-```python Python
-mine = await Sandbox.list_with(labels={"app": "engine"})
-```
-
-```go Go
-mine, err := microsandbox.ListSandboxesWith(ctx,
-    microsandbox.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}))
-```
-
-```bash CLI
-msb ls --label app=engine      # list matches
-msb stop --label app=engine    # stop every match
-msb rm --force --label app=engine
-```
-
-</CodeGroup>
+Labels also select sandboxes in bulk: `list_with` in the SDKs, and `--label` on the CLI fleet commands. See [Labels](/sandboxes/labels) for the full picture.
 
 <Tip>
   `cpus` and `memory` are limits, not reservations. Guest memory is allocated as the VM touches pages.
