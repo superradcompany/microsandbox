@@ -541,7 +541,7 @@ The returned plan dict mirrors the canonical JSON shape:
 | `changes` | `list[dict]` | One entry per field: `field`, `change` (`"added"`, `"updated"`, `"removed"`), `before`, `after`, `disposition`, optional `reason` |
 | `conflicts` | `list[dict]` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
-| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"applied"`, `"converging"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
+| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"accepted"`, `"converging"`, `"applied"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
 
