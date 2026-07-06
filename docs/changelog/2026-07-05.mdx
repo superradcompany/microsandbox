@@ -1,6 +1,6 @@
 ---
 title: "Week of July 5, 2026"
-description: "Live modify and resize for running sandboxes, richer `msb ps` and `msb metrics` output, faster image loading, and a round of CLI, network, and SDK fixes."
+description: "Modify existing sandboxes, inspect resize headroom, trust private TLS upstreams, load images faster, and pick up CLI, network, and SDK fixes."
 icon: "bolt"
 ---
 
@@ -10,38 +10,31 @@ icon: "bolt"
 
 ## New features
 
-**Live modify and resize for running sandboxes**
+**Modify existing sandboxes**
 
-`msb modify` and `Sandbox::modify()` can now change a sandbox in place, whether it is stopped or running: CPUs, memory, env vars, labels, workdir, and secrets.
-
-CPU and memory changes apply live, up to the `max_cpus` and `max_memory` ceilings chosen at create time. Secrets can be added, rotated, and removed on a running sandbox. A dry run shows what each change would do before you commit, and `--next-start` / `--restart` control when changes that cannot apply live take effect.
-
-`msb restart`, `msb touch`, and `msb ping` round out the lifecycle commands.
+`msb modify` and the SDK modify APIs can update existing sandboxes without recreating them. Resize CPU and memory, update labels, set env vars or workdir for future execs, and preview the plan with `--dry-run`. Secret changes are available in the CLI and Rust SDK.
 
 ```bash
-msb modify worker --cpus 2 --memory 1G
-msb modify worker --secret DB_URL=postgres://... --restart
+msb modify worker --cpus 2 --memory 1G --dry-run
+msb modify worker --secret DB_URL@db.internal.example.com
 ```
 
-See [Modify and resize](/sandboxes/lifecycle#modify-and-resize).
+See [Tuning](/sandboxes/tuning). Also new: `msb restart`, `msb touch`, and `msb ping`.
 
-**Sandbox state and resource columns in `msb ps` and `msb metrics`**
+**Inspect allocation and metrics**
 
-`msb ps` now shows each sandbox's CPU and memory allocation as `effective / max`, so you can see current allocation and resize headroom at a glance.
-
-`msb metrics` gains a `STATE` column (`running`, `stalled`, or `exited`), per-second I/O rates, `--sort cpu|mem`, and `--watch` / `--follow` modes for live monitoring; the Rust SDK exposes the same data via `SandboxMetricsReport`. Crashed sandboxes no longer show as running, and CPU and memory readings follow live resizes instead of boot-time values.
+`msb ps` now shows CPU and memory as `effective / max`. `msb metrics` adds sandbox state, per-second I/O rates, sorting, live watch/follow modes, and live-resize-aware CPU and memory readings.
 
 ```bash
 msb ps
-msb metrics --watch
-msb metrics --follow --interval 2s
+msb metrics --watch --sort cpu
 ```
 
-See the [sandbox commands reference](/cli/sandbox-commands).
+Crashed sandboxes now report as `exited` instead of `running`. The Rust SDK exposes the same report through `SandboxMetricsReport`.
 
 **Host-scoped upstream TLS trust**
 
-Sandboxes can now reach self-signed or private HTTPS endpoints without losing secret substitution. Trust is scoped per host: pin a CA bundle to specific hosts, or turn off verification for a bounded set of hosts. Available in the CLI and all four SDKs.
+Trust self-signed or private HTTPS upstreams without disabling secret substitution globally. Pin a CA bundle to specific hosts, or turn verification off for a bounded set of hosts. Available in the CLI and all four SDKs.
 
 ```bash
 msb create python --name agent \
@@ -54,22 +47,24 @@ See the [TLS networking guide](/networking/tls).
 
 **Faster `msb load` and `msb pull`**
 
-Loading an image that is already on disk now takes under a second instead of ~20 seconds (measured on a 1.3 GB image). `msb load` also shows the same progress bars as `msb pull`, including while streaming from `docker save | msb load`. A fix in `msb-imago` 0.1.1 resolves data corruption in OCI images with layers over 2 GiB.
+Loading an image that is already on disk now takes under a second instead of around 20 seconds for a 1.3 GB image. `msb load` also shows progress while streaming from Docker.
 
-See the [image commands reference](/cli/image-commands).
+```bash
+docker save app:latest | msb load
+```
+
+`msb-imago` 0.1.1 also fixes OCI image corruption for layers over 2 GiB.
 
 **Other features**
 
-- **`msb self downgrade`.** `msb self downgrade <version>` moves the local install to an older release (0.6.0 or newer), backing up the database and rolling back migrations on the way. `msb self update` stays latest-only. See the [CLI overview](/cli/overview).
-- **`--no-tty` execution mode.** `msb run` and `msb exec` gain `--no-tty` so scripts can force non-interactive, captured execution even when launched from a terminal. See the [sandbox commands reference](/cli/sandbox-commands).
+- **`msb self downgrade`.** Move a local install back to version 0.6.0 or newer, with database backup and migration rollback.
+- **`--no-tty`.** Force non-interactive captured execution in `msb run` and `msb exec`.
 
 ## Bug fixes
 
-- Killing an `msb exec` command now signals the whole process group inside the guest, so background jobs the command spawned no longer survive as orphans and silently saturate the guest.
-- Oversized and fragmented UDP datagrams now round-trip through the relay instead of blackholing. IPv4 and IPv6 fragments are reassembled behind normal egress policy, PMTU errors emit guest-facing ICMP responses, and large host replies are refragmented to the guest MTU.
-- IPv6 DNS answers for inactive address families are now suppressed, IPv4-mapped IPv6 addresses are normalized, and generated network config files are readable.
-- `msb stop` on a local ephemeral sandbox no longer reports `sandbox not found` when runtime cleanup deletes the row before the wait observes the stop. Persistent sandboxes and unrelated missing-sandbox errors keep their existing strict behavior.
-- `MSB_SHUTDOWN_FLUSH_TIMEOUT_MS` now overrides the VM shutdown flush timeout. Windows WHP tests and short-lived sandboxes can skip the default wait when no extra flush window is needed. Invalid values warn and fall back to the default instead of failing shutdown.
-- Restored SSH `direct-tcpip` forwarding, full image prune semantics, and Rust default-backend helpers after regressions from the backend-routing refactor. The CLI and the Rust, TypeScript, Python, and Go SDKs are back to their pre-refactor local feature set.
-- `msb doctor` now resolves `msb` and `libkrunfw` through the same runtime path logic as sandbox launches, so it no longer reports package-manager and side-by-side installs as broken. Invalid config surfaces as its own doctor problem, and repair hints distinguish standalone installs from package-manager installs.
-- Top-level `msb --help` now routes through the same terminal-aware color path as `msb --tree`, so colors render in supported terminals and older Windows console hosts no longer see raw ANSI escape text.
+- `msb exec` now signals the full guest process group, so spawned background jobs do not survive as orphans.
+- Large and fragmented UDP packets now round-trip through the relay; IPv6 DNS answers, IPv4-mapped addresses, and generated network config files are also handled more reliably.
+- `msb stop` no longer reports `sandbox not found` when an ephemeral sandbox is cleaned up during the stop wait.
+- `MSB_SHUTDOWN_FLUSH_TIMEOUT_MS` can shorten shutdown waits for Windows WHP tests and short-lived sandboxes.
+- SSH `direct-tcpip`, image prune behavior, and Rust default-backend helpers are restored after backend-routing regressions.
+- `msb doctor` now uses the same runtime path resolution as sandbox launches, and top-level `msb --help` no longer prints raw ANSI escapes on older Windows consoles.

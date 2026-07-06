@@ -116,7 +116,7 @@ async fn get(name: &str) -> MicrosandboxResult<VolumeHandle>
 
 ```rust
 let h = Volume::get("pip-cache").await?;
-println!("{} — {} bytes used", h.name(), h.used_bytes());
+println!("{} - {} bytes used", h.name(), h.used_bytes());
 ```
 
 </Accordion>
@@ -151,7 +151,7 @@ async fn list() -> MicrosandboxResult<Vec<VolumeHandle>>
 
 ```rust
 for h in Volume::list().await? {
-    println!("{} — {:?}", h.name(), h.kind());
+    println!("{} - {:?}", h.name(), h.kind());
 }
 ```
 

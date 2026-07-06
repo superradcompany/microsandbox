@@ -106,7 +106,7 @@ async fn list() -> MicrosandboxResult<Vec<SandboxHandle>>
 
 ```rust
 for h in Sandbox::list().await? {
-    println!("{} — {:?}", h.name(), h.status());
+    println!("{} - {:?}", h.name(), h.status());
 }
 ```
 
@@ -410,7 +410,7 @@ use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
 
 let handle = Sandbox::get("web").await?;
 
-// Default — all user-program output, regardless of pipe/pty mode
+// Default: all user-program output, regardless of pipe/pty mode
 let entries = handle.logs(&LogOptions::default())?;
 
 for e in entries {
@@ -445,7 +445,7 @@ let recent = handle.logs(&LogOptions {
 
 </Accordion>
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
 The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines. `logs()` is **synchronous** because it's a pure file read.
 
@@ -542,9 +542,11 @@ for r in &plan.resize_status {
 
 </Accordion>
 
-Start planning a configuration change for this sandbox. The returned builder accumulates a patch — CPUs, memory, env vars, labels, workdir, secrets — and terminates with [`dry_run()`](#dry_run) or [`apply()`](#apply). The resulting [`SandboxModificationPlan`](#sandboxmodificationplan) classifies every requested change as `live`, `next start`, `requires restart`, or `unsupported`, and apply is all-or-nothing. CPU count and memory apply live to a running sandbox when the target fits inside the boot-time capacity ([`max_cpus`](#max_cpus) / [`max_memory`](#max_memory)); raising the capacity itself is restart-backed. See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for the full builder API and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI equivalent.
+Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#dry_run) to preview or [`apply()`](#apply) to commit; both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
 
-The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to connect first. It never starts a stopped sandbox; changes on a stopped sandbox persist for the next boot.
+CPU and memory resize live within the [`max_cpus`](#max_cpus) / [`max_memory`](#max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+
+See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for all setters and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI.
 
 <p className="msb-label">Returns</p>
 
@@ -847,7 +849,7 @@ Fully disable networking. No network interface is created.
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
 ```
 
-Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics — specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
+Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics, specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
 
 <p className="msb-label">Parameters</p>
 
@@ -931,7 +933,7 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
 `cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`. Auto first honors a known init at the start of the image ENTRYPOINT, such as `/init` in s6-overlay images, then falls back to probing `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd` inside the guest. When attached `msb run` uses an image-declared init entrypoint, the remaining ENTRYPOINT plus CMD or trailing command is passed to that init instead of direct-executed through agentd. For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
 
@@ -968,7 +970,7 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape. The builder exposes `arg`, `args`, `env`, and `envs`. Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
+Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape. The builder exposes `arg`, `args`, `env`, and `envs`. Calling `init` or `init_with` more than once overwrites, unlike `env`, which appends. The init is one-shot pre-boot.
 
 <p className="msb-label">Parameters</p>
 
@@ -1424,7 +1426,7 @@ Set the default working directory for all commands.
 
 ## PatchBuilder
 
-Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">append()</span>
 
@@ -1642,9 +1644,11 @@ Write UTF-8 text content at `path`.
 
 ## SandboxModificationBuilder
 
-Fluent builder for changing an existing sandbox's configuration. Obtained via [`sb.modify()`](#sb-modify) or [`SandboxHandle::modify()`](#sandboxhandle). Setters accumulate a patch; nothing happens until the terminal [`dry_run()`](#dry_run) or [`apply()`](#apply) call. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) that classifies every requested change as `live`, `next start`, `requires restart`, or `unsupported`.
+Fluent builder for changing an existing sandbox's configuration. Obtained via [`sb.modify()`](#sb-modify) or [`SandboxHandle::modify()`](#sandboxhandle). Nothing happens until you finish with [`dry_run()`](#dry_run) or [`apply()`](#apply); both return a [`SandboxModificationPlan`](#sandboxmodificationplan) that labels each change `live`, `next start`, `requires restart`, or `unsupported`.
 
-Apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart-required changes under the default policy fails without changing anything. CPU count and memory apply live to a running sandbox when the target fits inside the boot-time capacity ([`max_cpus`](#max_cpus) / [`max_memory`](#max_memory)). Raising the capacity itself is restart-backed, so pick capacity headroom at create time. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Apply is all-or-nothing: if any change conflicts, is unsupported, or needs a restart you did not allow, the call fails and nothing changes.
+
+CPU and memory changes take effect immediately on a running sandbox as long as the new values stay within [`max_cpus`](#max_cpus) / [`max_memory`](#max_memory); raising those limits requires a restart, so reserve headroom at create time. Env and workdir changes affect future execs only; running processes keep their current environment (the plan notes this as a warning). The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
 
 #### <span className="msb-recv">.</span><span className="msb-hn">apply()</span>
 
@@ -1652,9 +1656,9 @@ Apply is all-or-nothing: a patch with conflicts, unsupported changes, or restart
 async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 ```
 
-Apply the accumulated patch atomically. Live-capable changes mutate the running VM first (CPU hotplug, memory resize, secret rotation through the runtime control socket); the desired config is persisted only after the live step succeeds. For stopped sandboxes or [`next_start()`](#next_start) requests, changes persist for the next start. With [`restart()`](#restart), the existing stop/start lifecycle path makes restart-required changes active.
+Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#next_start), are saved and take effect on the next start. With [`restart()`](#restart), the sandbox is stopped and started so that restart-required changes take effect.
 
-Live resize is not necessarily instant: when an accepted resize has not fully settled, the returned plan's `resize_status` reports per-resource convergence — see [`ResourceResizeStatus`](#resourceresizestatus).
+A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
 
 <p className="msb-label">Returns</p>
 
@@ -1890,7 +1894,7 @@ fn restart(self) -> Self
 
 Plan under restart-backed apply semantics. When the patch contains restart-required changes, [`apply()`](#apply) stops the sandbox, persists the config, and starts it again so the changes become active now.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">secret()</span>
+#### <span className="msb-recv">.</span><span className="msb-hn" id="sandboxmodificationbuilder-secret">secret()</span>
 
 ```rust
 fn secret(self, f: impl FnOnce(SecretPatchBuilder) -> SecretPatchBuilder) -> Self
@@ -1912,19 +1916,7 @@ let plan = sb.modify()
 
 </Accordion>
 
-Declare the desired state of one secret via a closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary, and the planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#remove_secret).
-
-The `SecretPatchBuilder` closure exposes:
-
-| Method | Description |
-|--------|-------------|
-| `env(name)` | Name the secret (required). This is the environment variable that exposes the placeholder inside the guest |
-| `source(source)` | Provide the material as a host-side `SecretSource` reference — `SecretSource::Env { var }` (host environment variable, resolved at apply time) or `SecretSource::Store { reference }`. The durable config records only the reference. Mutually exclusive with `value` |
-| `value(value)` | Provide the material as a raw value, for embedders that hold only a value. Zeroized on drop, redacted from `Debug`, never enters the plan — but a value-based apply persists the value into the durable config until a later source-based rotate migrates it to a reference, the same at-rest property as [`secret_env()`](#secret_env) |
-| `placeholder(text)` | Set the guest-visible placeholder. Placeholder changes cannot reach already-running processes, so they classify as `requires restart` on a running sandbox |
-| `allow_host(host)` | Add an allowed host pattern (`api.example.com`, `*.example.org`, or `*`). A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one |
-
-Prefer `source(..)` over `value(..)` when the value can be referenced — see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
+Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatchbuilder) closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary, and the planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#remove_secret).
 
 <p className="msb-label">Parameters</p>
 
@@ -2019,9 +2011,9 @@ Tag indicating where a captured log entry came from.
 
 | Value | Description |
 |-------|-------------|
-| `Stdout` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `Stdout` | Captured from a session's stdout (pipe mode; streams stayed separated) |
 | `Stderr` | Captured from a session's stderr (pipe mode) |
-| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabeled as `Stdout`. |
+| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `Output` rather than mislabeled as `Stdout`. |
 | `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
 
 ### SandboxPingResult
@@ -2153,20 +2145,160 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | warnings | `Vec<ModificationWarning>` | Non-fatal warnings (`field` + `message`) about the patch or current runtime capabilities, e.g. the future-execs-only env caveat |
 | resize_status | `Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>` | Live resource resize outcomes, populated by `apply()` when a live change ran |
 
+### SecretPatchBuilder
+
+<p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
+
+Fluent builder for one declarative secret patch inside [`SandboxModificationBuilder::secret()`](#sandboxmodificationbuilder-secret). It shares the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary: name the secret, provide material by source reference or raw value, set the placeholder when needed, and declare the allowed hosts.
+
+Import path: `microsandbox::sandbox::SecretPatchBuilder`.
+
+Prefer `source(...)` over `value(...)` when the value can be referenced; see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-env">env()</span>
+
+```rust
+fn env(self, name: impl Into<String>) -> Self
+```
+
+Name the secret. This is the environment variable that exposes the placeholder inside the guest. **Required.**
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Secret name, usually the environment variable name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-source">source()</span>
+
+```rust
+fn source(self, source: SecretSource) -> Self
+```
+
+Provide the secret material as a host-side [`SecretSource`](#secretsource) reference. The durable config records only the reference, and the value is resolved host-side when the change applies. Mutually exclusive with `value(...)`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><a className="msb-type" href="#secretsource">SecretSource</a></div>
+    <div className="msb-param-desc">Host-side reference for the secret material.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-value">value()</span>
+
+```rust
+fn value(self, value: impl Into<String>) -> Self
+```
+
+Provide the secret material as a raw value, for embedders that hold only a value. The value is zeroized on drop, redacted from `Debug`, and never enters the plan. Applying a value persists it into the durable config until a later source-based rotate migrates it to a reference, the same at-rest property as `secret_env()`. Mutually exclusive with `source(...)`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Raw secret value held by the embedding process.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-placeholder">placeholder()</span>
+
+```rust
+fn placeholder(self, placeholder: impl Into<String>) -> Self
+```
+
+Set the guest-visible placeholder. Placeholder changes cannot reach already-running processes, so they classify as `requires restart` on a running sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Guest-visible placeholder string.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-allow_host">allow_host()</span>
+
+```rust
+fn allow_host(self, host: impl Into<String>) -> Self
+```
+
+Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`. A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Allowed exact host, wildcard host pattern, or <code>*</code>.</div>
+  </div>
+</div>
+
+### SecretSource
+
+<p className="msb-backref">Used by <a href="#secretpatchbuilder-source">SecretPatchBuilder.source()</a></p>
+
+Host-side source for secret material. The source is resolved when the modification applies, and plans only show guest-visible references.
+
+Import path: `microsandbox::sandbox::SecretSource`.
+
+| Variant | Field | Description |
+|---------|-------|-------------|
+| `Env` | `var: String` | Read the value from a host environment variable at apply time |
+| `Store` | `reference: String` | Reserved for a host-side secret store reference; current modifiers report it as unsupported |
+
 ### PlannedChange
 
 <p className="msb-backref">Used by <a href="#sandboxmodificationplan">SandboxModificationPlan.changes</a></p>
 
-One planned modification entry.
+One planned modification entry. This enum has a `Config` variant for ordinary configuration fields and a `Secret` variant for secret changes.
 
-| Variant | Fields | Description |
-|---------|--------|-------------|
-| `Config` | - `field: String` <br/> - `change: ChangeKind` (`Added`, `Updated`, `Removed`) <br/> - `before: Option<String>` <br/> - `after: Option<String>` <br/> - `disposition:` [`ModificationDisposition`](#modificationdisposition) <br/> - `reason: Option<String>` | Ordinary config change |
-| `Secret` | - `field: String` (always `"secret"`) <br/> - `name: String` <br/> - `change: SecretChangeKind` (`Added`, `Rotated`, `Removed`, `Renamed`, `HostsUpdated`, `PlaceholderUpdated`) <br/> - `before_ref: Option<String>` <br/> - `after_ref: Option<String>` <br/> - `disposition:` [`ModificationDisposition`](#modificationdisposition) <br/> - `allow_hosts: Vec<String>` <br/> - `reason: Option<String>` | Secret change. Values are omitted by construction; `before_ref` / `after_ref` are guest-visible references |
+| Variant | Type | Description |
+|---------|------|-------------|
+| `Config` | [`ConfigPlannedChange`](#configplannedchange) | Ordinary config change |
+| `Secret` | [`SecretPlannedChange`](#secretplannedchange) | Secret change. Values are omitted by construction; references are guest-visible only |
+
+### ConfigPlannedChange
+
+<p className="msb-backref">Variant of <a href="#plannedchange">PlannedChange::Config</a></p>
+
+Ordinary configuration change in a modification plan.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| field | `String` | Config field being changed |
+| change | `ChangeKind` | `Added`, `Updated`, or `Removed` |
+| before | `Option<String>` | Previous safe visible state |
+| after | `Option<String>` | New safe visible state |
+| disposition | [`ModificationDisposition`](#modificationdisposition) | When or whether the change can take effect |
+| reason | `Option<String>` | Human-readable reason for the classification, when useful |
+
+### SecretPlannedChange
+
+<p className="msb-backref">Variant of <a href="#plannedchange">PlannedChange::Secret</a></p>
+
+Secret change in a modification plan. Values are omitted by construction; `before_ref` and `after_ref` are guest-visible references.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| field | `String` | Always `"secret"` |
+| name | `String` | Stable secret identity, usually the environment variable name |
+| change | `SecretChangeKind` | `Added`, `Rotated`, `Removed`, `Renamed`, `HostsUpdated`, or `PlaceholderUpdated` |
+| before_ref | `Option<String>` | Previous guest-visible reference or placeholder |
+| after_ref | `Option<String>` | New guest-visible reference or placeholder |
+| disposition | [`ModificationDisposition`](#modificationdisposition) | When or whether the change can take effect |
+| allow_hosts | `Vec<String>` | Allowed hosts after the requested change |
+| reason | `Option<String>` | Human-readable reason for the classification, when useful |
 
 ### ModificationDisposition
 
-<p className="msb-backref">Used by <a href="#plannedchange">PlannedChange.disposition</a></p>
+<p className="msb-backref">Used by <a href="#configplannedchange">ConfigPlannedChange.disposition</a> · <a href="#secretplannedchange">SecretPlannedChange.disposition</a></p>
 
 When or whether a planned change can take effect. Serializes as the quoted strings below.
 

@@ -1,7 +1,7 @@
 ---
-title: Customize
-description: Inject scripts, modify the rootfs, and choose your own init
-icon: "wand-magic-sparkles"
+title: Bootstrap
+description: Prepare scripts, patches, and PID 1 before work starts
+icon: "power-off"
 ---
 
 Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.

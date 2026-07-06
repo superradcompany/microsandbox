@@ -294,7 +294,7 @@ OOM, host reboot) never releases its slot, and registry readers used to
 keep reporting its frozen last sample as if the sandbox were running.
 Readers now verify that the slot's owner PID is alive and retire dead
 entries on first read, so a crashed sandbox drops out of the export
-stream on the next collection tick — the same "series goes stale"
+stream on the next collection tick, the same "series goes stale"
 signal as a clean stop.
 
 ## Counter resets across sandbox restarts

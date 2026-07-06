@@ -125,7 +125,7 @@ func ListVolumes(ctx context.Context) ([]*VolumeHandle, error)
 ```go
 vols, err := m.ListVolumes(ctx)
 for _, h := range vols {
-    fmt.Printf("%s — %s\n", h.Name(), h.Kind())
+    fmt.Printf("%s - %s\n", h.Name(), h.Kind())
 }
 ```
 

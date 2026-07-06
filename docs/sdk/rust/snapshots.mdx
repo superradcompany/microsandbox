@@ -188,7 +188,7 @@ async fn list() -> MicrosandboxResult<Vec<SnapshotHandle>>
 
 ```rust
 for h in Snapshot::list().await? {
-    println!("{:?} — {}", h.name(), h.digest());
+    println!("{:?} - {}", h.name(), h.digest());
 }
 ```
 

@@ -53,7 +53,7 @@ const sb = await Sandbox.builder("worker")
 
 </Accordion>
 
-Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image) — the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
+Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image); the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
 
 <p className="msb-label">Parameters</p>
 
@@ -163,7 +163,7 @@ const snap = await Snapshot.builder("baseline")
 
 </Accordion>
 
-Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fluent builder is what powers the CLI internally. The bare-name and explicit-path destinations are mutually exclusive — call exactly one of [`.name()`](#name) or [`.path()`](#path). See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
+Begin building a new snapshot of `sourceSandbox` (which must be stopped). The fluent builder is what powers the CLI internally. The bare-name and explicit-path destinations are mutually exclusive: call exactly one of [`.name()`](#name) or [`.path()`](#path). See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
 
 <p className="msb-label">Parameters</p>
 
@@ -198,7 +198,7 @@ console.log(snap.digest);
 
 </Accordion>
 
-Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only — does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
+Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only; it does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
 
 <p className="msb-label">Parameters</p>
 
@@ -295,7 +295,7 @@ console.log(`${found.length} artifacts`);
 
 </Accordion>
 
-Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections that were never imported. Skips entries that don't look like snapshot artifacts.
+Walk a directory and parse each subdirectory's manifest. Does not touch the index, useful for inspecting external snapshot collections that were never imported. Skips entries that don't look like snapshot artifacts.
 
 <p className="msb-label">Parameters</p>
 
@@ -683,7 +683,7 @@ Capture the configured snapshot and return the resulting artifact.
 
 ### SnapshotHandle <span className="msb-tag is-type">class</span>
 
-Lightweight handle backed by an index row. Values are snapshotted from the index at construction time — call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
+Lightweight handle backed by an index row. Values are snapshotted from the index at construction time; call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-import">Snapshot.import()</a></p>
 
@@ -706,7 +706,7 @@ Lightweight handle backed by an index row. Values are snapshotted from the index
 open(): Promise<Snapshot>
 ```
 
-Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)) — fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
+Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
 
 <p className="msb-label" id="snapshothandleremove">snapshotHandle.remove()</p>
 

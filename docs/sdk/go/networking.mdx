@@ -12,7 +12,7 @@ The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) stru
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-// Preset — public internet only
+// Preset: public internet only
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("alpine"),
     m.WithNetwork(m.NetworkPolicy.PublicOnly()),

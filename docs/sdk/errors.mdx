@@ -133,8 +133,8 @@ case err != nil:
 
 `exec()` distinguishes between:
 
-- **A program that ran and exited non-zero** — the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
-- **A program that never started** — the binary doesn't exist, isn't executable, the working directory is unreachable, etc. This surfaces as a typed error variant: `ExecFailed` (Rust), `ExecFailedError` (TypeScript), `ExecFailedError` (Python).
+- **A program that ran and exited non-zero**: the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
+- **A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. This surfaces as a typed error variant: `ExecFailed` (Rust), `ExecFailedError` (TypeScript), `ExecFailedError` (Python).
 
 The typed error carries a classified `kind` plus the underlying `errno`, so callers can branch on the cause and react. Common kinds: `NotFound` (binary missing on PATH), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, `Other`.
 
@@ -219,7 +219,7 @@ for {
     }
     switch ev.Kind {
     case m.ExecEventExited:
-        // Program ran — inspect ev.ExitCode.
+        // Program ran; inspect ev.ExitCode.
     case m.ExecEventFailed:
         f := ev.Failure // *m.ExecFailure
         switch f.Kind {
@@ -238,7 +238,7 @@ for {
 ```
 </CodeGroup>
 
-The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes — branch on `kind` instead.
+The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes; branch on `kind` instead.
 
 ## Name conflicts
 
@@ -388,7 +388,7 @@ async function runTemporary(): Promise<string> {
 ```
 
 ```python Python
-# Use async context manager — auto-kills and removes on exit.
+# Use async context manager: auto-kills and removes on exit.
 async with await Sandbox.create("temp", image="python") as sb:
     output = await sb.exec("python", ["-c", "print('hello')"])
     print(output.stdout_text)

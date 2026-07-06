@@ -108,7 +108,7 @@ static list(): Promise<SandboxHandle[]>
 
 ```typescript
 for (const h of await Sandbox.list()) {
-  console.log(`${h.name} — ${h.status}`);
+  console.log(`${h.name} - ${h.status}`);
 }
 ```
 
@@ -379,7 +379,7 @@ import { Sandbox } from "microsandbox";
 
 const handle = await Sandbox.get("web");
 
-// Default — all user-program output, regardless of pipe/pty mode
+// Default: all user-program output, regardless of pipe/pty mode
 const entries = await handle.logs();
 
 for (const e of entries) {
@@ -542,11 +542,13 @@ await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
 
 </Accordion>
 
-Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing. A patch with conflicts, unsupported changes, or restart-required changes under the default policy rejects without changing anything. `cpus` and `memory` apply live to a running sandbox when the target fits inside the boot-time capacity ([`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory)); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+`cpus` and `memory` resize live within the [`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Live resize is not necessarily instant: enforcement applies immediately, and the returned plan's `resizeStatus` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks). See [`SandboxModificationPlan`](#sandboxmodificationplan).
+Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -1134,7 +1136,7 @@ const sandbox = await Sandbox.builder("worker")
 
 </Accordion>
 
-Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. `cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`, which honors a known image ENTRYPOINT init then falls back to probing common init paths. See [Custom init system](/sandboxes/customize#custom-init-system). For init binaries that need extra env, use [`initWith`](#initwith).
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. `cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`, which honors a known image ENTRYPOINT init then falls back to probing common init paths. See [Custom init system](/sandboxes/bootstrap#custom-init-system). For init binaries that need extra env, use [`initWith`](#initwith).
 
 <p className="msb-label">Parameters</p>
 
@@ -1737,7 +1739,7 @@ Set the default working directory for all commands.
 
 ## PatchBuilder
 
-Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">append()</span>
 
@@ -2161,7 +2163,7 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | refresh() | `Promise<`[`SandboxHandle`](#sandboxhandle)`>` | Re-read the handle's state from the database |
 | ping() | `Promise<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | touch() | `Promise<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| modify(opts?) | `Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>` | Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes — changes persist for the next boot |
+| modify(opts?) | `Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>` | Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes; changes persist for the next boot |
 | metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | logs() | `Promise<`[`LogEntry`](#logentry)`[]>` | Read captured `exec.log` (works without starting) |
 | logStream() | `Promise<`[`LogStream`](#logstream)`>` | Stream captured `exec.log`, with optional follow |
@@ -2193,19 +2195,55 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | status | `string` | Status used for classification (`"running"`, `"stopped"`, ...) |
 | applied | `boolean` | Whether the changes were applied; `false` for dry runs |
 | policy | `"no_restart" \| "next_start" \| "restart"` | Policy used to produce the plan |
-| changes | `PlannedChange[]` | Planned changes, one entry per field or secret (see below) |
+| changes | [`PlannedChange`](#plannedchange)`[]` | Planned changes, one entry per field or secret |
 | conflicts | `{ field, message }[]` | Conflicts that must be resolved before the patch can apply |
 | warnings | `{ field, message }[]` | Non-fatal warnings, e.g. the future-execs-only env caveat |
 | resizeStatus | `ResourceResizeStatus[]` | Live resource resize outcomes, populated by apply when a live change ran (see below) |
 
-`PlannedChange` is a discriminated union on `kind`. Both variants carry `field`, `change`, a `disposition` of `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and an optional `reason`:
+### PlannedChange
 
-| Variant | Extra fields | Description |
-|---------|--------------|-------------|
-| `kind: "config"` | `change: "added" \| "updated" \| "removed"`, `before?`, `after?` | Ordinary config change |
-| `kind: "secret"` | `name`, `change: "added" \| "rotated" \| "removed" \| "renamed" \| "hosts updated" \| "placeholder updated"`, `beforeRef?`, `afterRef?`, `allowHosts` | Secret change. Values are omitted by construction; `beforeRef` / `afterRef` are guest-visible references |
+<p className="msb-backref">Used by <a href="#sandboxmodificationplan">SandboxModificationPlan.changes</a></p>
 
-`ResourceResizeStatus` reports runtime convergence for a live resize — enforcement applies immediately, the guest converges asynchronously:
+Discriminated union on `kind`. Both variants carry `field`, `change`, `disposition`, and `reason`.
+
+| Variant | Type | Description |
+|---------|------|-------------|
+| `kind: "config"` | [`ConfigPlannedChange`](#configplannedchange) | Ordinary config change |
+| `kind: "secret"` | [`SecretPlannedChange`](#secretplannedchange) | Secret change. Values are omitted by construction; references are guest-visible only |
+
+### ConfigPlannedChange
+
+<p className="msb-backref">Variant of <a href="#plannedchange">PlannedChange</a></p>
+
+Ordinary configuration change in a modification plan.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| field | `string` | Config field being changed |
+| change | `"added" \| "updated" \| "removed"` | Natural change type for table rendering |
+| before | `string \| null` | Previous safe visible state |
+| after | `string \| null` | New safe visible state |
+| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported"` | When or whether the change can take effect |
+| reason | `string \| null` | Human-readable reason for the classification, when useful |
+
+### SecretPlannedChange
+
+<p className="msb-backref">Variant of <a href="#plannedchange">PlannedChange</a></p>
+
+Secret change in a modification plan. Values are omitted by construction; `beforeRef` and `afterRef` are guest-visible references.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| field | `string` | Always `"secret"` |
+| name | `string` | Stable secret identity, usually the environment variable name |
+| change | `"added" \| "rotated" \| "removed" \| "renamed" \| "hosts updated" \| "placeholder updated"` | Natural change type for table rendering |
+| beforeRef | `string \| null` | Previous guest-visible reference or placeholder |
+| afterRef | `string \| null` | New guest-visible reference or placeholder |
+| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported"` | When or whether the change can take effect |
+| allowHosts | `string[]` | Allowed hosts after the requested change |
+| reason | `string \| null` | Human-readable reason for the classification, when useful |
+
+`ResourceResizeStatus` reports runtime convergence for a live resize; enforcement applies immediately, the guest converges asynchronously:
 
 | Field | Type | Description |
 |-------|------|-------------|
