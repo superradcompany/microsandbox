@@ -1,0 +1,121 @@
+---
+title: Labels
+description: Organize sandboxes, act on them in bulk, and attribute metrics
+icon: "tags"
+---
+
+Labels are `key=value` pairs you attach to a sandbox to organize it. They let you act on many sandboxes at once with a single command, and break metrics down by whatever dimension you choose, such as user, tenant, or job.
+
+## Add labels
+
+Attach labels when you create a sandbox. Labels are repeatable, and a bare key with no value is allowed:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    labels={"app": "engine", "user.id": "alice"},
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithLabel("app", "engine"),
+    m.WithLabel("user.id", "alice"),
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --label app=engine \
+  --label user.id=alice
+```
+</CodeGroup>
+
+## Change labels on a running sandbox
+
+Add, change, or remove labels without recreating the sandbox:
+
+<CodeGroup>
+```rust Rust
+sb.modify().label("tier", "web").remove_label("stale").apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ labels: { tier: "web" }, labelsRemove: ["stale"] });
+```
+
+```python Python
+await sb.modify(labels={"tier": "web"}, labels_rm=["stale"])
+```
+
+```go Go
+sb.Modify(ctx, m.ModifyOptions{
+    Labels:       map[string]string{"tier": "web"},
+    LabelsRemove: []string{"stale"},
+})
+```
+
+```bash CLI
+msb modify worker --label tier=web --label-rm stale
+```
+</CodeGroup>
+
+## Select sandboxes by label
+
+This is where labels earn their keep. Every fleet command takes `--label` to act on a whole group at once instead of naming sandboxes one by one. Pass `--label` more than once to require all of them (AND-matched):
+
+```bash
+msb ps --label app=engine                        # list matching sandboxes
+msb stop --label app=engine                       # stop all of them
+msb restart --label app=engine --label tier=web   # only those with both labels
+```
+
+`--label` works the same way on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`.
+
+From the SDKs, list sandboxes by label:
+
+<CodeGroup>
+```rust Rust
+let handles = Sandbox::list_with(
+    SandboxFilter::new().label("app", "engine"),
+).await?;
+```
+
+```typescript TypeScript
+const handles = await Sandbox.listWith({ labels: { app: "engine" } });
+```
+
+```python Python
+handles = await Sandbox.list_with(labels={"app": "engine"})
+```
+
+```go Go
+handles, err := m.ListSandboxesWith(ctx,
+    m.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}),
+)
+```
+</CodeGroup>
+
+## Attribute metrics by label
+
+Labels flow into a sandbox's metrics as dimensions, so you can break CPU, memory, and I/O down by any label you set, for example per user or per tenant. See [Labels and per-user views](/observability/msb-metrics#labels-and-per-user-views) for the PromQL detail.

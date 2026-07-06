@@ -4,7 +4,7 @@ description: Size a sandbox's CPU and memory, and resize a running one
 icon: "microchip"
 ---
 
-Every sandbox runs with a set number of vCPUs and a set amount of memory. You choose both when you create it, and you can resize a running sandbox up or down without recreating it.
+Every sandbox runs with a set number of vCPUs and a set amount of memory. You choose both when you create it, and you can resize a running sandbox up or down without recreating it. Left unset, a sandbox gets 1 vCPU and 512 MiB.
 
 ## Set CPU and memory at create time
 
@@ -89,6 +89,8 @@ msb modify worker --cpus 4 --memory 2G
 </CodeGroup>
 
 Growing beyond `max_cpus` or `max_memory` takes a restart. A live resize does not always take hold at once, since the guest applies it in the background; the result reports per-resource progress so you can tell when it has settled.
+
+To see a sandbox's live CPU and memory use before deciding how to resize, check [`msb metrics`](/cli/sandbox-commands#msb-metrics).
 
 ---
 

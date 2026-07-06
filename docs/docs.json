@@ -40,6 +40,7 @@
               "sandboxes/overview",
               "sandboxes/lifecycle",
               "sandboxes/compute",
+              "sandboxes/labels",
               "sandboxes/commands",
               "sandboxes/ssh",
               "sandboxes/filesystem",
