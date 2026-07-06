@@ -89,7 +89,7 @@ const snap = await h.snapshot("after-pip-install");
 
 </Accordion>
 
-Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed; running sandboxes are rejected with a `SnapshotSandboxRunning` error. For an explicit filesystem destination, see [`snapshotTo()`](#handle-snapshotto).
+Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). The sandbox must be stopped or crashed; the SDK rejects running sandboxes with a `SnapshotSandboxRunning` error. For an explicit filesystem destination, see [`snapshotTo()`](#handle-snapshotto).
 
 <p className="msb-label">Parameters</p>
 

@@ -478,7 +478,7 @@ console.log(`${health.name}: ${health.latencyMs.toFixed(1)} ms`);
 
 </Accordion>
 
-Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`; it does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
+Check that the running sandbox's guest agent is reachable without refreshing idle activity. This sends `core.ping` and waits for `core.pong`. It does not start stopped sandboxes and returns an error if the sandbox is not running or `agentd` cannot respond. After upgrading from a runtime that predates protocol generation 6, restart already-running sandboxes so the guest agent understands the message.
 
 <p className="msb-label">Returns</p>
 

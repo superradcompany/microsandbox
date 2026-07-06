@@ -169,8 +169,9 @@ Labels are on by default. Pass `--no-labels` to turn them off, e.g. when
 a high-cardinality key like `user.id` would inflate active-series
 billing. To drop individual noisy keys while keeping the rest, repeat
 `--exclude-label-key <key>` (e.g.
-`--exclude-label-key org.opencontainers.image.revision`); the key stays
-in the catalog for `msb inspect` and is only withheld from metrics. See
+`--exclude-label-key org.opencontainers.image.revision`). The key stays
+in the catalog for `msb inspect`, and `msb-metrics` withholds it only
+from metrics. See
 the [Deep dive](/observability/deep-dive#attributes) for the cardinality
 trade-offs.
 

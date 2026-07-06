@@ -314,7 +314,7 @@ sb.kill().await?; // SIGKILL, no graceful shutdown
 
 </Accordion>
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
+Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost. The durability semantics match a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill_with_timeout()</span>
 
@@ -849,7 +849,7 @@ Fully disable networking. No network interface is created.
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
 ```
 
-Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics, specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
+Override the OCI image's stored ENTRYPOINT. Command-resolution paths that follow OCI semantics consult this value, specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
 
 <p className="msb-label">Parameters</p>
 

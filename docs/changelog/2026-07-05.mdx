@@ -63,8 +63,8 @@ docker save app:latest | msb load
 ## Bug fixes
 
 - `msb exec` now signals the full guest process group, so spawned background jobs do not survive as orphans.
-- Large and fragmented UDP packets now round-trip through the relay; IPv6 DNS answers, IPv4-mapped addresses, and generated network config files are also handled more reliably.
+- Large and fragmented UDP packets now round-trip through the relay. The relay also handles IPv6 DNS answers, IPv4-mapped addresses, and generated network config files more reliably.
 - `msb stop` no longer reports `sandbox not found` when an ephemeral sandbox is cleaned up during the stop wait.
 - `MSB_SHUTDOWN_FLUSH_TIMEOUT_MS` can shorten shutdown waits for Windows WHP tests and short-lived sandboxes.
-- SSH `direct-tcpip`, image prune behavior, and Rust default-backend helpers are restored after backend-routing regressions.
+- Restored SSH `direct-tcpip`, image prune behavior, and Rust default-backend helpers after backend-routing regressions.
 - `msb doctor` now uses the same runtime path resolution as sandbox launches, and top-level `msb --help` no longer prints raw ANSI escapes on older Windows consoles.

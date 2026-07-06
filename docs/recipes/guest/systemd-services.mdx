@@ -17,7 +17,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
   -- bash
 ```
 
-`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for the exact behavior and for pinning to an explicit path.
+`debian-systemd` is one of the optional bases microsandbox provides in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for the exact behavior and for pinning to an explicit path.
 
 ## Step 2: Confirm systemd is PID 1
 

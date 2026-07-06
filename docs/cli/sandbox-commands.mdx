@@ -60,7 +60,7 @@ Common flags:
 
 Use `msb run --help` for the full flag list.
 
-Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
+Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`. Keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
 
 ### Network rule syntax
 
@@ -142,7 +142,7 @@ msb stop --label app=engine    # stop every sandbox labelled app=engine
 Graceful shutdown gives the sandbox a chance to finish writing any
 pending data to disk before it exits, so files written inside the
 sandbox aren't lost across a later `msb start`. If the sandbox is
-still running after the timeout, it is force-killed.
+still running after the timeout, `msb` force-kills it.
 
 `--force` and a timeout that elapses both end in a force-kill. Pending
 writes that the workload hasn't `fsync`'d at that point may be lost, with the

@@ -60,7 +60,7 @@ defer func() {
 
 </Accordion>
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process, call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process; call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
 
 <p className="msb-label">Parameters</p>
 
@@ -287,7 +287,7 @@ err := m.RemoveSandbox(ctx, "api")
 
 </Accordion>
 
-Delete a stopped sandbox and all its persisted state from disk. Fails if the sandbox is still running, stop it first.
+Delete a stopped sandbox and all its persisted state from disk. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 

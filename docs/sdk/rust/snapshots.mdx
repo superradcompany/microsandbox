@@ -88,7 +88,7 @@ let snap = Snapshot::create(
 
 </Accordion>
 
-Create a snapshot artifact from a stopped sandbox. Writes `manifest.json` and the captured `upper.ext4` into the destination directory atomically (the manifest is renamed into place last), then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create a snapshot artifact from a stopped sandbox. Writes `manifest.json` and the captured `upper.ext4` into the destination directory atomically, renaming the manifest into place last. It then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -361,7 +361,7 @@ println!("imported {}", h.digest());
 
 </Accordion>
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Recorded integrity is verified as artifacts land. Returns a handle for the head snapshot.
+Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory or `dest`. Any bundled image-cache entries land in the global cache, and everything found is registered in the index. Recorded integrity is verified as artifacts land. Returns a handle for the head snapshot.
 
 <p className="msb-label">Parameters</p>
 

@@ -136,7 +136,7 @@ case err != nil:
 - **A program that ran and exited non-zero**: the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
 - **A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. This surfaces as a typed error variant: `ExecFailed` (Rust), `ExecFailedError` (TypeScript), `ExecFailedError` (Python).
 
-The typed error carries a classified `kind` plus the underlying `errno`, so callers can branch on the cause and react. Common kinds: `NotFound` (binary missing on PATH), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, `Other`.
+The typed error carries a classified `kind` plus the underlying `errno`, so you can branch on the cause and react. Common kinds: `NotFound` (binary missing on PATH), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, `Other`.
 
 <CodeGroup>
 ```rust Rust

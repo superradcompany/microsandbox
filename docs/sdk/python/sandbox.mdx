@@ -40,7 +40,7 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
-The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed.
+The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit, the context manager kills the sandbox and removes its persisted state.
 
 <p className="msb-label">Parameters</p>
 
