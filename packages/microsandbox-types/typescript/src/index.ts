@@ -575,6 +575,10 @@ memory_mib: number | null,
  */
 max_memory_mib: number | null,
 /**
+ * Desired OCI writable overlay upper size in MiB. Grow-only: the upper is a real ext4 image, so shrinking risks data loss and is rejected in v1.
+ */
+oci_upper_size_mib: number | null,
+/**
  * Environment variables to set for future execs.
  */
 env?: Array<EnvVar>,
