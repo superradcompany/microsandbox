@@ -1032,6 +1032,25 @@ enforced: string,
  */
 state: ResourceConvergenceState, };
 
+export type CloudNetworkSpec = {
+/**
+ * Whether networking is enabled for this sandbox.
+ */
+enabled: boolean,
+/**
+ * Egress/ingress policy. The cloud floors it (hard-denies the internal
+ * network) before boot; public egress stays the caller's to govern.
+ */
+policy: NetworkPolicy | null,
+/**
+ * Secret-injection config.
+ */
+secrets: SecretsConfig | null,
+/**
+ * Max concurrent guest connections (the cloud clamps it to a ceiling).
+ */
+max_connections: number | null, };
+
 export type CloudRootfsSource = { "bind": string } | { "oci": {
 /**
  * OCI image reference (e.g. `python`).
@@ -1064,6 +1083,36 @@ memory_mib: number,
  */
 disk_size_mib?: number | null, };
 
+export type CloudSandboxRuntimeOptions = {
+/**
+ * Working directory for guest commands.
+ */
+workdir: string | null,
+/**
+ * Default shell.
+ */
+shell: string | null,
+/**
+ * Named in-guest scripts.
+ */
+scripts: { [key in string]: string },
+/**
+ * Entrypoint override.
+ */
+entrypoint: Array<string> | null,
+/**
+ * Command override.
+ */
+cmd: Array<string> | null,
+/**
+ * Guest user.
+ */
+user: string | null,
+/**
+ * Runtime log level.
+ */
+log_level: SandboxLogLevel | null, };
+
 export type CloudSandboxSpec = {
 /**
  * Unique sandbox name.
@@ -1078,9 +1127,9 @@ image: CloudRootfsSource,
  */
 resources: CloudSandboxResources,
 /**
- * Guest runtime options.
+ * Guest runtime options (curated; platform-controlled fields omitted).
  */
-runtime: SandboxRuntimeOptions,
+runtime: CloudSandboxRuntimeOptions,
 /**
  * Environment variables visible to commands in the sandbox.
  */
@@ -1102,9 +1151,9 @@ mounts: Array<VolumeMount>,
  */
 patches: Array<Patch>,
 /**
- * Network specification.
+ * Network specification (curated; platform-controlled fields omitted).
  */
-network: NetworkSpec,
+network: CloudNetworkSpec,
 /**
  * Hand off PID 1 to a guest init binary after agentd setup.
  */

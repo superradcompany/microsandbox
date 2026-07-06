@@ -12,9 +12,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    DiskImageFormat, EnvVar, HandoffInit, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit,
-    RootfsSource, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    SecurityProfile, VolumeMount,
+    DiskImageFormat, EnvVar, HandoffInit, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch,
+    PullPolicy, Rlimit, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec, SecretsConfig, SecurityProfile, VolumeMount,
 };
 use crate::{TypesError, TypesResult};
 
@@ -52,8 +52,8 @@ pub struct CloudSandboxSpec {
     /// CPU, memory, and user-facing disk resources.
     pub resources: CloudSandboxResources,
 
-    /// Guest runtime options.
-    pub runtime: SandboxRuntimeOptions,
+    /// Guest runtime options (curated; platform-controlled fields omitted).
+    pub runtime: CloudSandboxRuntimeOptions,
 
     /// Environment variables visible to commands in the sandbox.
     pub env: Vec<EnvVar>,
@@ -70,8 +70,8 @@ pub struct CloudSandboxSpec {
     /// Rootfs patches applied before VM start.
     pub patches: Vec<Patch>,
 
-    /// Network specification.
-    pub network: NetworkSpec,
+    /// Network specification (curated; platform-controlled fields omitted).
+    pub network: CloudNetworkSpec,
 
     /// Hand off PID 1 to a guest init binary after agentd setup.
     pub init: Option<HandoffInit>,
@@ -139,6 +139,74 @@ pub enum CloudRootfsSource {
         /// Inner filesystem type (optional; auto-detected if absent).
         fstype: Option<String>,
     },
+}
+
+/// Cloud network specification. Mirrors the domain [`NetworkSpec`] but omits
+/// the platform-controlled fields: interface overrides, host port mapping,
+/// DNS, TLS interception, and host-CA trust are set by the cloud, not the
+/// caller. `deny_unknown_fields` — posting an omitted field is an error, not a
+/// silent drop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudNetworkSpec {
+    /// Whether networking is enabled for this sandbox.
+    pub enabled: bool,
+
+    /// Egress/ingress policy. The cloud floors it (hard-denies the internal
+    /// network) before boot; public egress stays the caller's to govern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<NetworkPolicy>,
+
+    /// Secret-injection config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsConfig>,
+
+    /// Max concurrent guest connections (the cloud clamps it to a ceiling).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<usize>,
+}
+
+impl Default for CloudNetworkSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            policy: None,
+            secrets: None,
+            max_connections: None,
+        }
+    }
+}
+
+/// Cloud guest runtime options. Mirrors [`SandboxRuntimeOptions`] but omits the
+/// platform-controlled fields: the hostname (pinned to the sandbox id) and the
+/// metrics-sampling knobs (metering integrity). `deny_unknown_fields`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudSandboxRuntimeOptions {
+    /// Working directory for guest commands.
+    pub workdir: Option<String>,
+
+    /// Default shell.
+    pub shell: Option<String>,
+
+    /// Named in-guest scripts.
+    pub scripts: BTreeMap<String, String>,
+
+    /// Entrypoint override.
+    pub entrypoint: Option<Vec<String>>,
+
+    /// Command override.
+    pub cmd: Option<Vec<String>>,
+
+    /// Guest user.
+    pub user: Option<String>,
+
+    /// Runtime log level.
+    pub log_level: Option<SandboxLogLevel>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -301,17 +369,37 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             max_memory_mib: spec.resources.memory_mib,
         };
 
+        // Fill the platform-controlled fields the cloud twins omit with safe
+        // defaults; the resolver + driver floor set/override them.
+        let network = NetworkSpec {
+            enabled: spec.network.enabled,
+            policy: spec.network.policy,
+            secrets: spec.network.secrets,
+            max_connections: spec.network.max_connections,
+            ..NetworkSpec::default()
+        };
+        let runtime = SandboxRuntimeOptions {
+            workdir: spec.runtime.workdir,
+            shell: spec.runtime.shell,
+            scripts: spec.runtime.scripts,
+            entrypoint: spec.runtime.entrypoint,
+            cmd: spec.runtime.cmd,
+            user: spec.runtime.user,
+            log_level: spec.runtime.log_level,
+            ..SandboxRuntimeOptions::default()
+        };
+
         Ok(Self {
             name: spec.name,
             image,
             resources,
-            runtime: spec.runtime,
+            runtime,
             env: spec.env,
             labels: spec.labels,
             rlimits: spec.rlimits,
             mounts: spec.mounts,
             patches: spec.patches,
-            network: spec.network,
+            network,
             init: spec.init,
             pull_policy: spec.pull_policy,
             security_profile: spec.security_profile,
@@ -358,13 +446,26 @@ impl From<SandboxSpec> for CloudSandboxSpec {
                 memory_mib: spec.resources.memory_mib,
                 disk_size_mib,
             },
-            runtime: spec.runtime,
+            runtime: CloudSandboxRuntimeOptions {
+                workdir: spec.runtime.workdir,
+                shell: spec.runtime.shell,
+                scripts: spec.runtime.scripts,
+                entrypoint: spec.runtime.entrypoint,
+                cmd: spec.runtime.cmd,
+                user: spec.runtime.user,
+                log_level: spec.runtime.log_level,
+            },
             env: spec.env,
             labels: spec.labels,
             rlimits: spec.rlimits,
             mounts: spec.mounts,
             patches: spec.patches,
-            network: spec.network,
+            network: CloudNetworkSpec {
+                enabled: spec.network.enabled,
+                policy: spec.network.policy,
+                secrets: spec.network.secrets,
+                max_connections: spec.network.max_connections,
+            },
             init: spec.init,
             pull_policy: spec.pull_policy,
             security_profile: spec.security_profile,

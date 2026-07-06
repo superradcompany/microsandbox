@@ -17,8 +17,8 @@ pub mod typescript;
 
 pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudRootfsSource, CloudSandboxResources,
-    CloudSandboxSpec, CloudSandboxStatus,
+    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudRootfsSource,
+    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
 };
 pub use domain::{
     Action, CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_MEMORY_MIB,
