@@ -226,18 +226,14 @@ msb modify api --cpus 8 --dry-run          # show the plan, apply nothing
 
 `max_cpus` and `max_memory` are reserved at create time and default to the starting `cpus`/`memory`, leaving no headroom for live growth. Reserving more costs almost nothing, so set them higher at create time if the sandbox may need to grow.
 
-Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column:
+A live resize may not settle immediately. The apply output then reports a `STATE` per resource (`resize_status` in `--format json`):
 
-- `applied`: requested, actual, and enforced values match.
-- `converging`: the guest is still onlining CPUs or plugging memory.
-- `guest-refused`: the guest would not cooperate, but the host enforces the new limit anyway.
+- `applied`: the new value is in effect.
+- `converging`: the guest is still applying the change.
+- `guest-refused`: the guest declined, but the host enforces the limit anyway.
 - `failed`: the resize did not complete.
 
-JSON output (`--format json`) carries the same states in `resize_status`.
-
-Env and workdir changes apply to future execs only; running processes keep their current environment.
-
-`--secret NAME@HOST` adds or rotates a secret from the host environment variable of that name; the value never appears in the command. Inline `NAME=VALUE@HOST` is rejected, same as on `msb create`, since it would leak into shell history. To pass a raw value, use an SDK.
+`--secret NAME@HOST` adds or rotates a secret from the host environment variable of that name. Inline `NAME=VALUE@HOST` is rejected since it would leak into shell history; pass raw values through an SDK.
 
 | Flag | Description |
 |------|-------------|
