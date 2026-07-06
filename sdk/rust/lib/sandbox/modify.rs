@@ -527,7 +527,6 @@ async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
 }
 
 /// Ask the sandbox process which live-control operations it serves.
-#[cfg(unix)]
 async fn control_capabilities(
     name: &str,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
@@ -537,18 +536,36 @@ async fn control_capabilities(
     })
 }
 
-#[cfg(not(unix))]
-async fn control_capabilities(
-    _name: &str,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
-    Err(crate::MicrosandboxError::Unsupported {
-        feature: "live sandbox control".into(),
-        available_when: "on unix hosts".into(),
-    })
+/// Open the runtime control pipe, retrying briefly while the single server
+/// instance is serving another client.
+#[cfg(windows)]
+async fn connect_control_pipe(
+    path: &std::path::Path,
+) -> MicrosandboxResult<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    for _ in 0..100 {
+        match ClientOptions::new().open(path.as_os_str()) {
+            Ok(client) => return Ok(client),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                return Err(crate::MicrosandboxError::Runtime(format!(
+                    "failed to reach the runtime control pipe at {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Err(crate::MicrosandboxError::Runtime(format!(
+        "the runtime control pipe at {} stayed busy",
+        path.display()
+    )))
 }
 
 /// Send one control request line and parse the reply.
-#[cfg(unix)]
 async fn control_request(
     name: &str,
     request: String,
@@ -556,12 +573,15 @@ async fn control_request(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let path = control_socket_path(name)?;
+    #[cfg(unix)]
     let mut stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
         crate::MicrosandboxError::Runtime(format!(
             "failed to reach the runtime control socket at {}: {e}",
             path.display()
         ))
     })?;
+    #[cfg(windows)]
+    let mut stream = connect_control_pipe(&path).await?;
     stream
         .write_all(request.as_bytes())
         .await
@@ -586,10 +606,9 @@ async fn control_request(
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The
-/// request travels only over the private per-sandbox unix socket and is never
-/// logged; failures surface the runtime's error, which carries secret names
-/// only.
-#[cfg(unix)]
+/// request travels only over the private per-sandbox control endpoint and is
+/// never logged; failures surface the runtime's error, which carries secret
+/// names only.
 async fn control_secrets_update(
     name: &str,
     changes: Vec<microsandbox_runtime::control::SecretLiveChange>,
@@ -601,19 +620,7 @@ async fn control_secrets_update(
     Ok(())
 }
 
-#[cfg(not(unix))]
-async fn control_secrets_update(
-    _name: &str,
-    _changes: Vec<microsandbox_runtime::control::SecretLiveChange>,
-) -> MicrosandboxResult<()> {
-    Err(crate::MicrosandboxError::Unsupported {
-        feature: "live secret reconfiguration".into(),
-        available_when: "on unix hosts".into(),
-    })
-}
-
 /// Ask the sandbox process to converge on `total_mib` of usable guest memory.
-#[cfg(unix)]
 async fn control_memory_target(
     name: &str,
     total_mib: u64,
@@ -630,7 +637,6 @@ async fn control_memory_target(
 
 /// Ask the sandbox process to converge on `online` CPUs. Enforcement applies
 /// immediately in the VMM; the guest driver converges asynchronously.
-#[cfg(unix)]
 pub(crate) async fn control_cpu_target(
     name: &str,
     online: u32,
@@ -645,27 +651,6 @@ pub(crate) async fn control_cpu_target(
     })
 }
 
-#[cfg(not(unix))]
-async fn control_memory_target(
-    _name: &str,
-    _total_mib: u64,
-) -> MicrosandboxResult<microsandbox_runtime::control::MemoryControlState> {
-    Err(crate::MicrosandboxError::Unsupported {
-        feature: "live memory resize".into(),
-        available_when: "on unix hosts".into(),
-    })
-}
-
-#[cfg(not(unix))]
-pub(crate) async fn control_cpu_target(
-    _name: &str,
-    _online: u32,
-) -> MicrosandboxResult<microsandbox_runtime::control::CpuControlState> {
-    Err(crate::MicrosandboxError::Unsupported {
-        feature: "live CPU resize".into(),
-        available_when: "on unix hosts".into(),
-    })
-}
 fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResult<()> {
     if let Some(conflict) = plan.conflicts.first() {
         return Err(crate::MicrosandboxError::Custom(format!(

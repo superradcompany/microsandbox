@@ -3,9 +3,10 @@
 //! Live VM mutations that are host/VMM-owned (memory resize through
 //! virtio-mem, CPU online targets, and secret reconfiguration in the host
 //! network layer) cannot go through agentd: the guest is untrusted and the
-//! knobs live host-side. The sandbox process serves them instead on a unix
-//! socket next to the agent socket. The protocol is deliberately tiny: one
-//! JSON request line in, one JSON response line out, per connection.
+//! knobs live host-side. The sandbox process serves them instead next to the
+//! agent endpoint — a unix socket on unix hosts, a named pipe on Windows.
+//! The protocol is deliberately tiny: one JSON request line in, one JSON
+//! response line out, per connection.
 //!
 //! Secret requests may carry raw secret values (rotation needs the new
 //! material), so request lines are never logged and [`SecretValue`] redacts
@@ -187,7 +188,6 @@ pub struct ControlContext {
 //--------------------------------------------------------------------------------------------------
 
 impl ControlContext {
-    #[cfg(unix)]
     fn secrets_update_supported(&self) -> bool {
         #[cfg(feature = "net")]
         {
@@ -258,8 +258,78 @@ fn serve_connection(
 ) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(&mut *stream).read_line(&mut line)?;
+    stream.write_all(&respond_to_line(line.trim(), context))
+}
 
-    let response = match serde_json::from_str::<ControlRequest>(line.trim()) {
+/// Serve the Windows named-pipe listener. One pipe instance exists at a time;
+/// each connection is one request/response exchange, after which the instance
+/// is recreated. Zero-byte connections are tolerated because `Path::exists()`
+/// probes from the SDK open and immediately close the pipe.
+#[cfg(windows)]
+pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+
+    std::thread::Builder::new()
+        .name("msb-control".to_string())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let mut first_pipe_instance = true;
+                loop {
+                    let mut options = ServerOptions::new();
+                    options.pipe_mode(PipeMode::Byte);
+                    if first_pipe_instance {
+                        options.first_pipe_instance(true);
+                    }
+                    let server = match options.create(&pipe_name) {
+                        Ok(server) => server,
+                        Err(e) => {
+                            tracing::warn!("control: pipe create failed, stopping listener: {e}");
+                            break;
+                        }
+                    };
+                    first_pipe_instance = false;
+
+                    if let Err(e) = server.connect().await {
+                        tracing::debug!("control: pipe connect error: {e}");
+                        continue;
+                    }
+
+                    let mut reader = BufReader::new(server);
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => continue, // existence probe: opened and closed
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!("control: connection error: {e}");
+                            continue;
+                        }
+                    }
+
+                    let payload = respond_to_line(line.trim(), &context);
+                    let mut server = reader.into_inner();
+                    if let Err(e) = server.write_all(&payload).await {
+                        tracing::debug!("control: response write error: {e}");
+                        continue;
+                    }
+                    // Flush before this instance drops, or the client can
+                    // lose the unread reply when the handle closes.
+                    let _ = server.flush().await;
+                    let _ = server.disconnect();
+                }
+            });
+        })?;
+
+    Ok(())
+}
+
+/// Parse one request line and produce the newline-terminated JSON reply.
+fn respond_to_line(line: &str, context: &ControlContext) -> Vec<u8> {
+    let response = match serde_json::from_str::<ControlRequest>(line) {
         Ok(request) => handle_request(request, context),
         Err(e) => ControlResponse {
             ok: false,
@@ -270,10 +340,9 @@ fn serve_connection(
 
     let mut payload = serde_json::to_vec(&response).unwrap_or_default();
     payload.push(b'\n');
-    stream.write_all(&payload)
+    payload
 }
 
-#[cfg(unix)]
 fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlResponse {
     let control = &context.vm;
     let memory = |state: Option<msb_krun::VmMemoryState>| match state {
@@ -339,7 +408,7 @@ fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlR
     }
 }
 
-#[cfg(all(unix, feature = "net"))]
+#[cfg(feature = "net")]
 fn handle_secrets_update(
     context: &ControlContext,
     changes: Vec<SecretLiveChange>,
@@ -386,7 +455,7 @@ fn handle_secrets_update(
     }
 }
 
-#[cfg(all(unix, not(feature = "net")))]
+#[cfg(not(feature = "net"))]
 fn handle_secrets_update(
     _context: &ControlContext,
     _changes: Vec<SecretLiveChange>,
