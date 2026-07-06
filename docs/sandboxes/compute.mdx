@@ -1,0 +1,95 @@
+---
+title: Compute
+description: Size a sandbox's CPU and memory, and resize a running one
+icon: "microchip"
+---
+
+Every sandbox runs with a set number of vCPUs and a set amount of memory. You choose both when you create it, and you can resize a running sandbox up or down without recreating it.
+
+## Set CPU and memory at create time
+
+Pick the starting size, and optionally reserve headroom for later growth with `max_cpus` and `max_memory`:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .cpus(2)
+    .memory(1024)
+    .max_cpus(8)
+    .max_memory(4096)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .cpus(2)
+    .memory(1024)
+    .maxCpus(8)
+    .maxMemory(4096)
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    cpus=2,
+    memory=1024,
+    max_cpus=8,
+    max_memory=4096,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithCPUs(2),
+    m.WithMemory(1024),
+    m.WithMaxCPUs(8),
+    m.WithMaxMemory(4096),
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --cpus 2 --memory 1G \
+  --max-cpus 8 --max-memory 4G
+```
+</CodeGroup>
+
+`cpus` and `memory` are the sandbox's live size. `max_cpus` and `max_memory` are the ceilings it can grow to while running; they default to the starting size, so if you might scale up later, set them higher now. Reserving headroom is cheap: the spare vCPUs stay parked and the spare memory is only backed once used.
+
+## Resize a running sandbox
+
+Raise or lower CPUs and memory on the fly, up to the ceilings reserved at create time:
+
+<CodeGroup>
+```rust Rust
+sb.modify().cpus(4).memory(2048).apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ cpus: 4, memory: 2048 });
+```
+
+```python Python
+await sb.modify(cpus=4, memory=2048)
+```
+
+```go Go
+sb.Modify(ctx, m.ModifyOptions{CPUs: 4, MemoryMiB: 2048})
+```
+
+```bash CLI
+msb modify worker --cpus 4 --memory 2G
+```
+</CodeGroup>
+
+Growing beyond `max_cpus` or `max_memory` takes a restart. A live resize does not always take hold at once, since the guest applies it in the background; the result reports per-resource progress so you can tell when it has settled.
+
+---
+
+`modify` can also change environment variables, labels, workdir, and secrets on a running sandbox. See [`msb modify`](/cli/sandbox-commands#msb-modify) for the full surface and [Secrets](/sandboxes/secrets) for rotating credentials.
