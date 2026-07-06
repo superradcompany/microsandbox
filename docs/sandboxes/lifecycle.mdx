@@ -135,6 +135,38 @@ msb restart worker
 
 `msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
 
+## Modify and resize
+
+Use `msb modify`, or the SDK `modify()` methods, to change a running sandbox without recreating it: resize its CPUs and memory, update environment variables, labels, or the working directory, and add, rotate, or remove secrets. Changes that can apply to a running sandbox take effect immediately; the rest take effect on its next start.
+
+<CodeGroup>
+```rust Rust
+let plan = sb.modify()
+    .cpus(4)
+    .memory(4096)
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({ cpus: 4, memory: 4096 });
+```
+
+```python Python
+plan = await sb.modify(cpus=4, memory=4096)
+```
+
+```go Go
+plan, err := sb.Modify(ctx, m.ModifyOptions{CPUs: 4, MemoryMiB: 4096})
+```
+
+```bash CLI
+msb modify api --cpus 4 --memory 4G
+```
+</CodeGroup>
+
+See [`msb modify`](/cli/sandbox-commands#msb-modify) and the SDK sandbox reference for all options.
+
 ## Ping and touch
 
 Use `ping` to check that a running sandbox's guest agent is reachable, and `touch` to intentionally refresh its idle timer. Ping is a health check only: it does not count as sandbox activity and will not keep an idle sandbox alive by itself. Touch is the explicit keepalive.
