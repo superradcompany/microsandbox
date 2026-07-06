@@ -545,7 +545,7 @@ The returned plan dict mirrors the canonical JSON shape:
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
 | `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"applied"`, `"converging"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
 
-Live resize is not necessarily instant: enforcement applies immediately, and `resize_status` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks).
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
 
 <p className="msb-label">Parameters</p>
 

@@ -1658,9 +1658,9 @@ CPU and memory changes take effect immediately on a running sandbox as long as t
 async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 ```
 
-Apply the accumulated patch atomically. Live-capable changes mutate the running VM first (CPU hotplug, memory resize, secret rotation through the runtime control socket); the desired config is persisted only after the live step succeeds. For stopped sandboxes or [`next_start()`](#next_start) requests, changes persist for the next start. With [`restart()`](#restart), the existing stop/start lifecycle path makes restart-required changes active.
+Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#next_start), are saved and take effect on the next start. With [`restart()`](#restart), the sandbox is stopped and started so that restart-required changes take effect.
 
-Live resize is not necessarily instant: when an accepted resize has not fully settled, the returned plan's `resize_status` reports per-resource convergence; see [`ResourceResizeStatus`](#resourceresizestatus).
+A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
 
 <p className="msb-label">Returns</p>
 

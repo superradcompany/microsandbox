@@ -665,7 +665,7 @@ Apply is all-or-nothing: if any change conflicts, is unsupported, or needs a res
 
 The same method is available on [`SandboxHandle`](#sandboxhandle). It never starts a stopped sandbox; changes made while it is stopped take effect on the next boot. Secret changes are Rust-SDK and CLI only for now.
 
-Live resize is not necessarily instant: enforcement applies immediately, and the returned plan's `ResizeStatus` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks). See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 

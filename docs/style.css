@@ -105,14 +105,17 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
 
 /* ----------------------------------------------------------------------------
- * Tables scroll horizontally rather than being crammed into the prose width,
- * which forced ugly mid-token wraps (e.g. Vec<(String,\nString)>). The element
- * directly wrapping each table becomes the scroll boundary, and cells stop
- * wrapping, so a table sizes to its content and scrolls when it overflows.
+ * Tables: prose cells wrap, capped at a readable width, while code spans stay
+ * on one line so tokens like Vec<(String, String)> never break mid-token. The
+ * element directly wrapping each table is still a scroll boundary, so a table
+ * that is genuinely wider than the prose column (several code-heavy columns)
+ * scrolls instead of being crammed.
  * -------------------------------------------------------------------------- */
 :has(> table) { overflow-x: auto; max-width: 100%; }
 table { table-layout: auto; }
-table th, table td { vertical-align: top; white-space: nowrap; }
+table th, table td { vertical-align: top; }
+table td { max-width: 48ch; }
+table th code, table td code { white-space: nowrap; }
 
 /* ----------------------------------------------------------------------------
  * Code surfaces: Mintlify's default dark code background is nearly neutral and
