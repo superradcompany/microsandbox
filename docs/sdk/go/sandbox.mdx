@@ -144,7 +144,7 @@ if err != nil {
     return err
 }
 for _, h := range handles {
-    fmt.Printf("%s — %s\n", h.Name(), h.Status())
+    fmt.Printf("%s - %s\n", h.Name(), h.Status())
 }
 ```
 
@@ -657,11 +657,13 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 </Accordion>
 
-Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing. A patch with conflicts, unsupported changes, or restart-required changes under the default policy returns an error without changing anything. `CPUs` and `MemoryMiB` apply live to a running sandbox when the target fits inside the boot-time capacity ([`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory)); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Live resize is not necessarily instant: enforcement applies immediately, and the returned plan's `ResizeStatus` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks). See [`SandboxModificationPlan`](#sandboxmodificationplan).
+Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -1334,7 +1336,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 </Accordion>
 
-Hand off PID 1 inside the guest to a custom init binary after agentd finishes boot-time setup. Construct `cfg` via the [`Init`](#init) factory. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
+Hand off PID 1 inside the guest to a custom init binary after agentd finishes boot-time setup. Construct `cfg` via the [`Init`](#init) factory. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
 
 <p className="msb-label">Parameters</p>
 
@@ -1657,7 +1659,7 @@ Prevent [`EnsureInstalled`](#m-ensureinstalled) from fetching the msb + libkrunf
 
 ## Patch
 
-Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/customize#patches) for conceptual context.
+Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">Text()</span>
 
@@ -1820,7 +1822,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 ## Init
 
-Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
+Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
 
 #### <span className="msb-recv">Init.</span><span className="msb-hn">Auto()</span>
 
@@ -1901,7 +1903,7 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `Refresh(ctx)` | `(*SandboxHandle, error)` | Fresh handle for the same name |
 | `Ping(ctx)` | `(*`[`SandboxPingResult`](#sandboxpingresult)`, error)` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | `Touch(ctx)` | `(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| `Modify(ctx, opts)` | `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)` | Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes — changes persist for the next boot |
+| `Modify(ctx, opts)` | `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)` | Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
 | `Metrics(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Point-in-time resource metrics |
 | `Logs(ctx, opts)` | `([]`[`LogEntry`](#logentry)`, error)` | Read captured `exec.log` (works without starting) |
 | `LogStream(ctx, opts)` | `(*`[`LogStreamHandle`](#logstreamhandle)`, error)` | Stream captured output |
@@ -1991,7 +1993,7 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | AllowHosts | `[]string` | Allowed hosts after the requested change (secret entries) |
 | Reason | `*string` | Human-readable reason for the classification, when useful |
 
-`ResourceResizeStatus` reports runtime convergence for a live resize — enforcement applies immediately, the guest converges asynchronously:
+`ResourceResizeStatus` reports runtime convergence for a live resize; enforcement applies immediately, the guest converges asynchronously:
 
 | Field | Type | Description |
 |-------|------|-------------|

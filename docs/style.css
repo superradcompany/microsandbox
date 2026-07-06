@@ -3,7 +3,7 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
- * Content width — Mintlify caps #content-area at max-w-xl (36rem) and sets its
+ * Content width: Mintlify caps #content-area at max-w-xl (36rem) and sets its
  * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
  * content is a narrow column with large dead zones. The TOC column to its right
  * is only 19rem wide (#table-of-contents-layout, with its own pl-10 gap), so
@@ -65,7 +65,7 @@ body {
  * scannable. Scoped to method headings so section/type headings are
  * unaffected. */
 h4:has(.msb-hn) { margin-top: 5rem !important; }
-/* but the first method directly under a section heading needs far less — the
+/* but the first method directly under a section heading needs far less; the
  * section heading already separates it from what came before. */
 h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
@@ -105,17 +105,20 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
 
 /* ----------------------------------------------------------------------------
- * Tables scroll horizontally rather than being crammed into the prose width,
- * which forced ugly mid-token wraps (e.g. Vec<(String,\nString)>). The element
- * directly wrapping each table becomes the scroll boundary, and cells stop
- * wrapping, so a table sizes to its content and scrolls when it overflows.
+ * Tables: prose cells wrap, capped at a readable width, while code spans stay
+ * on one line so tokens like Vec<(String, String)> never break mid-token. The
+ * element directly wrapping each table is still a scroll boundary, so a table
+ * that is genuinely wider than the prose column (several code-heavy columns)
+ * scrolls instead of being crammed.
  * -------------------------------------------------------------------------- */
 :has(> table) { overflow-x: auto; max-width: 100%; }
 table { table-layout: auto; }
-table th, table td { vertical-align: top; white-space: nowrap; }
+table th, table td { vertical-align: top; }
+table td { max-width: 48ch; }
+table th code, table td code { white-space: nowrap; }
 
 /* ----------------------------------------------------------------------------
- * Code surfaces — Mintlify's default dark code background is nearly neutral and
+ * Code surfaces: Mintlify's default dark code background is nearly neutral and
  * can read greenish against the microsandbox palette. Tint standalone code
  * blocks, code groups, and SDK example accordions toward the purple brand color
  * while keeping the contrast restrained in both themes.
@@ -199,7 +202,7 @@ details.accordion:has(.code-block) > summary:hover {
 }
 
 /* ----------------------------------------------------------------------------
- * Example collapsibles — Mintlify wraps the code block in prose margins
+ * Example collapsibles: Mintlify wraps the code block in prose margins
  * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
  * leaves a lot of dead space inside the accordion. Trim it to a balanced, tight
  * inset. Scoped to accordions that hold a code block so prose accordions are

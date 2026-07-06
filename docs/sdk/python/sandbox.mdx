@@ -524,9 +524,11 @@ await sb.modify(env={"MODE": "prod"}, policy="restart")
 
 </Accordion>
 
-Plan or apply a configuration change. Every requested change is classified as `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing. A patch with conflicts, unsupported changes, or restart-required changes under the default policy raises without changing anything. `cpus` and `memory` apply live to a running sandbox when the target fits inside the boot-time capacity (`max_cpus` / `max_memory`); raising the capacity itself is restart-backed. Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment — and the plan reports this as a warning. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-The same method is available on [`SandboxHandle`](#sandboxhandle); it never starts a stopped sandbox — changes on a stopped sandbox persist for the next boot. Secret changes are Rust-SDK and CLI only for now.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+
+Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
 
 The returned plan dict mirrors the canonical JSON shape:
 
@@ -539,9 +541,9 @@ The returned plan dict mirrors the canonical JSON shape:
 | `changes` | `list[dict]` | One entry per field: `field`, `change` (`"added"`, `"updated"`, `"removed"`), `before`, `after`, `disposition`, optional `reason` |
 | `conflicts` | `list[dict]` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
-| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"applied"`, `"converging"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
+| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"accepted"`, `"converging"`, `"applied"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
 
-Live resize is not necessarily instant: enforcement applies immediately, and `resize_status` reports whether the guest has finished converging (onlining CPUs, plugging memory blocks).
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
 
 <p className="msb-label">Parameters</p>
 
@@ -683,7 +685,7 @@ from microsandbox import Sandbox
 
 handle = await Sandbox.get("web")
 
-# Default — all user-program output, regardless of pipe/pty mode
+# Default: all user-program output, regardless of pipe/pty mode
 entries = await handle.logs()
 for e in entries:
     label = {"stdout": "OUT", "stderr": "ERR", "output": "PTY", "system": "SYS"}[e.source]
@@ -935,7 +937,7 @@ Release the handle without stopping the sandbox. The sandbox continues running a
 
 ## Patch
 
-Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/customize#patches) for conceptual context.
+Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
 
@@ -1147,7 +1149,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` which pass `cmd` literally |
-| init | `str \| dict \| `[`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
+| init | `str \| dict \| `[`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
 | replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
@@ -1168,7 +1170,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(init=...)</a></p>
 
-Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`create()`](#sandbox-create) to hand PID 1 inside the guest off to your own init binary after agentd's setup. Frozen dataclass. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`create()`](#sandbox-create) to hand PID 1 inside the guest off to your own init binary after agentd's setup. Frozen dataclass. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -1230,7 +1232,7 @@ A lightweight handle to an existing sandbox (running or stopped). Provides statu
 | refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
 | ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
 | touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| modify(...) | `Awaitable[dict[str, Any]]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes — changes persist for the next boot |
+| modify(...) | `Awaitable[dict[str, Any]]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
 | connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
 | stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |

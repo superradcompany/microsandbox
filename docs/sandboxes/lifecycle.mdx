@@ -135,9 +135,9 @@ msb restart worker
 
 `msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
 
-## Modify and resize
+## Configuration
 
-Use `msb modify`, or the SDK `modify()` methods, to change a running sandbox without recreating it. You can resize its CPUs and memory, update environment variables, labels, or the working directory, and add, rotate, or remove secrets. Changes that can apply to a running sandbox take effect immediately; the rest take effect on its next start.
+Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply live, some affect future execs only, and some need a restart or the next start.
 
 <CodeGroup>
 ```rust Rust
@@ -165,7 +165,7 @@ msb modify api --cpus 4 --memory 4G
 ```
 </CodeGroup>
 
-See [`msb modify`](/cli/sandbox-commands#msb-modify) and the SDK sandbox reference for all options.
+See [Tuning](/sandboxes/tuning) for the change model, CPU and memory resize, labels, environment variables, secrets, and storage sizing.
 
 ## Ping and touch
 

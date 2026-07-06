@@ -1,0 +1,136 @@
+---
+title: Labels
+description: Organize sandboxes, act on them in bulk, and attribute metrics
+icon: "tags"
+---
+
+Labels are `key=value` pairs you attach to a sandbox to organize it. They let you act on many sandboxes at once with a single command, and break metrics down by whatever dimension you choose, such as user, tenant, or job.
+
+## Keys
+
+Label keys cannot start with the reserved prefixes `sandbox.`, `microsandbox.`, or `service.`. Those namespaces belong to the runtime, which sets attributes under them itself and rejects any sandbox you try to create with a label key that uses one.
+
+Values may be empty. A valueless label such as `--label gpu` is stored as `gpu=""`, matching Docker's label semantics. Use empty values for marker labels, and use explicit values when you need filtering or metrics dimensions such as `user.id=alice` or `tenant=acme`.
+
+## Add at create time
+
+Attach labels when you create a sandbox. Labels are repeatable, and a bare key with no value is allowed:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    labels={"app": "engine", "user.id": "alice"},
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithLabel("app", "engine"),
+    m.WithLabel("user.id", "alice"),
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --label app=engine \
+  --label user.id=alice
+```
+</CodeGroup>
+
+The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, etc.) are imported automatically at create time. A label you set yourself overrides the image's value on a key collision. Image labels using a reserved prefix are skipped.
+
+## Change while running
+
+Add, change, or remove labels without recreating the sandbox:
+
+<CodeGroup>
+```rust Rust
+sb.modify().label("tier", "web").remove_label("stale").apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ labels: { tier: "web" }, labelsRemove: ["stale"] });
+```
+
+```python Python
+await sb.modify(labels={"tier": "web"}, labels_rm=["stale"])
+```
+
+```go Go
+sb.Modify(ctx, m.ModifyOptions{
+    Labels:       map[string]string{"tier": "web"},
+    LabelsRemove: []string{"stale"},
+})
+```
+
+```bash CLI
+msb modify worker --label tier=web --label-rm stale
+```
+</CodeGroup>
+
+## Select in bulk
+
+This is where labels earn their keep. Find every sandbox carrying a label, from the CLI or an SDK; pass more than one label to require all of them (AND-matched):
+
+<CodeGroup>
+```bash CLI
+msb ps --label app=engine                    # matching sandboxes
+msb ps --label app=engine --label tier=web   # only those with both
+```
+
+```rust Rust
+let handles = Sandbox::list_with(
+    SandboxFilter::new().label("app", "engine"),
+).await?;
+```
+
+```typescript TypeScript
+const handles = await Sandbox.listWith({ labels: { app: "engine" } });
+```
+
+```python Python
+handles = await Sandbox.list_with(labels={"app": "engine"})
+```
+
+```go Go
+handles, err := m.ListSandboxesWith(ctx,
+    m.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}),
+)
+```
+</CodeGroup>
+
+On the CLI, `--label` also drives the fleet commands directly, so you act on the whole group in one call instead of listing and looping:
+
+```bash
+msb stop --label app=engine        # stop every match
+msb restart --label app=engine     # restart every match
+msb rm --force --label app=engine  # remove every match
+```
+
+It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`.
+
+## Attribute metrics
+
+Labels flow into a sandbox's metrics as dimensions, so you can break CPU, memory, and I/O down by any label you set, for example per user or per tenant. See [Labels and per-user views](/observability/msb-metrics#labels-and-per-user-views) for the PromQL detail.
+
+High-cardinality labels can increase the number of metric series your backend stores. If an image label carries a commit SHA, build timestamp, or other noisy value, run `msb-metrics` with `--exclude-label-key <key>` to drop that label from exported metrics while keeping it in the catalog. Use `--no-labels` to disable metric labels entirely.
