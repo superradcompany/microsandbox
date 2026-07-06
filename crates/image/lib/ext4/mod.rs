@@ -1,5 +1,6 @@
 mod format;
 mod formatter;
+mod jbd2;
 mod layout;
 mod resizer;
 

@@ -4,6 +4,9 @@
 //! superblock + GDT copies in new sparse_super groups, descriptors appended to the primary GDT and every backup GDT, and finally the updated primary superblock. Because the
 //! formatter reserves `RESERVED_GDT_BLOCKS` after the GDT, descriptors can extend into that reserved span without moving any existing metadata: `gdt_blocks +
 //! s_reserved_gdt_blocks` stays constant across grows.
+//!
+//! Images whose guest was stopped without unmounting carry `EXT4_FEATURE_INCOMPAT_RECOVER` plus a pending jbd2 log; those are recovered first (see the [`jbd2`](super::jbd2)
+//! module) and then grown as clean images.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -13,13 +16,14 @@ use super::format::{
     EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE,
     EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR, EXT4_FEATURE_COMPAT_HAS_JOURNAL,
     EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
-    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
-    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
-    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_LOG_BLOCK_SIZE, EXT4_SUPER_MAGIC,
-    sparse_super_group,
+    EXT4_FEATURE_INCOMPAT_RECOVER, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
+    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
+    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
+    EXT4_LOG_BLOCK_SIZE, EXT4_SUPER_MAGIC, sparse_super_group,
 };
 use super::formatter::{Ext4Error, mark_sparse};
+use super::jbd2;
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, bitmap_checksum, build_block_bitmap_base,
     build_group_descriptor, build_inode_bitmap_base, gdt_checksum, get_le16, get_le32, put_le16,
@@ -63,8 +67,11 @@ struct ParsedImage {
     /// Raw 1024-byte primary superblock.
     sb: Vec<u8>,
 
-    /// Raw primary GDT descriptors (num_groups x 64 bytes).
+    /// Raw primary GDT descriptors (num_groups x 64 bytes). Left empty when `needs_recovery` is set, since the deep GDT validation that fills it only runs on clean images.
     gdt: Vec<u8>,
+
+    /// `EXT4_FEATURE_INCOMPAT_RECOVER` was set: the guest never unmounted, so the jbd2 log must be replayed before the image can be trusted or grown.
+    needs_recovery: bool,
 
     num_blocks: u64,
     num_groups: u32,
@@ -112,12 +119,26 @@ impl ParsedImage {
 /// descriptors must fit within the image's existing GDT capacity (see
 /// [`Ext4Error::ExceedsGdtCapacity`]).
 ///
+/// Images left dirty by a hard guest stop (`EXT4_FEATURE_INCOMPAT_RECOVER` set) have their jbd2
+/// log replayed and the flag cleared everywhere before growing; any journal inconsistency aborts
+/// with the image untouched.
+///
 /// Crash safety: all new-group metadata, backup superblocks, and backup GDTs are written and
 /// fsynced before the primary superblock is rewritten, so a torn grow leaves the image valid at
 /// its old size.
 pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-    let img = parse_and_validate(&mut file)?;
+    let mut img = parse_and_validate(&mut file)?;
+
+    // Replay the journal before anything else: growing with a pending log would let the next kernel mount replay stale transactions over the appended GDT entries. After a
+    // successful replay the image must re-validate as a clean formatter image (the deep GDT checks were skipped on the dirty parse).
+    if img.needs_recovery {
+        replay_journal_and_clear_recover(&mut file, &img)?;
+        img = parse_and_validate(&mut file)?;
+        if img.needs_recovery {
+            return Err(unsupported("journal recovery left the RECOVER flag set"));
+        }
+    }
 
     let block_size = EXT4_BLOCK_SIZE as u64;
     if !new_size_bytes.is_multiple_of(block_size) {
@@ -354,7 +375,12 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         | EXT4_FEATURE_RO_COMPAT_DIR_NLINK
         | EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE
         | EXT4_FEATURE_RO_COMPAT_METADATA_CSUM;
-    if compat != expected_compat || incompat != expected_incompat || ro_compat != expected_ro_compat
+    // Acceptance rule: exactly the formatter's masks, with one exception — INCOMPAT_RECOVER may additionally be set, because every upper that was ever mounted carries it (the
+    // guest does not unmount on stop). RECOVER images get their journal replayed by grow_image before the deep validation below ever runs on them.
+    let needs_recovery = incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0;
+    if compat != expected_compat
+        || incompat & !EXT4_FEATURE_INCOMPAT_RECOVER != expected_incompat
+        || ro_compat != expected_ro_compat
     {
         return Err(unsupported(format!(
             "feature flags do not match this crate's formatter (compat={compat:#x}, incompat={incompat:#x}, ro_compat={ro_compat:#x})"
@@ -408,10 +434,10 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
             return Err(unsupported(message));
         }
     }
-    // A dirty filesystem may have pending journal transactions that would replay over whatever we
-    // write here; growing is only safe after a clean unmount.
+    // The kernel signals pending recovery via INCOMPAT_RECOVER and leaves s_state at 1 (valid) even across a hard stop, so any other value — error bits set or the valid bit
+    // cleared — means damage that journal replay cannot repair.
     if get_le16(&sb, 0x3A) != 1 {
-        return Err(unsupported("filesystem was not cleanly unmounted"));
+        return Err(unsupported("filesystem state is not clean (s_state != 1)"));
     }
 
     let num_blocks = get_le32(&sb, 0x04) as u64 | ((get_le32(&sb, 0x150) as u64) << 32);
@@ -450,12 +476,24 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         free_inodes: get_le32(&sb, 0x10),
         overhead_blocks: get_le32(&sb, 0x194),
         gdt: Vec::new(),
+        needs_recovery,
         sb,
     };
 
     let geo = img.geometry();
     if (geo.group_metadata_blocks(0) as u64) > geo.blocks_in_group(0) as u64 {
         return Err(unsupported("group 0 metadata does not fit its group"));
+    }
+
+    // Until the journal is replayed the on-disk descriptors may be stale or torn mid-checkpoint — exactly what replay repairs — so the deep validation below only runs on a
+    // clean image; grow_image replays and re-parses before growing.
+    if img.needs_recovery {
+        return Ok(img);
+    }
+
+    // A non-empty orphan list needs inode-level processing (truncating/deleting inodes that were unlinked while open) that this resizer does not implement.
+    if get_le32(&img.sb, 0xE8) != 0 {
+        return Err(unsupported("filesystem has a pending orphan inode list"));
     }
 
     // Every existing descriptor must place its group's metadata exactly where the formatter's
@@ -491,6 +529,75 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
     Ok(ParsedImage { gdt, ..img })
 }
 
+/// Replay the pending jbd2 log, then clear `EXT4_FEATURE_INCOMPAT_RECOVER` from the primary and every backup superblock.
+///
+/// The journal is fully validated before its first write (see [`jbd2::recover_journal`]) and the backup superblocks are validated up front too, so an inconsistent image is
+/// refused untouched. The write ordering is crash-safe: replayed blocks are fsynced, then the jbd2 superblock is reset to empty, then RECOVER is cleared — a tear at any point
+/// leaves an image that the next attempt recovers to the same end state (replaying an already-emptied journal is a no-op).
+fn replay_journal_and_clear_recover(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+    let geo = img.geometry();
+    let journal = jbd2::locate_journal(file, geo.group_inode_table_block(0), img.csum_seed)?;
+    if journal.start_block + journal.len_blocks as u64 > img.num_blocks {
+        return Err(unsupported("journal extent extends beyond the filesystem"));
+    }
+    let mut fs_uuid = [0u8; 16];
+    fs_uuid.copy_from_slice(&img.sb[0x68..0x78]);
+
+    let backup_groups: Vec<u32> = (1..img.num_groups)
+        .filter(|g| sparse_super_group(*g))
+        .collect();
+    for &group in &backup_groups {
+        read_superblock_at(
+            file,
+            geo.group_start_block(group) * EXT4_BLOCK_SIZE as u64,
+            &format!("group {group} backup"),
+        )?;
+    }
+
+    jbd2::recover_journal(file, &journal, &fs_uuid, img.num_blocks)?;
+
+    // Replay may rewrite block 0 — the primary superblock is journaled metadata like any other — so re-read it before clearing the flag.
+    let mut sb = read_superblock_at(file, SB_OFFSET, "primary")?;
+    clear_recover_flag(&mut sb);
+    file.seek(SeekFrom::Start(SB_OFFSET))?;
+    file.write_all(&sb)?;
+
+    // The kernel only ever sets RECOVER in the primary, but replay could have landed a journaled copy in a backup group; clear wherever it appears so the stored masks end up
+    // uniformly clean.
+    for &group in &backup_groups {
+        let offset = geo.group_start_block(group) * EXT4_BLOCK_SIZE as u64;
+        let mut backup = read_superblock_at(file, offset, &format!("group {group} backup"))?;
+        if get_le32(&backup, 0x60) & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
+            clear_recover_flag(&mut backup);
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&backup)?;
+        }
+    }
+    file.sync_all()?;
+
+    Ok(())
+}
+
+/// Read a 1024-byte superblock at `offset`, refusing bad magic or checksum.
+fn read_superblock_at(file: &mut File, offset: u64, label: &str) -> Result<Vec<u8>, Ext4Error> {
+    let mut sb = vec![0u8; SB_SIZE];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut sb)?;
+    if get_le16(&sb, 0x38) != EXT4_SUPER_MAGIC || superblock_checksum(&sb) != get_le32(&sb, 0x3FC) {
+        return Err(unsupported(format!(
+            "{label} superblock has a bad magic or checksum"
+        )));
+    }
+    Ok(sb)
+}
+
+fn clear_recover_flag(sb: &mut [u8]) {
+    let incompat = get_le32(sb, 0x60) & !EXT4_FEATURE_INCOMPAT_RECOVER;
+    put_le32(sb, 0x60, incompat);
+    let checksum = superblock_checksum(sb);
+    put_le32(sb, 0x3FC, checksum);
+}
+
 fn unsupported(message: impl Into<String>) -> Ext4Error {
     Ext4Error::Unsupported(message.into())
 }
@@ -514,10 +621,12 @@ fn write_block_at(file: &mut File, block: u64, data: &[u8]) -> Result<(), Ext4Er
 
 #[cfg(test)]
 mod tests {
+    use super::super::format::JBD2_MAGIC;
     use super::super::formatter::{
         Ext4FormatOptions, format_ext4, format_ext4_for_test_with_reserved_gdt,
     };
-    use super::super::layout::{RESERVED_GDT_BLOCKS, count_used_bits};
+    use super::super::jbd2::{JournalLocation, TestTransaction, write_test_log};
+    use super::super::layout::{RESERVED_GDT_BLOCKS, count_used_bits, get_be32, put_be32};
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -647,6 +756,107 @@ mod tests {
             hasher.update(&buf);
         }
         hasher.finalize().into()
+    }
+
+    fn journal_location(path: &Path) -> (JournalLocation, [u8; 16]) {
+        let mut file = File::open(path).unwrap();
+        let img = parse_and_validate(&mut file).unwrap();
+        let location = jbd2::locate_journal(
+            &mut file,
+            img.geometry().group_inode_table_block(0),
+            img.csum_seed,
+        )
+        .unwrap();
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&img.sb[0x68..0x78]);
+        (location, uuid)
+    }
+
+    /// Simulate the state every mounted-but-never-unmounted upper is left in: RECOVER set in the primary superblock (the kernel never sets it in backups).
+    fn set_recover_flag(path: &Path) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut sb = vec![0u8; SB_SIZE];
+        file.seek(SeekFrom::Start(SB_OFFSET)).unwrap();
+        file.read_exact(&mut sb).unwrap();
+        let incompat = get_le32(&sb, 0x60) | EXT4_FEATURE_INCOMPAT_RECOVER;
+        put_le32(&mut sb, 0x60, incompat);
+        let checksum = superblock_checksum(&sb);
+        put_le32(&mut sb, 0x3FC, checksum);
+        file.seek(SeekFrom::Start(SB_OFFSET)).unwrap();
+        file.write_all(&sb).unwrap();
+    }
+
+    fn write_dirty_journal(path: &Path, start_seq: u32, transactions: &[TestTransaction]) {
+        let (location, uuid) = journal_location(path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        write_test_log(&mut file, &location, &uuid, start_seq, transactions).unwrap();
+        drop(file);
+        set_recover_flag(path);
+    }
+
+    fn read_jbd2_superblock(path: &Path) -> Vec<u8> {
+        let (location, _) = journal_location(path);
+        let mut file = File::open(path).unwrap();
+        let mut jsb = vec![0u8; 1024];
+        file.seek(SeekFrom::Start(
+            location.start_block * EXT4_BLOCK_SIZE as u64,
+        ))
+        .unwrap();
+        file.read_exact(&mut jsb).unwrap();
+        jsb
+    }
+
+    fn assert_recover_cleared_everywhere(path: &Path) {
+        let mut file = File::open(path).unwrap();
+        let img = parse_and_validate(&mut file).unwrap();
+        assert_eq!(
+            get_le32(&img.sb, 0x60) & EXT4_FEATURE_INCOMPAT_RECOVER,
+            0,
+            "primary superblock still has RECOVER"
+        );
+        let geo = img.geometry();
+        for group in 1..img.num_groups {
+            if !sparse_super_group(group) {
+                continue;
+            }
+            let mut backup = vec![0u8; SB_SIZE];
+            file.seek(SeekFrom::Start(
+                geo.group_start_block(group) * EXT4_BLOCK_SIZE as u64,
+            ))
+            .unwrap();
+            file.read_exact(&mut backup).unwrap();
+            assert_eq!(
+                get_le32(&backup, 0x60) & EXT4_FEATURE_INCOMPAT_RECOVER,
+                0,
+                "backup superblock in group {group} still has RECOVER"
+            );
+        }
+    }
+
+    fn hash_file(path: &Path) -> [u8; 32] {
+        let mut file = File::open(path).unwrap();
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = file.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.finalize().into()
+    }
+
+    fn pattern_block(byte: u8) -> Vec<u8> {
+        vec![byte; EXT4_BLOCK_SIZE as usize]
     }
 
     #[test]
@@ -879,6 +1089,289 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_grow_replays_pending_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.ext4");
+        format_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        // Block 2 is the first reserved-GDT block, directly adjacent to the superblock + GDT; it stays reserved after this grow so the replayed content must survive verbatim.
+        let reserved_gdt_target = 2u64;
+        let data_target = location.start_block + location.len_blocks as u64 + 16;
+        let reserved_data = pattern_block(0xA5);
+        let file_data = pattern_block(0x5A);
+        write_dirty_journal(
+            &path,
+            2,
+            &[TestTransaction {
+                writes: vec![
+                    (reserved_gdt_target, reserved_data.clone()),
+                    (data_target, file_data.clone()),
+                ],
+                revokes: vec![],
+                corrupt_commit: false,
+            }],
+        );
+
+        let outcome = grow_image(&path, 512 * MIB).unwrap();
+        assert_eq!(outcome.new_groups, 4);
+
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            read_block_at(&mut file, reserved_gdt_target).unwrap(),
+            reserved_data,
+            "journaled superblock-adjacent write was not replayed"
+        );
+        assert_eq!(
+            read_block_at(&mut file, data_target).unwrap(),
+            file_data,
+            "journaled data-block write was not replayed"
+        );
+        drop(file);
+
+        assert_recover_cleared_everywhere(&path);
+        let jsb = read_jbd2_superblock(&path);
+        assert_eq!(get_be32(&jsb, 0x1C), 0, "journal s_start not reset");
+        // Sequence 2 replayed, end-of-log at sequence 3, and the kernel-mirroring reset restarts one past that.
+        assert_eq!(
+            get_be32(&jsb, 0x18),
+            4,
+            "journal s_sequence not advanced past the replayed transaction"
+        );
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_replay_restores_escaped_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("escape.ext4");
+        format_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let target = location.start_block + location.len_blocks as u64 + 16;
+        let mut data = pattern_block(0x11);
+        put_be32(&mut data, 0, JBD2_MAGIC);
+        write_dirty_journal(
+            &path,
+            2,
+            &[TestTransaction {
+                writes: vec![(target, data.clone())],
+                revokes: vec![],
+                corrupt_commit: false,
+            }],
+        );
+
+        grow_image(&path, 512 * MIB).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        let replayed = read_block_at(&mut file, target).unwrap();
+        assert_eq!(
+            get_be32(&replayed, 0),
+            JBD2_MAGIC,
+            "escape magic not restored"
+        );
+        assert_eq!(replayed, data);
+    }
+
+    #[test]
+    fn test_replay_honors_revocations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoke.ext4");
+        format_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let data_start = location.start_block + location.len_blocks as u64 + 16;
+        let revoked_target = data_start;
+        let kept_target = data_start + 1;
+        let late_target = data_start + 2;
+        // The revocation lives in a LATER transaction than the write it suppresses: replay of transaction 2 must skip revoked_target because transaction 3 revoked it.
+        write_dirty_journal(
+            &path,
+            2,
+            &[
+                TestTransaction {
+                    writes: vec![
+                        (revoked_target, pattern_block(0xDE)),
+                        (kept_target, pattern_block(0x22)),
+                    ],
+                    revokes: vec![],
+                    corrupt_commit: false,
+                },
+                TestTransaction {
+                    writes: vec![(late_target, pattern_block(0x33))],
+                    revokes: vec![revoked_target],
+                    corrupt_commit: false,
+                },
+            ],
+        );
+
+        grow_image(&path, 512 * MIB).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            read_block_at(&mut file, revoked_target).unwrap(),
+            vec![0u8; EXT4_BLOCK_SIZE as usize],
+            "revoked block was replayed"
+        );
+        assert_eq!(
+            read_block_at(&mut file, kept_target).unwrap(),
+            pattern_block(0x22)
+        );
+        assert_eq!(
+            read_block_at(&mut file, late_target).unwrap(),
+            pattern_block(0x33)
+        );
+    }
+
+    #[test]
+    fn test_replay_stops_at_corrupt_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("badcommit.ext4");
+        format_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let applied_target = location.start_block + location.len_blocks as u64 + 16;
+        let dropped_target = applied_target + 1;
+        write_dirty_journal(
+            &path,
+            2,
+            &[
+                TestTransaction {
+                    writes: vec![(applied_target, pattern_block(0x44))],
+                    revokes: vec![],
+                    corrupt_commit: false,
+                },
+                TestTransaction {
+                    writes: vec![(dropped_target, pattern_block(0x55))],
+                    revokes: vec![],
+                    corrupt_commit: true,
+                },
+            ],
+        );
+
+        grow_image(&path, 512 * MIB).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            read_block_at(&mut file, applied_target).unwrap(),
+            pattern_block(0x44),
+            "committed transaction was not replayed"
+        );
+        assert_eq!(
+            read_block_at(&mut file, dropped_target).unwrap(),
+            vec![0u8; EXT4_BLOCK_SIZE as usize],
+            "uncommitted transaction was replayed"
+        );
+        drop(file);
+
+        // end-of-log at the corrupt commit: sequence 2 replayed, sequence 3 discarded, so the reset journal restarts at 4.
+        let jsb = read_jbd2_superblock(&path);
+        assert_eq!(get_be32(&jsb, 0x1C), 0);
+        assert_eq!(get_be32(&jsb, 0x18), 4);
+        assert_recover_cleared_everywhere(&path);
+    }
+
+    #[test]
+    fn test_grow_clears_recover_flag_with_empty_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recover-clean.ext4");
+        format_image(&path, 256 * MIB);
+        set_recover_flag(&path);
+
+        let outcome = grow_image(&path, 512 * MIB).unwrap();
+        assert_eq!(outcome.new_groups, 4);
+
+        assert_recover_cleared_everywhere(&path);
+        // An empty log (s_start == 0) needs no recovery, so the journal superblock is left exactly as formatted.
+        let jsb = read_jbd2_superblock(&path);
+        assert_eq!(get_be32(&jsb, 0x1C), 0);
+        assert_eq!(get_be32(&jsb, 0x18), 1);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_replay_rejects_unknown_journal_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("badjournal.ext4");
+        format_image(&path, 256 * MIB);
+
+        // ASYNC_COMMIT (0x4) is a real jbd2 feature, but not one the formatter writes, so recovery must refuse it rather than misparse commit blocks.
+        let (location, _) = journal_location(&path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut jsb = vec![0u8; 1024];
+        file.seek(SeekFrom::Start(
+            location.start_block * EXT4_BLOCK_SIZE as u64,
+        ))
+        .unwrap();
+        file.read_exact(&mut jsb).unwrap();
+        let incompat = get_be32(&jsb, 0x28);
+        put_be32(&mut jsb, 0x28, incompat | 0x04);
+        jsb[0xFC..0x100].fill(0);
+        let checksum = crc32c::crc32c_raw(0xFFFF_FFFF, &jsb);
+        put_be32(&mut jsb, 0xFC, checksum);
+        file.seek(SeekFrom::Start(
+            location.start_block * EXT4_BLOCK_SIZE as u64,
+        ))
+        .unwrap();
+        file.write_all(&jsb).unwrap();
+        drop(file);
+        set_recover_flag(&path);
+
+        let before = hash_file(&path);
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(message.contains("journal feature"), "message: {message}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(
+            hash_file(&path),
+            before,
+            "failed recovery modified the image"
+        );
+    }
+
+    #[test]
+    fn test_replay_rejects_target_beyond_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oob.ext4");
+        format_image(&path, 256 * MIB);
+
+        // 256 MiB = 65536 blocks, so this target is past the end of the filesystem.
+        write_dirty_journal(
+            &path,
+            2,
+            &[TestTransaction {
+                writes: vec![(70_000, pattern_block(0x66))],
+                revokes: vec![],
+                corrupt_commit: false,
+            }],
+        );
+
+        let before = hash_file(&path);
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(
+                    message.contains("beyond the filesystem"),
+                    "message: {message}"
+                )
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(
+            hash_file(&path),
+            before,
+            "failed recovery modified the image"
+        );
+    }
+
     /// Full `e2fsck -fn` validation of a formatted and grown image. Gated behind `--ignored`
     /// because e2fsprogs is only guaranteed on Linux CI; skips cleanly when the binary is absent.
     #[test]
@@ -917,5 +1410,56 @@ mod tests {
         run_e2fsck("grow to 512 MiB");
         grow_image(&path, 1024 * MIB).unwrap();
         run_e2fsck("grow to 1 GiB");
+    }
+
+    /// Same e2fsck gate for the recovery path: a dirty image (pending journal with escaped and revoked blocks) must replay, grow, and still be fully clean to `e2fsck -fn`.
+    #[test]
+    #[ignore]
+    fn test_e2fsck_validates_replayed_and_grown_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fsck-replay.ext4");
+        format_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let data_start = location.start_block + location.len_blocks as u64 + 16;
+        let mut escaped = pattern_block(0x11);
+        put_be32(&mut escaped, 0, JBD2_MAGIC);
+        write_dirty_journal(
+            &path,
+            2,
+            &[
+                TestTransaction {
+                    writes: vec![(2, pattern_block(0xA5)), (data_start, escaped)],
+                    revokes: vec![],
+                    corrupt_commit: false,
+                },
+                TestTransaction {
+                    writes: vec![(data_start + 1, pattern_block(0x22))],
+                    revokes: vec![data_start],
+                    corrupt_commit: false,
+                },
+            ],
+        );
+
+        grow_image(&path, 512 * MIB).unwrap();
+
+        let output = match std::process::Command::new("e2fsck")
+            .arg("-fn")
+            .arg(&path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("e2fsck not found; skipping");
+                return;
+            }
+            Err(error) => panic!("failed to run e2fsck: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "e2fsck failed after replay + grow:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

@@ -281,3 +281,7 @@ pub(super) fn get_le16(buf: &[u8], off: usize) -> u16 {
 pub(super) fn get_le32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
+
+pub(super) fn get_be32(buf: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
