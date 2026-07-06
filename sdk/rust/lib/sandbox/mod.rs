@@ -542,14 +542,42 @@ pub(crate) async fn create_local(
             insecure: config.insecure,
             ca_certs: config.ca_certs.clone(),
         };
-        let pull_result = pull_oci_image(
+
+        // A snapshot's overlay is bound to the exact base image it was captured
+        // on, so restore pulls that base by its pinned digest; a tag could
+        // resolve to different content. Fresh creates pull the tag.
+        let pull_reference = match expected_snapshot_manifest_digest.as_deref() {
+            Some(pinned) => digest_pinned_reference(&reference, pinned)?,
+            None => reference.clone(),
+        };
+
+        let pull_result = match pull_oci_image(
             local_backend,
-            &reference,
+            &pull_reference,
             config.spec.pull_policy,
             overrides,
             progress,
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                // Restore pulled by pinned digest; a failure likely means the
+                // registry no longer serves it. Report that rather than falling
+                // back to the tag, whose content may not match the overlay.
+                if let Some(pinned) = expected_snapshot_manifest_digest.as_deref() {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                        "snapshot base image {pinned} no longer available in registry \
+                         (it may have been garbage-collected upstream); this snapshot \
+                         cannot be restored losslessly: {err}"
+                    )));
+                }
+                return Err(err);
+            }
+        };
+
+        // A cheap guard: fetched by digest, so this should match unless a
+        // registry serves mismatched content.
         if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
             && pull_result.manifest_digest.to_string() != expected
         {
@@ -619,12 +647,13 @@ pub(crate) async fn create_local(
         // Store manifest digest for spawn to derive paths.
         config.manifest_digest = Some(pull_result.manifest_digest.to_string());
 
-        // Persist full image metadata to database.
-        if let Ok(image_ref) = reference.parse::<Reference>() {
+        // The cache is keyed by the reference actually pulled (digest-pinned on
+        // restore), so read and persist metadata under that same reference.
+        if let Ok(image_ref) = pull_reference.parse::<Reference>() {
             match cache.read_image_metadata_async(&image_ref).await {
                 Ok(Some(metadata)) => {
                     if let Err(e) =
-                        crate::image::Image::persist(local_backend, &reference, metadata).await
+                        crate::image::Image::persist(local_backend, &pull_reference, metadata).await
                     {
                         tracing::warn!(
                             error = %e,
@@ -2424,6 +2453,22 @@ pub(crate) fn hostname_from_sandbox_name(name: &str) -> String {
     derive_hostname(name)
 }
 
+/// Build a digest-pinned OCI reference (`<registry>/<repo>@<digest>`) from a
+/// reference and a manifest digest, so restore fetches the base image by exact
+/// content rather than re-resolving the tag.
+fn digest_pinned_reference(reference: &str, pinned_digest: &str) -> MicrosandboxResult<String> {
+    let parsed: Reference = reference.parse().map_err(|e| {
+        crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+    })?;
+
+    Ok(Reference::with_digest(
+        parsed.registry().to_string(),
+        parsed.repository().to_string(),
+        pinned_digest.to_string(),
+    )
+    .whole())
+}
+
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
@@ -2969,11 +3014,34 @@ mod tests {
 
     use super::{
         MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount, ephemeral_cleanup_stop_result, hostname_from_sandbox_name,
-        insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
-        reconcile_sandbox_runtime_state, remove_dir_if_exists, sandbox_not_found_for_name,
-        validate_hostname, validate_rootfs_source,
+        SandboxStatus, VolumeMount, digest_pinned_reference, ephemeral_cleanup_stop_result,
+        hostname_from_sandbox_name, insert_sandbox_record, persist_oci_manifest_pin,
+        prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
+        sandbox_not_found_for_name, validate_hostname, validate_rootfs_source,
     };
+
+    const TEST_DIGEST: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn test_digest_pinned_reference_from_tag() {
+        // A tag reference is rewritten to a digest reference.
+        let pinned = digest_pinned_reference("python:3.12", TEST_DIGEST).unwrap();
+        assert_eq!(pinned, format!("docker.io/library/python@{TEST_DIGEST}"));
+        assert!(pinned.contains('@'));
+        assert!(!pinned.contains("3.12"));
+    }
+
+    #[test]
+    fn test_digest_pinned_reference_preserves_registry_and_repository() {
+        let pinned = digest_pinned_reference("ghcr.io/acme/app:v1", TEST_DIGEST).unwrap();
+        assert_eq!(pinned, format!("ghcr.io/acme/app@{TEST_DIGEST}"));
+    }
+
+    #[test]
+    fn test_digest_pinned_reference_rejects_invalid_reference() {
+        assert!(digest_pinned_reference("", TEST_DIGEST).is_err());
+    }
 
     /// Open both pools at `db_path` for tests, with migrations applied.
     async fn open_test_pools(db_path: &std::path::Path) -> DbPools {
