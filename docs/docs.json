@@ -39,6 +39,7 @@
             "pages": [
               "sandboxes/overview",
               "sandboxes/lifecycle",
+              "sandboxes/reconfigure",
               "sandboxes/commands",
               "sandboxes/ssh",
               "sandboxes/filesystem",
