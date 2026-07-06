@@ -861,6 +861,20 @@ pub(crate) fn configure_modify(
         .collect();
     label_pairs.sort();
 
+    // Secret names are sorted so identical options always produce the same
+    // patch (and plan ordering), matching the env/labels handling above.
+    let mut secret_entries: Vec<_> = options
+        .secrets
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    secret_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let secrets = secret_entries
+        .into_iter()
+        .map(|(name, spec)| secret_patch_from_spec(name, spec))
+        .collect::<Result<Vec<_>>>()?;
+
     let patch = SandboxModificationPatch {
         cpus: options.cpus.map(cpu_count_u8).transpose()?,
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
@@ -874,8 +888,10 @@ pub(crate) fn configure_modify(
         labels: label_pairs,
         labels_remove: options.labels_remove.clone().unwrap_or_default(),
         workdir: options.workdir.clone(),
-        secrets: Vec::new(),
-        secrets_remove: Vec::new(),
+        secrets,
+        secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        // Patch fields without an option surface here stay unset.
+        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);
@@ -893,6 +909,46 @@ pub(crate) fn configure_modify(
 
 pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {
     options.and_then(|options| options.dry_run).unwrap_or(false)
+}
+
+/// Convert one `secrets` entry into the canonical secret patch, rejecting
+/// specs that set more than one of `env` / `value` / `store`. Errors name
+/// only the conflicting fields, never the secret material; the raw value
+/// moves straight into the patch's `Zeroizing` field.
+fn secret_patch_from_spec(
+    name: String,
+    spec: SecretModifySpec,
+) -> Result<microsandbox::sandbox::SecretModificationPatch> {
+    use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
+
+    let set: Vec<_> = [
+        ("env", spec.env.is_some()),
+        ("value", spec.value.is_some()),
+        ("store", spec.store.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, present)| *present)
+    .map(|(key, _)| format!("{key:?}"))
+    .collect();
+    if set.len() > 1 {
+        return Err(Error::from_reason(format!(
+            "secret {name:?}: {} are mutually exclusive; set at most one",
+            set.join(" and ")
+        )));
+    }
+
+    let source = match (spec.env, spec.store) {
+        (Some(var), _) => Some(SecretSource::Env { var }),
+        (_, Some(reference)) => Some(SecretSource::Store { reference }),
+        _ => None,
+    };
+    Ok(SecretModificationPatch {
+        name,
+        source,
+        value: spec.value.unwrap_or_default().into(),
+        placeholder: spec.placeholder,
+        allowed_hosts: spec.allowed_hosts.unwrap_or_default(),
+    })
 }
 
 /// Drive dry-run or apply and serialize the resulting plan to JSON.
@@ -935,4 +991,99 @@ pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus 
 
 fn consumed_error() -> napi::Error {
     napi::Error::from_reason("Sandbox handle has been consumed (detached or removed)")
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox::sandbox::SecretSource;
+
+    use super::*;
+
+    #[test]
+    fn secret_patch_from_spec_maps_each_source_kind() {
+        let env = secret_patch_from_spec(
+            "API_KEY".to_string(),
+            SecretModifySpec {
+                env: Some("HOST_API_KEY".to_string()),
+                placeholder: Some("$API_KEY".to_string()),
+                allowed_hosts: Some(vec!["api.example.com".to_string()]),
+                ..Default::default()
+            },
+        )
+        .expect("env spec");
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(json["name"], "API_KEY");
+        assert_eq!(json["source"]["kind"], "env");
+        assert_eq!(json["source"]["var"], "HOST_API_KEY");
+        assert_eq!(json["placeholder"], "$API_KEY");
+        assert_eq!(json["allowed_hosts"][0], "api.example.com");
+        assert!(json.get("value").is_none(), "empty value must be omitted");
+
+        let store = secret_patch_from_spec(
+            "DB_PASS".to_string(),
+            SecretModifySpec {
+                store: Some("vault://prod/db".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("store spec");
+        assert_eq!(
+            store.source,
+            Some(SecretSource::Store {
+                reference: "vault://prod/db".to_string()
+            })
+        );
+
+        let value = secret_patch_from_spec(
+            "STRIPE_KEY".to_string(),
+            SecretModifySpec {
+                value: Some("sk_test_123".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("value spec");
+        assert!(value.source.is_none());
+        let json = serde_json::to_value(&value).expect("serialize");
+        assert!(json["value"] == "sk_test_123", "value field mismatch");
+        // Debug output must redact the raw secret material.
+        let debug = format!("{value:?}");
+        assert!(!debug.contains("sk_test_123"), "debug output leaks value");
+    }
+
+    #[test]
+    fn secret_patch_from_spec_rejects_multiple_sources() {
+        for spec in [
+            SecretModifySpec {
+                env: Some("HOST_VAR".to_string()),
+                value: Some("sk_test_123".to_string()),
+                ..Default::default()
+            },
+            SecretModifySpec {
+                value: Some("sk_test_123".to_string()),
+                store: Some("vault://ref".to_string()),
+                ..Default::default()
+            },
+            SecretModifySpec {
+                env: Some("HOST_VAR".to_string()),
+                store: Some("vault://ref".to_string()),
+                ..Default::default()
+            },
+        ] {
+            let err = secret_patch_from_spec("STRIPE_KEY".to_string(), spec)
+                .expect_err("combination must be rejected");
+            assert!(
+                err.reason.contains("\"STRIPE_KEY\""),
+                "error must name the secret"
+            );
+            assert!(err.reason.contains("mutually exclusive"));
+            assert!(
+                !err.reason.contains("sk_test_123"),
+                "error message leaks value"
+            );
+        }
+    }
 }

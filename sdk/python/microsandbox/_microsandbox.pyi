@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping
-from typing import Any
+from typing import Any, TypedDict
 
 from microsandbox.types import ImageSource, LogReadSource, LogSource, MountConfig, Rlimit, Stdin
+
+class SecretModifySpec(TypedDict, total=False):
+    """Desired state for one secret in `modify(secrets=...)`.
+
+    `env`, `value`, and `store` are mutually exclusive ways to provide the
+    secret material; setting more than one raises ValueError.
+    """
+
+    env: str
+    value: str
+    store: str
+    placeholder: str
+    allowed_hosts: list[str]
 
 class PyAgentClient:
     """Raw agent client.
@@ -142,6 +155,8 @@ class Sandbox:
         labels: Mapping[str, str] | None = None,
         labels_rm: list[str] | None = None,
         workdir: str | None = None,
+        secrets: Mapping[str, SecretModifySpec] | None = None,
+        secrets_rm: list[str] | None = None,
         policy: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]: ...
@@ -230,6 +245,8 @@ class SandboxHandle:
         labels: Mapping[str, str] | None = None,
         labels_rm: list[str] | None = None,
         workdir: str | None = None,
+        secrets: Mapping[str, SecretModifySpec] | None = None,
+        secrets_rm: list[str] | None = None,
         policy: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]: ...

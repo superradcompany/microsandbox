@@ -6,15 +6,21 @@ use std::path::Path;
 use std::ptr;
 
 use super::format::{
-    EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
-    EXT4_EXTENTS_FL, EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR,
-    EXT4_FEATURE_COMPAT_HAS_JOURNAL, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS,
-    EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
-    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
-    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
-    EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SUPER_MAGIC,
-    JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG,
+    EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC, EXT4_EXTENTS_FL,
+    EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR, EXT4_FEATURE_COMPAT_HAS_JOURNAL,
+    EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
+    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
+    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
+    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE,
+    EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFCHR,
+    S_IFDIR, S_IFLNK, S_IFREG,
+};
+use super::layout::{
+    GroupDescStats, GroupGeometry, MAX_BLOCKS, RESERVED_GDT_BLOCKS, bitmap_checksum,
+    build_block_bitmap_base, build_group_descriptor, build_inode_bitmap_base, count_used_bits,
+    dir_block_checksum, inode_checksum, put_be32, put_le16, put_le32, superblock_checksum,
+    write_backup_superblock_at, write_gdt_at,
 };
 use crate::crc32c;
 use crate::tree::{DirectoryNode, FileTree, TreeNode};
@@ -35,15 +41,8 @@ const DEFAULT_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Default journal size in blocks (64 MiB at 4 KiB/block = 16384 blocks).
 const DEFAULT_JOURNAL_BLOCKS: u32 = 16384;
 
-/// Maximum image size this formatter supports while writing physical block
-/// locations through ext4's low 32-bit fields.
-const MAX_BLOCKS: u64 = u32::MAX as u64;
-
 /// Maximum initialized extent length that fits in one ext4 extent record.
 const MAX_INITIALIZED_EXTENT_BLOCKS: u32 = 32768;
-
-/// This minimal filesystem does not reserve space for online resize metadata.
-const RESERVED_GDT_BLOCKS: u32 = 0;
 
 /// ext4 directory entry file type: directory.
 const EXT4_FT_DIR: u8 = 2;
@@ -100,6 +99,20 @@ pub enum Ext4Error {
 
     /// The requested tree cannot be serialized by this minimal formatter.
     Layout(String),
+
+    /// The image is not one this crate's formatter produced (or is corrupted), so the offline
+    /// resizer refuses to touch it.
+    Unsupported(String),
+
+    /// Growing to the requested size needs more group descriptors than the image's GDT
+    /// (allocated + reserved blocks) can hold; the image must be recreated to grow further.
+    ExceedsGdtCapacity {
+        /// Requested image size in bytes.
+        requested_bytes: u64,
+
+        /// Largest size in bytes this image can grow to in place.
+        max_size_bytes: u64,
+    },
 }
 
 /// Internal layout computed from `Ext4FormatOptions`.
@@ -108,6 +121,8 @@ struct Layout {
     num_groups: u32,
     uuid: [u8; 16],
     gdt_blocks: u32,
+    /// Blocks reserved after the GDT for future offline growth.
+    reserved_gdt_blocks: u32,
     /// First block of the inode table in group 0.
     inode_table_block: u64,
     /// Number of blocks occupied by the inode table in group 0.
@@ -205,6 +220,14 @@ impl std::fmt::Display for Ext4Error {
                 "image is too large for ext4 formatting: requested {requested_blocks} blocks, maximum is {max_blocks} blocks"
             ),
             Ext4Error::Layout(e) => write!(f, "ext4 layout error: {e}"),
+            Ext4Error::Unsupported(e) => write!(f, "unsupported ext4 image: {e}"),
+            Ext4Error::ExceedsGdtCapacity {
+                requested_bytes,
+                max_size_bytes,
+            } => write!(
+                f,
+                "cannot grow ext4 image to {requested_bytes} bytes: group descriptor capacity allows at most {max_size_bytes} bytes; recreate the image to grow beyond this"
+            ),
         }
     }
 }
@@ -216,7 +239,9 @@ impl std::error::Error for Ext4Error {
             Ext4Error::InvalidSize(_)
             | Ext4Error::TooSmall
             | Ext4Error::TooLarge { .. }
-            | Ext4Error::Layout(_) => None,
+            | Ext4Error::Layout(_)
+            | Ext4Error::Unsupported(_)
+            | Ext4Error::ExceedsGdtCapacity { .. } => None,
         }
     }
 }
@@ -230,12 +255,13 @@ impl From<io::Error> for Ext4Error {
 impl Layout {
     #[cfg(test)]
     fn compute(opts: &Ext4FormatOptions) -> Result<Self, Ext4Error> {
-        Self::compute_with_root_blocks(opts, 1)
+        Self::compute_with_root_blocks(opts, 1, RESERVED_GDT_BLOCKS)
     }
 
     fn compute_with_root_blocks(
         opts: &Ext4FormatOptions,
         root_dir_blocks: u32,
+        reserved_gdt_blocks: u32,
     ) -> Result<Self, Ext4Error> {
         let block_size = EXT4_BLOCK_SIZE as u64;
         if !opts.size_bytes.is_multiple_of(block_size) {
@@ -265,7 +291,7 @@ impl Layout {
             max_blocks: MAX_BLOCKS,
         })?;
 
-        // We need at least: superblock(1) + GDT(1) + reserved_gdt(256) +
+        // We need at least: superblock(1) + GDT + reserved GDT headroom (RESERVED_GDT_BLOCKS) +
         // bitmaps(2) + inode_table + root_dir(1) + journal
         let inode_table_blocks =
             (EXT4_INODES_PER_GROUP as u64 * EXT4_INODE_SIZE as u64 / block_size) as u32;
@@ -281,7 +307,7 @@ impl Layout {
         //   next block: root dir data block
         //   next M blocks: journal
 
-        let overhead_blocks = 1u64 + gdt_blocks as u64 + RESERVED_GDT_BLOCKS as u64;
+        let overhead_blocks = 1u64 + gdt_blocks as u64 + reserved_gdt_blocks as u64;
         let block_bitmap_block = overhead_blocks;
         let inode_bitmap_block = block_bitmap_block + 1;
         let inode_table_block = inode_bitmap_block + 1;
@@ -318,6 +344,7 @@ impl Layout {
             num_groups,
             uuid,
             gdt_blocks,
+            reserved_gdt_blocks,
             inode_table_block,
             inode_table_blocks,
             first_data_block,
@@ -354,40 +381,30 @@ impl Layout {
         uuid
     }
 
-    fn group_start_block(&self, group: u32) -> u64 {
-        group as u64 * EXT4_BLOCKS_PER_GROUP as u64
-    }
-
-    fn blocks_in_group(&self, group: u32) -> u32 {
-        let group_start = self.group_start_block(group);
-        std::cmp::min(
-            EXT4_BLOCKS_PER_GROUP as u64,
-            self.num_blocks.saturating_sub(group_start),
-        ) as u32
-    }
-
-    fn group_has_backup_super(&self, group: u32) -> bool {
-        group == 0 || sparse_super_group(group)
-    }
-
-    fn group_leading_overhead_blocks(&self, group: u32) -> u32 {
-        if self.group_has_backup_super(group) {
-            1 + self.gdt_blocks + RESERVED_GDT_BLOCKS
-        } else {
-            0
+    /// Group-relative layout math shared with the resizer.
+    fn geometry(&self) -> GroupGeometry {
+        GroupGeometry {
+            num_blocks: self.num_blocks,
+            gdt_blocks: self.gdt_blocks,
+            reserved_gdt_blocks: self.reserved_gdt_blocks,
+            inode_table_blocks: self.inode_table_blocks,
         }
     }
 
+    fn group_start_block(&self, group: u32) -> u64 {
+        self.geometry().group_start_block(group)
+    }
+
+    fn blocks_in_group(&self, group: u32) -> u32 {
+        self.geometry().blocks_in_group(group)
+    }
+
     fn group_block_bitmap_block(&self, group: u32) -> u64 {
-        self.group_start_block(group) + self.group_leading_overhead_blocks(group) as u64
+        self.geometry().group_block_bitmap_block(group)
     }
 
     fn group_inode_bitmap_block(&self, group: u32) -> u64 {
-        self.group_block_bitmap_block(group) + 1
-    }
-
-    fn group_inode_table_block(&self, group: u32) -> u64 {
-        self.group_inode_bitmap_block(group) + 1
+        self.geometry().group_inode_bitmap_block(group)
     }
 
     fn group_data_start_block(&self, group: u32) -> u64 {
@@ -399,7 +416,7 @@ impl Layout {
     }
 
     fn group_metadata_blocks(&self, group: u32) -> u32 {
-        self.group_leading_overhead_blocks(group) + 2 + self.inode_table_blocks
+        self.geometry().group_metadata_blocks(group)
     }
 
     fn group_used_blocks(&self, group: u32) -> u32 {
@@ -516,6 +533,26 @@ pub fn format_ext4_with_tree(
     options: &Ext4FormatOptions,
     tree: FileTree,
 ) -> Result<(), Ext4Error> {
+    format_ext4_with_tree_and_reserved(path, options, tree, RESERVED_GDT_BLOCKS)
+}
+
+/// Test hook: format with a custom reserved-GDT-block count so the resizer's over-capacity
+/// handling of pre-headroom images (formatted before growth headroom existed) stays covered.
+#[cfg(test)]
+pub(super) fn format_ext4_for_test_with_reserved_gdt(
+    path: &Path,
+    options: &Ext4FormatOptions,
+    reserved_gdt_blocks: u32,
+) -> Result<(), Ext4Error> {
+    format_ext4_with_tree_and_reserved(path, options, FileTree::new(), reserved_gdt_blocks)
+}
+
+fn format_ext4_with_tree_and_reserved(
+    path: &Path,
+    options: &Ext4FormatOptions,
+    tree: FileTree,
+    reserved_gdt_blocks: u32,
+) -> Result<(), Ext4Error> {
     let mut next_inode = EXT4_FIRST_INO;
     let mut plans = Vec::new();
     let root_mode = tree.root.metadata.mode;
@@ -528,7 +565,8 @@ pub fn format_ext4_with_tree(
         &mut plans,
     )?;
     let root_dir_blocks = blocks_for_len(root_draft.data.len());
-    let layout = Layout::compute_with_root_blocks(options, root_dir_blocks.max(1))?;
+    let layout =
+        Layout::compute_with_root_blocks(options, root_dir_blocks.max(1), reserved_gdt_blocks)?;
     let mut allocator = DataAllocator::new(&layout);
 
     for plan in &mut plans {
@@ -588,12 +626,12 @@ pub fn format_ext4_with_tree(
 }
 
 #[cfg(not(windows))]
-fn mark_sparse(_file: &std::fs::File) -> Result<(), Ext4Error> {
+pub(super) fn mark_sparse(_file: &std::fs::File) -> Result<(), Ext4Error> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn mark_sparse(file: &std::fs::File) -> Result<(), Ext4Error> {
+pub(super) fn mark_sparse(file: &std::fs::File) -> Result<(), Ext4Error> {
     let mut bytes_returned = 0;
     let ok = unsafe {
         DeviceIoControl(
@@ -947,13 +985,9 @@ impl DataAllocator {
 }
 
 fn build_block_bitmap_for_plan(layout: &Layout, plan: &BitmapPlan, group: u32) -> Vec<u8> {
-    let mut bitmap = vec![0u8; EXT4_BLOCK_SIZE as usize];
+    let mut bitmap = build_block_bitmap_base(&layout.geometry(), group);
     let group_start = layout.group_start_block(group);
     let group_end = group_start + layout.blocks_in_group(group) as u64;
-
-    for bit in 0..layout.group_metadata_blocks(group) {
-        bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
-    }
 
     for (start, len) in &plan.block_extents {
         let extent_start = *start;
@@ -968,25 +1002,11 @@ fn build_block_bitmap_for_plan(layout: &Layout, plan: &BitmapPlan, group: u32) -
         }
     }
 
-    let blocks_in_group = layout.blocks_in_group(group);
-    for bit in blocks_in_group..EXT4_BLOCKS_PER_GROUP {
-        bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
-    }
-
     bitmap
 }
 
 fn build_inode_bitmap_for_plan(_layout: &Layout, plan: &BitmapPlan, group: u32) -> Vec<u8> {
-    let mut bitmap = vec![0u8; EXT4_BLOCK_SIZE as usize];
-    if group == 0 {
-        for bit in 0..plan.max_used_inode {
-            bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
-        }
-    }
-    for bit in EXT4_INODES_PER_GROUP..(EXT4_BLOCK_SIZE * 8) {
-        bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
-    }
-    bitmap
+    build_inode_bitmap_base(if group == 0 { plan.max_used_inode } else { 0 })
 }
 
 fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
@@ -1034,22 +1054,6 @@ fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
         total_free_inodes,
         total_used_blocks,
     }
-}
-
-fn count_used_bits(bitmap: &[u8], bits: usize) -> usize {
-    let full_bytes = bits / 8;
-    let mut used: usize = bitmap[..full_bytes]
-        .iter()
-        .map(|b| b.count_ones() as usize)
-        .sum();
-
-    // Count remaining bits in the partial last byte.
-    let remaining = bits % 8;
-    if remaining > 0 {
-        let mask = (1u8 << remaining) - 1;
-        used += (bitmap[full_bytes] & mask).count_ones() as usize;
-    }
-    used
 }
 
 fn write_tree_data(
@@ -1229,50 +1233,30 @@ fn build_superblock_with_stats_for_group(
     put_le32(sb, 0x10, stats.total_free_inodes as u32);
     put_le32(sb, 0x158, (stats.total_free_blocks >> 32) as u32);
     put_le32(sb, 0x194, stats.total_used_blocks as u32);
-    put_le32(sb, 0x3FC, 0);
-    let checksum = crc32c::crc32c_raw(0xFFFF_FFFF, &sb[..0x3FC]);
+    let checksum = superblock_checksum(sb);
     put_le32(sb, 0x3FC, checksum);
     Ok(block)
 }
 
 fn build_gdt_with_stats(layout: &Layout, stats: &FsStats) -> Result<Vec<u8>, Ext4Error> {
     let desc_size = EXT4_DESC_SIZE as usize;
-    let mut gdt = vec![0u8; layout.num_groups as usize * desc_size];
+    let geometry = layout.geometry();
+    let mut gdt = Vec::with_capacity(layout.num_groups as usize * desc_size);
 
     for g in 0..layout.num_groups {
-        let off = g as usize * desc_size;
-        let desc = &mut gdt[off..off + desc_size];
-        let bb = layout.group_block_bitmap_block(g);
-        let ib = layout.group_inode_bitmap_block(g);
-        let it = layout.group_inode_table_block(g);
-        let bb_csum = stats.block_bitmap_checksums[g as usize];
-        let ib_csum = stats.inode_bitmap_checksums[g as usize];
-        let free_blocks = stats.group_free_blocks[g as usize];
-        let free_inodes = stats.group_free_inodes[g as usize];
-        let used_dirs = stats.group_used_dirs[g as usize];
-
-        put_le32(desc, 0x00, bb as u32);
-        put_le32(desc, 0x04, ib as u32);
-        put_le32(desc, 0x08, it as u32);
-        put_le16(desc, 0x0C, free_blocks as u16);
-        put_le16(desc, 0x0E, free_inodes as u16);
-        put_le16(desc, 0x10, used_dirs as u16);
-        put_le16(desc, 0x12, EXT4_BG_INODE_ZEROED);
-        put_le16(desc, 0x18, bb_csum as u16);
-        put_le16(desc, 0x1A, ib_csum as u16);
-        put_le16(desc, 0x1C, free_inodes as u16);
-        put_le32(desc, 0x20, (bb >> 32) as u32);
-        put_le32(desc, 0x24, (ib >> 32) as u32);
-        put_le32(desc, 0x28, (it >> 32) as u32);
-        put_le16(desc, 0x2C, (free_blocks >> 16) as u16);
-        put_le16(desc, 0x2E, (free_inodes >> 16) as u16);
-        put_le16(desc, 0x30, (used_dirs >> 16) as u16);
-        put_le16(desc, 0x32, (free_inodes >> 16) as u16);
-        put_le16(desc, 0x38, (bb_csum >> 16) as u16);
-        put_le16(desc, 0x3A, (ib_csum >> 16) as u16);
-        put_le16(desc, 0x1E, 0);
-        let checksum = gdt_checksum(layout.csum_seed, g, desc);
-        put_le16(desc, 0x1E, checksum);
+        let desc_stats = GroupDescStats {
+            free_blocks: stats.group_free_blocks[g as usize],
+            free_inodes: stats.group_free_inodes[g as usize],
+            used_dirs: stats.group_used_dirs[g as usize],
+            block_bitmap_csum: stats.block_bitmap_checksums[g as usize],
+            inode_bitmap_csum: stats.inode_bitmap_checksums[g as usize],
+        };
+        gdt.extend_from_slice(&build_group_descriptor(
+            &geometry,
+            g,
+            &desc_stats,
+            layout.csum_seed,
+        ));
     }
 
     Ok(gdt)
@@ -1626,7 +1610,7 @@ fn build_superblock(
     sb[0xCD] = 0;
 
     // s_reserved_gdt_blocks (0xCE, u16)
-    put_le16(sb, 0xCE, RESERVED_GDT_BLOCKS as u16);
+    put_le16(sb, 0xCE, layout.reserved_gdt_blocks as u16);
 
     // s_journal_uuid (0xD0, 16 bytes) -- leave zeroed (internal journal)
 
@@ -1714,7 +1698,7 @@ fn build_superblock(
     put_le16(sb, 0x27C, 0);
 
     // s_checksum (0x3FC, u32) -- CRC32C of sb bytes 0..0x3FC
-    let sb_csum = crc32c::crc32c_raw(0xFFFF_FFFF, &sb[..0x3FC]);
+    let sb_csum = superblock_checksum(sb);
     put_le32(sb, 0x3FC, sb_csum);
 
     Ok(block)
@@ -1728,54 +1712,31 @@ fn build_gdt(
     block_bitmaps: &[Vec<u8>],
     inode_bitmaps: &[Vec<u8>],
 ) -> Result<Vec<u8>, Ext4Error> {
-    let desc_size = EXT4_DESC_SIZE as usize;
-    let mut gdt = vec![0u8; layout.num_groups as usize * desc_size];
+    let geometry = layout.geometry();
+    let mut gdt = Vec::with_capacity(layout.num_groups as usize * EXT4_DESC_SIZE as usize);
 
     for g in 0..layout.num_groups {
-        let off = g as usize * desc_size;
-        let desc = &mut gdt[off..off + desc_size];
-        let bb = layout.group_block_bitmap_block(g);
-        let ib = layout.group_inode_bitmap_block(g);
-        let it = layout.group_inode_table_block(g);
-        let bb_csum = bitmap_checksum(
+        let desc_stats = GroupDescStats {
+            free_blocks: layout.group_free_blocks(g),
+            free_inodes: layout.group_free_inodes(g),
+            used_dirs: layout.group_used_dirs(g),
+            block_bitmap_csum: bitmap_checksum(
+                layout.csum_seed,
+                &block_bitmaps[g as usize],
+                EXT4_BLOCK_SIZE as usize,
+            ),
+            inode_bitmap_csum: bitmap_checksum(
+                layout.csum_seed,
+                &inode_bitmaps[g as usize],
+                (EXT4_INODES_PER_GROUP / 8) as usize,
+            ),
+        };
+        gdt.extend_from_slice(&build_group_descriptor(
+            &geometry,
+            g,
+            &desc_stats,
             layout.csum_seed,
-            &block_bitmaps[g as usize],
-            EXT4_BLOCK_SIZE as usize,
-        );
-        let ib_csum = bitmap_checksum(
-            layout.csum_seed,
-            &inode_bitmaps[g as usize],
-            (EXT4_INODES_PER_GROUP / 8) as usize,
-        );
-
-        put_le32(desc, 0x00, bb as u32);
-        put_le32(desc, 0x04, ib as u32);
-        put_le32(desc, 0x08, it as u32);
-        put_le16(desc, 0x0C, layout.group_free_blocks(g) as u16);
-        put_le16(desc, 0x0E, layout.group_free_inodes(g) as u16);
-        put_le16(desc, 0x10, layout.group_used_dirs(g) as u16);
-        put_le16(desc, 0x12, EXT4_BG_INODE_ZEROED);
-        put_le32(desc, 0x14, 0);
-        put_le16(desc, 0x18, bb_csum as u16);
-        put_le16(desc, 0x1A, ib_csum as u16);
-        put_le16(desc, 0x1C, layout.group_free_inodes(g) as u16);
-        put_le32(desc, 0x20, (bb >> 32) as u32);
-        put_le32(desc, 0x24, (ib >> 32) as u32);
-        put_le32(desc, 0x28, (it >> 32) as u32);
-        put_le16(desc, 0x2C, (layout.group_free_blocks(g) >> 16) as u16);
-        put_le16(desc, 0x2E, (layout.group_free_inodes(g) >> 16) as u16);
-        put_le16(desc, 0x30, (layout.group_used_dirs(g) >> 16) as u16);
-        put_le16(desc, 0x32, (layout.group_free_inodes(g) >> 16) as u16);
-        put_le32(desc, 0x34, 0);
-        put_le16(desc, 0x38, (bb_csum >> 16) as u16);
-        put_le16(desc, 0x3A, (ib_csum >> 16) as u16);
-
-        // GDT entry checksum (stored at bg_checksum, offset 0x1E)
-        // crc32c(csum_seed, le32(group_num) || desc_bytes_with_checksum_zeroed) & 0xFFFF
-        // Zero out the checksum field before computing.
-        put_le16(desc, 0x1E, 0);
-        let gdt_csum = gdt_checksum(layout.csum_seed, g, desc);
-        put_le16(desc, 0x1E, gdt_csum);
+        ));
     }
 
     Ok(gdt)
@@ -1789,87 +1750,6 @@ fn write_primary_superblock_at(
     file.seek(SeekFrom::Start(0))?;
     file.write_all(sb_block)?;
     Ok(())
-}
-
-/// Write a 1024-byte backup superblock at the given group's first byte.
-fn write_backup_superblock_at(
-    file: &mut (impl std::io::Write + std::io::Seek),
-    group_start_block: u64,
-    sb_block: &[u8],
-) -> Result<(), Ext4Error> {
-    file.seek(SeekFrom::Start(group_start_block * EXT4_BLOCK_SIZE as u64))?;
-    file.write_all(sb_block)?;
-    Ok(())
-}
-
-/// Write GDT at block (group_start_block + 1).
-fn write_gdt_at(
-    file: &mut (impl std::io::Write + std::io::Seek),
-    group_start_block: u64,
-    gdt: &[u8],
-) -> Result<(), Ext4Error> {
-    let offset = (group_start_block + 1) * EXT4_BLOCK_SIZE as u64;
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(gdt)?;
-    Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions: Checksums
-//--------------------------------------------------------------------------------------------------
-
-/// GDT entry checksum (16-bit).
-fn gdt_checksum(csum_seed: u32, group: u32, desc: &[u8]) -> u16 {
-    let mut crc = crc32c::crc32c_raw(csum_seed, &group.to_le_bytes());
-    crc = crc32c::crc32c_raw(crc, desc);
-    (crc & 0xFFFF) as u16
-}
-
-/// Inode checksum (32-bit, split across lo/hi in the inode).
-fn inode_checksum(csum_seed: u32, inum: u32, generation: u32, inode_bytes: &[u8]) -> u32 {
-    let mut crc = crc32c::crc32c_raw(csum_seed, &inum.to_le_bytes());
-    crc = crc32c::crc32c_raw(crc, &generation.to_le_bytes());
-    crc = crc32c::crc32c_raw(crc, &inode_bytes[..0x7C]);
-    crc = crc32c::crc32c_raw(crc, &[0u8; 2]);
-    crc = crc32c::crc32c_raw(crc, &inode_bytes[0x7E..0x82]);
-    crc = crc32c::crc32c_raw(crc, &[0u8; 2]);
-    crc = crc32c::crc32c_raw(crc, &inode_bytes[0x84..]);
-    crc
-}
-
-/// Bitmap checksum (block bitmap or inode bitmap). The checksum is computed
-/// over the raw bitmap data and stored in the corresponding GDT fields. This
-/// helper just computes the raw CRC; the caller reads the bitmap from disk.
-///
-/// For now we compute it over an in-memory representation of the bitmap. The
-/// `_block_addr` and `_bitmap_size` arguments are unused but kept for future
-/// reference.
-fn bitmap_checksum(csum_seed: u32, bitmap: &[u8], checksum_len: usize) -> u32 {
-    crc32c::crc32c_raw(csum_seed, &bitmap[..checksum_len])
-}
-
-/// Directory block checksum.
-fn dir_block_checksum(csum_seed: u32, inum: u32, generation: u32, data: &[u8]) -> u32 {
-    let mut crc = crc32c::crc32c_raw(csum_seed, &inum.to_le_bytes());
-    crc = crc32c::crc32c_raw(crc, &generation.to_le_bytes());
-    crc = crc32c::crc32c_raw(crc, data);
-    crc
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions: Byte helpers
-//--------------------------------------------------------------------------------------------------
-
-fn put_le16(buf: &mut [u8], off: usize, val: u16) {
-    buf[off..off + 2].copy_from_slice(&val.to_le_bytes());
-}
-
-fn put_le32(buf: &mut [u8], off: usize, val: u32) {
-    buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
-}
-
-fn put_be32(buf: &mut [u8], off: usize, val: u32) {
-    buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
 }
 
 //--------------------------------------------------------------------------------------------------

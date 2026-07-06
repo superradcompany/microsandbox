@@ -6036,4 +6036,51 @@ mod tests {
             other => panic!("expected domain destination, got {other:?}"),
         }
     }
+
+    #[test]
+    fn sandbox_modify_opts_parses_secret_specs() {
+        use microsandbox::sandbox::SecretSource;
+
+        // Mirrors the wire shape emitted by the Go SDK's buildModifyRequestJSON.
+        let opts = parse_sandbox_modify_opts(
+            r#"{"patch":{"secrets":[
+                {"name":"API_KEY","source":{"kind":"env","var":"HOST_API_KEY"},"placeholder":"$API_KEY","allowed_hosts":["api.example.com"]},
+                {"name":"DB_PASS","source":{"kind":"store","reference":"vault://prod/db"}},
+                {"name":"STRIPE_KEY","value":"sk_test_123"}
+            ],"secrets_remove":["OLD"]}}"#,
+        )
+        .unwrap_or_else(|e| panic!("{}", e.message));
+
+        let secrets = &opts.patch.secrets;
+        assert_eq!(secrets.len(), 3);
+
+        assert_eq!(secrets[0].name, "API_KEY");
+        assert_eq!(
+            secrets[0].source,
+            Some(SecretSource::Env {
+                var: "HOST_API_KEY".to_string()
+            })
+        );
+        assert_eq!(secrets[0].placeholder.as_deref(), Some("$API_KEY"));
+        assert_eq!(secrets[0].allowed_hosts, ["api.example.com"]);
+        assert!(secrets[0].value.is_empty());
+
+        assert_eq!(secrets[1].name, "DB_PASS");
+        assert_eq!(
+            secrets[1].source,
+            Some(SecretSource::Store {
+                reference: "vault://prod/db".to_string()
+            })
+        );
+
+        assert_eq!(secrets[2].name, "STRIPE_KEY");
+        assert!(secrets[2].source.is_none());
+        assert!(*secrets[2].value == *"sk_test_123", "value mismatch");
+
+        assert_eq!(opts.patch.secrets_remove, ["OLD"]);
+
+        // Debug output of the patch must redact the raw secret material.
+        let debug = format!("{:?}", opts.patch);
+        assert!(!debug.contains("sk_test_123"), "debug output leaks value");
+    }
 }

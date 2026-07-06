@@ -18,6 +18,7 @@ mod patch;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 mod types;
+pub(crate) mod upper;
 
 use std::{
     collections::{BTreeMap, HashMap},

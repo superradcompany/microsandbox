@@ -301,6 +301,11 @@ pub async fn spawn_sandbox(
         tokio::fs::create_dir_all(&scripts_dir),
     )?;
 
+    // Stopped-safe preparation: a `--next-start` upper grow persists only the
+    // desired size, so the file itself grows here, before any virtio device
+    // attaches the image.
+    prepare_oci_upper(config, &sandbox_dir).await?;
+
     // Write scripts to the runtime scripts directory.
     for (name, content) in &config.spec.runtime.scripts {
         // Prevent path traversal: only use the filename component.
@@ -676,6 +681,22 @@ pub async fn spawn_sandbox(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Pre-boot preparation for the OCI writable upper: grow `upper.ext4` when
+/// the persisted desired size exceeds the file's current size. This is where
+/// a `--next-start` upper grow lands; ordinary starts no-op because create
+/// formats the file at the desired size. A missing upper is not this hook's
+/// problem — non-OCI rootfs and not-yet-materialized sandboxes skip it.
+async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+    let Some(desired_mib) = config.spec.image.oci_upper_size_mib() else {
+        return Ok(());
+    };
+    let upper_path = sandbox_dir.join("upper.ext4");
+    if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    crate::sandbox::upper::grow_upper_to_mib(upper_path, desired_mib).await
+}
 
 fn reserve_metrics_slot(
     local: &LocalBackend,

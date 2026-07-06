@@ -637,6 +637,10 @@ impl PySandbox {
     /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
     /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
     /// plan is computed without applying anything.
+    ///
+    /// `secrets` maps secret names to spec dicts with at most one of
+    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
+    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -648,6 +652,8 @@ impl PySandbox {
         labels = None,
         labels_rm = None,
         workdir = None,
+        secrets = None,
+        secrets_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -664,12 +670,16 @@ impl PySandbox {
         labels: Option<HashMap<String, String>>,
         labels_rm: Option<Vec<String>>,
         workdir: Option<String>,
+        secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
+        secrets_rm: Option<Vec<String>>,
         policy: Option<String>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let secrets = build_secret_patches(py, secrets)?;
         let patch = build_modify_patch(
-            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir,
+            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
+            secrets_rm,
         );
         let policy = parse_modify_policy(policy.as_deref())?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -944,6 +954,8 @@ pub(crate) fn build_modify_patch(
     labels: Option<HashMap<String, String>>,
     labels_rm: Option<Vec<String>>,
     workdir: Option<String>,
+    secrets: Vec<microsandbox::sandbox::SecretModificationPatch>,
+    secrets_rm: Option<Vec<String>>,
 ) -> microsandbox::sandbox::SandboxModificationPatch {
     let mut env_pairs: Vec<_> = env.unwrap_or_default().into_iter().collect();
     env_pairs.sort();
@@ -963,9 +975,101 @@ pub(crate) fn build_modify_patch(
         labels: label_pairs,
         labels_remove: labels_rm.unwrap_or_default(),
         workdir,
-        secrets: Vec::new(),
-        secrets_remove: Vec::new(),
+        secrets,
+        secrets_remove: secrets_rm.unwrap_or_default(),
+        // Patch fields without a kwarg surface here stay unset.
+        ..Default::default()
     }
+}
+
+/// Convert the `secrets=` kwarg into canonical secret patches, sorted by
+/// name for deterministic patch (and plan) ordering.
+///
+/// The raw value moves straight from the extracted Python string into the
+/// patch's `Zeroizing` field; no error path ever echoes secret material.
+pub(crate) fn build_secret_patches(
+    py: Python<'_>,
+    secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
+) -> PyResult<Vec<microsandbox::sandbox::SecretModificationPatch>> {
+    use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
+
+    let mut entries: Vec<_> = secrets.unwrap_or_default().into_iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut patches = Vec::with_capacity(entries.len());
+    for (name, spec) in entries {
+        let mut env = None;
+        let mut value: Option<String> = None;
+        let mut store = None;
+        let mut placeholder = None;
+        let mut allowed_hosts = Vec::new();
+        for (key, obj) in spec {
+            let obj = obj.bind(py);
+            match key.as_str() {
+                "env" => env = Some(extract_secret_str(&name, "env", obj)?),
+                "value" => value = Some(extract_secret_str(&name, "value", obj)?),
+                "store" => store = Some(extract_secret_str(&name, "store", obj)?),
+                "placeholder" => placeholder = Some(extract_secret_str(&name, "placeholder", obj)?),
+                "allowed_hosts" => {
+                    allowed_hosts = obj.extract().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "secret {name:?}: \"allowed_hosts\" must be a list of strings"
+                        ))
+                    })?
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "secret {name:?}: unknown key {other:?}; expected \"env\", \"value\", \
+                         \"store\", \"placeholder\", or \"allowed_hosts\""
+                    )));
+                }
+            }
+        }
+
+        validate_secret_source_exclusivity(&name, env.is_some(), value.is_some(), store.is_some())
+            .map_err(PyValueError::new_err)?;
+
+        let source = match (env, store) {
+            (Some(var), _) => Some(SecretSource::Env { var }),
+            (_, Some(reference)) => Some(SecretSource::Store { reference }),
+            _ => None,
+        };
+        patches.push(SecretModificationPatch {
+            name,
+            source,
+            value: value.unwrap_or_default().into(),
+            placeholder,
+            allowed_hosts,
+        });
+    }
+    Ok(patches)
+}
+
+/// Reject specs that set more than one of `env` / `value` / `store`. The
+/// error names only the conflicting keys, never the secret material.
+pub(crate) fn validate_secret_source_exclusivity(
+    name: &str,
+    has_env: bool,
+    has_value: bool,
+    has_store: bool,
+) -> Result<(), String> {
+    let set: Vec<_> = [("env", has_env), ("value", has_value), ("store", has_store)]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(key, _)| format!("{key:?}"))
+        .collect();
+    if set.len() > 1 {
+        return Err(format!(
+            "secret {name:?}: {} are mutually exclusive; set at most one",
+            set.join(" and ")
+        ));
+    }
+    Ok(())
+}
+
+fn extract_secret_str(name: &str, key: &str, obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    obj.extract()
+        .map_err(|_| PyValueError::new_err(format!("secret {name:?}: {key:?} must be a string")))
 }
 
 /// Parse the `policy=` kwarg into the core modification policy.
@@ -1715,4 +1819,121 @@ struct PyPullEvent {
     total_bytes: Option<i64>,
     #[pyo3(get)]
     bytes_read: Option<i64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
+
+    use super::*;
+
+    fn secret_patch(
+        name: &str,
+        source: Option<SecretSource>,
+        value: &str,
+    ) -> SecretModificationPatch {
+        SecretModificationPatch {
+            name: name.to_string(),
+            source,
+            value: value.to_string().into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn modify_patch_serializes_each_secret_source_kind() {
+        let patch = build_modify_patch(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![
+                SecretModificationPatch {
+                    name: "API_KEY".to_string(),
+                    source: Some(SecretSource::Env {
+                        var: "HOST_API_KEY".to_string(),
+                    }),
+                    placeholder: Some("$API_KEY".to_string()),
+                    allowed_hosts: vec!["api.example.com".to_string()],
+                    ..Default::default()
+                },
+                secret_patch(
+                    "DB_PASS",
+                    Some(SecretSource::Store {
+                        reference: "vault://prod/db".to_string(),
+                    }),
+                    "",
+                ),
+                secret_patch("STRIPE_KEY", None, "sk_test_123"),
+            ],
+            Some(vec!["OLD".to_string()]),
+        );
+
+        let json = serde_json::to_value(&patch).expect("serialize patch");
+        let secrets = json["secrets"].as_array().expect("secrets array");
+        assert_eq!(secrets.len(), 3);
+
+        assert_eq!(secrets[0]["name"], "API_KEY");
+        assert_eq!(secrets[0]["source"]["kind"], "env");
+        assert_eq!(secrets[0]["source"]["var"], "HOST_API_KEY");
+        assert_eq!(secrets[0]["placeholder"], "$API_KEY");
+        assert_eq!(secrets[0]["allowed_hosts"][0], "api.example.com");
+        assert!(
+            secrets[0].get("value").is_none(),
+            "empty value must be omitted"
+        );
+
+        assert_eq!(secrets[1]["source"]["kind"], "store");
+        assert_eq!(secrets[1]["source"]["reference"], "vault://prod/db");
+
+        assert!(secrets[2].get("source").is_none());
+        assert!(secrets[2]["value"] == "sk_test_123", "value field mismatch");
+
+        assert_eq!(json["secrets_remove"][0], "OLD");
+    }
+
+    #[test]
+    fn secret_patch_debug_redacts_value() {
+        let patch = secret_patch("STRIPE_KEY", None, "sk_test_123");
+        let debug = format!("{patch:?}");
+        assert!(!debug.contains("sk_test_123"), "debug output leaks value");
+    }
+
+    #[test]
+    fn secret_source_exclusivity_rejects_combinations() {
+        for (env, value, store) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let err = validate_secret_source_exclusivity("STRIPE_KEY", env, value, store)
+                .expect_err("combination must be rejected");
+            assert!(err.contains("\"STRIPE_KEY\""), "error must name the secret");
+            assert!(err.contains("mutually exclusive"));
+            assert!(!err.contains("sk_test_123"), "error message leaks value");
+        }
+    }
+
+    #[test]
+    fn secret_source_exclusivity_allows_single_or_none() {
+        for (env, value, store) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            validate_secret_source_exclusivity("API_KEY", env, value, store)
+                .expect("single source must be accepted");
+        }
+    }
 }

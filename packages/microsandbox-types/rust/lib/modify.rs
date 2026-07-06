@@ -40,6 +40,10 @@ pub struct SandboxModificationPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_memory_mib: Option<u32>,
 
+    /// Desired OCI writable overlay upper size in MiB. Grow-only: the upper is a real ext4 image, so shrinking risks data loss and is rejected in v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oci_upper_size_mib: Option<u32>,
+
     /// Environment variables to set for future execs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
