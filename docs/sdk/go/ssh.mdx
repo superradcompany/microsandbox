@@ -5,56 +5,6 @@ description: Go SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable SSH server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods<span className="msb-ct">20</span></p>
-  <a className="msb-row" href="#sb-ssh"><span className="msb-rn">sb.SSH()</span><span className="msb-rg">SSH namespace for this sandbox</span></a>
-  <a className="msb-row" href="#ssh-openclient"><span className="msb-rn">ssh.OpenClient()</span><span className="msb-rg">open a native client</span></a>
-  <a className="msb-row" href="#ssh-prepareserver"><span className="msb-rn">ssh.PrepareServer()</span><span className="msb-rg">prepare a server endpoint</span></a>
-  <a className="msb-row" href="#c-exec"><span className="msb-rn">c.Exec()</span><span className="msb-rg">run a command</span></a>
-  <a className="msb-row" href="#c-attach"><span className="msb-rn">c.Attach()</span><span className="msb-rg">interactive shell</span></a>
-  <a className="msb-row" href="#c-sftp"><span className="msb-rn">c.SFTP()</span><span className="msb-rg">open an SFTP session</span></a>
-  <a className="msb-row" href="#c-close"><span className="msb-rn">c.Close()</span><span className="msb-rg">close the client</span></a>
-  <a className="msb-row" href="#srv-serveconnection"><span className="msb-rn">srv.ServeConnection()</span><span className="msb-rg">serve one connection</span></a>
-  <a className="msb-row" href="#srv-close"><span className="msb-rn">srv.Close()</span><span className="msb-rg">release the endpoint</span></a>
-  <a className="msb-row" href="#o-success"><span className="msb-rn">o.Success()</span><span className="msb-rg">exit status was 0</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Read()</span><span className="msb-rg">read a file</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Write()</span><span className="msb-rg">write a file</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Mkdir()</span><span className="msb-rg">create a directory</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Rename()</span><span className="msb-rg">rename a path</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.RealPath()</span><span className="msb-rg">resolve a canonical path</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Symlink()</span><span className="msb-rg">create a symlink</span></a>
-  <a className="msb-row" href="#sftpclient"><span className="msb-rn">sftp.Close()</span><span className="msb-rg">+ 3 more in SFTPClient</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">10</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#sshclientoption">WithSSHUser()</a>
-    <a className="msb-chip" href="#sshclientoption">WithSSHTerm()</a>
-    <a className="msb-chip" href="#sshclientoption">WithSSHClientSFTP()</a>
-    <a className="msb-chip" href="#sshexecoption">WithSSHTTY()</a>
-    <a className="msb-chip" href="#sshattachoption">WithSSHAttachTerm()</a>
-    <a className="msb-chip" href="#sshattachoption">WithSSHDetachKeys()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHHostKeyPath()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHAuthorizedKeysPath()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHServerUser()</a>
-    <a className="msb-chip" href="#sshserveroption">WithSSHServerSFTP()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxsshops">SandboxSSHOps</a>
-    <a className="msb-typepill" href="#sshclient">SSHClient</a>
-    <a className="msb-typepill" href="#sftpclient">SFTPClient</a>
-    <a className="msb-typepill" href="#sshserver">SSHServer</a>
-    <a className="msb-typepill" href="#sshoutput">SSHOutput</a>
-    <a className="msb-typepill" href="#sshclientoption">SSHClientOption</a>
-    <a className="msb-typepill" href="#sshexecoption">SSHExecOption</a>
-    <a className="msb-typepill" href="#sshattachoption">SSHAttachOption</a>
-    <a className="msb-typepill" href="#sshserveroption">SSHServerOption</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
@@ -81,14 +31,20 @@ fmt.Printf("%s (exit %d)\n", out.Stdout, out.Status)
 
 ## Methods
 
----
-
 #### <span className="msb-recv">sb.</span><span className="msb-hn">SSH()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (s *Sandbox) SSH() *SandboxSSHOps
 ```
+
+<Accordion title="Example">
+
+```go
+ssh := sb.SSH()
+client, err := ssh.OpenClient(ctx)
+```
+
+</Accordion>
 
 Return the SSH operations namespace for this sandbox. The namespace groups the client and server helpers; it holds no resources of its own.
 
@@ -101,23 +57,26 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-ssh := sb.SSH()
-client, err := ssh.OpenClient(ctx)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">OpenClient()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (ssh *SandboxSSHOps) OpenClient(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error)
 ```
+
+<Accordion title="Example">
+
+```go
+client, err := sb.SSH().OpenClient(ctx,
+    m.WithSSHUser("app"),
+    m.WithSSHTerm("xterm-256color"),
+)
+if err != nil {
+    return err
+}
+defer client.Close(ctx)
+```
+
+</Accordion>
 
 Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25519 client and host key pair, stands up an internal server bound to a duplex stream, and authenticates over public key. With no options it uses login user `root`, terminal from `$TERM` (falling back to `xterm`), and SFTP enabled.
 
@@ -147,29 +106,25 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-client, err := sb.SSH().OpenClient(ctx,
-    m.WithSSHUser("app"),
-    m.WithSSHTerm("xterm-256color"),
-)
-if err != nil {
-    return err
-}
-defer client.Close(ctx)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
 ```
+
+<Accordion title="Example">
+
+```go
+srv, err := sb.SSH().PrepareServer(ctx,
+    m.WithSSHAuthorizedKeysPath("/etc/msb/authorized_keys"),
+)
+if err != nil {
+    return err
+}
+defer srv.Close(ctx)
+```
+
+</Accordion>
 
 Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the host key and resolves authorized keys from the default authorized-keys file unless overridden. The returned [`SSHServer`](#sshserver) can serve connections one at a time over the process's standard streams.
 
@@ -199,28 +154,26 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-srv, err := sb.SSH().PrepareServer(ctx,
-    m.WithSSHAuthorizedKeysPath("/etc/msb/authorized_keys"),
-)
-if err != nil {
-    return err
-}
-defer srv.Close(ctx)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Exec()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Exec(ctx context.Context, command string, opts ...SSHExecOption) (*SSHOutput, error)
 ```
+
+<Accordion title="Example">
+
+```go
+out, err := client.Exec(ctx, "python -V")
+if err != nil {
+    return err
+}
+if !out.Success() {
+    return fmt.Errorf("exit %d: %s", out.Status, out.Stderr)
+}
+fmt.Printf("%s", out.Stdout)
+```
+
+</Accordion>
 
 Run an SSH exec request and collect stdout, stderr, and the exit status. The command is run through the sandbox's configured shell. No PTY is requested unless [`WithSSHTTY`](#sshexecoption) is passed.
 
@@ -254,29 +207,26 @@ Run an SSH exec request and collect stdout, stderr, and the exit status. The com
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-out, err := client.Exec(ctx, "python -V")
-if err != nil {
-    return err
-}
-if !out.Success() {
-    return fmt.Errorf("exit %d: %s", out.Status, out.Stderr)
-}
-fmt.Printf("%s", out.Stdout)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Attach()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Attach(ctx context.Context, opts ...SSHAttachOption) (int, error)
 ```
+
+<Accordion title="Example">
+
+```go
+code, err := client.Attach(ctx,
+    m.WithSSHAttachTerm("xterm-256color"),
+    m.WithSSHDetachKeys("ctrl-p,ctrl-q"),
+)
+if err != nil {
+    return err
+}
+fmt.Printf("shell exited with %d\n", code)
+```
+
+</Accordion>
 
 Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, relays window-resize events, and returns when the shell exits or the detach key sequence is typed.
 
@@ -306,29 +256,27 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-code, err := client.Attach(ctx,
-    m.WithSSHAttachTerm("xterm-256color"),
-    m.WithSSHDetachKeys("ctrl-p,ctrl-q"),
-)
-if err != nil {
-    return err
-}
-fmt.Printf("shell exited with %d\n", code)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">SFTP()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) SFTP(ctx context.Context) (*SFTPClient, error)
 ```
+
+<Accordion title="Example">
+
+```go
+sftp, err := client.SFTP(ctx)
+if err != nil {
+    return err
+}
+defer sftp.Close(ctx)
+
+if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Open an SFTP session over this SSH connection. Returns a high-level SFTP client for reading, writing, and managing files inside the guest. Requires SFTP enabled on the client (the default).
 
@@ -354,30 +302,19 @@ Open an SFTP session over this SSH connection. Returns a high-level SFTP client 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-sftp, err := client.SFTP(ctx)
-if err != nil {
-    return err
-}
-defer sftp.Close(ctx)
-
-if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hi")); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">c.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (c *SSHClient) Close(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+defer client.Close(ctx)
+```
+
+</Accordion>
 
 Close this SSH client session. The handle is consumed; do not use it after closing.
 
@@ -399,22 +336,27 @@ Close this SSH client session. The handle is consumed; do not use it after closi
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-defer client.Close(ctx)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">srv.</span><span className="msb-hn">ServeConnection()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (srv *SSHServer) ServeConnection(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+srv, err := sb.SSH().PrepareServer(ctx)
+if err != nil {
+    return err
+}
+defer srv.Close(ctx)
+
+if err := srv.ServeConnection(ctx); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Serve one SSH transport over this process's stdin and stdout. Returns when the connection ends. Call again on the same [`SSHServer`](#sshserver) to serve another connection.
 
@@ -436,30 +378,19 @@ Serve one SSH transport over this process's stdin and stdout. Returns when the c
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-srv, err := sb.SSH().PrepareServer(ctx)
-if err != nil {
-    return err
-}
-defer srv.Close(ctx)
-
-if err := srv.ServeConnection(ctx); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">srv.</span><span className="msb-hn">Close()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (srv *SSHServer) Close(ctx context.Context) error
 ```
+
+<Accordion title="Example">
+
+```go
+defer srv.Close(ctx)
+```
+
+</Accordion>
 
 Release this prepared server endpoint. The handle is consumed; do not use it after closing.
 
@@ -481,33 +412,11 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-defer srv.Close(ctx)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (o SSHOutput) Success() bool
 ```
-
-Report whether the command exited with status `0`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>true</code> when <code>Status</code> is <code>0</code>.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -521,13 +430,20 @@ fmt.Println("present:", out.Success())
 
 </Accordion>
 
----
+Report whether the command exited with status `0`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> when <code>Status</code> is <code>0</code>.</div>
+  </div>
+</div>
 
 ## Types
 
 ### SandboxSSHOps
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#sb-ssh">SSH()</a></p>
 
@@ -539,8 +455,6 @@ SSH operations namespace for a sandbox. Obtained via [`sb.SSH()`](#sb-ssh). Hold
 | [`PrepareServer(ctx, opts...)`](#ssh-prepareserver) | `(`[`*SSHServer`](#sshserver)`, error)` | Prepare a reusable SSH server endpoint |
 
 ### SSHClient
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#ssh-openclient">OpenClient()</a></p>
 
@@ -554,8 +468,6 @@ A native in-process SSH client session. Obtained via [`OpenClient()`](#ssh-openc
 | [`Close(ctx)`](#c-close) | `error` | Close the session (consumes the handle) |
 
 ### SFTPClient
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-sftp">SFTP()</a></p>
 
@@ -576,8 +488,6 @@ A high-level SFTP client session over an SSH connection. Obtained via [`SFTP()`]
 
 ### SSHServer
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 
 A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#ssh-prepareserver).
@@ -588,8 +498,6 @@ A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#
 | [`Close(ctx)`](#srv-close) | `error` | Release the endpoint (consumes the handle) |
 
 ### SSHOutput
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#c-exec">Exec()</a></p>
 
@@ -604,8 +512,6 @@ The output from an SSH exec request.
 
 ### SSHClientOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
-
 <p className="msb-backref">Used by <a href="#ssh-openclient">OpenClient()</a></p>
 
 Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled.
@@ -618,8 +524,6 @@ Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, 
 
 ### SSHExecOption
 
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
-
 <p className="msb-backref">Used by <a href="#c-exec">Exec()</a></p>
 
 Functional option for [`Exec()`](#c-exec).
@@ -629,8 +533,6 @@ Functional option for [`Exec()`](#c-exec).
 | WithSSHTTY(enabled) | Request a PTY for the exec channel |
 
 ### SSHAttachOption
-
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#c-attach">Attach()</a></p>
 
@@ -642,8 +544,6 @@ Functional option for [`Attach()`](#c-attach). The default terminal comes from `
 | WithSSHDetachKeys(keys) | Detach key sequence |
 
 ### SSHServerOption
-
-<div className="msb-tags"><span className="msb-tag is-type">option</span></div>
 
 <p className="msb-backref">Used by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 

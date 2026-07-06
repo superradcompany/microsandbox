@@ -6,7 +6,7 @@ icon: "chart-line"
 
 Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
 
-OCI sandboxes also expose optional upper filesystem fields for capacity dashboards: guest-visible `upper_used_bytes` / `upper_free_bytes` when the protected bundled-kernel reporter is available and fresh, plus host-observed `upper_host_allocated_bytes` when the writable upper image can be inspected from the host. SDKs surface those as nullable fields (`Option`, `null`, `None`, or `nil`) because custom kernels and non-OCI roots may not provide them.
+OCI sandboxes also expose optional upper filesystem fields for capacity dashboards. Guest-visible `upper_used_bytes` and `upper_free_bytes` are available when the protected bundled-kernel reporter is fresh. Host-observed `upper_host_allocated_bytes` is available when microsandbox can inspect the writable upper image from the host. SDKs surface those as nullable fields (`Option`, `null`, `None`, or `nil`) because custom kernels and non-OCI roots may not provide them.
 
 <Note>
 Need continuous shipping to Grafana, Datadog, Prometheus, or any other OTel-compatible backend? See [`msb-metrics`](/observability/msb-metrics), a sidecar binary that reads the same data and ships it over OTLP.

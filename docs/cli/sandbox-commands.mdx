@@ -226,7 +226,14 @@ msb modify api --cpus 8 --dry-run          # show the plan, apply nothing
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom — live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
 
-Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column: `applied` (requested, actual, and enforced values match), `converging` (the guest is still onlining CPUs or plugging memory), `guest-refused` (the guest would not cooperate; the host enforces the new limit anyway), and `failed`. JSON output (`--format json`) carries the same states in `resize_status`.
+Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column:
+
+- `applied` — requested, actual, and enforced values match.
+- `converging` — the guest is still onlining CPUs or plugging memory.
+- `guest-refused` — the guest would not cooperate, but the host enforces the new limit anyway.
+- `failed` — the resize did not complete.
+
+JSON output (`--format json`) carries the same states in `resize_status`.
 
 Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment. The plan reports this as a warning.
 
@@ -503,7 +510,7 @@ Manage the msb installation itself.
 ```bash
 msb doctor                   # Alias for msb self doctor
 msb doctor --fix             # Try supported host setup fixes
-msb self doctor              # Check runtime and host virtualization prerequisites
+msb self doctor              # Check runtime files and supported host prerequisites
 msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
@@ -515,14 +522,14 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
-| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
+| `doctor` (alias: `check`) | Check runtime files and supported host prerequisites, including Windows Hypervisor Platform on Windows |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
 
-Before a downgrade changes local state, `msb` checks the target release, confirms it can understand the current local database, refuses targets below 0.6.0, refuses irreversible state changes, and blocks the operation while matching running sandboxes are active. When a database rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless `--no-backup` is passed. If rollback metadata marks the image cache affected, `msb` purges the cache after the database rollback unless `--keep-cache` is passed. The target binary is always installed fresh and checked with `msb --version` before command links are refreshed.
+Before a downgrade changes local state, `msb` runs several safety checks. It verifies the target release and confirms it can read the current local database. It refuses targets below 0.6.0, refuses irreversible state changes, and blocks the operation while matching running sandboxes are active. When a database rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless you pass `--no-backup`. If rollback metadata marks the image cache affected, `msb` purges the cache after the database rollback unless you pass `--keep-cache`. `msb` always installs the target binary fresh and checks it with `msb --version` before refreshing command links.
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|

@@ -5,42 +5,6 @@ description: TypeScript SDK - Volume API reference
 
 Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · Volume<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#volume-builder"><span className="msb-rn">Volume.builder()</span><span className="msb-rg">configure a new volume</span></a>
-  <a className="msb-row" href="#volume-get"><span className="msb-rn">Volume.get()</span><span className="msb-rg">handle to an existing one</span></a>
-  <a className="msb-row" href="#volume-list"><span className="msb-rn">Volume.list()</span><span className="msb-rg">all volumes</span></a>
-  <a className="msb-row" href="#volume-remove"><span className="msb-rn">Volume.remove()</span><span className="msb-rg">delete a volume</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · Volume<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#volume-name"><span className="msb-rn">volume.name</span><span className="msb-rg">volume name</span></a>
-  <a className="msb-row" href="#volume-path"><span className="msb-rn">volume.path</span><span className="msb-rg">host directory path</span></a>
-  <a className="msb-row" href="#volume-fs"><span className="msb-rn">volume.fs()</span><span className="msb-rg">host-side filesystem</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · VolumeBuilder<span className="msb-ct">7</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#directory">.directory()</a>
-    <a className="msb-chip" href="#disk">.disk()</a>
-    <a className="msb-chip" href="#size">.size()</a>
-    <a className="msb-chip" href="#quota">.quota()</a>
-    <a className="msb-chip" href="#label">.label()</a>
-    <a className="msb-chip" href="#build">.build()</a>
-    <a className="msb-chip" href="#create">.create()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
-    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
-    <a className="msb-typepill" href="#volumefsreadstream">VolumeFsReadStream</a>
-    <a className="msb-typepill" href="#volumefswritesink">VolumeFsWriteSink</a>
-    <a className="msb-typepill" href="/sdk/typescript/filesystem#fsentry">FsEntry</a>
-    <a className="msb-typepill" href="/sdk/typescript/filesystem#fsmetadata">FsMetadata</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```typescript
@@ -59,14 +23,21 @@ await Volume.remove("my-data");                 // 4. delete
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
 static builder(name: string): VolumeBuilder
 ```
+
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data")
+  .label("env", "prod")
+  .create();
+```
+
+</Accordion>
 
 Begin building a named volume. Directory-backed volumes are the default. Call `.disk().size(...)` for a disk-backed volume. See [`VolumeBuilder`](#volumebuilder) for all options.
 
@@ -88,24 +59,20 @@ Begin building a named volume. Directory-backed volumes are the default. Call `.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const data = await Volume.builder("my-data")
-  .label("env", "prod")
-  .create();
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static get(name: string): Promise<VolumeHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const handle = await Volume.get("my-data");
+console.log(handle.usedBytes);
+```
+
+</Accordion>
 
 Get a live handle to an existing named volume. A live handle supports `.fs()` and `.remove()`, unlike the read-only handles returned by [`list()`](#volume-list).
 
@@ -127,23 +94,21 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const handle = await Volume.get("my-data");
-console.log(handle.usedBytes);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static list(): Promise<VolumeHandle[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const v of await Volume.list()) {
+  console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
+}
+```
+
+</Accordion>
 
 List all named volumes. Handles returned here are **read-only**: calling `.fs()` or `.remove()` on them throws. Call [`Volume.get(name)`](#volume-get) to upgrade to a live handle.
 
@@ -156,24 +121,19 @@ List all named volumes. Handles returned here are **read-only**: calling `.fs()`
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const v of await Volume.list()) {
-  console.log(`${v.name} — ${v.kind} — ${v.usedBytes} bytes`);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static remove(name: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await Volume.remove("my-data");
+```
+
+</Accordion>
 
 Delete a named volume and its contents. Fails if the volume is currently mounted by a sandbox.
 
@@ -186,22 +146,9 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await Volume.remove("my-data");
-```
-
-</Accordion>
-
----
-
 ## Instance methods
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get name(): string
@@ -218,10 +165,7 @@ The volume's name.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get path(): string
@@ -238,14 +182,21 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```typescript
 fs(): VolumeFs
 ```
+
+<Accordion title="Example">
+
+```typescript
+const vfs = data.fs();
+await vfs.write("seed.txt", "hello");
+console.log(await vfs.readToString("seed.txt"));
+```
+
+</Accordion>
 
 Get a host-side filesystem handle for this volume's directory. Reads and writes happen directly on the host, with no sandbox running. See [`VolumeFs`](#volumefs-methods) for the full API.
 
@@ -258,26 +209,11 @@ Get a host-side filesystem handle for this volume's directory. Reads and writes 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const vfs = data.fs();
-await vfs.write("seed.txt", "hello");
-console.log(await vfs.readToString("seed.txt"));
-```
-
-</Accordion>
-
----
-
 ## VolumeBuilder
 
 Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#disk) plus [`size()`](#size) for a disk-backed volume. Every setter returns the builder, so calls chain.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 directory(): this
@@ -285,16 +221,11 @@ directory(): this
 
 Create a directory-backed volume. This is the default, so calling it is only needed for clarity.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 disk(): this
 ```
-
-Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
 <Accordion title="Example">
 
@@ -307,10 +238,9 @@ const dockerData = await Volume.builder("docker-data")
 
 </Accordion>
 
----
+Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 size(mib: number): this
@@ -327,10 +257,7 @@ Set the disk capacity in MiB. Required after [`disk()`](#disk).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 quota(mib: number): this
@@ -347,10 +274,7 @@ Record a quota in MiB as metadata for directory-backed volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 label(key: string, value: string): this
@@ -371,10 +295,7 @@ Add a metadata label. Can be called multiple times.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 build(): { name: string; kind: string; quotaMib?: number | null; capacityMib?: number | null; labels: Record<string, string> }
@@ -391,14 +312,19 @@ Materialize the volume configuration without creating the volume on disk. To cre
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 create(): Promise<Volume>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const data = await Volume.builder("my-data").create();
+```
+
+</Accordion>
 
 Build and create the volume on disk, returning a [`Volume`](#instance-methods).
 
@@ -411,28 +337,23 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const data = await Volume.builder("my-data").create();
-```
-
-</Accordion>
-
----
-
 ## VolumeFs methods
 
 Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
 
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 read(path: string): Promise<Uint8Array>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const bytes = await vfs.read("data.bin");
+```
+
+</Accordion>
 
 Read a file's full contents as bytes.
 
@@ -454,22 +375,19 @@ Read a file's full contents as bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const bytes = await vfs.read("data.bin");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readToString(path: string): Promise<string>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const text = await vfs.readToString("config.json");
+```
+
+</Accordion>
 
 Read a file's full contents as a UTF-8 string.
 
@@ -491,22 +409,22 @@ Read a file's full contents as a UTF-8 string.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const text = await vfs.readToString("config.json");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 readStream(path: string): Promise<VolumeFsReadStream>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const stream = await vfs.readStream("large.bin");
+for await (const chunk of stream) {
+  console.log(chunk.byteLength);
+}
+```
+
+</Accordion>
 
 Open a streaming reader for a file, for chunked reads of large files without loading them fully into memory.
 
@@ -528,25 +446,19 @@ Open a streaming reader for a file, for chunked reads of large files without loa
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const stream = await vfs.readStream("large.bin");
-for await (const chunk of stream) {
-  console.log(chunk.byteLength);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.write("seed.txt", "hello");
+```
+
+</Accordion>
 
 Write a file, replacing any existing contents. Strings are encoded as UTF-8.
 
@@ -563,22 +475,21 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.write("seed.txt", "hello");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 writeStream(path: string): Promise<VolumeFsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const sink = await vfs.writeStream("out.bin");
+await sink.write(chunk);
+await sink.close();
+```
+
+</Accordion>
 
 Open a streaming writer for a file, for chunked writes of large files.
 
@@ -600,24 +511,21 @@ Open a streaming writer for a file, for chunked writes of large files.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const sink = await vfs.writeStream("out.bin");
-await sink.write(chunk);
-await sink.close();
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 list(path: string): Promise<FsEntry[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const e of await vfs.list("")) {
+  console.log(e.path, e.kind, e.size);
+}
+```
+
+</Accordion>
 
 List the entries in a directory. Pass `""` for the volume root.
 
@@ -639,24 +547,19 @@ List the entries in a directory. Pass `""` for the volume root.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const e of await vfs.list("")) {
-  console.log(e.path, e.kind, e.size);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 mkdir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.mkdir("cache/images");
+```
+
+</Accordion>
 
 Create a directory, including any missing parents.
 
@@ -669,22 +572,19 @@ Create a directory, including any missing parents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.mkdir("cache/images");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">removeDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 removeDir(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.removeDir("cache");
+```
+
+</Accordion>
 
 Recursively remove a directory and its contents.
 
@@ -697,22 +597,19 @@ Recursively remove a directory and its contents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.removeDir("cache");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 remove(path: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.remove("seed.txt");
+```
+
+</Accordion>
 
 Remove a single file.
 
@@ -725,22 +622,19 @@ Remove a single file.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.remove("seed.txt");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 copy(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.copy("seed.txt", "backup/seed.txt");
+```
+
+</Accordion>
 
 Copy a file or directory from one path to another.
 
@@ -757,22 +651,19 @@ Copy a file or directory from one path to another.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.copy("seed.txt", "backup/seed.txt");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 rename(from: string, to: string): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await vfs.rename("draft.txt", "final.txt");
+```
+
+</Accordion>
 
 Move or rename a file or directory.
 
@@ -789,22 +680,20 @@ Move or rename a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await vfs.rename("draft.txt", "final.txt");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 stat(path: string): Promise<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const meta = await vfs.stat("seed.txt");
+console.log(meta.size, meta.kind);
+```
+
+</Accordion>
 
 Get metadata for a file or directory.
 
@@ -826,23 +715,21 @@ Get metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const meta = await vfs.stat("seed.txt");
-console.log(meta.size, meta.kind);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 exists(path: string): Promise<boolean>
 ```
+
+<Accordion title="Example">
+
+```typescript
+if (await vfs.exists("seed.txt")) {
+  await vfs.remove("seed.txt");
+}
+```
+
+</Accordion>
 
 Check whether a path exists.
 
@@ -864,23 +751,9 @@ Check whether a path exists.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-if (await vfs.exists("seed.txt")) {
-  await vfs.remove("seed.txt");
-}
-```
-
-</Accordion>
-
----
-
 ## Types
 
 ### VolumeHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
@@ -901,8 +774,6 @@ A handle to an existing named volume, carrying its metadata. Handles from [`Volu
 | remove() | `Promise<void>` | Delete this volume (live handles only; throws on read-only handles) |
 
 ### VolumeFs
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
 
@@ -926,8 +797,6 @@ Host-side filesystem operations on a volume's directory. The methods mirror [`Sa
 
 ### VolumeFsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
 
 A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await` and `using`.
@@ -940,8 +809,6 @@ A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` an
 | [Symbol.asyncDispose]() | `Promise<void>` | Mark the stream done (for `using`) |
 
 ### VolumeFsWriteSink
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
 

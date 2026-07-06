@@ -2,6 +2,19 @@ body {
   font-size: 12px;
 }
 
+/* ----------------------------------------------------------------------------
+ * Content width — Mintlify caps #content-area at max-w-xl (36rem) and sets its
+ * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
+ * content is a narrow column with large dead zones. The TOC column to its right
+ * is only 19rem wide (#table-of-contents-layout, with its own pl-10 gap), so
+ * that 28rem reserve leaves ~9rem unused. Restore the wider-but-bounded 72rem
+ * content max and reserve only 20rem on the right, so tables and code get room
+ * without prose stretching indefinitely on very wide screens.
+ * -------------------------------------------------------------------------- */
+@media (min-width: 1280px) {
+  #content-area { max-width: 72rem !important; width: calc(100% - 20rem) !important; }
+}
+
 /*
  * microsandbox SDK reference styles
  * Auto-loaded by Mintlify (any .css in the docs root). Class names are
@@ -9,80 +22,52 @@ body {
  * Light is the default; `.dark` (toggled by Mintlify on <html>) overrides.
  */
 
-/* kind tags: static / instance / builder / type / async */
-.msb-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0 12px; }
-.msb-tag {
-  font-size: 11px; line-height: 1; padding: 4px 9px;
-  border-radius: 6px; font-weight: 600; letter-spacing: .01em;
+:root {
+  --msb-code-surface: #fdfbff;
+  --msb-code-surface-strong: #faf5ff;
+  --msb-code-border: rgba(109, 75, 196, 0.16);
+  --msb-code-header: #f6efff;
+  --msb-code-header-hover: #f0e4ff;
+  --msb-code-header-text: #5f3caf;
+  --msb-code-control-surface: rgba(246, 239, 255, 0.22);
+  --msb-code-control-surface-hover: rgba(240, 228, 255, 0.38);
+  --msb-code-control-icon: rgba(95, 60, 175, 0.72);
+  --msb-code-control-icon-hover: #5f3caf;
+  --msb-code-fade-10: rgba(255, 255, 255, 0.06);
+  --msb-code-fade-25: rgba(255, 255, 255, 0.14);
+  --msb-code-fade-35: rgba(255, 255, 255, 0.24);
+  --msb-code-fade-45: rgba(255, 255, 255, 0.34);
 }
-.msb-tag.is-static   { background: #EEEDFE; color: #26215C; }
-.msb-tag.is-instance { background: #E1F5EE; color: #04342C; }
-.msb-tag.is-builder  { background: #FAECE7; color: #4A1B0C; }
-.msb-tag.is-type     { background: #FBEAF0; color: #4B1528; }
-.msb-tag.is-async    { background: rgba(135,134,128,.18); color: #5F5E5A; }
 
-.dark .msb-tag.is-static   { background: #2b2655; color: #CECBF6; }
-.dark .msb-tag.is-instance { background: #0c3a2e; color: #9FE1CB; }
-.dark .msb-tag.is-builder  { background: #3a1c10; color: #F5C4B3; }
-.dark .msb-tag.is-type     { background: #3a1424; color: #F4C0D1; }
-.dark .msb-tag.is-async    { background: rgba(211,209,199,.14); color: #B4B2A9; }
-
-/* at a glance — grouped table, border-only (no fill, so no muddy dark blob) */
-.msb-glance {
-  border: 1px solid #e7e4ef; border-radius: 14px;
-  padding: 6px 18px 14px; margin: 20px 0 8px;
+.dark {
+  --msb-code-surface: #171221;
+  --msb-code-surface-strong: #1b1428;
+  --msb-code-border: rgba(191, 132, 254, 0.24);
+  --msb-code-header: #211832;
+  --msb-code-header-hover: #2a1d40;
+  --msb-code-header-text: #d8c0ff;
+  --msb-code-control-surface: rgba(33, 24, 50, 0.22);
+  --msb-code-control-surface-hover: rgba(42, 29, 64, 0.38);
+  --msb-code-control-icon: rgba(216, 192, 255, 0.72);
+  --msb-code-control-icon-hover: #d8c0ff;
+  --msb-code-fade-10: rgba(11, 12, 14, 0.06);
+  --msb-code-fade-25: rgba(11, 12, 14, 0.14);
+  --msb-code-fade-35: rgba(11, 12, 14, 0.24);
+  --msb-code-fade-45: rgba(11, 12, 14, 0.34);
 }
-.dark .msb-glance { border-color: #322f2b; }
-
-/* group label row: dot + label + count */
-.msb-gl {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 11px; font-weight: 600; letter-spacing: .05em;
-  text-transform: uppercase; opacity: .6; padding: 14px 0 4px;
-}
-.msb-gl:first-child { padding-top: 6px; }
-.msb-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.msb-dot.static   { background: #7F77DD; }
-.msb-dot.instance { background: #1D9E75; }
-.msb-dot.builder  { background: #D85A30; }
-.msb-dot.type     { background: #D4537E; }
-.msb-ct { margin-left: auto; font-weight: 500; opacity: .8; }
-
-/* method rows */
-.msb-row {
-  display: grid; grid-template-columns: 200px 1fr; gap: 16px;
-  padding: 5px 6px; margin: 0 -6px; border-radius: 6px;
-  border-top: 1px solid #f2f0f8; font-size: 12.5px; text-decoration: none;
-}
-.dark .msb-row { border-top-color: #211f1c; }
-.msb-row:hover { background: rgba(127,119,221,.07); }
-.msb-rn { font-family: var(--font-mono, monospace); color: #6d4bc4; }
-.dark .msb-rn { color: #c9a4ff; }
-.msb-row:hover .msb-rn { text-decoration: underline; }
-.msb-rg { opacity: .7; }
-
-/* builder + types chip rows */
-.msb-chiprow {
-  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-  padding: 7px 0 2px; border-top: 1px solid #f2f0f8;
-}
-.dark .msb-chiprow { border-top-color: #211f1c; }
-.msb-chip {
-  font-family: var(--font-mono, monospace); font-size: 11.5px; text-decoration: none;
-  padding: 2px 9px; border-radius: 6px; background: #f4f1fb; color: #4b3f7a;
-}
-.dark .msb-chip { background: #241f33; color: #c8baf2; }
-.msb-typepill {
-  font-family: var(--font-mono, monospace); font-size: 11.5px; text-decoration: none;
-  padding: 2px 9px; border-radius: 6px; background: #fbeef4; color: #7a2348;
-}
-.dark .msb-typepill { background: #321826; color: #f0b9d0; }
-.msb-more { font-size: 11.5px; opacity: .6; text-decoration: none; }
 
 /* our links shouldn't get Mintlify's prose underline-border */
-.msb-row, .msb-chip, .msb-typepill, .msb-more, .msb-backref a, .msb-type { border-bottom: 0 !important; }
+.msb-backref a, .msb-type { border-bottom: 0 !important; }
 
-/* method headings: monospace name with a muted receiver / path prefix */
+/* method headings: monospace name with a muted receiver / path prefix.
+ * With the rules between entries gone, lean on a generous top margin to
+ * separate one method from the previous one's body and keep the list
+ * scannable. Scoped to method headings so section/type headings are
+ * unaffected. */
+h4:has(.msb-hn) { margin-top: 5rem !important; }
+/* but the first method directly under a section heading needs far less — the
+ * section heading already separates it from what came before. */
+h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }
@@ -112,7 +97,7 @@ body {
   padding: 9px 0; border-top: 1px solid rgba(135,134,128,.18);
 }
 .msb-param-key code { font-size: 13px; }
-.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; }
+.msb-param-key .msb-type { font-size: 12px; display: inline-block; margin-top: 3px; margin-left: 6px; }
 .msb-param-desc { font-size: 14px; opacity: .85; }
 
 /* back-references on types (returned by / used by) */
@@ -120,27 +105,117 @@ body {
 .msb-backref a { font-family: var(--font-mono, monospace); font-size: 12.5px; text-decoration: none; }
 
 /* ----------------------------------------------------------------------------
- * Table columns — hand the slack to the column that needs it (content-driven
- * layout) instead of splitting width evenly, and keep name-ish first columns
- * on one line. Width is unchanged: tables stay within the prose column.
+ * Tables scroll horizontally rather than being crammed into the prose width,
+ * which forced ugly mid-token wraps (e.g. Vec<(String,\nString)>). The element
+ * directly wrapping each table becomes the scroll boundary, and cells stop
+ * wrapping, so a table sizes to its content and scrolls when it overflows.
  * -------------------------------------------------------------------------- */
+:has(> table) { overflow-x: auto; max-width: 100%; }
 table { table-layout: auto; }
-table th, table td { vertical-align: top; overflow-wrap: anywhere; }
-table td:first-child { white-space: nowrap; }
+table th, table td { vertical-align: top; white-space: nowrap; }
+
+/* ----------------------------------------------------------------------------
+ * Code surfaces — Mintlify's default dark code background is nearly neutral and
+ * can read greenish against the microsandbox palette. Tint standalone code
+ * blocks, code groups, and SDK example accordions toward the purple brand color
+ * while keeping the contrast restrained in both themes.
+ * -------------------------------------------------------------------------- */
+.code-block, .code-group {
+  border-color: var(--msb-code-border) !important;
+}
+
+.code-block-background[data-component-part="code-block-root"],
+html.dark body .code-block-background[data-component-part="code-block-root"] {
+  background-color: var(--msb-code-surface) !important;
+}
+
+.code-group {
+  background-color: var(--msb-code-surface-strong) !important;
+}
+
+details.accordion:has(.code-block) {
+  background-color: var(--msb-code-surface) !important;
+  border-color: var(--msb-code-border) !important;
+}
+
+details.accordion:has(.code-block) > summary {
+  background-color: var(--msb-code-header) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+details.accordion:has(.code-block) > summary:hover {
+  background-color: var(--msb-code-header-hover) !important;
+}
+
+.code-block [data-floating-buttons="true"],
+.code-group [data-floating-buttons="true"] {
+  z-index: 2;
+}
+
+.code-block [data-floating-buttons="true"] button,
+.code-group [data-floating-buttons="true"] button,
+.code-block [data-floating-buttons="true"] a,
+.code-group [data-floating-buttons="true"] a,
+.code-block [data-testid="copy-code-button"],
+.code-group [data-testid="copy-code-button"],
+.code-block [aria-label*="assistant" i],
+.code-group [aria-label*="assistant" i] {
+  background-color: var(--msb-code-control-surface) !important;
+  box-shadow: 0 0 0 1px var(--msb-code-border);
+  color: var(--msb-code-control-icon) !important;
+}
+
+.code-block [data-floating-buttons="true"] button:hover,
+.code-group [data-floating-buttons="true"] button:hover,
+.code-block [data-floating-buttons="true"] a:hover,
+.code-group [data-floating-buttons="true"] a:hover,
+.code-block [data-testid="copy-code-button"]:hover,
+.code-group [data-testid="copy-code-button"]:hover,
+.code-block [aria-label*="assistant" i]:hover,
+.code-group [aria-label*="assistant" i]:hover {
+  background-color: var(--msb-code-control-surface-hover) !important;
+  color: var(--msb-code-control-icon-hover) !important;
+}
+
+.code-block [data-floating-buttons="true"] svg,
+.code-group [data-floating-buttons="true"] svg,
+.code-block [data-testid="copy-code-button"] svg,
+.code-group [data-testid="copy-code-button"] svg,
+.code-block [aria-label*="assistant" i] svg,
+.code-group [aria-label*="assistant" i] svg {
+  color: currentColor !important;
+}
+
+.code-block [data-fade-overlay="true"],
+.code-group [data-fade-overlay="true"] {
+  background-image: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0) 0,
+    var(--msb-code-fade-10) 10px,
+    var(--msb-code-fade-25) 25px,
+    var(--msb-code-fade-35) 35px,
+    var(--msb-code-fade-45) 45px
+  ) !important;
+}
 
 /* ----------------------------------------------------------------------------
  * Example collapsibles — Mintlify wraps the code block in prose margins
  * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
- * leaves a lot of dead space inside the accordion. Trim it to an even, tight
+ * leaves a lot of dead space inside the accordion. Trim it to a balanced, tight
  * inset. Scoped to accordions that hold a code block so prose accordions are
  * left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block) > *:not(summary) { margin: 0 0.75rem 0.75rem !important; }
+details.accordion:has(.code-block) > *:not(summary) { margin: 0.75rem !important; }
 details.accordion:has(.code-block) .code-block { margin: 0 !important; }
 
+/* The example now sits directly under the signature. The signature code
+ * block's 2rem bottom margin and the accordion's top margin stacked into a
+ * wide gap; collapse them to one even, tight inset so the example reads as
+ * attached to the signature it documents. */
+.code-block:has(+ details.accordion) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
+
 @media (max-width: 640px) {
-  .msb-row { grid-template-columns: 1fr; gap: 0; }
-  .msb-rg { font-size: 11.5px; opacity: .6; }
   .msb-params { grid-template-columns: 1fr; }
   .msb-param { row-gap: 2px; }
 }

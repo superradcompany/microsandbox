@@ -5,126 +5,6 @@ description: Rust SDK - Volume API reference
 
 Create and manage named volumes: persistent storage that lives independently of any sandbox. Read and write a volume's files directly from the host, or mount it into a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · Volume<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#volumebuilder"><span className="msb-rn">Volume::builder()</span><span className="msb-rg">configure a new volume</span></a>
-  <a className="msb-row" href="#volumecreate"><span className="msb-rn">Volume::create()</span><span className="msb-rg">provision from a config</span></a>
-  <a className="msb-row" href="#volumeget"><span className="msb-rn">Volume::get()</span><span className="msb-rg">handle to an existing one</span></a>
-  <a className="msb-row" href="#volumelist"><span className="msb-rn">Volume::list()</span><span className="msb-rg">all volumes</span></a>
-  <a className="msb-row" href="#volumeremove"><span className="msb-rn">Volume::remove()</span><span className="msb-rg">delete by name</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · Volume<span className="msb-ct">11</span></p>
-  <a className="msb-row" href="#vol-name"><span className="msb-rn">vol.name()</span><span className="msb-rg">volume name</span></a>
-  <a className="msb-row" href="#vol-kind"><span className="msb-rn">vol.kind()</span><span className="msb-rg">directory or disk</span></a>
-  <a className="msb-row" href="#vol-fs"><span className="msb-rn">vol.fs()</span><span className="msb-rg">read / write files</span></a>
-  <a className="msb-row" href="#vol-path"><span className="msb-rn">vol.path()</span><span className="msb-rg">host data directory</span></a>
-  <a className="msb-row" href="#vol-disk_path"><span className="msb-rn">vol.disk_path()</span><span className="msb-rg">host disk image path</span></a>
-  <a className="msb-row" href="#vol-capacity_bytes"><span className="msb-rn">vol.capacity_bytes()</span><span className="msb-rg">disk capacity</span></a>
-  <a className="msb-row" href="#vol-disk_format"><span className="msb-rn">vol.disk_format()</span><span className="msb-rg">disk image format</span></a>
-  <a className="msb-row" href="#vol-disk_fstype"><span className="msb-rn">vol.disk_fstype()</span><span className="msb-rg">inner disk filesystem</span></a>
-  <a className="msb-row" href="#vol-backend_kind"><span className="msb-rn">vol.backend_kind()</span><span className="msb-rg">local or cloud</span></a>
-  <a className="msb-row" href="#vol-local"><span className="msb-rn">vol.local()</span><span className="msb-rg">local-only state</span></a>
-  <a className="msb-row" href="#vol-cloud"><span className="msb-rn">vol.cloud()</span><span className="msb-rg">cloud-only state</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · VolumeHandle<span className="msb-ct">15</span></p>
-  <a className="msb-row" href="#h-name"><span className="msb-rn">h.name()</span><span className="msb-rg">volume name</span></a>
-  <a className="msb-row" href="#h-kind"><span className="msb-rn">h.kind()</span><span className="msb-rg">directory or disk</span></a>
-  <a className="msb-row" href="#h-fs"><span className="msb-rn">h.fs()</span><span className="msb-rg">read / write files</span></a>
-  <a className="msb-row" href="#h-remove"><span className="msb-rn">h.remove()</span><span className="msb-rg">delete this volume</span></a>
-  <a className="msb-row" href="#h-used_bytes"><span className="msb-rn">h.used_bytes()</span><span className="msb-rg">usage snapshot</span></a>
-  <a className="msb-row" href="#h-quota_mib"><span className="msb-rn">h.quota_mib()</span><span className="msb-rg">storage quota</span></a>
-  <a className="msb-row" href="#h-capacity_bytes"><span className="msb-rn">h.capacity_bytes()</span><span className="msb-rg">disk capacity</span></a>
-  <a className="msb-row" href="#h-disk_format"><span className="msb-rn">h.disk_format()</span><span className="msb-rg">disk image format</span></a>
-  <a className="msb-row" href="#h-disk_fstype"><span className="msb-rn">h.disk_fstype()</span><span className="msb-rg">inner disk filesystem</span></a>
-  <a className="msb-row" href="#h-disk_path"><span className="msb-rn">h.disk_path()</span><span className="msb-rg">host disk image path</span></a>
-  <a className="msb-row" href="#h-labels"><span className="msb-rn">h.labels()</span><span className="msb-rg">key-value labels</span></a>
-  <a className="msb-row" href="#h-created_at"><span className="msb-rn">h.created_at()</span><span className="msb-rg">creation time</span></a>
-  <a className="msb-row" href="#h-backend_kind"><span className="msb-rn">h.backend_kind()</span><span className="msb-rg">local or cloud</span></a>
-  <a className="msb-row" href="#h-local"><span className="msb-rn">h.local()</span><span className="msb-rg">local-only state</span></a>
-  <a className="msb-row" href="#h-cloud"><span className="msb-rn">h.cloud()</span><span className="msb-rg">cloud-only state</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Instance · VolumeFs<span className="msb-ct">13</span></p>
-  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.read()</span><span className="msb-rg">read bytes</span></a>
-  <a className="msb-row" href="#fs-read_to_string"><span className="msb-rn">fs.read_to_string()</span><span className="msb-rg">read UTF-8 text</span></a>
-  <a className="msb-row" href="#fs-read_stream"><span className="msb-rn">fs.read_stream()</span><span className="msb-rg">stream a file in</span></a>
-  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.write()</span><span className="msb-rg">write bytes</span></a>
-  <a className="msb-row" href="#fs-write_stream"><span className="msb-rn">fs.write_stream()</span><span className="msb-rg">stream a file out</span></a>
-  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.list()</span><span className="msb-rg">list a directory</span></a>
-  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.mkdir()</span><span className="msb-rg">create a directory</span></a>
-  <a className="msb-row" href="#fs-remove"><span className="msb-rn">fs.remove()</span><span className="msb-rg">delete a file</span></a>
-  <a className="msb-row" href="#fs-remove_dir"><span className="msb-rn">fs.remove_dir()</span><span className="msb-rg">delete a directory</span></a>
-  <a className="msb-row" href="#fs-copy"><span className="msb-rn">fs.copy()</span><span className="msb-rg">copy a file</span></a>
-  <a className="msb-row" href="#fs-rename"><span className="msb-rn">fs.rename()</span><span className="msb-rg">rename / move</span></a>
-  <a className="msb-row" href="#fs-stat"><span className="msb-rn">fs.stat()</span><span className="msb-rg">metadata</span></a>
-  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.exists()</span><span className="msb-rg">existence check</span></a>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · VolumeBuilder<span className="msb-ct">7</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#directory">.directory()</a>
-    <a className="msb-chip" href="#disk">.disk()</a>
-    <a className="msb-chip" href="#size">.size()</a>
-    <a className="msb-chip" href="#quota">.quota()</a>
-    <a className="msb-chip" href="#label">.label()</a>
-    <a className="msb-chip" href="#vb-build">.build()</a>
-    <a className="msb-chip" href="#vb-create">.create()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · MountBuilder<span className="msb-ct">15</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#bind">.bind()</a>
-    <a className="msb-chip" href="#named">.named()</a>
-    <a className="msb-chip" href="#named_with">.named_with()</a>
-    <a className="msb-chip" href="#tmpfs">.tmpfs()</a>
-    <a className="msb-chip" href="#mb-disk">.disk()</a>
-    <a className="msb-chip" href="#format">.format()</a>
-    <a className="msb-chip" href="#fstype">.fstype()</a>
-    <a className="msb-chip" href="#readonly">.readonly()</a>
-    <a className="msb-chip" href="#noexec">.noexec()</a>
-    <a className="msb-chip" href="#nosuid">.nosuid()</a>
-    <a className="msb-chip" href="#nodev">.nodev()</a>
-    <a className="msb-chip" href="#stat_virtualization">.stat_virtualization()</a>
-    <a className="msb-chip" href="#host_permissions">.host_permissions()</a>
-    <a className="msb-chip" href="#mb-size">.size()</a>
-    <a className="msb-chip" href="#mb-build">.build()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · NamedVolumeBuilder<span className="msb-ct">9</span></p>
-  <div className="msb-chiprow">
-    <a className="msb-chip" href="#nv-existing">.existing()</a>
-    <a className="msb-chip" href="#nv-create">.create()</a>
-    <a className="msb-chip" href="#nv-ensure_exists">.ensure_exists()</a>
-    <a className="msb-chip" href="#nv-name">.name()</a>
-    <a className="msb-chip" href="#nv-directory">.directory()</a>
-    <a className="msb-chip" href="#nv-disk">.disk()</a>
-    <a className="msb-chip" href="#nv-size">.size()</a>
-    <a className="msb-chip" href="#nv-quota">.quota()</a>
-    <a className="msb-chip" href="#nv-label">.label()</a>
-  </div>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#volume">Volume</a>
-    <a className="msb-typepill" href="#volumehandle">VolumeHandle</a>
-    <a className="msb-typepill" href="#volumebuilder-2">VolumeBuilder</a>
-    <a className="msb-typepill" href="#volumefs">VolumeFs</a>
-    <a className="msb-typepill" href="#volumefsreadstream">VolumeFsReadStream</a>
-    <a className="msb-typepill" href="#volumefswritesink">VolumeFsWriteSink</a>
-    <a className="msb-typepill" href="#mountbuilder-2">MountBuilder</a>
-    <a className="msb-typepill" href="#namedvolumebuilder-2">NamedVolumeBuilder</a>
-    <a className="msb-typepill" href="#volumekind">VolumeKind</a>
-    <a className="msb-typepill" href="#volumespec">VolumeSpec</a>
-    <a className="msb-typepill" href="#mountoptions">MountOptions</a>
-    <a className="msb-typepill" href="#statvirtualization">StatVirtualization</a>
-    <a className="msb-typepill" href="#hostpermissions">HostPermissions</a>
-    <a className="msb-typepill" href="#diskimageformat">DiskImageFormat</a>
-    <a className="msb-typepill" href="#namedvolumemode">NamedVolumeMode</a>
-    <a className="msb-typepill" href="/sdk/rust/filesystem#fsentry">FsEntry</a>
-    <a className="msb-typepill" href="/sdk/rust/filesystem#fsmetadata">FsMetadata</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust
@@ -149,14 +29,19 @@ sb.stop().await?;
 
 ## Static methods
 
----
-
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```rust
 fn builder(name: impl Into<String>) -> VolumeBuilder
 ```
+
+<Accordion title="Example">
+
+```rust
+let vol = Volume::builder("pip-cache").create().await?;
+```
+
+</Accordion>
 
 Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#disk) then [`.size()`](#size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
 
@@ -178,22 +63,28 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let vol = Volume::builder("pip-cache").create().await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn create(config: VolumeConfig) -> MicrosandboxResult<Volume>
 ```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::volume::{VolumeConfig, VolumeKind};
+
+let vol = Volume::create(VolumeConfig {
+    name: "cache".into(),
+    kind: VolumeKind::Directory,
+    quota_mib: Some(1024),
+    capacity_mib: None,
+    labels: vec![("team".into(), "ml".into())],
+})
+.await?;
+```
+
+</Accordion>
 
 Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the active backend. Locally this inserts a database record and creates the host directory (formatting a `disk.raw` for disk volumes). Fails with `VolumeAlreadyExists` if a volume of the same name already exists. Most callers use [`Volume::builder()`](#volumebuilder), which calls this internally.
 
@@ -215,31 +106,20 @@ Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the acti
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use microsandbox::volume::{VolumeConfig, VolumeKind};
-
-let vol = Volume::create(VolumeConfig {
-    name: "cache".into(),
-    kind: VolumeKind::Directory,
-    quota_mib: Some(1024),
-    capacity_mib: None,
-    labels: vec![("team".into(), "ml".into())],
-})
-.await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn get(name: &str) -> MicrosandboxResult<VolumeHandle>
 ```
+
+<Accordion title="Example">
+
+```rust
+let h = Volume::get("pip-cache").await?;
+println!("{} — {} bytes used", h.name(), h.used_bytes());
+```
+
+</Accordion>
 
 Get a handle to an existing named volume. Use the handle to access the volume's filesystem from the host, read its metadata, or delete it. Fails with `VolumeNotFound` if no volume by that name exists.
 
@@ -261,23 +141,21 @@ Get a handle to an existing named volume. Use the handle to access the volume's 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let h = Volume::get("pip-cache").await?;
-println!("{} — {} bytes used", h.name(), h.used_bytes());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list() -> MicrosandboxResult<Vec<VolumeHandle>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for h in Volume::list().await? {
+    println!("{} — {:?}", h.name(), h.kind());
+}
+```
+
+</Accordion>
 
 List all named volumes, newest first.
 
@@ -290,24 +168,19 @@ List all named volumes, newest first.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for h in Volume::list().await? {
-    println!("{} — {:?}", h.name(), h.kind());
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(name: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+Volume::remove("pip-cache").await?;
+```
+
+</Accordion>
 
 Delete a named volume and its contents from disk. Locally the database record is deleted first, then the directory, so an orphaned directory is easier to detect than an orphaned record. Fails with `VolumeNotFound` if the volume does not exist.
 
@@ -320,24 +193,11 @@ Delete a named volume and its contents from disk. Locally the database record is
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-Volume::remove("pip-cache").await?;
-```
-
-</Accordion>
-
----
-
 ## Volume instance methods
 
 A live `Volume`, returned by [`Volume::create()`](#volumecreate) or [`VolumeBuilder::create()`](#vb-create). Carries the backend it was created on.
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn name(&self) -> &str
@@ -354,10 +214,7 @@ The unique name identifying this volume.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">kind()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn kind(&self) -> VolumeKind
@@ -374,14 +231,19 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">fs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().write("/seed.txt", "hello").await?;
+```
+
+</Accordion>
 
 Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. Local volumes route to `tokio::fs`. See [`VolumeFs`](#volumefs) for the operations.
 
@@ -394,22 +256,19 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().write("/seed.txt", "hello").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn path(&self) -> MicrosandboxResult<&Path>
 ```
+
+<Accordion title="Example">
+
+```rust
+println!("{}", vol.path()?.display());
+```
+
+</Accordion>
 
 The host-side directory where this volume's data is stored (local backend only). Errors with `Unsupported` for cloud volumes, whose bytes live in the org's object storage rather than on the caller's host.
 
@@ -422,18 +281,7 @@ The host-side directory where this volume's data is stored (local backend only).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-println!("{}", vol.path()?.display());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">disk_path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_path(&self) -> Option<PathBuf>
@@ -450,10 +298,7 @@ Host path to the managed raw disk image (`disk.raw`) for disk volumes. Returns `
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">capacity_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn capacity_bytes(&self) -> Option<u64>
@@ -470,10 +315,7 @@ Disk capacity in bytes for disk volumes. `None` for directory volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">disk_format()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_format(&self) -> Option<&str>
@@ -490,10 +332,7 @@ Disk image format for disk volumes (always `"raw"` for managed disk volumes). `N
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">disk_fstype()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_fstype(&self) -> Option<&str>
@@ -510,10 +349,7 @@ Inner disk filesystem type for disk volumes (always `"ext4"` for managed disk vo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">backend_kind()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn backend_kind(&self) -> BackendKind
@@ -530,10 +366,7 @@ Which backend variant this volume is bound to: `Local` or `Cloud`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">local()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn local(&self) -> Option<&VolumeLocalState>
@@ -550,10 +383,7 @@ Local-only volume state. Returns `Some` for local-backed volumes, `None` for clo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">vol.</span><span className="msb-hn">cloud()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn cloud(&self) -> Option<&VolumeCloudState>
@@ -570,16 +400,11 @@ Cloud-only volume state. Returns `Some` for cloud-backed volumes, `None` for loc
   </div>
 </div>
 
----
-
 ## VolumeHandle methods
 
 A lightweight handle returned by [`Volume::get()`](#volumeget) and [`Volume::list()`](#volumelist). Exposes metadata captured at read time plus filesystem and delete operations, without holding a live [`Volume`](#volume).
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn name(&self) -> &str
@@ -596,10 +421,7 @@ The unique name identifying this volume.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">kind()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn kind(&self) -> VolumeKind
@@ -616,14 +438,20 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">fs()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
+
+<Accordion title="Example">
+
+```rust
+let h = Volume::get("pip-cache").await?;
+let names = h.fs().list("/").await?;
+```
+
+</Accordion>
 
 Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. See [`VolumeFs`](#volumefs).
 
@@ -636,25 +464,11 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let h = Volume::get("pip-cache").await?;
-let names = h.fs().list("/").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(&self) -> MicrosandboxResult<()>
 ```
-
-Delete this volume and its contents. Locally the database record is removed first, then the directory.
 
 <Accordion title="Example">
 
@@ -664,10 +478,9 @@ Volume::get("pip-cache").await?.remove().await?;
 
 </Accordion>
 
----
+Delete this volume and its contents. Locally the database record is removed first, then the directory.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">used_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn used_bytes(&self) -> u64
@@ -684,10 +497,7 @@ Disk usage snapshot from when this handle was created. Not live, call [`Volume::
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">quota_mib()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn quota_mib(&self) -> Option<u32>
@@ -704,10 +514,7 @@ Maximum storage in MiB, or `None` if unlimited.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">capacity_bytes()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn capacity_bytes(&self) -> Option<u64>
@@ -724,10 +531,7 @@ Disk capacity in bytes for disk volumes. `None` for directory volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">disk_format()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_format(&self) -> Option<&str>
@@ -744,10 +548,7 @@ Disk image format for disk volumes. `None` for directory volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">disk_fstype()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_fstype(&self) -> Option<&str>
@@ -764,10 +565,7 @@ Inner disk filesystem type for disk volumes. `None` for directory volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">disk_path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn disk_path(&self) -> Option<PathBuf>
@@ -784,10 +582,7 @@ Host path to the managed raw disk image (`disk.raw`) for local disk volumes. `No
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">labels()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn labels(&self) -> &[(String, String)]
@@ -804,10 +599,7 @@ Key-value labels for organizing and filtering volumes.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn created_at(&self) -> Option<DateTime<Utc>>
@@ -824,10 +616,7 @@ When this volume was first created, if recorded.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">backend_kind()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn backend_kind(&self) -> BackendKind
@@ -844,10 +633,7 @@ Which backend variant this handle is bound to: `Local` or `Cloud`.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">local()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn local(&self) -> Option<&VolumeHandleLocalState>
@@ -864,10 +650,7 @@ Local-only handle state. Returns `Some` for local-backed handles, `None` for clo
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">h.</span><span className="msb-hn">cloud()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
 
 ```rust
 fn cloud(&self) -> Option<&VolumeHandleCloudState>
@@ -884,20 +667,23 @@ Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for loc
   </div>
 </div>
 
----
-
 ## VolumeFs methods
 
 Host-side filesystem operations on a named volume, obtained via [`Volume::fs()`](#vol-fs) or [`VolumeHandle::fs()`](#h-fs). Unlike [`SandboxFsOps`](/sdk/rust/filesystem), which goes through the agent protocol, `VolumeFs` reads and writes the volume's bytes directly. Paths are relative to the volume root; a leading `/` is stripped, and path traversal outside the root is rejected.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
 ```
+
+<Accordion title="Example">
+
+```rust
+let data = vol.fs().read("/seed.txt").await?;
+```
+
+</Accordion>
 
 Read an entire file into memory as raw bytes.
 
@@ -919,22 +705,19 @@ Read an entire file into memory as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let data = vol.fs().read("/seed.txt").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let text = vol.fs().read_to_string("/seed.txt").await?;
+```
+
+</Accordion>
 
 Read an entire file into memory as a UTF-8 string.
 
@@ -956,22 +739,22 @@ Read an entire file into memory as a UTF-8 string.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let text = vol.fs().read_to_string("/seed.txt").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut stream = vol.fs().read_stream("/model.bin").await?;
+while let Some(chunk) = stream.recv().await? {
+    // process chunk
+}
+```
+
+</Accordion>
 
 Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreadstream) that yields 64 KiB chunks, so large files don't have to be held in memory at once.
 
@@ -993,25 +776,19 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut stream = vol.fs().read_stream("/model.bin").await?;
-while let Some(chunk) = stream.recv().await? {
-    // process chunk
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
+```
+
+</Accordion>
 
 Write data to a file, creating parent directories as needed. Overwrites if the file already exists.
 
@@ -1028,22 +805,21 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().write("/config/app.json", r#"{"ready":true}"#).await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut sink = vol.fs().write_stream("/upload.bin").await?;
+sink.write(&chunk).await?;
+sink.close().await?;
+```
+
+</Accordion>
 
 Open a file for streaming writes. Returns a [`VolumeFsWriteSink`](#volumefswritesink) that accepts chunks of bytes. Creates parent directories as needed.
 
@@ -1065,24 +841,21 @@ Open a file for streaming writes. Returns a [`VolumeFsWriteSink`](#volumefswrite
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut sink = vol.fs().write_stream("/upload.bin").await?;
-sink.write(&chunk).await?;
-sink.close().await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for entry in vol.fs().list("/").await? {
+    println!("{} ({} bytes)", entry.path, entry.size);
+}
+```
+
+</Accordion>
 
 List the immediate children of a directory (non-recursive). Each entry includes the path, kind, size, permissions, and modification time.
 
@@ -1104,24 +877,19 @@ List the immediate children of a directory (non-recursive). Each entry includes 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for entry in vol.fs().list("/").await? {
-    println!("{} ({} bytes)", entry.path, entry.size);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn mkdir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().mkdir("/data/incoming").await?;
+```
+
+</Accordion>
 
 Create a directory and any missing parents.
 
@@ -1134,22 +902,19 @@ Create a directory and any missing parents.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().mkdir("/data/incoming").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().remove("/data/stale.tmp").await?;
+```
+
+</Accordion>
 
 Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
@@ -1162,22 +927,19 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().remove("/data/stale.tmp").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().remove_dir("/data/incoming").await?;
+```
+
+</Accordion>
 
 Remove a directory and its contents recursively. Targeting the volume root is rejected.
 
@@ -1190,22 +952,19 @@ Remove a directory and its contents recursively. Targeting the volume root is re
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().remove_dir("/data/incoming").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
+```
+
+</Accordion>
 
 Copy a file within the volume. Creates the destination's parent directories as needed.
 
@@ -1222,22 +981,19 @@ Copy a file within the volume. Creates the destination's parent directories as n
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().copy("/seed.txt", "/backup/seed.txt").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
+```
+
+</Accordion>
 
 Rename or move a file or directory. Creates the destination's parent directories as needed.
 
@@ -1254,22 +1010,20 @@ Rename or move a file or directory. Creates the destination's parent directories
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-vol.fs().rename("/tmp/out.txt", "/done/out.txt").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let meta = vol.fs().stat("/seed.txt").await?;
+println!("{} bytes", meta.size);
+```
+
+</Accordion>
 
 Get metadata for a file or directory: kind, size, permission bits, read-only flag, and timestamps.
 
@@ -1291,23 +1045,21 @@ Get metadata for a file or directory: kind, size, permission bits, read-only fla
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let meta = vol.fs().stat("/seed.txt").await?;
-println!("{} bytes", meta.size);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn exists(&self, path: &str) -> MicrosandboxResult<bool>
 ```
+
+<Accordion title="Example">
+
+```rust
+if !vol.fs().exists("/seed.txt").await? {
+    vol.fs().write("/seed.txt", "hello").await?;
+}
+```
+
+</Accordion>
 
 Check whether a file or directory exists at the given path. Returns `false` rather than an error if the path is absent.
 
@@ -1329,26 +1081,11 @@ Check whether a file or directory exists at the given path. Returns `false` rath
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-if !vol.fs().exists("/seed.txt").await? {
-    vol.fs().write("/seed.txt", "hello").await?;
-}
-```
-
-</Accordion>
-
----
-
 ## VolumeBuilder
 
 Builder for configuring a named volume before creation. Obtained via [`Volume::builder(name)`](#volumebuilder). Directory-backed is the default; disk volumes require [`.disk()`](#disk) plus [`.size()`](#size). Every setter returns `Self`, so calls chain.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn directory(self) -> Self
@@ -1356,10 +1093,7 @@ fn directory(self) -> Self
 
 Create a directory-backed named volume (mounted through virtiofs). This is the default.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn disk(self) -> Self
@@ -1367,25 +1101,11 @@ fn disk(self) -> Self
 
 Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#size).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn size(self, size: impl Into<Mebibytes>) -> Self
 ```
-
-Set the disk volume's capacity. Required for disk volumes; rejected for directory volumes. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `20.gib()`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
-    <div className="msb-param-desc">Capacity in MiB.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -1401,10 +1121,18 @@ let vol = Volume::builder("docker-data")
 
 </Accordion>
 
----
+Set the disk volume's capacity. Required for disk volumes; rejected for directory volumes. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `20.gib()`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
+    <div className="msb-param-desc">Capacity in MiB.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn quota(self, size: impl Into<Mebibytes>) -> Self
@@ -1421,10 +1149,7 @@ Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` he
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -1445,10 +1170,7 @@ Attach a key-value label for organizing and filtering volumes. Can be called mul
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="vb-build"></a>
 
@@ -1467,27 +1189,13 @@ Materialize the [`VolumeConfig`](#volumespec) without creating the volume. Pass 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 <a id="vb-create"></a>
 
 ```rust
 async fn create(self) -> MicrosandboxResult<Volume>
 ```
-
-Create the volume on the active backend. Equivalent to `Volume::create(self.build())`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
-    <div className="msb-param-desc">The created volume.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -1501,16 +1209,22 @@ let vol = Volume::builder("pip-cache")
 
 </Accordion>
 
----
+Create the volume on the active backend. Equivalent to `Volume::create(self.build())`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
+    <div className="msb-param-desc">The created volume.</div>
+  </div>
+</div>
 
 ## MountBuilder
 
 Builder for configuring a volume mount on a sandbox. Used in `SandboxBuilder::volume(guest_path, |v| v...)` (see [`.volume()`](/sdk/rust/sandbox#volume)). Pick exactly one mount kind: [`.bind()`](#bind), [`.named()`](#named) / [`.named_with()`](#named_with), [`.tmpfs()`](#tmpfs), or [`.disk()`](#mb-disk). Kind-specific options are validated when the surrounding `SandboxBuilder` is finalized, so an option set on the wrong kind surfaces a clear error rather than being silently dropped.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">bind()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn bind(self, host: impl Into<PathBuf>) -> Self
@@ -1527,10 +1241,7 @@ Bind mount a host directory into the guest. Changes in the guest are reflected o
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">named()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn named(self, name: impl Into<String>) -> Self
@@ -1547,10 +1258,7 @@ Mount a named volume created via [`Volume::create()`](#volumecreate). The volume
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">named_with()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn named_with(
@@ -1559,21 +1267,6 @@ fn named_with(
     f: impl FnOnce(NamedVolumeBuilder) -> NamedVolumeBuilder,
 ) -> Self
 ```
-
-Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
-    <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -1592,10 +1285,22 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
----
+Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
+    <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">tmpfs()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn tmpfs(self) -> Self
@@ -1603,10 +1308,7 @@ fn tmpfs(self) -> Self
 
 Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good for scratch space, temp files, and build artifacts. Cap its size with [`.size()`](#mb-size).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="mb-disk"></a>
 
@@ -1625,10 +1327,7 @@ Mount a host disk-image file as a virtio-blk device at the guest path. The forma
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">format()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn format(self, format: DiskImageFormat) -> Self
@@ -1645,10 +1344,7 @@ Override the disk-image format for a [`.disk()`](#mb-disk) mount. Valid only wit
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">fstype()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn fstype(self, fstype: impl Into<String>) -> Self
@@ -1665,10 +1361,7 @@ Set the inner filesystem type for a [`.disk()`](#mb-disk) mount, for example `"e
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">readonly()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn readonly(self) -> Self
@@ -1676,10 +1369,7 @@ fn readonly(self) -> Self
 
 Prevent writes to this mount. Enforced both at the host (virtiofs server rejects writes) and in the guest (the kernel returns `EROFS`).
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">noexec()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn noexec(self) -> Self
@@ -1687,10 +1377,7 @@ fn noexec(self) -> Self
 
 Prevent direct execution of files on this mount. Interpreters can still read scripts from the mount, such as `sh /mnt/script.sh`, because the interpreter binary executes from a different filesystem.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">nosuid()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn nosuid(self) -> Self
@@ -1698,10 +1385,7 @@ fn nosuid(self) -> Self
 
 Ignore setuid and setgid privilege elevation from files on this mount.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">nodev()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn nodev(self) -> Self
@@ -1709,10 +1393,7 @@ fn nodev(self) -> Self
 
 Ignore device files on this mount.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">stat_virtualization()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn stat_virtualization(self, policy: StatVirtualization) -> Self
@@ -1729,10 +1410,7 @@ Set the guest stat virtualization policy for a virtiofs-backed mount. Default: [
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">host_permissions()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
 fn host_permissions(self, policy: HostPermissions) -> Self
@@ -1749,10 +1427,7 @@ Set the host permission propagation policy for a virtiofs-backed mount. Default:
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="mb-size"></a>
 
@@ -1771,10 +1446,7 @@ Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) 
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="mb-build"></a>
 
@@ -1793,16 +1465,11 @@ Validate and materialize the mount. Usually called internally by `SandboxBuilder
   </div>
 </div>
 
----
-
 ## NamedVolumeBuilder
 
 Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">existing()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-existing"></a>
 
@@ -1812,10 +1479,7 @@ fn existing(self) -> Self
 
 Require the named volume to already exist. This is the default.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-create"></a>
 
@@ -1825,10 +1489,7 @@ fn create(self) -> Self
 
 Create the named volume at sandbox launch and fail if it already exists.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">ensure_exists()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-ensure_exists"></a>
 
@@ -1838,10 +1499,7 @@ fn ensure_exists(self) -> Self
 
 Create the named volume if it is missing, or reuse a compatible existing volume. Errors if an existing volume's kind, quota, capacity, or explicitly requested labels differ.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">name()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-name"></a>
 
@@ -1860,10 +1518,7 @@ Override the volume name passed to [`named_with()`](#named_with).
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-directory"></a>
 
@@ -1873,10 +1528,7 @@ fn directory(self) -> Self
 
 Use directory-backed storage for a created volume. This is the default. Clears any previously set disk capacity.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-disk"></a>
 
@@ -1886,10 +1538,7 @@ fn disk(self) -> Self
 
 Use raw ext4 disk-image storage for a created volume. Requires [`.size()`](#nv-size). Clears any previously set quota.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-size"></a>
 
@@ -1908,10 +1557,7 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-quota"></a>
 
@@ -1930,10 +1576,7 @@ Set a storage quota for a created directory volume. Accepts a bare `u32` (MiB) o
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 <a id="nv-label"></a>
 
@@ -1956,15 +1599,9 @@ Attach a label to a newly-created volume. For `ensure_exists`, requested labels 
   </div>
 </div>
 
----
-
 ## Types
 
----
-
 ### Volume
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 A live named volume, carrying the backend it was created on. Returned by [`Volume::create()`](#volumecreate) and [`VolumeBuilder::create()`](#vb-create).
 
@@ -1984,11 +1621,7 @@ A live named volume, carrying the backend it was created on. Returned by [`Volum
 | [`local()`](#vol-local) | `Option<&VolumeLocalState>` | Local-only state |
 | [`cloud()`](#vol-cloud) | `Option<&VolumeCloudState>` | Cloud-only state |
 
----
-
 ### VolumeHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 A lightweight handle to a volume, exposing metadata plus filesystem and delete operations without a live [`Volume`](#volume).
 
@@ -2012,11 +1645,7 @@ A lightweight handle to a volume, exposing metadata plus filesystem and delete o
 | [`local()`](#h-local) | `Option<&VolumeHandleLocalState>` | Local-only state |
 | [`cloud()`](#h-cloud) | `Option<&VolumeHandleCloudState>` | Cloud-only state |
 
----
-
 ### VolumeBuilder
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Builder for configuring a named volume before creation. Implements `From<VolumeConfig>`.
 
@@ -2032,11 +1661,7 @@ Builder for configuring a named volume before creation. Implements `From<VolumeC
 | [`build()`](#vb-build) | [`VolumeConfig`](#volumespec) | Materialize config |
 | [`create()`](#vb-create) | [`Volume`](#volume) | Create the volume |
 
----
-
 ### VolumeFs
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Host-side filesystem operations on a volume. Borrows the parent's backend and name and dispatches each op through the backend. A lifetime-bound handle (`VolumeFs<'_>`).
 
@@ -2060,11 +1685,7 @@ Host-side filesystem operations on a volume. Borrows the parent's backend and na
 
 `VolumeFs::with_backend(backend, name)` is also available as a public constructor for FFI shims that re-assemble a handle per call; most callers use `Volume::fs()` / `VolumeHandle::fs()`.
 
----
-
 ### VolumeFsReadStream
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 A streaming reader for file data from a local volume directory. Returned by [`VolumeFs::read_stream()`](#fs-read_stream).
 
@@ -2075,11 +1696,7 @@ A streaming reader for file data from a local volume directory. Returned by [`Vo
 | `recv()` | `Option<Bytes>` | Next chunk; `None` at EOF |
 | `collect()` | `Bytes` | Read the rest into one buffer |
 
----
-
 ### VolumeFsWriteSink
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 A streaming writer for file data to a local volume directory. Returned by [`VolumeFs::write_stream()`](#fs-write_stream).
 
@@ -2090,11 +1707,7 @@ A streaming writer for file data to a local volume directory. Returned by [`Volu
 | `write(data)` | `()` | Append a chunk |
 | `close()` | `()` | Flush and close |
 
----
-
 ### MountBuilder
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Builder for a sandbox volume mount, used in `SandboxBuilder::volume`. Builds a `VolumeMount`.
 
@@ -2118,11 +1731,7 @@ Builder for a sandbox volume mount, used in `SandboxBuilder::volume`. Builds a `
 | [`size()`](#mb-size) | `Self` | tmpfs size limit |
 | [`build()`](#mb-build) | `MicrosandboxResult<VolumeMount>` | Validate and materialize |
 
----
-
 ### NamedVolumeBuilder
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-time existence behavior and creation metadata.
 
@@ -2140,11 +1749,7 @@ Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-tim
 | [`quota()`](#nv-quota) | `Self` | Directory quota |
 | [`label()`](#nv-label) | `Self` | Attach a label |
 
----
-
 ### VolumeKind
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 Storage kind for a named volume.
 
@@ -2155,11 +1760,7 @@ Storage kind for a named volume.
 | `Directory` | Directory-backed volume mounted through virtiofs |
 | `Disk` | Raw ext4 disk-image volume mounted through virtio-blk |
 
----
-
 ### VolumeSpec
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Configuration for creating a named volume. Re-exported as both `VolumeSpec` and the alias `VolumeConfig`.
 
@@ -2173,11 +1774,7 @@ Configuration for creating a named volume. Re-exported as both `VolumeSpec` and 
 | `capacity_mib` | `Option<u32>` | Disk capacity in MiB; required for disk volumes |
 | `labels` | `Vec<(String, String)>` | Organization labels |
 
----
-
 ### MountOptions
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder-2) toggles; all fields default to `false`.
 
@@ -2188,11 +1785,7 @@ Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#m
 | `nosuid` | `bool` | setuid/setgid elevation from files on the mount is ignored |
 | `nodev` | `bool` | Device files on the mount are ignored |
 
----
-
 ### StatVirtualization
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set via [`MountBuilder::stat_virtualization()`](#stat_virtualization).
 
@@ -2202,11 +1795,7 @@ Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set v
 | `Relaxed` | Opportunistic: apply the overlay when present; tolerate missing xattr support |
 | `Off` | Literal host metadata: do not read or apply the override xattr |
 
----
-
 ### HostPermissions
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 Host permission propagation policy for a virtiofs-backed mount. Default: `Private`. Set via [`MountBuilder::host_permissions()`](#host_permissions).
 
@@ -2215,11 +1804,7 @@ Host permission propagation policy for a virtiofs-backed mount. Default: `Privat
 | `Private` | Guest chmod stays in the metadata overlay only |
 | `Mirror` | Mirror ordinary rwx bits for files and directories to the host inode |
 
----
-
 ### DiskImageFormat
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 Disk image format for virtio-blk root filesystems and volume mounts. Used by [`MountBuilder::format()`](#format).
 
@@ -2229,11 +1814,7 @@ Disk image format for virtio-blk root filesystems and volume mounts. Used by [`M
 | `Raw` | Raw disk image |
 | `Vmdk` | VMware Disk (FLAT/ZERO only, no delta links) |
 
----
-
 ### NamedVolumeMode
-
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`](#namedvolumebuilder-2).
 
