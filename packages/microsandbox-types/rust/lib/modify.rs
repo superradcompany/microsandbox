@@ -130,6 +130,7 @@ pub struct SecretModificationPatch {
 /// Host-side source for secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretSource {
     /// Read the value from a host environment variable at apply time.

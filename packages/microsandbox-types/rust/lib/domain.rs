@@ -514,6 +514,7 @@ pub struct SecretEntry {
     /// entry drops.
     #[serde(default = "empty_secret_value")]
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub value: Zeroizing<String>,
 
     /// Host-side source reference resolved into [`value`](Self::value) at
