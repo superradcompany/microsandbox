@@ -645,9 +645,9 @@ pub fn apply_sandbox_opts(
         // `auto` is the magic sentinel that asks agentd to probe a
         // candidate list inside the guest rootfs. Anything else must
         // be an absolute path so the eventual execve can find it.
-        if init_path != microsandbox_protocol::HANDOFF_INIT_AUTO
-            && !std::path::Path::new(init_path).is_absolute()
-        {
+        // Checked textually — `Path::is_absolute` follows host semantics
+        // and treats `/sbin/init` as relative on Windows.
+        if init_path != microsandbox_protocol::HANDOFF_INIT_AUTO && !init_path.starts_with('/') {
             anyhow::bail!("--init must be an absolute path or `auto`, got: {init_path}");
         }
         if opts.init_arg.is_empty() && opts.init_env.is_empty() {

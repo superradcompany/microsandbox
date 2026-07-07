@@ -52,15 +52,18 @@ fn require_test_init() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Build a sandbox with the test init patched in at `/sbin/init`.
+/// Build a sandbox with the test init patched in at `/sbin/test-init`.
+///
+/// The destination basename must be `test-init`: the kernel sets `/proc/1/comm` from the basename of the execve'd path, and the comm assertion below relies on it to
+/// distinguish our init from the image's own `/sbin/init` (busybox on alpine).
 async fn boot_with_test_init(name: &str, init_bin: &Path) -> Sandbox {
     Sandbox::builder(name)
         .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(256)
         .replace()
-        .patch(|p| p.copy_file(init_bin, "/sbin/init", Some(0o755), true))
-        .init("/sbin/init")
+        .patch(|p| p.copy_file(init_bin, "/sbin/test-init", Some(0o755), true))
+        .init("/sbin/test-init")
         .create()
         .await
         .expect("create sandbox with handoff")
