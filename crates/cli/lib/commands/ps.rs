@@ -162,8 +162,8 @@ fn status_json(handle: &SandboxHandle) -> serde_json::Value {
         "status": status,
         "image": config.as_ref().map(extract_image_raw).unwrap_or_else(|| "-".to_string()),
         "command": config.as_ref().map(format_command_raw).unwrap_or_else(|| "-".to_string()),
-        "cpus": resources.map(|r| r.cpus),
-        "max_cpus": resources.map(|r| r.max_cpus.max(r.cpus)),
+        "cpus": resources.map(|r| r.vcpus),
+        "max_cpus": resources.map(|r| r.max_vcpus.max(r.vcpus)),
         "memory_mib": resources.map(|r| r.memory_mib),
         "max_memory_mib": resources.map(|r| r.max_memory_mib.max(r.memory_mib)),
         "ports": config.as_ref().map(format_ports_raw).unwrap_or_default(),
@@ -190,8 +190,8 @@ fn format_resources(config: &SandboxConfig) -> (String, String) {
     let resources = &config.spec.resources;
     let cpus = format!(
         "{} / {}",
-        resources.cpus,
-        resources.max_cpus.max(resources.cpus)
+        resources.vcpus,
+        resources.max_vcpus.max(resources.vcpus)
     );
     let mem = format!(
         "{} / {}",

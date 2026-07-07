@@ -77,7 +77,7 @@ pub struct SecretPatchBuilder {
 }
 
 struct DesiredResources {
-    max_cpus: u8,
+    max_vcpus: u8,
     max_memory_mib: u32,
 }
 
@@ -113,13 +113,13 @@ impl SandboxModificationBuilder {
 
     /// Set the desired effective vCPU count.
     pub fn cpus(mut self, cpus: u8) -> Self {
-        self.patch.cpus = Some(cpus);
+        self.patch.vcpus = Some(cpus);
         self
     }
 
     /// Set the desired boot-time maximum possible vCPU count.
     pub fn max_cpus(mut self, max_cpus: u8) -> Self {
-        self.patch.max_cpus = Some(max_cpus);
+        self.patch.max_vcpus = Some(max_cpus);
         self
     }
 
@@ -324,7 +324,7 @@ impl SandboxModificationBuilder {
             // change as pending. The guest driver converges asynchronously;
             // enforcement applies immediately either way.
             if let Some(active) = active.as_mut() {
-                active.spec.resources.cpus = target;
+                active.spec.resources.vcpus = target;
                 persist_active_config(&self.backend, &handle, active).await?;
             }
         }
@@ -504,7 +504,7 @@ fn live_cpu_target(plan: &SandboxModificationPlan, patch: &SandboxModificationPa
                     && matches!(change.disposition, ModificationDisposition::Live)
         )
     });
-    if live_cpus { patch.cpus } else { None }
+    if live_cpus { patch.vcpus } else { None }
 }
 
 /// The live memory target in MiB, when the plan classified `memory` as live.
@@ -785,14 +785,14 @@ fn plan_requires_restart(plan: &SandboxModificationPlan) -> bool {
 }
 
 fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModificationPatch) {
-    if let Some(cpus) = patch.cpus {
-        config.spec.resources.cpus = cpus;
+    if let Some(cpus) = patch.vcpus {
+        config.spec.resources.vcpus = cpus;
     }
-    if let Some(max_cpus) = patch.max_cpus {
-        config.spec.resources.max_cpus = max_cpus;
+    if let Some(max_cpus) = patch.max_vcpus {
+        config.spec.resources.max_vcpus = max_cpus;
     }
-    if config.spec.resources.max_cpus < config.spec.resources.cpus {
-        config.spec.resources.max_cpus = config.spec.resources.cpus;
+    if config.spec.resources.max_vcpus < config.spec.resources.vcpus {
+        config.spec.resources.max_vcpus = config.spec.resources.vcpus;
     }
     if let Some(memory_mib) = patch.memory_mib {
         config.spec.resources.memory_mib = memory_mib;
@@ -857,7 +857,7 @@ fn apply_secret_patch_to_config(
     }
     network
         .secrets
-        .secrets
+        .entries
         .retain(|entry| !patch.secrets_remove.contains(&entry.env_var));
     // Enforce env-var and placeholder shape rules before anything persists;
     // validation errors carry entry indexes and sizes, never values.
@@ -920,7 +920,7 @@ fn apply_secret_spec(
 
     let material = secret_material(spec)?;
     if let Some(entry) = secrets
-        .secrets
+        .entries
         .iter_mut()
         .find(|entry| entry.env_var == spec.name)
     {
@@ -954,7 +954,7 @@ fn apply_secret_spec(
                 )));
             }
         };
-        secrets.secrets.push(SecretEntry {
+        secrets.entries.push(SecretEntry {
             env_var: spec.name.clone(),
             value,
             source,
@@ -1173,13 +1173,13 @@ fn push_resource_changes(
     let resources = config.spec.resources;
     let desired = desired_resources(config, patch);
 
-    if let Some(cpus) = patch.cpus
-        && cpus != resources.cpus
+    if let Some(cpus) = patch.vcpus
+        && cpus != resources.vcpus
     {
         // CPUs change live when the target fits inside the capacity the running
         // VM actually booted with. The active config snapshot is the authority;
         // older runtimes without one classify as restart-required.
-        let active_max_cpus = active.map(|active| active.spec.resources.max_cpus);
+        let active_max_cpus = active.map(|active| active.spec.resources.max_vcpus);
         let live = live_control_supported && active_max_cpus.is_some_and(|max| cpus <= max);
         let reason = match (resource_disposition(status, policy, live), active_max_cpus) {
             (ModificationDisposition::RequiresRestart, Some(max)) if cpus > max => Some(format!(
@@ -1190,7 +1190,7 @@ fn push_resource_changes(
         changes.push(PlannedChange::Config(ConfigPlannedChange {
             field: "cpus".to_string(),
             change: ChangeKind::Updated,
-            before: Some(resources.cpus.to_string()),
+            before: Some(resources.vcpus.to_string()),
             after: Some(cpus.to_string()),
             disposition: resource_disposition(status, policy, live),
             reason,
@@ -1198,14 +1198,14 @@ fn push_resource_changes(
         push_live_resize_warning("cpus", status, policy, live, warnings);
     }
 
-    if desired.max_cpus != resources.max_cpus
-        && (patch.max_cpus.is_some() || desired.max_cpus > resources.max_cpus)
+    if desired.max_vcpus != resources.max_vcpus
+        && (patch.max_vcpus.is_some() || desired.max_vcpus > resources.max_vcpus)
     {
         changes.push(PlannedChange::Config(ConfigPlannedChange {
             field: "max_cpus".to_string(),
             change: ChangeKind::Updated,
-            before: Some(resources.max_cpus.to_string()),
-            after: Some(desired.max_cpus.to_string()),
+            before: Some(resources.max_vcpus.to_string()),
+            after: Some(desired.max_vcpus.to_string()),
             disposition: boot_capacity_disposition(status, policy),
             reason: boot_capacity_reason(status, policy, "max_cpus"),
         }));
@@ -1715,7 +1715,7 @@ fn push_resource_conflicts(
     patch: &SandboxModificationPatch,
     conflicts: &mut Vec<ModificationConflict>,
 ) {
-    if matches!(patch.cpus, Some(0)) {
+    if matches!(patch.vcpus, Some(0)) {
         conflicts.push(ModificationConflict {
             field: "cpus".to_string(),
             message: "cpus must be greater than 0".to_string(),
@@ -1727,7 +1727,7 @@ fn push_resource_conflicts(
             message: "memory must be greater than 0".to_string(),
         });
     }
-    if matches!(patch.max_cpus, Some(0)) {
+    if matches!(patch.max_vcpus, Some(0)) {
         conflicts.push(ModificationConflict {
             field: "max_cpus".to_string(),
             message: "max_cpus must be greater than 0".to_string(),
@@ -1740,8 +1740,8 @@ fn push_resource_conflicts(
         });
     }
 
-    let desired_cpus = patch.cpus.unwrap_or(config.spec.resources.cpus);
-    if let Some(max_cpus) = patch.max_cpus
+    let desired_cpus = patch.vcpus.unwrap_or(config.spec.resources.vcpus);
+    if let Some(max_cpus) = patch.max_vcpus
         && max_cpus < desired_cpus
     {
         conflicts.push(ModificationConflict {
@@ -1767,16 +1767,16 @@ fn push_resource_conflicts(
 
 fn desired_resources(config: &SandboxConfig, patch: &SandboxModificationPatch) -> DesiredResources {
     let resources = config.spec.resources;
-    let cpus = patch.cpus.unwrap_or(resources.cpus);
+    let cpus = patch.vcpus.unwrap_or(resources.vcpus);
     let memory_mib = patch.memory_mib.unwrap_or(resources.memory_mib);
-    let max_cpus = patch.max_cpus.unwrap_or(resources.max_cpus).max(cpus);
+    let max_cpus = patch.max_vcpus.unwrap_or(resources.max_vcpus).max(cpus);
     let max_memory_mib = patch
         .max_memory_mib
         .unwrap_or(resources.max_memory_mib)
         .max(memory_mib);
 
     DesiredResources {
-        max_cpus,
+        max_vcpus: max_cpus,
         max_memory_mib,
     }
 }
@@ -2026,7 +2026,7 @@ fn existing_secret_from_network_config(
     let network = config.local_network_config().ok()?;
     network
         .secrets
-        .secrets
+        .entries
         .into_iter()
         .find(|secret| secret.env_var == name)
         .map(|secret| ExistingSecret {
@@ -2150,9 +2150,9 @@ mod tests {
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.spec.name = "api".to_string();
-        config.spec.resources.cpus = cpus;
+        config.spec.resources.vcpus = cpus;
         config.spec.resources.memory_mib = memory_mib;
-        config.spec.resources.max_cpus = cpus;
+        config.spec.resources.max_vcpus = cpus;
         config.spec.resources.max_memory_mib = memory_mib;
         config
     }
@@ -2160,7 +2160,7 @@ mod tests {
     #[test]
     fn running_resource_changes_require_restart_until_live_resize_lands() {
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
         };
@@ -2203,10 +2203,10 @@ mod tests {
         // The sandbox booted with reserved capacity: desired and active agree
         // on max_cpus 8 while only 2 CPUs are online.
         let mut desired = config(2, 1024);
-        desired.spec.resources.max_cpus = 8;
+        desired.spec.resources.max_vcpus = 8;
         let active = desired.clone();
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             ..SandboxModificationPatch::default()
         };
 
@@ -2275,9 +2275,9 @@ mod tests {
     #[test]
     fn running_cpus_above_active_capacity_require_restart() {
         let mut active = config(2, 1024);
-        active.spec.resources.max_cpus = 8;
+        active.spec.resources.max_vcpus = 8;
         let patch = SandboxModificationPatch {
-            cpus: Some(12),
+            vcpus: Some(12),
             ..SandboxModificationPatch::default()
         };
 
@@ -2311,7 +2311,7 @@ mod tests {
     #[test]
     fn restart_policy_allows_restart_required_resource_apply() {
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
         };
@@ -2332,7 +2332,7 @@ mod tests {
     #[test]
     fn no_restart_policy_rejects_restart_required_resource_apply() {
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
         };
@@ -2353,7 +2353,7 @@ mod tests {
     #[test]
     fn stopped_resource_changes_are_next_start() {
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
         };
@@ -2381,8 +2381,8 @@ mod tests {
     #[test]
     fn max_capacity_conflicts_with_requested_effective_value() {
         let patch = SandboxModificationPatch {
-            cpus: Some(8),
-            max_cpus: Some(4),
+            vcpus: Some(8),
+            max_vcpus: Some(4),
             memory_mib: Some(8192),
             max_memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
@@ -2406,8 +2406,8 @@ mod tests {
     #[test]
     fn zero_resource_values_are_conflicts() {
         let patch = SandboxModificationPatch {
-            cpus: Some(0),
-            max_cpus: Some(0),
+            vcpus: Some(0),
+            max_vcpus: Some(0),
             memory_mib: Some(0),
             max_memory_mib: Some(0),
             ..SandboxModificationPatch::default()
@@ -2449,15 +2449,15 @@ mod tests {
     fn applying_effective_resource_change_raises_capacity_when_needed() {
         let mut config = config(2, 1024);
         let patch = SandboxModificationPatch {
-            cpus: Some(4),
+            vcpus: Some(4),
             memory_mib: Some(4096),
             ..SandboxModificationPatch::default()
         };
 
         apply_patch_to_config(&mut config, &patch);
 
-        assert_eq!(config.spec.resources.cpus, 4);
-        assert_eq!(config.spec.resources.max_cpus, 4);
+        assert_eq!(config.spec.resources.vcpus, 4);
+        assert_eq!(config.spec.resources.max_vcpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 4096);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
     }
@@ -2995,7 +2995,7 @@ mod tests {
 
         let mut config = config(2, 1024);
         let mut network = config.local_network_config().unwrap();
-        network.secrets.secrets.push(SecretEntry {
+        network.secrets.entries.push(SecretEntry {
             env_var: name.to_string(),
             value: zeroize::Zeroizing::new(value.to_string()),
             source: None,
@@ -3068,10 +3068,10 @@ mod tests {
     fn running_secret_rotate_remove_hosts_classify_live_with_runtime_support() {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
         let mut network = config.local_network_config().unwrap();
-        let mut other = network.secrets.secrets[0].clone();
+        let mut other = network.secrets.entries[0].clone();
         other.env_var = "OTHER_KEY".to_string();
         other.placeholder = "$MSB_OTHER_KEY".to_string();
-        network.secrets.secrets.push(other);
+        network.secrets.entries.push(other);
         config.set_local_network_config(network).unwrap();
 
         let patch = patch_with_specs(vec![
@@ -3429,7 +3429,7 @@ mod tests {
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
         let network = config.local_network_config().unwrap();
-        let entry = &network.secrets.secrets[0];
+        let entry = &network.secrets.entries[0];
         assert_eq!(entry.env_var, "API_KEY");
         assert!(entry.value.is_empty());
         assert_eq!(
@@ -3455,7 +3455,7 @@ mod tests {
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
         let network = config.local_network_config().unwrap();
-        let entry = &network.secrets.secrets[0];
+        let entry = &network.secrets.entries[0];
         assert!(entry.value.is_empty());
         assert_eq!(
             entry.source,
@@ -3474,7 +3474,7 @@ mod tests {
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
         // Give the entry a stale source reference to prove the value clears it.
         let mut network = config.local_network_config().unwrap();
-        network.secrets.secrets[0].source = Some(SecretSource::Env {
+        network.secrets.entries[0].source = Some(SecretSource::Env {
             var: "API_KEY".into(),
         });
         config.set_local_network_config(network).unwrap();
@@ -3488,7 +3488,7 @@ mod tests {
         // The value persists at rest (documented secret_env-style property)
         // and the entry is no longer reference-backed.
         let network = config.local_network_config().unwrap();
-        let entry = &network.secrets.secrets[0];
+        let entry = &network.secrets.entries[0];
         assert_eq!(entry.value.as_str(), "caller-held-value");
         assert_eq!(entry.source, None);
         assert_eq!(entry.placeholder, "$MSB_API_KEY");
@@ -3506,7 +3506,7 @@ mod tests {
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
         let network = config.local_network_config().unwrap();
-        assert!(network.secrets.secrets.is_empty());
+        assert!(network.secrets.entries.is_empty());
     }
 
     #[cfg(feature = "net")]
@@ -3521,7 +3521,7 @@ mod tests {
 
         let network = config.local_network_config().unwrap();
         assert_eq!(
-            network.secrets.secrets[0].allowed_hosts,
+            network.secrets.entries[0].allowed_hosts,
             vec![
                 HostPattern::Wildcard("*.example.org".into()),
                 HostPattern::Any,
@@ -3540,7 +3540,7 @@ mod tests {
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
 
         let network = config.local_network_config().unwrap();
-        assert_eq!(network.secrets.secrets[0].placeholder, "$NEW_REF");
+        assert_eq!(network.secrets.entries[0].placeholder, "$NEW_REF");
     }
 
     #[cfg(feature = "net")]

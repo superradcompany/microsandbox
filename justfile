@@ -309,3 +309,18 @@ _clean-unix:
 [windows]
 clean:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1 clean
+
+# Regenerate the `@microsandbox/types` TypeScript bindings from Rust.
+#
+# ts-rs is the sole codegen: the `typescript` module in `microsandbox-types`
+# renders every `#[cfg_attr(feature = "ts", derive(TS))]` spec sub-type into the
+# checked-in `typescript/src/index.ts` (faithful to serde's external tagging).
+# Go/Python consume the JSON contract directly, so there are no generated
+# bindings for them. Adding a spec field means regenerating here, not
+# hand-editing the output.
+gen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    REGEN_TS_BINDINGS=1 cargo test -p microsandbox-types --features ts \
+        checked_in_bindings_match_generated_output
+    echo "generated packages/microsandbox-types/typescript/src/index.ts"

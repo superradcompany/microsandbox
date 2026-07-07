@@ -437,7 +437,7 @@ fn slot_rank(live: &LiveMetric) -> u8 {
 
 fn report_from_live(live: LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetricsReport {
     let state = classify_state(&live, config);
-    let cpus = config.map(|config| u32::from(config.spec.resources.cpus));
+    let cpus = config.map(|config| u32::from(config.spec.resources.vcpus));
     let metrics = to_sandbox_metrics(&live, config);
     SandboxMetricsReport {
         name: live.name,

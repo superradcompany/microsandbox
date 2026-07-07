@@ -26,11 +26,11 @@ use crate::domain::EnvVar;
 pub struct SandboxModificationPatch {
     /// Desired effective vCPU count.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpus: Option<u8>,
+    pub vcpus: Option<u8>,
 
     /// Desired boot-time maximum possible vCPU count.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_cpus: Option<u8>,
+    pub max_vcpus: Option<u8>,
 
     /// Desired effective guest memory in MiB.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +134,7 @@ pub struct SecretModificationPatch {
 /// Host-side source for secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretSource {
     /// Read the value from a host environment variable at apply time.

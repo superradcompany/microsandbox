@@ -68,6 +68,7 @@ typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
 
 typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_create_from_spec_fn)(uint64_t cancel_id, const char *spec_json, const char *overrides_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_lookup_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_connect_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_start_fn)(uint64_t cancel_id, const char *name, bool detached, uint8_t *buf, size_t buf_len);
@@ -209,6 +210,7 @@ static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
+static msb_sandbox_create_from_spec_fn ptr_msb_sandbox_create_from_spec = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
 static msb_sandbox_start_fn      ptr_msb_sandbox_start      = NULL;
@@ -368,6 +370,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE(msb_sandbox_create);
+	RESOLVE(msb_sandbox_create_from_spec);
 	RESOLVE(msb_sandbox_lookup);
 	RESOLVE(msb_sandbox_connect);
 	RESOLVE(msb_sandbox_start);
@@ -518,6 +521,9 @@ void call_msb_cancel_unregister(uint64_t id) {
 }
 char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_create_from_spec(uint64_t cancel_id, const char *spec_json, const char *overrides_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_create_from_spec ? ptr_msb_sandbox_create_from_spec(cancel_id, spec_json, overrides_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_lookup(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_lookup ? ptr_msb_sandbox_lookup(cancel_id, name, buf, buf_len) : NULL;
@@ -1637,6 +1643,48 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 		return nil, fmt.Errorf("parse create response: %w", err)
 	}
 	s := &Sandbox{name: name}
+	s.handle.Store(resp.Handle)
+	return s, nil
+}
+
+// CreateSandboxFromSpec creates a sandbox from a full, pre-marshaled SandboxSpec
+// (specJSON = the flattened spec plus optional operational flags: detached,
+// replace, replace_with_timeout_ms, registry_auth). Unlike CreateSandbox it
+// drops nothing in translation — the whole spec is fed straight to the builder.
+func CreateSandboxFromSpec(ctx context.Context, specJSON string, overrides CreateOptions) (*Sandbox, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	// The sandbox name lives inside the spec; pull it out to label the handle.
+	var hdr struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal([]byte(specJSON), &hdr)
+	overridesJSON, err := json.Marshal(overrides)
+	if err != nil {
+		return nil, fmt.Errorf("marshal overrides: %w", err)
+	}
+	cSpec := C.CString(specJSON)
+	defer C.free(unsafe.Pointer(cSpec))
+	cOverrides := C.CString(string(overridesJSON))
+	defer C.free(unsafe.Pointer(cOverrides))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_create_from_spec(cancelID, cSpec, cOverrides, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Handle uint64 `json:"handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
+		return nil, fmt.Errorf("parse create-from-spec response: %w", err)
+	}
+	s := &Sandbox{name: hdr.Name}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }

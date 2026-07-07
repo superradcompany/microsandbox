@@ -304,7 +304,10 @@ jobs:
         run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
 
       - name: Check generated microsandbox types
-        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+        run: |
+          REGEN_TS_BINDINGS=1 cargo +stable test -p microsandbox-types --features ts \
+            checked_in_bindings_match_generated_output
+          git diff --exit-code -- packages/microsandbox-types/typescript/src/index.ts
 
       # -- Checks (agentd — Linux-only) --
       - name: Format agentd

@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::secrets::config::{SecretsConfig, ViolationAction};
+use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
 };
@@ -269,7 +269,7 @@ async fn tcp_proxy_task(
     // is reused and this is cheap; with no secrets it is skipped entirely
     // (`is_tls` only matters for deciding whether to build the handler).
     let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
-    let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
+    let (initial_buf, is_tls) = if !secrets.entries.is_empty() {
         classify_first_flight(
             initial_buf,
             &mut from_smoltcp,
@@ -311,7 +311,7 @@ async fn tcp_proxy_task(
     }
 
     let mut late_connect_state = tls_state;
-    let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls {
+    let mut secrets_handler: Option<SecretsHandler> = if !secrets.entries.is_empty() && !is_tls {
         Some(match extract_http_host(&initial_buf) {
             Some(host) => SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared),
             None => SecretsHandler::new_plain_http_invalid_host(&secrets),
@@ -704,7 +704,7 @@ fn sanitize_connect_headers<'a>(
     header_bytes: &'a [u8],
     secrets: &SecretsConfig,
 ) -> Result<Cow<'a, [u8]>, ViolationAction> {
-    if secrets.secrets.is_empty() {
+    if secrets.entries.is_empty() {
         return Ok(Cow::Borrowed(header_bytes));
     }
 
@@ -1508,7 +1508,7 @@ mod tests {
 
     fn make_plain_http_secret(placeholder: &str, value: &str, require_tls: bool) -> SecretsConfig {
         SecretsConfig {
-            secrets: vec![SecretEntry {
+            entries: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: zeroize::Zeroizing::new(value.into()),
                 source: None,
@@ -1529,7 +1529,7 @@ mod tests {
 
     fn make_host_bound_secret(placeholder: &str, value: &str, host: &str) -> SecretsConfig {
         SecretsConfig {
-            secrets: vec![SecretEntry {
+            entries: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: zeroize::Zeroizing::new(value.into()),
                 source: None,
@@ -1713,7 +1713,7 @@ mod tests {
         );
 
         let secrets = SecretsConfig {
-            secrets: vec![SecretEntry {
+            entries: vec![SecretEntry {
                 env_var: "API_KEY".into(),
                 value: zeroize::Zeroizing::new("real-secret-value".into()),
                 source: None,

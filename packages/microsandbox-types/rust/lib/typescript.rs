@@ -3,16 +3,20 @@
 use ts_rs::TS;
 
 use crate::{
-    ChangeKind, CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, ConfigPlannedChange, DiskImageFormat, EnvVar,
-    HandoffInit, HostPermissions, LogSource, ModificationConflict, ModificationDisposition,
-    ModificationPolicy, ModificationWarning, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    NetworkSpec, OciRootfsSource, Patch, PlannedChange, PortProtocol, PublishedPortSpec,
-    PullPolicy, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Rlimit,
-    RlimitResource, RootfsSource, SandboxLogLevel, SandboxModificationPatch,
-    SandboxModificationPlan, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    SecretChangeKind, SecretModificationPatch, SecretPlannedChange, SecretSource, SecurityProfile,
-    SnapshotDestination, SnapshotSpec, StatVirtualization, VolumeKind, VolumeMount, VolumeSpec,
+    Action, CertCacheConfig, ChangeKind, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudRootfsSource,
+    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
+    ConfigPlannedChange, Destination, DestinationGroup, Direction, DiskImageFormat, DnsConfig,
+    EnvVar, HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides,
+    ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
+    MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource,
+    Patch, PlannedChange, PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Rlimit, RlimitResource,
+    RootfsSource, Rule, SandboxLogLevel, SandboxModificationPatch, SandboxModificationPlan,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert,
+    ScopedVerifyUpstream, SecretChangeKind, SecretEntry, SecretInjection, SecretModificationPatch,
+    SecretPlannedChange, SecretSource, SecretsConfig, SecurityProfile, StatVirtualization,
+    TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -45,7 +49,6 @@ pub fn declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
 
     vec![
-        serde_json::Value::decl(&cfg),
         DiskImageFormat::decl(&cfg),
         OciRootfsSource::decl(&cfg),
         RootfsSource::decl(&cfg),
@@ -60,13 +63,31 @@ pub fn declarations() -> Vec<String> {
         NamedVolumeCreate::decl(&cfg),
         VolumeMount::decl(&cfg),
         Patch::decl(&cfg),
+        HostPattern::decl(&cfg),
+        SecretInjection::decl(&cfg),
+        ViolationAction::decl(&cfg),
+        SecretEntry::decl(&cfg),
+        SecretsConfig::decl(&cfg),
+        InterceptCaConfig::decl(&cfg),
+        CertCacheConfig::decl(&cfg),
+        ScopedUpstreamCaCert::decl(&cfg),
+        ScopedVerifyUpstream::decl(&cfg),
+        TlsConfig::decl(&cfg),
+        Action::decl(&cfg),
+        Direction::decl(&cfg),
+        Protocol::decl(&cfg),
+        DestinationGroup::decl(&cfg),
+        Destination::decl(&cfg),
+        PortRange::decl(&cfg),
+        Rule::decl(&cfg),
+        NetworkPolicy::decl(&cfg),
+        DnsConfig::decl(&cfg),
+        InterfaceOverrides::decl(&cfg),
         NetworkSpec::decl(&cfg),
         PublishedPortSpec::decl(&cfg),
         PortProtocol::decl(&cfg),
         HandoffInit::decl(&cfg),
         SandboxPolicy::decl(&cfg),
-        SnapshotDestination::decl(&cfg),
-        SnapshotSpec::decl(&cfg),
         SandboxSpec::decl(&cfg),
         SandboxResources::decl(&cfg),
         SandboxRuntimeOptions::decl(&cfg),
@@ -74,7 +95,6 @@ pub fn declarations() -> Vec<String> {
         SandboxLogLevel::decl(&cfg),
         RlimitResource::decl(&cfg),
         Rlimit::decl(&cfg),
-        LogSource::decl(&cfg),
         SandboxModificationPatch::decl(&cfg),
         ModificationPolicy::decl(&cfg),
         SecretModificationPatch::decl(&cfg),
@@ -91,10 +111,14 @@ pub fn declarations() -> Vec<String> {
         ResourceKind::decl(&cfg),
         ResourceConvergenceState::decl(&cfg),
         ResourceResizeStatus::decl(&cfg),
-        CloudCreateSandboxRequest::decl(&cfg),
-        CloudSandbox::decl(&cfg),
+        CloudNetworkSpec::decl(&cfg),
+        CloudRootfsSource::decl(&cfg),
+        CloudSandboxResources::decl(&cfg),
+        CloudSandboxRuntimeOptions::decl(&cfg),
+        CloudSandboxSpec::decl(&cfg),
+        CloudCreateSandboxResponse::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
-        CloudPaginated::<CloudSandbox>::decl(&cfg),
+        CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
         CloudErrorDetails::decl(&cfg),
@@ -142,18 +166,31 @@ mod tests {
             .parent()
             .expect("microsandbox-types rust crate should live under <package>/rust");
         let bindings_path = package_root.join("typescript/src/index.ts");
+
+        // `just gen` (and the CI staleness gate) set this to rewrite the
+        // checked-in bindings from the ts-rs declarations.
+        if std::env::var_os("REGEN_TS_BINDINGS").is_some() {
+            fs::write(&bindings_path, &generated).expect("write bindings");
+            return;
+        }
+
         let bindings = fs::read_to_string(&bindings_path).unwrap_or_else(|err| {
             panic!("failed to read {}: {err}", bindings_path.display());
         });
 
-        assert_eq!(bindings, generated, "{} is stale", bindings_path.display());
+        assert_eq!(
+            bindings,
+            generated,
+            "{} is stale; run `just gen`",
+            bindings_path.display()
+        );
     }
 
     #[test]
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 53);
+        assert_eq!(declarations.len(), 71);
         assert!(
             declarations
                 .iter()
@@ -164,7 +201,7 @@ mod tests {
         assert!(
             declarations
                 .iter()
-                .any(|decl| decl.contains("CloudCreateSandboxRequest"))
+                .any(|decl| decl.contains("CloudSandboxSpec"))
         );
         assert!(
             declarations

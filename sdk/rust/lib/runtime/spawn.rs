@@ -286,7 +286,7 @@ pub async fn spawn_sandbox(
         msb = %msb_path.display(),
         libkrunfw = %libkrunfw_path.display(),
         sandbox = %config.spec.name,
-        cpus = config.spec.resources.cpus,
+        cpus = config.spec.resources.vcpus,
         memory_mib = config.spec.resources.memory_mib,
         mode = ?mode,
         "spawn_sandbox: resolved paths"
@@ -2193,12 +2193,12 @@ fn sandbox_cli_args(
         visible.push(pipe.to_os_string());
     }
     visible.push(OsString::from("--vcpus"));
-    visible.push(OsString::from(config.spec.resources.cpus.to_string()));
+    visible.push(OsString::from(config.spec.resources.vcpus.to_string()));
     visible.push(OsString::from("--memory-mib"));
     visible.push(OsString::from(config.spec.resources.memory_mib.to_string()));
-    if config.spec.resources.max_cpus > config.spec.resources.cpus {
+    if config.spec.resources.max_vcpus > config.spec.resources.vcpus {
         visible.push(OsString::from("--max-vcpus"));
-        visible.push(OsString::from(config.spec.resources.max_cpus.to_string()));
+        visible.push(OsString::from(config.spec.resources.max_vcpus.to_string()));
     }
     if config.spec.resources.max_memory_mib > config.spec.resources.memory_mib {
         visible.push(OsString::from("--max-memory-mib"));

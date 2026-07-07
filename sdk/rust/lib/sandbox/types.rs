@@ -1325,8 +1325,9 @@ mod tests {
         let value = serde_json::to_value(&mount).unwrap();
         assert!(value.get("readonly").is_none());
         assert!(value.get("noexec").is_none());
-        assert_eq!(value["options"]["readonly"], true);
-        assert_eq!(value["options"]["noexec"], true);
+        // Externally tagged: payload fields live under the variant key.
+        assert_eq!(value["bind"]["options"]["readonly"], true);
+        assert_eq!(value["bind"]["options"]["noexec"], true);
 
         let decoded: VolumeMount = serde_json::from_value(value).unwrap();
         match decoded {
@@ -1339,42 +1340,35 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_mount_json_accepts_legacy_readonly_field() {
-        let bind: VolumeMount = serde_json::from_str(
-            r#"{"type":"Bind","host":"/host/data","guest":"/data","readonly":true}"#,
-        )
-        .unwrap();
+    fn test_volume_mount_json_adjacent_tag_and_pascal_alias() {
+        // Adjacently tagged; the legacy PascalCase tag still deserializes via
+        // `#[serde(alias)]`, and an omitted `options` falls back to the default.
+        let bind: VolumeMount =
+            serde_json::from_str(r#"{"Bind":{"host":"/host/data","guest":"/data"}}"#).unwrap();
         match bind {
-            VolumeMount::Bind { options, .. } => {
-                assert!(options.readonly);
-                assert!(!options.noexec);
-            }
+            VolumeMount::Bind { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Bind, got {other:?}"),
         }
 
         let named: VolumeMount =
-            serde_json::from_str(r#"{"type":"Named","name":"cache","guest":"/cache"}"#).unwrap();
+            serde_json::from_str(r#"{"named":{"name":"cache","guest":"/cache"}}"#).unwrap();
         match named {
             VolumeMount::Named { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Named, got {other:?}"),
         }
 
-        let tmpfs: VolumeMount =
-            serde_json::from_str(r#"{"type":"Tmpfs","guest":"/tmp","readonly":false}"#).unwrap();
+        let tmpfs: VolumeMount = serde_json::from_str(r#"{"Tmpfs":{"guest":"/tmp"}}"#).unwrap();
         match tmpfs {
             VolumeMount::Tmpfs { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected Tmpfs, got {other:?}"),
         }
 
         let disk: VolumeMount = serde_json::from_str(
-            r#"{"type":"DiskImage","host":"/host/data.raw","guest":"/data","format":"Raw","readonly":true}"#,
+            r#"{"DiskImage":{"host":"/host/data.raw","guest":"/data","format":"raw"}}"#,
         )
         .unwrap();
         match disk {
-            VolumeMount::DiskImage { options, .. } => {
-                assert!(options.readonly);
-                assert!(!options.noexec);
-            }
+            VolumeMount::DiskImage { options, .. } => assert_eq!(options, MountOptions::default()),
             other => panic!("expected DiskImage, got {other:?}"),
         }
     }

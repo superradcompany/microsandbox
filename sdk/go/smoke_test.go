@@ -27,6 +27,11 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/bundle"
 )
 
+// smokeSetup gives each test a fresh throwaway MSB_HOME for non-VM operations.
+// VM-booting tests must NOT use this: the FFI caches a process-global server
+// bound to the first boot's MSB_HOME, and this helper RemoveAll's that home on
+// cleanup — stranding a later VM test on a deleted DB. Boot sandboxes via
+// vmSmokeSetup (shared home) instead. See create_from_spec_test.go.
 func smokeSetup(t *testing.T) context.Context {
 	t.Helper()
 	if os.Getenv(bundle.FFIPathEnv) == "" {
