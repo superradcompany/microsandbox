@@ -70,6 +70,10 @@ jobs:
             "@superradcompany/microsandbox-win32-arm64-msvc" \
             "@superradcompany/microsandbox-win32-x64-msvc"; do
             echo "Unpublishing $pkg@${{ inputs.version }}..."
+            if ! npm view "$pkg@${{ inputs.version }}" version >/dev/null 2>&1; then
+              echo "$pkg@${{ inputs.version }} already gone — skipping"
+              continue
+            fi
             if ! npm unpublish "$pkg@${{ inputs.version }}" --force; then
               echo "unpublish refused for $pkg — deprecating instead"
               npm deprecate "$pkg@${{ inputs.version }}" \
@@ -79,7 +83,7 @@ jobs:
           done
           exit $fail
       - name: Re-point latest below the yanked version
-        if: inputs.latest_fallback != ''
+        if: always() && inputs.latest_fallback != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
