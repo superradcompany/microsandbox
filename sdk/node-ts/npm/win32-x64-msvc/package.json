@@ -1,6 +1,6 @@
 {
   "name": "@superradcompany/microsandbox-win32-x64-msvc",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Windows x64.",
   "os": ["win32"],
   "cpu": ["x64"],
