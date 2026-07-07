@@ -14,6 +14,10 @@ on:
         description: "version to yank (e.g. 0.6.5)"
         required: true
         type: string
+      latest_fallback:
+        description: "npm version to re-point `latest` at when unpublish is refused (empty = skip)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -74,6 +78,16 @@ jobs:
             npm dist-tag ls "$pkg" || true
           done
           exit $fail
+      - name: Re-point latest below the yanked version
+        if: inputs.latest_fallback != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # unpublish is refused for packages with registry dependents; the
+          # deprecation only warns, and `latest` keeps serving the yanked
+          # version to plain `npm install` until re-pointed.
+          npm dist-tag add "microsandbox@${{ inputs.latest_fallback }}" latest
+          npm dist-tag ls microsandbox
 
   ghcr-yank:
     name: Delete GHCR tags
