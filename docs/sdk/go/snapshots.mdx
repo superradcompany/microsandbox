@@ -525,7 +525,7 @@ An artifact on disk. The accessors below are plain field reads; only [`Verify`](
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute recorded content integrity for this snapshot. Requires that the artifact was created with [`RecordIntegrity`](#snapshotcreateoptionsstruct) set.
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `Upper.Kind` is `"not_recorded"` when the artifact was created without [`RecordIntegrity`](#snapshotcreateoptionsstruct), and `"verified"` when the recorded hash matched.
 
 <p className="msb-label">Returns</p>
 

@@ -62,10 +62,12 @@ impl Snapshot {
     /// The source sandbox is required:
     /// `Snapshot::builder("clean").from_sandbox("box").create()`.
     ///
-    /// The name is the artifact's identity; by default the artifact is
-    /// created in the snapshots store, and [`dest_dir`](SnapshotBuilder::dest_dir)
-    /// selects a different parent directory. Archive movement happens
-    /// through [`save`](Self::save)/[`load`](Self::load).
+    /// The name is the artifact's human-readable address and directory
+    /// basename; the descriptor digest is its identity. By default the
+    /// artifact is created in the snapshots store, and
+    /// [`dest_dir`](SnapshotBuilder::dest_dir) selects a different parent
+    /// directory. Archive movement happens through
+    /// [`save`](Self::save)/[`load`](Self::load).
     pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
         SnapshotBuilder {
             name: name.into(),
@@ -329,7 +331,7 @@ impl SnapshotBuilder {
     pub fn build(self) -> MicrosandboxResult<SnapshotConfig> {
         let source_sandbox = self.source_sandbox.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "snapshot builder requires a source sandbox (.from_sandbox())".into(),
+                "snapshot builder requires a source sandbox; set from_sandbox before create".into(),
             )
         })?;
         Ok(SnapshotConfig {

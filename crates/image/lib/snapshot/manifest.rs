@@ -33,6 +33,10 @@ pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
 /// Sparse representation-aware digest for raw upper files.
 pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
+/// Extension keys this runtime understands (see [`Manifest::requires`]).
+/// Empty today; resumable-era capabilities register here as they land.
+pub const SUPPORTED_REQUIRES: &[&str] = &[];
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -136,6 +140,15 @@ pub struct Manifest {
     /// Best-effort name of the source sandbox (informational).
     #[serde(deserialize_with = "deserialize_required_option")]
     pub source_sandbox: Option<String>,
+    /// Namespaced additive data. Readers must tolerate keys they do not
+    /// recognize and may ignore them; load-bearing keys are named in
+    /// `requires`. This is how schema 1 evolves without breaking parsers.
+    pub extensions: BTreeMap<String, serde_json::Value>,
+    /// Extension keys a reader must understand to restore or start from
+    /// this snapshot. Readers that do not recognize a listed key must
+    /// refuse restore with a clear error but may still list and inspect
+    /// the artifact. Sorted and unique in canonical form.
+    pub requires: Vec<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -191,7 +204,37 @@ impl Manifest {
             }
             validate_digest_form(&integrity.digest, "upper.integrity.digest")?;
         }
+        let mut prev: Option<&str> = None;
+        for key in &self.requires {
+            if key.is_empty() {
+                return Err(ImageError::ManifestParse(
+                    "snapshot descriptor: empty requires entry".into(),
+                ));
+            }
+            if !self.extensions.contains_key(key) {
+                return Err(ImageError::ManifestParse(format!(
+                    "snapshot descriptor: requires names '{key}' but extensions has no such key"
+                )));
+            }
+            if prev.is_some_and(|p| p >= key.as_str()) {
+                return Err(ImageError::ManifestParse(format!(
+                    "snapshot descriptor: requires must be sorted and unique (at '{key}')"
+                )));
+            }
+            prev = Some(key);
+        }
         Ok(())
+    }
+
+    /// Extension keys named in `requires` that this runtime does not
+    /// understand. Non-empty means the artifact can be listed and
+    /// inspected but must not be restored or booted from.
+    pub fn unsupported_requires(&self) -> Vec<&str> {
+        self.requires
+            .iter()
+            .map(String::as_str)
+            .filter(|k| !SUPPORTED_REQUIRES.contains(k))
+            .collect()
     }
 
     /// Serialize to the canonical byte form used for digest computation.
@@ -310,6 +353,8 @@ mod tests {
                 }),
             },
             source_sandbox: Some("build-1".into()),
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -461,10 +506,73 @@ mod tests {
         let format_pos = s.find("\"format\"").unwrap();
         let upper_pos = s.find("\"upper\"").unwrap();
         let source_pos = s.find("\"source_sandbox\"").unwrap();
+        let extensions_pos = s.find("\"extensions\"").unwrap();
+        let requires_pos = s.find("\"requires\"").unwrap();
         assert!(schema_pos < artifact_pos);
         assert!(artifact_pos < scope_pos);
         assert!(scope_pos < format_pos);
         assert!(format_pos < upper_pos);
         assert!(upper_pos < source_pos);
+        assert!(source_pos < extensions_pos);
+        assert!(extensions_pos < requires_pos);
+    }
+
+    #[test]
+    fn extensions_round_trip_and_may_be_ignored() {
+        let mut m = sample_manifest();
+        m.extensions
+            .insert("msb.example/1".into(), serde_json::json!({ "answer": 42 }));
+        let bytes = m.to_canonical_bytes().unwrap();
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.extensions["msb.example/1"]["answer"], 42);
+        assert!(parsed.unsupported_requires().is_empty());
+    }
+
+    #[test]
+    fn unknown_required_extension_blocks_restore_but_parses() {
+        let mut m = sample_manifest();
+        m.extensions
+            .insert("msb.future/1".into(), serde_json::json!({}));
+        m.requires.push("msb.future/1".into());
+        let bytes = m.to_canonical_bytes().unwrap();
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.unsupported_requires(), vec!["msb.future/1"]);
+    }
+
+    #[test]
+    fn rejects_require_without_extension() {
+        let mut m = sample_manifest();
+        m.requires.push("msb.future/1".into());
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let err = Manifest::from_bytes(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("no such key"));
+    }
+
+    #[test]
+    fn rejects_unsorted_or_duplicate_requires() {
+        let mut m = sample_manifest();
+        m.extensions.insert("msb.a/1".into(), serde_json::json!({}));
+        m.extensions.insert("msb.b/1".into(), serde_json::json!({}));
+        m.requires = vec!["msb.b/1".into(), "msb.a/1".into()];
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let err = Manifest::from_bytes(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("sorted and unique"));
+
+        m.requires = vec!["msb.a/1".into(), "msb.a/1".into()];
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let err = Manifest::from_bytes(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("sorted and unique"));
+    }
+
+    #[test]
+    fn descriptor_without_extensions_and_requires_is_rejected() {
+        let m = sample_manifest();
+        let mut v: serde_json::Value = serde_json::to_value(&m).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("extensions");
+        obj.remove("requires");
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let err = Manifest::from_bytes(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("missing field"));
     }
 }

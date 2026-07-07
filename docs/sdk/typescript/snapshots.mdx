@@ -440,7 +440,7 @@ console.log(`reindexed ${count} snapshots`);
 static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. When the snapshot has no integrity hash yet, one is computed and embedded in the bundled manifest so the receiver can verify. See [`SaveOpts`](#saveopts-interface) for bundling options.
+Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
 
 <p className="msb-label">Parameters</p>
 
@@ -875,7 +875,7 @@ Bundle options for [`Snapshot.save()`](#snapshot-save). All fields default to `f
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `withParents` | `boolean` | Walk the parent chain and include each ancestor (no-op in v1). |
+| `withParents` | `boolean` | Walk the parent chain and include each ancestor in the archive. |
 | `withImage` | `boolean` | Include the OCI image cache so the archive boots offline. |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar`. |
 

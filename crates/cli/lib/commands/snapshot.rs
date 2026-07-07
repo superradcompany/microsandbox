@@ -310,6 +310,16 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Upper File", &m.upper.file);
     ui::detail_kv("Upper Size", &format_size(m.upper.size_bytes));
     ui::detail_kv("Integrity", &format_integrity(m.upper.integrity.as_ref()));
+    if !m.requires.is_empty() {
+        ui::detail_kv("Requires", &m.requires.join(", "));
+        let unsupported = m.unsupported_requires();
+        if !unsupported.is_empty() {
+            ui::detail_kv(
+                "Restore",
+                &format!("blocked: needs {}", unsupported.join(", ")),
+            );
+        }
+    }
     if args.verify {
         let report = snap.verify().await?;
         ui::detail_kv("Verification", &format_verify_status(&report.upper));

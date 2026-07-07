@@ -1389,6 +1389,11 @@ export declare class Snapshot {
   static listDir(dir: string): Promise<Array<Snapshot>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
   static reindex(dir?: string | undefined | null): Promise<number>
+  /**
+   * Bundle a snapshot into a `.tar.zst` archive. The recorded
+   * manifest is archived as-is, so create the snapshot with
+   * `recordIntegrity()` if receivers must verify content.
+   */
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
   get path(): string
@@ -2103,7 +2108,7 @@ export interface SandboxTouchResult {
 
 /** Options for `Snapshot.save()`. */
 export interface SaveOpts {
-  /** Walk the parent chain and include each ancestor (no-op today). */
+  /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean
   /** Bundle the OCI image cache for offline transport. */
   withImage?: boolean

@@ -5,6 +5,46 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Kwargs accepted by `Sandbox.create` / `Sandbox.create_with_progress`.
+/// `detached` is consumed by the callers in `sandbox.rs`, not here.
+const KNOWN_CREATE_KWARGS: &[&str] = &[
+    "image",
+    "from_snapshot",
+    "memory",
+    "cpus",
+    "max_memory",
+    "max_cpus",
+    "workdir",
+    "shell",
+    "security",
+    "hostname",
+    "user",
+    "entrypoint",
+    "init",
+    "replace",
+    "replace_with_timeout",
+    "max_duration",
+    "idle_timeout",
+    "ephemeral",
+    "env",
+    "labels",
+    "scripts",
+    "pull_policy",
+    "log_level",
+    "registry_auth",
+    "volumes",
+    "patches",
+    "ports",
+    "network",
+    "secrets",
+    "on_secret_violation",
+    "detached",
+];
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
@@ -26,6 +66,8 @@ pub fn sandbox_builder_from_args(
             "image= or from_snapshot= is required",
         ));
     };
+
+    reject_unknown_kwargs(kwargs)?;
 
     let image_present = kwargs.get_item("image")?.is_some();
     let snapshot_present = kwargs.get_item("from_snapshot")?.is_some();
@@ -1257,6 +1299,37 @@ fn apply_secret(
 //--------------------------------------------------------------------------------------------------
 // Functions: Extraction Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Reject kwargs that no consumer of `Sandbox.create` recognizes, so a
+/// typo (or a removed kwarg like `snapshot=`) fails loudly instead of
+/// being silently ignored.
+fn reject_unknown_kwargs(kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
+    let mut unknown: Vec<String> = Vec::new();
+    for key in kwargs.keys() {
+        let key: String = key.extract()?;
+        if !KNOWN_CREATE_KWARGS.contains(&key.as_str()) {
+            unknown.push(key);
+        }
+    }
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let listed = unknown
+        .iter()
+        .map(|k| {
+            if k == "snapshot" {
+                "'snapshot' (did you mean 'from_snapshot'?)".to_string()
+            } else {
+                format!("'{k}'")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if unknown.len() == 1 { "" } else { "s" };
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "unexpected keyword argument{plural} {listed}"
+    )))
+}
 
 /// Convert an object to a PyDict — either it's already a dict, or call _to_dict().
 fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {

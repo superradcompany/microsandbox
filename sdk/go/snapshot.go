@@ -156,6 +156,12 @@ func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
 }
 
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
+	if opts.Name == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a non-empty Name"}
+	}
+	if opts.FromSandbox == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
+	}
 	info, err := ffi.SnapshotCreate(ctx, opts.FromSandbox, ffi.SnapshotCreateOptions{
 		Name:            opts.Name,
 		DestDir:         opts.DestDir,

@@ -44,10 +44,10 @@ Capture the disk state of a stopped sandbox as a reusable artifact, then boot fr
 ```python
 from microsandbox import Sandbox, Snapshot
 
-# Run setup work, then stop the sandbox
-async with await Sandbox.create("baseline", image="python:3.12") as sb:
-    await sb.exec("pip", ["install", "numpy"])
-    await sb.stop()
+# Run setup work, then stop the sandbox (snapshots are stopped-only)
+sb = await Sandbox.create("baseline", image="python:3.12")
+await sb.exec("pip", ["install", "numpy"])
+await sb.stop()
 
 # Capture its disk state under a name
 snap = await Snapshot.create("after-pip-install", from_sandbox="baseline")

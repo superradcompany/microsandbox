@@ -43,13 +43,14 @@ Capture a stopped sandbox's writable upper layer into a self-describing, content
   <a className="msb-row" href="#from_snapshot"><span className="msb-rn">.from_snapshot()</span><span className="msb-rg">boot from a snapshot</span></a>
   <a className="msb-row" href="#h-snapshot"><span className="msb-rn">h.snapshot()</span><span className="msb-rg">snapshot a stopped sandbox</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SnapshotBuilder<span className="msb-ct">7</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SnapshotBuilder<span className="msb-ct">8</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#from_sandbox">.from_sandbox()</a>
     <a className="msb-chip" href="#dest_dir">.dest_dir()</a>
     <a className="msb-chip" href="#label">.label()</a>
     <a className="msb-chip" href="#force">.force()</a>
     <a className="msb-chip" href="#record_integrity">.record_integrity()</a>
+    <a className="msb-chip" href="#resumable">.resumable()</a>
     <a className="msb-chip" href="#build">.build()</a>
     <a className="msb-chip" href="#create">.create()</a>
   </div>
@@ -961,6 +962,17 @@ fn record_integrity(self) -> Self
 ```
 
 Compute and record an upper-layer content-integrity hash during creation. Recorded integrity is what [`verify()`](#snap-verify) checks and what save/load rely on when crossing a trust boundary.
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn resumable(self) -> Self
+```
+
+Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
 
 ---
 

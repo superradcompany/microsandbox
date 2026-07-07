@@ -20,7 +20,7 @@ export type SnapshotScope = "disk" | "resumable";
  * Bundle options for `Snapshot.save`.
  */
 export interface SaveOpts {
-  /** Walk the parent chain and include each ancestor (no-op in v1). */
+  /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean;
   /** Include the OCI image cache so the archive boots offline. */
   withImage?: boolean;
@@ -87,9 +87,9 @@ export class Snapshot {
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
    *
-   * Snapshots are always created in the snapshots store. To place an
-   * artifact elsewhere, use `save()`/`load()`, or move the
-   * self-contained artifact directory directly.
+   * Use `destDir(dir)` to create the artifact under a different parent
+   * directory instead; it lands at `destDir/<name>`, and the name stays
+   * the snapshot's identity either way.
    */
   static builder(name: string): SnapshotBuilder {
     return wrapBuilder(new napi.SnapshotBuilder(name));
@@ -153,9 +153,9 @@ export class Snapshot {
   }
 
   /**
-   * Bundle a snapshot into a `.tar.zst` archive. When the snapshot
-   * has no integrity hash yet, one is computed and embedded in the
-   * bundled manifest so the receiver can verify.
+   * Bundle a snapshot into a `.tar.zst` archive. The recorded
+   * manifest is archived as-is, so create the snapshot with
+   * `recordIntegrity()` if receivers must verify content.
    */
   static async save(
     nameOrPath: string,

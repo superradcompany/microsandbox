@@ -158,7 +158,7 @@ let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
 println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
 Snapshot::remove("after-pip-install", false).await?;
-Snapshot::reindex("~/.microsandbox/snapshots").await?;
+Snapshot::reindex("/data/snapshots").await?;
 ```
 
 ```typescript TypeScript
@@ -169,7 +169,7 @@ const h = await Snapshot.get("after-pip-install");       // By name, digest, or 
 console.log(`${h.name ?? "-"} (${h.digest})`);
 
 await Snapshot.remove("after-pip-install");
-await Snapshot.reindex("~/.microsandbox/snapshots");
+await Snapshot.reindex();                               // Default snapshots directory
 ```
 
 ```python Python
@@ -180,11 +180,12 @@ h = await Snapshot.get("after-pip-install")              # By name, digest, or p
 print(f"{h.name or '-'} ({h.digest})")
 
 await Snapshot.remove("after-pip-install")
-await Snapshot.reindex("~/.microsandbox/snapshots")
+await Snapshot.reindex()                                 # Default snapshots directory
 ```
 
 ```go Go
 all, err := m.Snapshot.List(ctx)            // Indexed snapshots
+fmt.Printf("%d snapshots\n", len(all))
 h, err := m.Snapshot.Get(ctx, "after-pip-install") // By name, digest, or path
 name := "-"
 if h.Name() != nil {
@@ -193,7 +194,7 @@ if h.Name() != nil {
 fmt.Printf("%s (%s)\n", name, h.Digest())
 
 err = m.Snapshot.Remove(ctx, "after-pip-install", false)
-_, err = m.Snapshot.Reindex(ctx, "~/.microsandbox/snapshots")
+_, err = m.Snapshot.Reindex(ctx, "/data/snapshots")
 ```
 
 ```bash CLI

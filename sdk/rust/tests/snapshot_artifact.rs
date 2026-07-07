@@ -82,7 +82,31 @@ fn sample_manifest(upper_size: u64) -> Manifest {
             integrity: None,
         },
         source_sandbox: Some("synthetic".into()),
+        extensions: BTreeMap::new(),
+        requires: Vec::new(),
     }
+}
+
+/// Build an artifact whose manifest names a required extension this
+/// runtime does not understand.
+fn make_artifact_with_unknown_require(
+    parent: &Path,
+    name: &str,
+    upper_bytes: &[u8],
+) -> (std::path::PathBuf, String) {
+    let dir = parent.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DEFAULT_UPPER_FILE), upper_bytes).unwrap();
+
+    let mut manifest = sample_manifest(upper_bytes.len() as u64);
+    manifest
+        .extensions
+        .insert("msb.future/1".into(), serde_json::json!({}));
+    manifest.requires = vec!["msb.future/1".into()];
+    let bytes = manifest.to_canonical_bytes().unwrap();
+    let digest = manifest.digest().unwrap();
+    std::fs::write(dir.join(DESCRIPTOR_FILENAME), bytes).unwrap();
+    (dir, digest)
 }
 
 fn make_artifact_with_integrity(
@@ -1251,4 +1275,115 @@ async fn load_streams_large_archive_without_buffering() {
         msg.contains("no snapshot manifest") || msg.contains("manifest"),
         "got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn create_rejects_resumable_before_touching_anything() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let err = Snapshot::builder("warm")
+            .from_sandbox("box")
+            .resumable()
+            .create()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Resumable snapshots"),
+            "unexpected error: {err}"
+        );
+    })
+    .await;
+
+    assert!(!home.join("snapshots").join("warm").exists());
+}
+
+#[tokio::test]
+async fn create_rejects_unaddressable_names() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        for name in ["~cache", "sha256:v1", "a\\b"] {
+            let err = Snapshot::builder(name)
+                .from_sandbox("box")
+                .create()
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("bare identifier"),
+                "{name}: unexpected error: {err}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact_with_unknown_require(tmp.path(), "future-snap", b"upper");
+
+    let snap = Snapshot::open(dir.to_string_lossy().as_ref())
+        .await
+        .unwrap();
+    assert_eq!(snap.manifest().requires, vec!["msb.future/1".to_string()]);
+
+    let err = microsandbox::Sandbox::builder("requires-gate-test")
+        .from_snapshot(dir.to_string_lossy().to_string())
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("msb.future/1"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let snapshots = home.join("snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
+
+    microsandbox::with_backend(backend, async {
+        let (_pdir, pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
+        let (cdir, _c1) =
+            make_artifact_with_parent(&snapshots, "child", b"child v1", Some(pdigest.clone()));
+        Snapshot::reindex(&snapshots).await.unwrap();
+
+        // Replace the child in place: same name and path, different digest,
+        // same parent. Opening it runs the auto-reindex upsert, which must
+        // not double-count the parent edge.
+        std::fs::remove_dir_all(&cdir).unwrap();
+        make_artifact_with_parent(
+            &snapshots,
+            "child",
+            b"child v2 with different size",
+            Some(pdigest.clone()),
+        );
+        Snapshot::open("child").await.unwrap();
+
+        Snapshot::remove("child", false).await.unwrap();
+        Snapshot::remove("parent", false)
+            .await
+            .expect("parent should be removable once its only child is gone");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn list_dir_skips_dot_prefixed_staging_directories() {
+    let tmp = TempDir::new().unwrap();
+    make_artifact(tmp.path(), "real", b"upper");
+    make_artifact(tmp.path(), ".ghost.staging", b"upper");
+
+    let snaps = Snapshot::list_dir(tmp.path()).await.unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert!(snaps[0].path().ends_with("real"));
 }

@@ -32,7 +32,7 @@ pub struct JsSnapshotHandle {
 #[derive(Default)]
 #[napi(object, js_name = "SaveOpts")]
 pub struct JsSaveOpts {
-    /// Walk the parent chain and include each ancestor (no-op today).
+    /// Walk the parent chain and include each ancestor in the archive.
     pub with_parents: Option<bool>,
     /// Bundle the OCI image cache for offline transport.
     pub with_image: Option<bool>,
@@ -146,6 +146,9 @@ impl JsSnapshot {
         Ok(n as u32)
     }
 
+    /// Bundle a snapshot into a `.tar.zst` archive. The recorded
+    /// manifest is archived as-is, so create the snapshot with
+    /// `recordIntegrity()` if receivers must verify content.
     #[napi]
     pub async fn save(name_or_path: String, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
         let opts = opts.unwrap_or_default();

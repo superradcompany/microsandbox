@@ -123,17 +123,30 @@ pub(super) async fn index_upsert(
     // Delete any prior row for this digest, name, or path, then insert.
     // This keeps the rebuildable index aligned when an artifact is
     // replaced in-place or when a manifest rewrite changes its digest.
-    snapshot_entity::Entity::delete_by_id(digest.to_string())
-        .exec(db)
-        .await?;
+    // The superseded rows' parent edges disappear with them, so their
+    // parents' child_count must come down first; the fresh insert re-adds
+    // its own edge below.
+    let mut supersede = sea_orm::Condition::any()
+        .add(snapshot_entity::Column::Digest.eq(digest.to_string()))
+        .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()));
     if let Some(name) = artifact_name.as_ref() {
-        snapshot_entity::Entity::delete_many()
-            .filter(snapshot_entity::Column::Name.eq(name.clone()))
-            .exec(db)
+        supersede = supersede.add(snapshot_entity::Column::Name.eq(name.clone()));
+    }
+    let superseded = snapshot_entity::Entity::find()
+        .filter(supersede.clone())
+        .all(db)
+        .await?;
+    for row in &superseded {
+        if let Some(parent) = row.parent_digest.as_ref() {
+            db.execute_unprepared(&format!(
+                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE digest = '{}'",
+                parent.replace('\'', "''")
+            ))
             .await?;
+        }
     }
     snapshot_entity::Entity::delete_many()
-        .filter(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()))
+        .filter(supersede)
         .exec(db)
         .await?;
 
@@ -222,6 +235,16 @@ pub(super) async fn list_dir(
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+        // Dot-prefixed directories are never artifacts; create() stages
+        // in-progress snapshots as `.<name>.staging` siblings, and a crashed
+        // staging dir must not be listed or indexed as a snapshot.
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with('.'))
+        {
             continue;
         }
         if !path.join(DESCRIPTOR_FILENAME).exists() {

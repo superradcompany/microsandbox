@@ -172,8 +172,8 @@ impl PySnapshot {
 
     /// Bundle a snapshot into a `.tar.zst` archive.
     ///
-    /// When the snapshot has no integrity hash yet, one is computed
-    /// and embedded in the bundled manifest.
+    /// The recorded manifest is archived as-is, so create the snapshot
+    /// with `record_integrity=True` if receivers must verify content.
     #[staticmethod]
     #[pyo3(signature = (
         name_or_path,
