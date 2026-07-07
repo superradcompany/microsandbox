@@ -18,6 +18,7 @@ mod patch;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 mod types;
+pub(crate) mod upper;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -937,6 +938,11 @@ pub(crate) async fn stop_local(
             })?;
     let (model, pid) = get_local_handle_state(local_backend, name).await?;
     if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
+        // A terminal row can still be backed by a leaked VM process on
+        // Windows; stopping an "already stopped" sandbox must still leave no
+        // process serving its agent pipes.
+        #[cfg(windows)]
+        reap_leaked_runtime_process(local_backend, model.id, name).await?;
         return Ok(());
     }
 
@@ -957,8 +963,23 @@ pub(crate) async fn stop_local(
                 error = %e,
                 "stop_local: agent endpoint unreachable; falling back to process termination",
             );
+            #[cfg(unix)]
             if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
                 terminate_pid_gracefully(pid)?;
+            }
+            // An unreachable agent pipe often means the runtime already died
+            // and the PID was recycled; the identity-checked reap avoids
+            // TerminateProcess on an innocent process.
+            #[cfg(windows)]
+            match reap_leaked_runtime_process(local_backend, model.id, name).await? {
+                LeakedReapVerdict::NoProcess | LeakedReapVerdict::RecycledPid => {}
+                LeakedReapVerdict::Unverifiable => {
+                    let pid = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "cannot stop sandbox '{name}': recorded process {pid} is alive but not \
+                         queryable (possibly running elevated); terminate it manually"
+                    )));
+                }
             }
             Ok(())
         }
@@ -983,36 +1004,70 @@ pub(crate) async fn kill_local(
             })?;
     let (model, pid) = get_local_handle_state(local_backend, name).await?;
     if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
+        // Windows: a terminal row can still be backed by a leaked VM process
+        // (guest poweroff recorded, process never exited). Force-stop must
+        // free the agent pipes even in that state.
+        #[cfg(windows)]
+        reap_leaked_runtime_process(local_backend, model.id, name).await?;
         return Ok(());
     }
 
-    let mut pids = Vec::new();
-    if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
-        kill_pid(pid)?;
-        pids.push(pid);
-    }
-
-    if !pids.is_empty() {
-        let timeout = std::time::Duration::from_secs(5);
-        let start = std::time::Instant::now();
-        let poll_interval = std::time::Duration::from_millis(50);
-        while start.elapsed() < timeout {
-            if pids.iter().all(|pid| pid_is_dead_or_reaped(*pid)) {
-                break;
+    // Windows: identity-checked termination instead of a blind
+    // TerminateProcess. A recycled PID must not be killed — and a recycled PID
+    // also proves the runtime is gone, so the row can be marked Stopped either
+    // way. The reap waits for process exit and errors if it survives.
+    #[cfg(windows)]
+    {
+        match reap_leaked_runtime_process(local_backend, model.id, name).await? {
+            LeakedReapVerdict::NoProcess | LeakedReapVerdict::RecycledPid => {}
+            // An active run whose live PID we cannot even query may still be
+            // the runtime (e.g. spawned elevated); claiming Stopped here would
+            // hide a process we did not kill.
+            LeakedReapVerdict::Unverifiable => {
+                let pid = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
+                return Err(crate::MicrosandboxError::Runtime(format!(
+                    "cannot terminate sandbox '{name}': recorded process {pid} is alive but not \
+                     queryable (possibly running elevated); terminate it manually"
+                )));
             }
-            tokio::time::sleep(poll_interval).await;
         }
-    }
-
-    let all_dead = pids.is_empty() || pids.iter().all(|pid| pid_is_dead_or_reaped(*pid));
-    if all_dead {
         let db = local_backend.db().await?.write();
         if let Err(e) = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await {
             tracing::warn!(sandbox = %name, error = %e, "failed to update sandbox status after kill");
         }
+        Ok(())
     }
 
-    Ok(())
+    #[cfg(unix)]
+    {
+        let mut pids = Vec::new();
+        if let Some(pid) = pid.filter(|p| pid_is_alive(*p)) {
+            kill_pid(pid)?;
+            pids.push(pid);
+        }
+
+        if !pids.is_empty() {
+            let timeout = std::time::Duration::from_secs(5);
+            let start = std::time::Instant::now();
+            let poll_interval = std::time::Duration::from_millis(50);
+            while start.elapsed() < timeout {
+                if pids.iter().all(|pid| pid_is_dead_or_reaped(*pid)) {
+                    break;
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+
+        let all_dead = pids.is_empty() || pids.iter().all(|pid| pid_is_dead_or_reaped(*pid));
+        if all_dead {
+            let db = local_backend.db().await?.write();
+            if let Err(e) = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await {
+                tracing::warn!(sandbox = %name, error = %e, "failed to update sandbox status after kill");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Local lifecycle: drain a running sandbox by name.
@@ -1059,6 +1114,108 @@ pub(crate) async fn drain_local(
         }
         Ok(())
     }
+}
+
+/// What [`reap_leaked_runtime_process`] established about the recorded run PID.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LeakedReapVerdict {
+    /// No live runtime process remains (already dead, or terminated here).
+    NoProcess,
+
+    /// A live process holds the PID but is provably not the runtime; it was left alone. The
+    /// runtime itself is therefore gone.
+    RecycledPid,
+
+    /// The PID names a live process that could not be queried, so ownership is unknown; it was
+    /// left alone. Usually a recycled PID landing on a protected/other-user process, but callers
+    /// holding an *active* run should treat this as "may still be running".
+    Unverifiable,
+}
+
+/// Terminate a leftover VM process for this sandbox when the most recent run's
+/// PID still names a live process that provably is the sandbox runtime.
+///
+/// Windows-only: a guest poweroff can be recorded in the database (run
+/// terminated, sandbox stopped) while the host VM process never finishes
+/// exiting, silently keeping the name-derived agent pipes served. Every
+/// lifecycle operation that promises "no process remains" (stop, force-kill,
+/// remove) funnels through here. Identity is validated against the run row
+/// (creation time no later than `started_at`, image name `msb`) so a recycled
+/// PID is never killed.
+///
+/// Returns an error when a validated runtime process survives the termination
+/// wait; callers must not delete sandbox state in that case.
+#[cfg(windows)]
+pub(crate) async fn reap_leaked_runtime_process(
+    local_backend: &crate::backend::LocalBackend,
+    sandbox_id: i32,
+    name: &str,
+) -> MicrosandboxResult<LeakedReapVerdict> {
+    use crate::runtime::reap;
+
+    let pools = local_backend.db().await?;
+    let run = run_entity::Entity::find()
+        .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+        .order_by_desc(run_entity::Column::Id)
+        .one(pools.read())
+        .await?;
+    let Some(run) = run else {
+        return Ok(LeakedReapVerdict::NoProcess);
+    };
+    let (Some(pid), Some(started_at)) = (run.pid, run.started_at) else {
+        return Ok(LeakedReapVerdict::NoProcess);
+    };
+    let Ok(pid_u32) = u32::try_from(pid) else {
+        return Ok(LeakedReapVerdict::NoProcess);
+    };
+    if !pid_is_alive(pid) {
+        return Ok(LeakedReapVerdict::NoProcess);
+    }
+
+    let outcome =
+        reap::terminate_runtime_process_checked(pid_u32, started_at.and_utc().timestamp_micros());
+    match outcome {
+        Ok(reap::ReapOutcome::AlreadyDead) => return Ok(LeakedReapVerdict::NoProcess),
+        Ok(reap::ReapOutcome::IdentityMismatch) => {
+            tracing::warn!(
+                pid,
+                sandbox = %name,
+                "recorded runtime PID is now a different process (recycled); leaving it alone"
+            );
+            return Ok(LeakedReapVerdict::RecycledPid);
+        }
+        Ok(reap::ReapOutcome::Unverifiable) => {
+            tracing::warn!(
+                pid,
+                sandbox = %name,
+                "recorded runtime PID cannot be queried (likely recycled); leaving it alone"
+            );
+            return Ok(LeakedReapVerdict::Unverifiable);
+        }
+        Ok(reap::ReapOutcome::Terminated) => {
+            tracing::warn!(pid, sandbox = %name, "terminated leftover sandbox VM process");
+        }
+        // Terminate failed on a *verified* runtime process. It may be mid-exit
+        // (an exiting process can reject TerminateProcess); the liveness wait
+        // below is the real arbiter.
+        Err(err) => {
+            tracing::warn!(
+                pid,
+                sandbox = %name,
+                error = %err,
+                "failed to terminate leftover sandbox VM process; waiting for exit"
+            );
+        }
+    }
+
+    wait_for_pids_to_exit(&[pid], reap::REAP_EXIT_WAIT).await;
+    if pid_is_alive(pid) {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "sandbox process {pid} for '{name}' is still running after termination"
+        )));
+    }
+    Ok(LeakedReapVerdict::NoProcess)
 }
 
 async fn request_agent_shutdown(
@@ -1373,6 +1530,10 @@ impl Sandbox {
         self.request_stop().await?;
         if let Ok(result) = tokio::time::timeout(timeout, self.wait_until_stopped()).await {
             result?;
+            // Windows: the DB can record the guest poweroff while the VM
+            // process never exits; a successful stop must mean "no process".
+            #[cfg(windows)]
+            self.reap_leaked_local_runtime().await?;
             return Ok(());
         }
 
@@ -1392,6 +1553,21 @@ impl Sandbox {
                 self.name
             ))),
         }
+    }
+
+    /// Kill any leftover VM process still backing this local sandbox after
+    /// its DB row went terminal. No-op for cloud sandboxes.
+    #[cfg(windows)]
+    async fn reap_leaked_local_runtime(&self) -> MicrosandboxResult<()> {
+        let Some(local) = self.local() else {
+            return Ok(());
+        };
+        let Some(local_backend) = self.backend.as_local() else {
+            return Ok(());
+        };
+        reap_leaked_runtime_process(local_backend, local.db_id, &self.name)
+            .await
+            .map(|_| ())
     }
 
     /// Stop the sandbox gracefully and wait for the process to exit.
@@ -2343,11 +2519,6 @@ fn pid_is_dead_or_reaped(pid: i32) -> bool {
         return true;
     }
 
-    !pid_is_alive(pid)
-}
-
-#[cfg(windows)]
-fn pid_is_dead_or_reaped(pid: i32) -> bool {
     !pid_is_alive(pid)
 }
 

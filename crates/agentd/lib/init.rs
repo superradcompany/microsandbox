@@ -272,6 +272,8 @@ mod linux {
         )
         .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
         register_upper_metrics(upperfs_dir);
+        // The pivot below makes this mount unreachable by path; pin a fd now so poweroff teardown can still remount it read-only.
+        crate::teardown::register_upper_fs(upperfs_dir);
 
         // Create upper and work subdirs on the writable device.
         let upper_dir = format!("{upperfs_dir}/upper");

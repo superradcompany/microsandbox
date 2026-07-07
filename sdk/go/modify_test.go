@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +95,104 @@ func TestModifyRequestJSONFullOptions(t *testing.T) {
 	labelsRemove := patch["labels_remove"].([]any)
 	if len(labelsRemove) != 1 || labelsRemove[0] != "stale" {
 		t.Fatalf("labels_remove = %v", labelsRemove)
+	}
+}
+
+func TestModifyRequestJSONSecretSources(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Secrets: map[string]SecretModifySpec{
+			// Deliberately unsorted; entries must serialize in name order.
+			"STRIPE_KEY": {Value: "sk_test_123"},
+			"API_KEY": {
+				Env:          "HOST_API_KEY",
+				Placeholder:  "$API_KEY",
+				AllowedHosts: []string{"api.example.com"},
+			},
+			"DB_PASS": {Store: "vault://prod/db"},
+		},
+		SecretsRemove: []string{"OLD"},
+	})
+
+	patch := out["patch"].(map[string]any)
+	secrets := patch["secrets"].([]any)
+	if len(secrets) != 3 {
+		t.Fatalf("expected 3 secrets; got %d", len(secrets))
+	}
+
+	// Env-sourced entry, first in sorted order.
+	apiKey := secrets[0].(map[string]any)
+	if apiKey["name"] != "API_KEY" {
+		t.Fatalf("secrets[0] name = %v", apiKey["name"])
+	}
+	source := apiKey["source"].(map[string]any)
+	if source["kind"] != "env" || source["var"] != "HOST_API_KEY" {
+		t.Fatalf("env source = %v", source)
+	}
+	if _, present := source["reference"]; present {
+		t.Fatalf("env source must omit reference; got %v", source)
+	}
+	if apiKey["placeholder"] != "$API_KEY" {
+		t.Fatalf("placeholder = %v", apiKey["placeholder"])
+	}
+	hosts := apiKey["allowed_hosts"].([]any)
+	if len(hosts) != 1 || hosts[0] != "api.example.com" {
+		t.Fatalf("allowed_hosts = %v", hosts)
+	}
+	if _, present := apiKey["value"]; present {
+		t.Fatalf("empty value must be omitted from the wire")
+	}
+
+	// Store-sourced entry.
+	dbPass := secrets[1].(map[string]any)
+	if dbPass["name"] != "DB_PASS" {
+		t.Fatalf("secrets[1] name = %v", dbPass["name"])
+	}
+	source = dbPass["source"].(map[string]any)
+	if source["kind"] != "store" || source["reference"] != "vault://prod/db" {
+		t.Fatalf("store source = %v", source)
+	}
+	if _, present := source["var"]; present {
+		t.Fatalf("store source must omit var; got %v", source)
+	}
+
+	// Value-sourced entry: value serializes as a plain string, no source.
+	stripe := secrets[2].(map[string]any)
+	if stripe["name"] != "STRIPE_KEY" {
+		t.Fatalf("secrets[2] name = %v", stripe["name"])
+	}
+	if _, present := stripe["source"]; present {
+		t.Fatalf("value-sourced entry must omit source")
+	}
+	if stripe["value"] != "sk_test_123" {
+		t.Fatalf("value field mismatch")
+	}
+
+	remove := patch["secrets_remove"].([]any)
+	if len(remove) != 1 || remove[0] != "OLD" {
+		t.Fatalf("secrets_remove = %v", remove)
+	}
+}
+
+func TestModifyRequestJSONSecretMutualExclusion(t *testing.T) {
+	for _, spec := range []SecretModifySpec{
+		{Env: "HOST_VAR", Value: "sk_test_123"},
+		{Value: "sk_test_123", Store: "vault://ref"},
+		{Env: "HOST_VAR", Store: "vault://ref"},
+		{Env: "HOST_VAR", Value: "sk_test_123", Store: "vault://ref"},
+	} {
+		_, err := buildModifyRequestJSON(ModifyOptions{
+			Secrets: map[string]SecretModifySpec{"STRIPE_KEY": spec},
+		})
+		if err == nil {
+			t.Fatalf("expected mutual-exclusion error")
+		}
+		if !strings.Contains(err.Error(), `secret "STRIPE_KEY"`) {
+			t.Fatalf("error must name the secret; got %v", err)
+		}
+		// The raw secret material must never leak into error messages.
+		if strings.Contains(err.Error(), "sk_test_123") {
+			t.Fatalf("error message leaks the secret value")
+		}
 	}
 }
 

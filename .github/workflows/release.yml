@@ -628,9 +628,13 @@ jobs:
   #
   # mintlify is the docs deploy branch. it tracks the released commit but may
   # also carry docs that were merged into it directly. we merge the release
-  # commit forward instead of hard-resetting, so those docs survive. a clean
-  # merge is pushed straight to mintlify; a conflicting merge opens a pr so the
-  # releaser resolves it by hand instead of losing work silently.
+  # commit forward instead of hard-resetting, so those docs survive. mintlify
+  # requires a merge queue that always creates a merge commit, so the sync
+  # lands as a pr: a clean merge is enqueued automatically, a conflicting one
+  # is left for the releaser to resolve by hand instead of losing work
+  # silently. the queue keeps the history shared with main intact; squashing
+  # these prs is what used to turn every following sync into a wall of false
+  # conflicts.
   # ---------------------------------------------------------------------------
   sync-mintlify:
     name: Sync mintlify branch
@@ -650,32 +654,42 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge release commit into mintlify
+      - name: Check whether the release commit merges cleanly
         id: merge
         run: |
-          if git merge --no-edit ${{ github.sha }}; then
+          if git merge-base --is-ancestor ${{ github.sha }} HEAD; then
+            echo "result=uptodate" >> "$GITHUB_OUTPUT"
+          elif git merge --no-commit --no-ff ${{ github.sha }}; then
+            git merge --abort
             echo "result=clean" >> "$GITHUB_OUTPUT"
           else
             git merge --abort
             echo "result=conflict" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Push merged mintlify
-        if: steps.merge.outputs.result == 'clean'
-        run: git push origin HEAD:refs/heads/mintlify
-
-      - name: Open reconciliation PR on conflict
-        if: steps.merge.outputs.result == 'conflict'
+      - name: Open sync PR
+        if: steps.merge.outputs.result != 'uptodate'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           branch="mintlify-sync-${{ github.ref_name }}"
           git push --force origin ${{ github.sha }}:refs/heads/"$branch"
+          if [ "${{ steps.merge.outputs.result }}" = "clean" ]; then
+            body="Syncs mintlify to ${{ github.ref_name }}. The release commit merges cleanly, so this PR was enqueued automatically; the merge queue lands it as a merge commit."
+          else
+            body="Releasing ${{ github.ref_name }} could not merge into mintlify cleanly. mintlify carries docs that conflict with this release. Resolve by merging mintlify into this branch and pushing, then add the PR to the merge queue (merge when ready). The queue lands it as a merge commit, which keeps the history shared with main intact. Do not bypass the queue with a squash: that erases the shared history and turns the next sync into a wall of false conflicts."
+          fi
           gh pr create \
             --base mintlify \
             --head "$branch" \
             --title "sync mintlify to ${{ github.ref_name }}" \
-            --body "Releasing ${{ github.ref_name }} could not merge into mintlify cleanly. mintlify carries docs that conflict with this release. Resolve the conflicts and merge to publish the released docs."
+            --body "$body"
+
+      - name: Enqueue clean sync PR
+        if: steps.merge.outputs.result == 'clean'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --merge "mintlify-sync-${{ github.ref_name }}"
 
   # ---------------------------------------------------------------------------
   # Update Homebrew formula in the tap repo
