@@ -46,7 +46,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.6.5"
+version = "0.6.6"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -64,18 +64,18 @@ panic = "abort"
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.6.5", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.6.5", path = "packages/agent-client/rust" }
-microsandbox-db = { version = "=0.6.5", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.6.5", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.6.5", path = "crates/image" }
-microsandbox-metrics = { version = "=0.6.5", path = "crates/metrics" }
-microsandbox-types = { version = "=0.6.5", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.6.5", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.5", path = "crates/network" }
-microsandbox-protocol = { version = "=0.6.5", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.6.5", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.6.5", path = "crates/utils" }
+microsandbox = { version = "=0.6.6", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.6.6", path = "packages/agent-client/rust" }
+microsandbox-db = { version = "=0.6.6", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.6.6", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.6.6", path = "crates/image" }
+microsandbox-metrics = { version = "=0.6.6", path = "crates/metrics" }
+microsandbox-types = { version = "=0.6.6", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.6.6", path = "crates/migration" }
+microsandbox-network = { version = "=0.6.6", path = "crates/network" }
+microsandbox-protocol = { version = "=0.6.6", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.6.6", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.6.6", path = "crates/utils" }
 msb_krun = "=0.1.25"
 msb_krun_utils = "=0.1.25"
 test-macros = { path = "crates/test-macros" }
