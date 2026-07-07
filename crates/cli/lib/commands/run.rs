@@ -30,7 +30,11 @@ pub struct RunArgs {
     /// The snapshot pins the image; passing `--from-snapshot` is equivalent
     /// to specifying the snapshot's image plus pre-populating the
     /// upper layer from the artifact.
-    #[arg(long = "from-snapshot", value_name = "PATH_OR_NAME")]
+    #[arg(
+        long = "from-snapshot",
+        alias = "from-snap",
+        value_name = "PATH_OR_NAME"
+    )]
     pub from_snapshot: Option<String>,
 
     /// Start the sandbox in the background and print its name.
@@ -427,6 +431,25 @@ mod tests {
         let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
 
         assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
+    }
+
+    #[test]
+    fn from_snap_is_an_alias_for_from_snapshot() {
+        let args = parse_run_args(&["--name", "box", "--from-snap", "clean"]);
+
+        assert_eq!(args.from_snapshot.as_deref(), Some("clean"));
+    }
+
+    #[test]
+    fn from_snap_alias_is_hidden_from_help() {
+        let mut help = Vec::new();
+        <TestCli as clap::CommandFactory>::command()
+            .write_long_help(&mut help)
+            .unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--from-snapshot"));
+        assert!(!help.contains("--from-snap "));
     }
 
     #[test]
