@@ -153,6 +153,22 @@ impl Registry {
             .map(|cached| (cached.result, cached.metadata)))
     }
 
+    /// Resolve a pull from any complete cached image metadata matching a manifest digest.
+    ///
+    /// Snapshot restores use this before contacting a registry because the
+    /// snapshot already records the immutable base image digest, while cached
+    /// metadata may still be keyed by the mutable tag that produced it.
+    pub async fn pull_cached_by_manifest_digest(
+        cache: &GlobalCache,
+        manifest_digest: &Digest,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        Ok(
+            resolve_cached_pull_result_by_manifest_digest_async(cache, manifest_digest)
+                .await?
+                .map(|cached| (cached.result, cached.metadata)),
+        )
+    }
+
     /// Pull an image. Downloads blobs and materializes EROFS layers concurrently.
     pub async fn pull(
         &self,
@@ -1475,6 +1491,54 @@ async fn resolve_cached_pull_result_async(
         return Ok(None);
     };
 
+    resolve_cached_metadata_pull_result_async(cache, metadata).await
+}
+
+async fn resolve_cached_pull_result_by_manifest_digest_async(
+    cache: &GlobalCache,
+    manifest_digest: &Digest,
+) -> ImageResult<Option<CachedPullInfo>> {
+    let expected = manifest_digest.to_string();
+    let mut entries = tokio::fs::read_dir(cache.manifests_dir())
+        .await
+        .map_err(|e| ImageError::Cache {
+            path: cache.manifests_dir().to_path_buf(),
+            source: e,
+        })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| ImageError::Cache {
+        path: cache.manifests_dir().to_path_buf(),
+        source: e,
+    })? {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(ImageError::Cache { path, source: e }),
+        };
+        let Some(metadata) = cache::parse_cached_image_metadata(&path, &data)? else {
+            continue;
+        };
+        if metadata.manifest_digest != expected {
+            continue;
+        }
+
+        if let Some(cached) = resolve_cached_metadata_pull_result_async(cache, metadata).await? {
+            return Ok(Some(cached));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn resolve_cached_metadata_pull_result_async(
+    cache: &GlobalCache,
+    metadata: CachedImageMetadata,
+) -> ImageResult<Option<CachedPullInfo>> {
     let cached_diff_ids = match metadata
         .layers
         .iter()
@@ -1701,6 +1765,42 @@ mod tests {
             metadata.manifest_digest
         );
         assert_eq!(cached.1.manifest_digest, metadata.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn test_pull_cached_by_manifest_digest_finds_tag_keyed_metadata() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/python:3.12".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true, true]);
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+
+        let cached = super::Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest)
+            .await
+            .unwrap()
+            .expect("expected cached pull result by manifest digest");
+
+        assert!(cached.0.cached);
+        assert_eq!(
+            cached.0.manifest_digest.to_string(),
+            metadata.manifest_digest
+        );
+        assert_eq!(cached.1.manifest_digest, metadata.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn test_pull_cached_by_manifest_digest_requires_complete_artifacts() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/python:3.12".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true, false]);
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+
+        let cached = super::Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest)
+            .await
+            .unwrap();
+
+        assert!(cached.is_none());
     }
 
     #[tokio::test]

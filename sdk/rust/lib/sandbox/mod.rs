@@ -45,8 +45,8 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
 use microsandbox_image::{
-    Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4,
-    progress_channel, tree,
+    CachedImageMetadata, Digest, GlobalCache, PullOptions, PullProgressSender, PullResult,
+    Reference, ext4, progress_channel, tree,
 };
 
 use crate::{
@@ -175,6 +175,12 @@ pub(crate) struct RegistryOverrides {
     pub auth: Option<microsandbox_image::RegistryAuth>,
     pub insecure: bool,
     pub ca_certs: Vec<Vec<u8>>,
+}
+
+struct ResolvedOciImage {
+    pull_result: PullResult,
+    metadata_reference: String,
+    cached_metadata: Option<CachedImageMetadata>,
 }
 
 /// Filter for [`Sandbox::list_with`].
@@ -543,41 +549,22 @@ pub(crate) async fn create_local(
             ca_certs: config.ca_certs.clone(),
         };
 
-        // A snapshot's overlay is bound to the exact base image it was captured
-        // on, so restore pulls that base by its pinned digest; a tag could
-        // resolve to different content. Fresh creates pull the tag.
-        let pull_reference = match expected_snapshot_manifest_digest.as_deref() {
-            Some(pinned) => digest_pinned_reference(&reference, pinned)?,
-            None => reference.clone(),
-        };
-
-        let pull_result = match pull_oci_image(
+        let ResolvedOciImage {
+            pull_result,
+            metadata_reference,
+            cached_metadata,
+        } = resolve_oci_image_for_create(
             local_backend,
-            &pull_reference,
+            &reference,
             config.spec.pull_policy,
             overrides,
+            expected_snapshot_manifest_digest.as_deref(),
             progress,
         )
-        .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                // Restore pulled by pinned digest; a failure likely means the
-                // registry no longer serves it. Report that rather than falling
-                // back to the tag, whose content may not match the overlay.
-                if let Some(pinned) = expected_snapshot_manifest_digest.as_deref() {
-                    return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
-                        "snapshot base image {pinned} no longer available in registry \
-                         (it may have been garbage-collected upstream); this snapshot \
-                         cannot be restored losslessly: {err}"
-                    )));
-                }
-                return Err(err);
-            }
-        };
+        .await?;
 
-        // A cheap guard: fetched by digest, so this should match unless a
-        // registry serves mismatched content.
+        // A cheap guard: snapshot restores are resolved by the pinned digest,
+        // so this should match unless the cache or registry is inconsistent.
         if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
             && pull_result.manifest_digest.to_string() != expected
         {
@@ -594,7 +581,7 @@ pub(crate) async fn create_local(
         }
 
         pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
-        pinned_reference = Some(reference.clone());
+        pinned_reference = Some(metadata_reference.clone());
 
         // Verify VMDK exists in the global cache.
         let cache_dir = local_backend.cache_dir();
@@ -647,13 +634,23 @@ pub(crate) async fn create_local(
         // Store manifest digest for spawn to derive paths.
         config.manifest_digest = Some(pull_result.manifest_digest.to_string());
 
-        // The cache is keyed by the reference actually pulled (digest-pinned on
-        // restore), so read and persist metadata under that same reference.
-        if let Ok(image_ref) = pull_reference.parse::<Reference>() {
+        // Persist under the immutable digest-pinned reference on snapshot
+        // restore, even when the matching metadata was found under an old tag.
+        if let Some(metadata) = cached_metadata {
+            if let Err(e) =
+                crate::image::Image::persist(local_backend, &metadata_reference, metadata).await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "failed to persist image metadata to database"
+                );
+            }
+        } else if let Ok(image_ref) = metadata_reference.parse::<Reference>() {
             match cache.read_image_metadata_async(&image_ref).await {
                 Ok(Some(metadata)) => {
                     if let Err(e) =
-                        crate::image::Image::persist(local_backend, &pull_reference, metadata).await
+                        crate::image::Image::persist(local_backend, &metadata_reference, metadata)
+                            .await
                     {
                         tracing::warn!(
                             error = %e,
@@ -2469,6 +2466,133 @@ fn digest_pinned_reference(reference: &str, pinned_digest: &str) -> Microsandbox
     .whole())
 }
 
+async fn resolve_oci_image_for_create(
+    local_backend: &crate::backend::LocalBackend,
+    reference: &str,
+    pull_policy: PullPolicy,
+    registry_overrides: RegistryOverrides,
+    expected_snapshot_manifest_digest: Option<&str>,
+    progress: Option<PullProgressSender>,
+) -> MicrosandboxResult<ResolvedOciImage> {
+    let Some(pinned_digest) = expected_snapshot_manifest_digest else {
+        let pull_result = pull_oci_image(
+            local_backend,
+            reference,
+            pull_policy,
+            registry_overrides,
+            progress,
+        )
+        .await?;
+        return Ok(ResolvedOciImage {
+            pull_result,
+            metadata_reference: reference.to_string(),
+            cached_metadata: None,
+        });
+    };
+
+    resolve_snapshot_oci_image(
+        local_backend,
+        reference,
+        pinned_digest,
+        pull_policy,
+        registry_overrides,
+        progress,
+    )
+    .await
+}
+
+async fn resolve_snapshot_oci_image(
+    local_backend: &crate::backend::LocalBackend,
+    reference: &str,
+    pinned_digest: &str,
+    pull_policy: PullPolicy,
+    registry_overrides: RegistryOverrides,
+    progress: Option<PullProgressSender>,
+) -> MicrosandboxResult<ResolvedOciImage> {
+    let manifest_digest: Digest = pinned_digest.parse().map_err(|e| {
+        crate::MicrosandboxError::SnapshotIntegrity(format!(
+            "invalid snapshot image digest {pinned_digest}: {e}"
+        ))
+    })?;
+    let pinned_reference = digest_pinned_reference(reference, pinned_digest)?;
+    let cache = GlobalCache::new_async(&local_backend.cache_dir()).await?;
+
+    if let Some((pull_result, metadata)) =
+        Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest).await?
+    {
+        emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
+        return Ok(ResolvedOciImage {
+            pull_result,
+            metadata_reference: pinned_reference,
+            cached_metadata: Some(metadata),
+        });
+    }
+
+    if pull_policy == PullPolicy::Never {
+        return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+            "snapshot base image {pinned_digest} is not cached locally and pull policy is `never`; \
+             this snapshot cannot be restored losslessly"
+        )));
+    }
+
+    // A snapshot's overlay is bound to the exact base image it was captured on,
+    // so restore pulls that base by its pinned digest; a tag could resolve to
+    // different content. Fresh creates still pull the tag.
+    let pull_result = match pull_oci_image(
+        local_backend,
+        &pinned_reference,
+        pull_policy,
+        registry_overrides,
+        progress,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                "snapshot base image {pinned_digest} no longer available in registry \
+                 (it may have been garbage-collected upstream); this snapshot \
+                 cannot be restored losslessly: {err}"
+            )));
+        }
+    };
+
+    Ok(ResolvedOciImage {
+        pull_result,
+        metadata_reference: pinned_reference,
+        cached_metadata: None,
+    })
+}
+
+fn emit_cached_pull_progress(
+    progress: Option<&PullProgressSender>,
+    reference: &str,
+    metadata: &CachedImageMetadata,
+) {
+    let Some(sender) = progress else {
+        return;
+    };
+
+    let reference: std::sync::Arc<str> = reference.to_string().into();
+    sender.send(PullProgress::Resolving {
+        reference: reference.clone(),
+    });
+    sender.send(PullProgress::Resolved {
+        reference: reference.clone(),
+        manifest_digest: metadata.manifest_digest.clone().into(),
+        layer_count: metadata.layers.len(),
+        total_download_bytes: metadata
+            .layers
+            .iter()
+            .filter_map(|layer| layer.size_bytes)
+            .reduce(|a, b| a + b),
+    });
+    sender.send(PullProgress::Complete {
+        reference,
+        layer_count: metadata.layers.len(),
+    });
+}
+
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
@@ -2502,27 +2626,7 @@ async fn pull_oci_image(
     // constructing the registry client when the image is already complete
     // in the local cache.
     if let Some((result, metadata)) = Registry::pull_cached(&cache, &image_ref, &options)? {
-        if let Some(sender) = progress {
-            let reference: std::sync::Arc<str> = reference.to_string().into();
-            sender.send(PullProgress::Resolving {
-                reference: reference.clone(),
-            });
-            sender.send(PullProgress::Resolved {
-                reference: reference.clone(),
-                manifest_digest: metadata.manifest_digest.clone().into(),
-                layer_count: metadata.layers.len(),
-                total_download_bytes: metadata
-                    .layers
-                    .iter()
-                    .filter_map(|layer| layer.size_bytes)
-                    .reduce(|a, b| a + b),
-            });
-            sender.send(PullProgress::Complete {
-                reference,
-                layer_count: metadata.layers.len(),
-            });
-        }
-
+        emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
         return Ok(result);
     }
 
@@ -3001,6 +3105,7 @@ mod tests {
 
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
+    use microsandbox_image::{CachedImageMetadata, CachedLayerMetadata, GlobalCache, ImageConfig};
 
     use crate::{
         backend::{Backend, LocalBackend},
@@ -3013,15 +3118,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount, digest_pinned_reference, ephemeral_cleanup_stop_result,
-        hostname_from_sandbox_name, insert_sandbox_record, persist_oci_manifest_pin,
-        prepare_create_target, reconcile_sandbox_runtime_state, remove_dir_if_exists,
-        sandbox_not_found_for_name, validate_hostname, validate_rootfs_source,
+        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, PullPolicy, RegistryOverrides,
+        RootfsSource, SandboxConfig, SandboxStatus, VolumeMount, digest_pinned_reference,
+        ephemeral_cleanup_stop_result, hostname_from_sandbox_name, insert_sandbox_record,
+        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
+        remove_dir_if_exists, resolve_snapshot_oci_image, sandbox_not_found_for_name,
+        validate_hostname, validate_rootfs_source,
     };
 
     const TEST_DIGEST: &str =
         "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    const TEST_LAYER_DIFF_ID: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     #[test]
     fn test_digest_pinned_reference_from_tag() {
@@ -3041,6 +3149,103 @@ mod tests {
     #[test]
     fn test_digest_pinned_reference_rejects_invalid_reference() {
         assert!(digest_pinned_reference("", TEST_DIGEST).is_err());
+    }
+
+    async fn seed_tag_keyed_snapshot_base_cache(
+        cache: &GlobalCache,
+        reference: &microsandbox_image::Reference,
+    ) -> CachedImageMetadata {
+        let metadata = CachedImageMetadata {
+            manifest_digest: TEST_DIGEST.to_string(),
+            config_digest:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_string(),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.to_string(),
+            raw_config_json:
+                r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#
+                    .to_string(),
+            config: ImageConfig {
+                env: vec!["PATH=/usr/bin".into()],
+                ..Default::default()
+            },
+            layers: vec![CachedLayerMetadata {
+                digest: "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_string(),
+                media_type: Some("application/vnd.oci.image.layer.v1.tar+gzip".into()),
+                size_bytes: Some(4096),
+                diff_id: TEST_LAYER_DIFF_ID.to_string(),
+            }],
+        };
+
+        cache
+            .write_image_metadata_async(reference, &metadata)
+            .await
+            .unwrap();
+
+        let manifest_digest = TEST_DIGEST.parse().unwrap();
+        let layer_diff_id = TEST_LAYER_DIFF_ID.parse().unwrap();
+        // Snapshot restores need the fully materialized cache, not just metadata.
+        std::fs::write(cache.layer_erofs_path(&layer_diff_id), vec![0u8; 4096]).unwrap();
+        std::fs::write(cache.fsmeta_erofs_path(&manifest_digest), vec![0u8; 4096]).unwrap();
+        std::fs::write(cache.vmdk_path(&manifest_digest), b"# VMDK fixture").unwrap();
+
+        metadata
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_restore_resolves_tag_keyed_cache_by_pinned_digest() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let cache = GlobalCache::new(&local.cache_dir()).unwrap();
+        let tag_reference: microsandbox_image::Reference =
+            "docker.io/library/python:3.12".parse().unwrap();
+        let metadata = seed_tag_keyed_snapshot_base_cache(&cache, &tag_reference).await;
+        let digest_reference = digest_pinned_reference(&tag_reference.to_string(), TEST_DIGEST)
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        assert!(
+            cache
+                .read_image_metadata_async(&digest_reference)
+                .await
+                .unwrap()
+                .is_none(),
+            "fixture should only be cached under the mutable tag key"
+        );
+
+        let resolved = resolve_snapshot_oci_image(
+            &local,
+            &tag_reference.to_string(),
+            TEST_DIGEST,
+            PullPolicy::Never,
+            RegistryOverrides {
+                auth: None,
+                insecure: false,
+                ca_certs: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(resolved.pull_result.cached);
+        assert_eq!(
+            resolved.pull_result.manifest_digest.to_string(),
+            TEST_DIGEST
+        );
+        assert_eq!(
+            resolved.metadata_reference,
+            format!("docker.io/library/python@{TEST_DIGEST}")
+        );
+        assert_eq!(
+            resolved.cached_metadata.unwrap().manifest_digest,
+            metadata.manifest_digest
+        );
     }
 
     /// Open both pools at `db_path` for tests, with migrations applied.

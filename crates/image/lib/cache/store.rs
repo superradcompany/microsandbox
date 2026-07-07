@@ -407,7 +407,7 @@ fn image_cache_key(reference: &Reference) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn parse_cached_image_metadata(
+pub(crate) fn parse_cached_image_metadata(
     path: &Path,
     data: &str,
 ) -> ImageResult<Option<CachedImageMetadata>> {
