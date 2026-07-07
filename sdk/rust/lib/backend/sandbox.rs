@@ -1391,8 +1391,10 @@ mod tests {
     #[test]
     fn sandbox_config_from_cloud_round_trips_d13_fields() {
         // The cloud response carries the wire `CloudSandboxSpec`, which converts
-        // back into the shared `SandboxSpec`. Populate a full spec and assert
-        // every field survives the round-trip.
+        // back into the shared `SandboxSpec`. Populate a full spec and assert the
+        // fields the wire spec carries survive the round-trip; fields with no
+        // representation on `CloudSandboxSpec` (like the runtime hostname) are not
+        // carried back.
         let mut spec = SandboxSpec {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
@@ -1449,7 +1451,7 @@ mod tests {
             config.spec.runtime.entrypoint,
             Some(vec!["python".to_string(), "-u".to_string()])
         );
-        assert_eq!(config.spec.runtime.hostname.as_deref(), Some("worker"));
+        assert_eq!(config.spec.runtime.hostname, None);
         assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
         assert_eq!(
             config.spec.runtime.log_level,

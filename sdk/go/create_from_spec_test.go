@@ -62,7 +62,7 @@ func vmSmokeSetup(t *testing.T) context.Context {
 func fromSpecJSON(name string) string {
 	return fmt.Sprintf(`{
 		"name": %q,
-		"image": {"type":"oci","data":{"reference":"mirror.gcr.io/library/alpine"}},
+		"image": {"oci":{"reference":"mirror.gcr.io/library/alpine"}},
 		"resources": {"vcpus":1,"memory_mib":256},
 		"runtime": {"hostname":"spec-host"},
 		"env": [{"key":"FROM_SPEC","value":"applied"}]
