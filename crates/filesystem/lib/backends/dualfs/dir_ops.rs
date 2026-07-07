@@ -8,14 +8,14 @@ use std::{
 
 use super::{
     DualFs,
-    lookup::{auto_register_readdir, backend, get_node},
+    lookup::{auto_register_readdir, backend, do_forget, get_node},
     policy::{BackendChoice, DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx},
     types::{
         BackendId, DirSnapshot, DualDirHandle, FileKind, MergedDirEntry, NodeState, ROOT_INODE,
     },
 };
 use crate::{
-    Context, DirEntry, Entry, OpenOptions,
+    AddDirEntry, AddDirEntryPlus, Context, DirEntry, Entry, OpenOptions,
     backends::shared::{
         dir_snapshot::{self, SnapshotEntry},
         init_binary, platform,
@@ -128,6 +128,27 @@ pub(crate) fn do_readdir(
     serve_readdir(snapshot, offset)
 }
 
+/// Handle readdir by streaming entries from the snapshot.
+pub(crate) fn do_readdir_for_each(
+    fs: &DualFs,
+    ctx: Context,
+    _ino: u64,
+    handle: u64,
+    _size: u32,
+    offset: u64,
+    add_entry: &mut AddDirEntry<'_>,
+) -> io::Result<()> {
+    let dh = get_dir_handle(fs, handle)?;
+    let mut snapshot_guard = dh.snapshot.lock().unwrap();
+
+    if snapshot_guard.is_none() {
+        *snapshot_guard = Some(build_readdir_snapshot(fs, ctx, dh.guest_inode, &dh)?);
+    }
+
+    let snapshot = snapshot_guard.as_ref().unwrap();
+    dir_snapshot::serve_snapshot_entries_for_each(&snapshot.entries, offset, add_entry)
+}
+
 /// Handle readdirplus.
 pub(crate) fn do_readdirplus(
     fs: &DualFs,
@@ -194,6 +215,98 @@ pub(crate) fn do_readdirplus(
     }
 
     Ok(result)
+}
+
+/// Handle readdirplus by streaming entries with attributes.
+pub(crate) fn do_readdirplus_for_each(
+    fs: &DualFs,
+    ctx: Context,
+    _ino: u64,
+    handle: u64,
+    _size: u32,
+    offset: u64,
+    add_entry: &mut AddDirEntryPlus<'_>,
+) -> io::Result<()> {
+    let dh = get_dir_handle(fs, handle)?;
+    let mut snapshot_guard = dh.snapshot.lock().unwrap();
+
+    if snapshot_guard.is_none() {
+        *snapshot_guard = Some(build_readdir_snapshot(fs, ctx, dh.guest_inode, &dh)?);
+    }
+
+    let snapshot = snapshot_guard.as_ref().unwrap();
+    let mut emitted_lookup_refs = Vec::new();
+
+    for snapshot_entry in dir_snapshot::snapshot_entries_after(&snapshot.entries, offset) {
+        let dir_entry = DirEntry {
+            ino: snapshot_entry.inode(),
+            offset: snapshot_entry.offset(),
+            type_: snapshot_entry.file_type(),
+            name: snapshot_entry.name(),
+        };
+
+        let lookup_ref = if dir_entry.ino == init_binary::INIT_INODE {
+            None
+        } else {
+            fs.state
+                .nodes
+                .read()
+                .unwrap()
+                .get(&dir_entry.ino)
+                .cloned()
+                .map(|node| {
+                    node.lookup_refs.fetch_add(1, Ordering::Relaxed);
+                    dir_entry.ino
+                })
+        };
+
+        let entry = if dir_entry.ino == init_binary::INIT_INODE {
+            init_binary::init_entry(fs.cfg.entry_timeout, fs.cfg.attr_timeout)
+        } else if let Some(node) = fs.state.nodes.read().unwrap().get(&dir_entry.ino).cloned() {
+            let (backend_id, child_inode) = super::lookup::resolve_active_backend_inode(&node);
+            match backend(fs, backend_id).getattr(ctx, child_inode, None) {
+                Ok((mut st, _)) => {
+                    st.st_ino = dir_entry.ino;
+                    Entry {
+                        inode: dir_entry.ino,
+                        generation: 0,
+                        attr: st,
+                        attr_flags: 0,
+                        attr_timeout: fs.cfg.attr_timeout,
+                        entry_timeout: fs.cfg.entry_timeout,
+                    }
+                }
+                Err(_) => fallback_entry(fs, dir_entry.ino),
+            }
+        } else {
+            fallback_entry(fs, dir_entry.ino)
+        };
+
+        match add_entry(dir_entry, entry) {
+            Ok(0) => {
+                if let Some(inode) = lookup_ref {
+                    do_forget(fs, ctx, inode, 1);
+                }
+                break;
+            }
+            Ok(_) => {
+                if let Some(inode) = lookup_ref {
+                    emitted_lookup_refs.push(inode);
+                }
+            }
+            Err(err) => {
+                if let Some(inode) = lookup_ref {
+                    do_forget(fs, ctx, inode, 1);
+                }
+                for inode in emitted_lookup_refs {
+                    do_forget(fs, ctx, inode, 1);
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle releasedir.
@@ -528,6 +641,18 @@ fn serve_readdir(snapshot: &DirSnapshot, offset: u64) -> io::Result<Vec<DirEntry
         &snapshot.entries,
         offset,
     ))
+}
+
+/// Build a minimal fallback entry when backend attributes cannot be read.
+fn fallback_entry(fs: &DualFs, inode: u64) -> Entry {
+    Entry {
+        inode,
+        generation: 0,
+        attr: unsafe { std::mem::zeroed() },
+        attr_flags: 0,
+        attr_timeout: fs.cfg.attr_timeout,
+        entry_timeout: fs.cfg.entry_timeout,
+    }
 }
 
 /// Get a directory handle by guest handle ID.

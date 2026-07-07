@@ -30,8 +30,8 @@ use std::{
 };
 
 use crate::{
-    Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
+    GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
     backends::shared::{
         handle_table::HandleData,
         init_binary,
@@ -802,6 +802,18 @@ impl DynFileSystem for PassthroughFs {
         dir_ops::do_readdir(self, ctx, ino, handle, size, offset)
     }
 
+    fn readdir_for_each(
+        &self,
+        ctx: Context,
+        ino: u64,
+        handle: u64,
+        size: u32,
+        offset: u64,
+        add_entry: &mut AddDirEntry<'_>,
+    ) -> io::Result<()> {
+        dir_ops::do_readdir_for_each(self, ctx, ino, handle, size, offset, add_entry)
+    }
+
     fn readdirplus(
         &self,
         ctx: Context,
@@ -811,6 +823,18 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
     ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
         dir_ops::do_readdirplus(self, ctx, ino, handle, size, offset)
+    }
+
+    fn readdirplus_for_each(
+        &self,
+        ctx: Context,
+        ino: u64,
+        handle: u64,
+        size: u32,
+        offset: u64,
+        add_entry: &mut AddDirEntryPlus<'_>,
+    ) -> io::Result<()> {
+        dir_ops::do_readdirplus_for_each(self, ctx, ino, handle, size, offset, add_entry)
     }
 
     fn fsyncdir(&self, ctx: Context, ino: u64, datasync: bool, handle: u64) -> io::Result<()> {

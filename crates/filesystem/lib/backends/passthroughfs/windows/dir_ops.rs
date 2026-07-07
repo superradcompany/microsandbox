@@ -74,6 +74,97 @@ impl PassthroughFs {
         Ok(entries)
     }
 
+    pub(super) fn dir_entries_for_each(
+        &self,
+        inode: u64,
+        offset: u64,
+        add_entry: &mut AddDirEntryPlus<'_>,
+    ) -> io::Result<()> {
+        let data = self.inode(inode)?;
+        let metadata = self.safe_metadata(&data.path)?;
+        if !metadata.file_type().is_dir() {
+            return Err(linux_error(LINUX_ENOTDIR));
+        }
+
+        let mut index = 0u64;
+        let mut emit = |ino: u64,
+                        type_: u32,
+                        name: &[u8],
+                        entry: Entry,
+                        add_entry: &mut AddDirEntryPlus<'_>| {
+            let dir_entry = DirEntry {
+                ino,
+                offset: index + 1,
+                type_,
+                name,
+            };
+            index += 1;
+
+            if dir_entry.offset <= offset {
+                return Ok(false);
+            }
+
+            add_entry(dir_entry, entry).map(|written| written == 0)
+        };
+
+        if emit(
+            inode,
+            DT_DIR,
+            b".",
+            self.entry_from_metadata(&metadata, data.as_ref())?,
+            add_entry,
+        )? {
+            return Ok(());
+        }
+        if emit(
+            ROOT_INODE,
+            DT_DIR,
+            b"..",
+            self.parent_entry(data.as_ref())?,
+            add_entry,
+        )? {
+            return Ok(());
+        }
+
+        if self.cfg.inject_init
+            && inode == ROOT_INODE
+            && emit(
+                INIT_INODE,
+                DT_REG,
+                INIT_NAME,
+                init_entry(self.cfg.entry_timeout, self.cfg.attr_timeout),
+                add_entry,
+            )?
+        {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(&data.path).map_err(host_error)? {
+            let entry = entry.map_err(host_error)?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| linux_error(LINUX_EINVAL))?;
+            if is_reserved_name(name) {
+                continue;
+            }
+            let name_buffer = format!("{name}\0");
+            let name = CStr::from_bytes_with_nul(name_buffer.as_bytes())
+                .map_err(|_| linux_error(LINUX_EINVAL))?;
+            validate_component(name)?;
+
+            let path = entry.path();
+            let metadata = self.safe_metadata(&path)?;
+            let child = self.intern_path(path);
+            let full_entry = self.entry_from_metadata(&metadata, child.as_ref())?;
+            let type_ = dirent_type_from_mode(full_entry.attr.st_mode);
+
+            if emit(child.inode, type_, name.to_bytes(), full_entry, add_entry)? {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn parent_entry(&self, data: &InodeData) -> io::Result<Entry> {
         let parent_path = data.path.parent().unwrap_or(&self.root);
         let parent_path = if data.inode == ROOT_INODE || !parent_path.starts_with(&self.root) {

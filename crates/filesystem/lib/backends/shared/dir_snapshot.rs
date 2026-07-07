@@ -1,5 +1,7 @@
 //! Shared helpers for serving snapshot-backed directory entries.
 
+use std::io;
+
 use crate::DirEntry;
 
 //--------------------------------------------------------------------------------------------------
@@ -66,4 +68,40 @@ pub(crate) fn serve_snapshot_entries<T: SnapshotEntry>(
             name: &leaked[start..start + len],
         })
         .collect()
+}
+
+/// Stream directory entries from a snapshot starting strictly after `offset`.
+pub(crate) fn serve_snapshot_entries_for_each<T, F>(
+    entries: &[T],
+    offset: u64,
+    mut add_entry: F,
+) -> io::Result<()>
+where
+    T: SnapshotEntry,
+    F: for<'name> FnMut(DirEntry<'name>) -> io::Result<usize>,
+{
+    for entry in snapshot_entries_after(entries, offset) {
+        let dir_entry = DirEntry {
+            ino: entry.inode(),
+            offset: entry.offset(),
+            type_: entry.file_type(),
+            name: entry.name(),
+        };
+
+        if add_entry(dir_entry)? == 0 {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Return snapshot entries strictly after `offset`.
+pub(crate) fn snapshot_entries_after<T: SnapshotEntry>(entries: &[T], offset: u64) -> &[T] {
+    let start = entries
+        .iter()
+        .position(|entry| entry.offset() > offset)
+        .unwrap_or(entries.len());
+
+    &entries[start..]
 }
