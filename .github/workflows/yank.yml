@@ -1,0 +1,94 @@
+name: Yank release
+
+# Pull a published version back from the registries. crates.io yanks keep the
+# version resolvable for existing lockfiles but stop new resolution; npm has no
+# yank, so within the 72h window we unpublish the version (falling back to
+# deprecate if the registry refuses). PyPI yanking has no API (publishing here
+# uses OIDC trusted publishing) — yank 0.6.5 in the web UI: project → release →
+# Options → Yank. GHCR versions tagged with the target are deleted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version to yank (e.g. 0.6.5)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cargo-yank:
+    name: Yank crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Yank all workspace crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -uo pipefail
+          fail=0
+          for crate in \
+            microsandbox-utils microsandbox-types microsandbox-protocol \
+            microsandbox-agent-client microsandbox-agentd microsandbox-db \
+            microsandbox-migration microsandbox-image microsandbox-filesystem \
+            microsandbox-network microsandbox-metrics microsandbox-metrics-collector \
+            microsandbox-runtime microsandbox microsandbox-cli; do
+            echo "Yanking $crate@${{ inputs.version }}..."
+            cargo yank --version "${{ inputs.version }}" "$crate" || fail=1
+          done
+          exit $fail
+
+  npm-yank:
+    name: Unpublish npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Unpublish (or deprecate) each package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          fail=0
+          for pkg in \
+            microsandbox \
+            "@microsandbox/agent-client" \
+            "@microsandbox/types" \
+            "@superradcompany/microsandbox-darwin-arm64" \
+            "@superradcompany/microsandbox-linux-arm64-gnu" \
+            "@superradcompany/microsandbox-linux-x64-gnu" \
+            "@superradcompany/microsandbox-win32-arm64-msvc" \
+            "@superradcompany/microsandbox-win32-x64-msvc"; do
+            echo "Unpublishing $pkg@${{ inputs.version }}..."
+            if ! npm unpublish "$pkg@${{ inputs.version }}" --force; then
+              echo "unpublish refused for $pkg — deprecating instead"
+              npm deprecate "$pkg@${{ inputs.version }}" \
+                "yanked: contains breaking changes; use the previous release" || fail=1
+            fi
+            npm dist-tag ls "$pkg" || true
+          done
+          exit $fail
+
+  ghcr-yank:
+    name: Delete GHCR tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete container versions tagged with the target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          for pkg in microsandbox; do
+            ids=$(gh api "orgs/superradcompany/packages/container/$pkg/versions" --paginate \
+              --jq ".[] | select(.metadata.container.tags | index(\"${{ inputs.version }}\")) | .id") || continue
+            for id in $ids; do
+              echo "Deleting $pkg container version $id (tagged ${{ inputs.version }})"
+              gh api -X DELETE "orgs/superradcompany/packages/container/$pkg/versions/$id" || true
+            done
+          done
