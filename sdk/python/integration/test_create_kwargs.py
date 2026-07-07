@@ -108,7 +108,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
             "echo entrypoint-from-python",
         ]
         assert config["init"]["cmd"] == "auto"
-        assert config["pull_policy"] == "IfMissing"
+        assert config["pull_policy"] == "if_missing"
         assert config["runtime"]["log_level"] == "info"
         assert config["lifecycle"]["max_duration_secs"] == 7200
         assert config["lifecycle"]["idle_timeout_secs"] == 1800
