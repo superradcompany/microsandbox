@@ -265,7 +265,18 @@ func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, b
 		return "", "", 0, false, err
 	}
 
-	if value, ok := tagged["Oci"]; ok {
+	// Canonical tags are snake_case; the PascalCase forms decode configs
+	// persisted before the casing change (mirrors the core's serde aliases).
+	variant := func(keys ...string) (json.RawMessage, bool) {
+		for _, k := range keys {
+			if v, ok := tagged[k]; ok {
+				return v, true
+			}
+		}
+		return nil, false
+	}
+
+	if value, ok := variant("oci", "Oci"); ok {
 		var source struct {
 			Reference    string  `json:"reference"`
 			UpperSizeMiB *uint32 `json:"upper_size_mib"`
@@ -279,7 +290,7 @@ func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, b
 		return source.Reference, "", *source.UpperSizeMiB, true, nil
 	}
 
-	if value, ok := tagged["Bind"]; ok {
+	if value, ok := variant("bind", "Bind"); ok {
 		var path string
 		if err := json.Unmarshal(value, &path); err != nil {
 			return "", "", 0, false, err
@@ -287,7 +298,7 @@ func decodePersistedRootfsSource(raw json.RawMessage) (string, string, uint32, b
 		return path, "", 0, false, nil
 	}
 
-	if value, ok := tagged["DiskImage"]; ok {
+	if value, ok := variant("disk_image", "DiskImage"); ok {
 		var source struct {
 			Path   string  `json:"path"`
 			Fstype *string `json:"fstype"`
