@@ -94,10 +94,28 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
+	// Canonical field names; the cpus/max_cpus pair decodes configs
+	// persisted before the vcpus rename.
+	Vcpus        uint8  `json:"vcpus"`
+	MaxVcpus     uint8  `json:"max_vcpus"`
 	CPUs         uint8  `json:"cpus"`
 	MemoryMiB    uint32 `json:"memory_mib"`
 	MaxCPUs      uint8  `json:"max_cpus"`
 	MaxMemoryMiB uint32 `json:"max_memory_mib"`
+}
+
+func (r persistedResources) effectiveCPUs() uint8 {
+	if r.Vcpus != 0 {
+		return r.Vcpus
+	}
+	return r.CPUs
+}
+
+func (r persistedResources) effectiveMaxCPUs() uint8 {
+	if r.MaxVcpus != 0 {
+		return r.MaxVcpus
+	}
+	return r.MaxCPUs
 }
 
 type persistedLifecycle struct {
@@ -159,7 +177,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 
 func (c persistedSandboxConfig) cpus() uint8 {
 	if c.Resources != nil {
-		return c.Resources.CPUs
+		return c.Resources.effectiveCPUs()
 	}
 	return c.CPUs
 }
@@ -173,10 +191,10 @@ func (c persistedSandboxConfig) memoryMiB() uint32 {
 
 func (c persistedSandboxConfig) maxCPUs() uint8 {
 	if c.Resources != nil {
-		if c.Resources.MaxCPUs != 0 {
-			return c.Resources.MaxCPUs
+		if max := c.Resources.effectiveMaxCPUs(); max != 0 {
+			return max
 		}
-		return c.Resources.CPUs
+		return c.Resources.effectiveCPUs()
 	}
 	if c.MaxCPUs != 0 {
 		return c.MaxCPUs
