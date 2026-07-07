@@ -28,8 +28,8 @@ pub(crate) mod volume;
 pub use cloud::{CloudBackend, CloudBackendBuilder};
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudCreateSandboxRequest, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
+    CloudPaginated, CloudSandbox, CloudSandboxStatus,
 };
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{

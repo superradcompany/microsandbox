@@ -43,28 +43,6 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 	return &Sandbox{inner: inner}, nil
 }
 
-// CreateSandboxFromSpecJSON creates and boots a sandbox from a full, JSON-encoded
-// SandboxSpec — the flattened durable spec. Unlike CreateSandbox, nothing is
-// dropped in translation: every spec field — lifecycle, rlimits, secret
-// injection — is applied. This is the cross-language entry point; any producer
-// that can emit the shared SandboxSpec JSON (the cloud, another SDK) can drive it.
-//
-// Any opts are applied on top of the spec as a last-wins override layer — the
-// same SandboxOptions CreateSandbox uses — so callers can override individual
-// fields (e.g. WithRegistryAuth) without leaving the full-spec path. An unset
-// option never clobbers a spec value.
-func CreateSandboxFromSpecJSON(ctx context.Context, specJSON string, opts ...SandboxOption) (*Sandbox, error) {
-	o := SandboxConfig{}
-	for _, opt := range opts {
-		opt(&o)
-	}
-	inner, err := ffi.CreateSandboxFromSpec(ctx, specJSON, buildFFICreateOptions(o))
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
 // buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {

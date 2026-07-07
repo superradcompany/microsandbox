@@ -59,12 +59,6 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
-char *msb_sandbox_create_from_spec(uint64_t cancel_id,
-                                   const char *spec_json,
-                                   const char *overrides_json,
-                                   unsigned char *buf,
-                                   uintptr_t buf_len);
-
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,

@@ -70,11 +70,11 @@ impl SecretsHandle {
     /// an already-absent secret is a no-op: the goal state is reached.
     pub fn remove(&self, name: &str) {
         let mut guard = self.inner.write().expect("secrets lock poisoned");
-        if !guard.entries.iter().any(|entry| entry.env_var == name) {
+        if !guard.secrets.iter().any(|entry| entry.env_var == name) {
             return;
         }
         let mut config = (**guard).clone();
-        config.entries.retain(|entry| entry.env_var != name);
+        config.secrets.retain(|entry| entry.env_var != name);
         *guard = Arc::new(config);
     }
 
@@ -102,7 +102,7 @@ impl SecretsHandle {
         let mut guard = self.inner.write().expect("secrets lock poisoned");
         let mut config = (**guard).clone();
         let entry = config
-            .entries
+            .secrets
             .iter_mut()
             .find(|entry| entry.env_var == name)
             .ok_or_else(|| SecretsUpdateError::UnknownSecret {
@@ -125,7 +125,7 @@ mod tests {
 
     fn config_with_secret(name: &str, value: &str) -> SecretsConfig {
         SecretsConfig {
-            entries: vec![SecretEntry {
+            secrets: vec![SecretEntry {
                 env_var: name.to_string(),
                 value: zeroize::Zeroizing::new(value.to_string()),
                 source: None,
@@ -147,9 +147,9 @@ mod tests {
         handle.rotate_value("API_KEY", "new".into()).unwrap();
 
         // The pre-rotation snapshot is untouched; new loads see the new value.
-        assert_eq!(before.entries[0].value.as_str(), "old");
-        assert_eq!(handle.load().entries[0].value.as_str(), "new");
-        assert_eq!(handle.load().entries[0].placeholder, "$MSB_API_KEY");
+        assert_eq!(before.secrets[0].value.as_str(), "old");
+        assert_eq!(handle.load().secrets[0].value.as_str(), "new");
+        assert_eq!(handle.load().secrets[0].placeholder, "$MSB_API_KEY");
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
         handle.remove("API_KEY");
         handle.remove("API_KEY");
 
-        assert!(handle.load().entries.is_empty());
+        assert!(handle.load().secrets.is_empty());
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            handle.load().entries[0].allowed_hosts,
+            handle.load().secrets[0].allowed_hosts,
             vec![
                 HostPattern::Wildcard("*.example.org".into()),
                 HostPattern::Exact("one.test".into()),
@@ -201,6 +201,6 @@ mod tests {
                 name: "API_KEY".into()
             })
         );
-        assert_eq!(handle.load().entries[0].allowed_hosts.len(), 1);
+        assert_eq!(handle.load().secrets[0].allowed_hosts.len(), 1);
     }
 }

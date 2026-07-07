@@ -34,7 +34,7 @@ use microsandbox_types::{RootfsSource, SandboxResources, SandboxSpec};
 let spec = SandboxSpec {
     name: "worker".into(),
     image: RootfsSource::oci("python"),
-    resources: SandboxResources { vcpus: 2, memory_mib: 1024, disk_size_mib: None },
+    resources: SandboxResources { cpus: 2, memory_mib: 1024 },
     ..Default::default()
 };
 ```
@@ -48,21 +48,23 @@ The Rust SDK re-exports the contract types it accepts, so most SDK users get the
 - `VolumeMount` has hand-written `Serialize`/`Deserialize`. It tags variants with a `type` field and accepts a legacy top-level `readonly` flag, folding it into `MountOptions` on read.
 - Static defaults only. Nothing here reads process-global or profile config; the SDK and backends apply environment defaults before execution.
 
-## Binding Generation
+## TypeScript Generation
 
-[typeshare](https://github.com/1Password/typeshare) is the sole codegen for both the Go (`../go/types_gen.go`) and TypeScript (`../typescript/src/index.ts`) bindings. It reads the `#[typeshare]`-annotated types directly from this crate's source, so no crate feature has to be enabled to generate — the `typeshare` feature only governs whether the attribute resolves when the crate itself is compiled.
+The `ts` feature derives `ts_rs::TS` on every exported type and builds the `microsandbox-types-generate` binary, which writes `../typescript/src/index.ts`.
 
 ```bash
-# Regenerate both the Go and TypeScript bindings (requires `cargo install typeshare-cli`).
-just gen
+# Regenerate the checked-in bindings.
+cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate
+
+# Verify they are current (used in CI; exits non-zero when stale).
+cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
 ```
 
-Only the `#[typeshare]`-annotated `SandboxSpec` sub-types are emitted; the cloud wire DTOs and the top-level container specs (`SandboxSpec`, `NetworkSpec`, `VolumeSpec`, …) are intentionally out of scope for the shared bindings.
-
-An integration test (`checked_in_bindings_match_generated_output`) regenerates the TypeScript bindings and fails when `typescript/src/index.ts` drifts. It is skipped when the `typeshare` CLI is not on `PATH`; the CI `just gen` check installs the CLI and enforces staleness there.
+A unit test (`checked_in_bindings_match_generated_output`) also fails when `typescript/src/index.ts` drifts from the generator output, so `cargo test --features ts` catches stale bindings too.
 
 ## Testing
 
 ```bash
 cargo test -p microsandbox-types
+cargo test -p microsandbox-types --features ts
 ```

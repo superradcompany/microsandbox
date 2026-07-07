@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, SandboxBuilder, SecurityProfile, all_sandbox_metrics_local,
+        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -921,7 +921,7 @@ struct RegistryAuthOpts {
     password: String,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
     image_fstype: Option<String>,
@@ -1861,218 +1861,162 @@ pub unsafe extern "C" fn msb_sandbox_create(
         let opts: SandboxCreateOpts = serde_json::from_str(&opts_raw)
             .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
 
-        Ok(Box::pin(async move {
-            let detached = opts.detached;
-            let builder = Sandbox::builder(&name);
-            let builder = apply_create_opts(builder, opts)?;
-            let sandbox = if detached {
-                builder.create_detached().await?
-            } else {
-                builder.create().await?
-            };
-            let handle = register(sandbox)?;
-            Ok(format!(r#"{{"handle":{handle}}}"#))
-        }))
-    })
-}
-
-/// Apply the field-by-field create options onto `builder` and return it.
-///
-/// Shared by [`msb_sandbox_create`] (a fresh builder) and
-/// [`msb_sandbox_create_from_spec`] (a spec-seeded builder, where these options
-/// are the last-wins override layer). `pull_policy`/`log_level`/
-/// `security_profile` are pre-parsed by the caller so bad values surface from
-/// the synchronous prologue rather than inside the async block.
-fn apply_create_opts(
-    mut builder: SandboxBuilder,
-    opts: SandboxCreateOpts,
-) -> Result<SandboxBuilder, FfiError> {
-    // Parse the stringly-typed enums up front so a bad value fails before any
-    // builder mutation (and before the sandbox is created).
-    let pull_policy = match opts.pull_policy.as_deref() {
-        Some(s) => Some(parse_pull_policy(s)?),
-        None => None,
-    };
-    let log_level = match opts.log_level.as_deref() {
-        Some(s) => Some(parse_log_level(s)?),
-        None => None,
-    };
-    let security_profile = match opts.security_profile.as_deref() {
-        Some(s) => Some(parse_security_profile(s)?),
-        None => None,
-    };
-    if opts.image.is_some() && opts.snapshot.is_some() {
-        return Err(FfiError::invalid_argument(
-            "image and snapshot are mutually exclusive",
-        ));
-    }
-    if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
-        return Err(FfiError::invalid_argument(
-            "oci_upper_size_mib is not valid when booting from a snapshot",
-        ));
-    }
-    if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
-        return Err(FfiError::invalid_argument(
-            "image_bind is mutually exclusive with image and snapshot",
-        ));
-    }
-    if let Some(img) = opts.image {
-        if let Some(fstype) = opts.image_fstype {
-            builder = builder.image_with(|i| i.disk(img).fstype(fstype));
-        } else {
-            builder = builder.image(img.as_str());
-        }
-    }
-    if let Some(bind_path) = opts.image_bind {
-        builder = builder.image_with(|i| i.bind(bind_path));
-    }
-    if let Some(size_mib) = opts.oci_upper_size_mib {
-        builder = builder.oci_upper_size(size_mib);
-    }
-    if let Some(snapshot) = opts.snapshot {
-        builder = builder.from_snapshot(snapshot);
-    }
-    if let Some(m) = opts.memory_mib {
-        builder = builder.memory(m);
-    }
-    if let Some(c) = opts.cpus {
-        builder = builder.cpus(c);
-    }
-    if let Some(m) = opts.max_memory_mib {
-        builder = builder.max_memory(m);
-    }
-    if let Some(c) = opts.max_cpus {
-        builder = builder.max_cpus(c);
-    }
-    if let Some(w) = opts.workdir {
-        builder = builder.workdir(w);
-    }
-    if let Some(s) = opts.shell {
-        builder = builder.shell(s);
-    }
-    if let Some(h) = opts.hostname {
-        builder = builder.hostname(h);
-    }
-    if let Some(u) = opts.user {
-        builder = builder.user(u);
-    }
-    if let Some(profile) = security_profile {
-        builder = builder.security(profile);
-    }
-    if let Some(timeout_ms) = opts.replace_with_timeout_ms {
-        builder = builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
-    } else if opts.replace {
-        builder = builder.replace();
-    }
-    if opts.ephemeral {
-        builder = builder.ephemeral(true);
-    }
-    if !opts.entrypoint.is_empty() {
-        builder = builder.entrypoint(opts.entrypoint);
-    }
-    if let Some(init) = opts.init {
-        let args = init.args;
-        let env = init.env;
-        builder = builder.init_with(init.cmd, |i| i.args(args).envs(env));
-    }
-    if let Some(level) = log_level {
-        builder = builder.log_level(level);
-    }
-    if opts.quiet_logs {
-        builder = builder.quiet_logs();
-    }
-    for (k, v) in opts.scripts {
-        builder = builder.script(k, v);
-    }
-    if let Some(policy) = pull_policy {
-        builder = builder.pull_policy(policy);
-    }
-    if let Some(secs) = opts.max_duration_secs
-        && secs > 0
-    {
-        builder = builder.max_duration(secs);
-    }
-    if let Some(secs) = opts.idle_timeout_secs
-        && secs > 0
-    {
-        builder = builder.idle_timeout(secs);
-    }
-    if let Some(auth) = opts.registry_auth {
-        builder = builder.registry(|r| {
-            r.auth(RegistryAuth::Basic {
-                username: auth.username,
-                password: auth.password,
-            })
-        });
-    }
-    for (k, v) in opts.env.unwrap_or_default() {
-        builder = builder.env(k, v);
-    }
-    for (k, v) in opts.labels {
-        builder = builder.label(k, v);
-    }
-    // Top-level ports.
-    for (host, guest) in &opts.ports {
-        builder = builder.port(*host, *guest);
-    }
-    for (host, guest) in &opts.ports_udp {
-        builder = builder.port_udp(*host, *guest);
-    }
-    for port in &opts.port_bindings {
-        builder = apply_port_binding(builder, port)?;
-    }
-    // Network (policy, DNS, TLS, ports-in-network).
-    if let Some(ref net) = opts.network {
-        builder = apply_network(builder, net)?;
-    }
-    // Secrets.
-    for s in &opts.secrets {
-        builder = apply_secret(builder, s)?;
-    }
-    // Patches.
-    for p in &opts.patches {
-        builder = apply_patch(builder, p)?;
-    }
-    // Volume mounts.
-    for (guest_path, mount) in &opts.volumes {
-        builder = apply_volume(builder, guest_path, mount)?;
-    }
-    Ok(builder)
-}
-
-// ---------------------------------------------------------------------------
-// msb_sandbox_create_from_spec(cancel_id, spec_json, overrides_json, buf, buf_len)
-//   spec_json:      a full SandboxSpec — the lossless base.
-//   overrides_json: SandboxCreateOpts applied on top as a last-wins layer (the
-//                   same options the field-by-field create path uses; "{}" =
-//                   none).
-// Output on success: {"handle": <u64>}
-//
-// The lossless counterpart to `msb_sandbox_create`: the whole SandboxSpec seeds
-// the builder (no field-by-field adapter, so lifecycle/rlimits/secret injection
-// ride through), then the overrides override individual fields.
-// ---------------------------------------------------------------------------
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_create_from_spec(
-    cancel_id: u64,
-    spec_json: *const c_char,
-    overrides_json: *const c_char,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let spec_raw = unsafe { cstr(spec_json) }?;
-        let overrides_raw = unsafe { cstr(overrides_json) }?;
-        let overrides: SandboxCreateOpts = serde_json::from_str(&overrides_raw)
-            .map_err(|e| FfiError::invalid_argument(format!("invalid overrides JSON: {e}")))?;
+        // Pre-parse pull policy / log level / violation action so any error
+        // surfaces from the synchronous prologue, not inside the async block.
+        let pull_policy = match opts.pull_policy.as_deref() {
+            Some(s) => Some(parse_pull_policy(s)?),
+            None => None,
+        };
+        let log_level = match opts.log_level.as_deref() {
+            Some(s) => Some(parse_log_level(s)?),
+            None => None,
+        };
+        let security_profile = match opts.security_profile.as_deref() {
+            Some(s) => Some(parse_security_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
-            let detached = overrides.detached;
-            // Seed the builder from the full spec via the SDK's own entry,
-            // then apply the caller's options as a last-wins layer.
-            let builder = SandboxBuilder::from_spec_json(&spec_raw)?;
-            let builder = apply_create_opts(builder, overrides)?;
-            let sandbox = if detached {
+            let mut builder = Sandbox::builder(&name);
+            if opts.image.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "image and snapshot are mutually exclusive",
+                ));
+            }
+            if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "oci_upper_size_mib is not valid when booting from a snapshot",
+                ));
+            }
+            if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
+                return Err(FfiError::invalid_argument(
+                    "image_bind is mutually exclusive with image and snapshot",
+                ));
+            }
+            if let Some(img) = opts.image {
+                if let Some(fstype) = opts.image_fstype {
+                    builder = builder.image_with(|i| i.disk(img).fstype(fstype));
+                } else {
+                    builder = builder.image(img.as_str());
+                }
+            }
+            if let Some(bind_path) = opts.image_bind {
+                builder = builder.image_with(|i| i.bind(bind_path));
+            }
+            if let Some(size_mib) = opts.oci_upper_size_mib {
+                builder = builder.oci_upper_size(size_mib);
+            }
+            if let Some(snapshot) = opts.snapshot {
+                builder = builder.from_snapshot(snapshot);
+            }
+            if let Some(m) = opts.memory_mib {
+                builder = builder.memory(m);
+            }
+            if let Some(c) = opts.cpus {
+                builder = builder.cpus(c);
+            }
+            if let Some(m) = opts.max_memory_mib {
+                builder = builder.max_memory(m);
+            }
+            if let Some(c) = opts.max_cpus {
+                builder = builder.max_cpus(c);
+            }
+            if let Some(w) = opts.workdir {
+                builder = builder.workdir(w);
+            }
+            if let Some(s) = opts.shell {
+                builder = builder.shell(s);
+            }
+            if let Some(h) = opts.hostname {
+                builder = builder.hostname(h);
+            }
+            if let Some(u) = opts.user {
+                builder = builder.user(u);
+            }
+            if let Some(profile) = security_profile {
+                builder = builder.security(profile);
+            }
+            if let Some(timeout_ms) = opts.replace_with_timeout_ms {
+                builder =
+                    builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
+            } else if opts.replace {
+                builder = builder.replace();
+            }
+            if opts.ephemeral {
+                builder = builder.ephemeral(true);
+            }
+            if !opts.entrypoint.is_empty() {
+                builder = builder.entrypoint(opts.entrypoint);
+            }
+            if let Some(init) = opts.init {
+                let args = init.args;
+                let env = init.env;
+                builder = builder.init_with(init.cmd, |i| i.args(args).envs(env));
+            }
+            if let Some(level) = log_level {
+                builder = builder.log_level(level);
+            }
+            if opts.quiet_logs {
+                builder = builder.quiet_logs();
+            }
+            for (k, v) in opts.scripts {
+                builder = builder.script(k, v);
+            }
+            if let Some(policy) = pull_policy {
+                builder = builder.pull_policy(policy);
+            }
+            if let Some(secs) = opts.max_duration_secs
+                && secs > 0
+            {
+                builder = builder.max_duration(secs);
+            }
+            if let Some(secs) = opts.idle_timeout_secs
+                && secs > 0
+            {
+                builder = builder.idle_timeout(secs);
+            }
+            if let Some(auth) = opts.registry_auth {
+                builder = builder.registry(|r| {
+                    r.auth(RegistryAuth::Basic {
+                        username: auth.username,
+                        password: auth.password,
+                    })
+                });
+            }
+            for (k, v) in opts.env.unwrap_or_default() {
+                builder = builder.env(k, v);
+            }
+            for (k, v) in opts.labels {
+                builder = builder.label(k, v);
+            }
+            // Top-level ports.
+            for (host, guest) in &opts.ports {
+                builder = builder.port(*host, *guest);
+            }
+            for (host, guest) in &opts.ports_udp {
+                builder = builder.port_udp(*host, *guest);
+            }
+            for port in &opts.port_bindings {
+                builder = apply_port_binding(builder, port)?;
+            }
+            // Network (policy, DNS, TLS, ports-in-network).
+            if let Some(ref net) = opts.network {
+                builder = apply_network(builder, net)?;
+            }
+            // Secrets.
+            for s in &opts.secrets {
+                builder = apply_secret(builder, s)?;
+            }
+            // Patches.
+            for p in &opts.patches {
+                builder = apply_patch(builder, p)?;
+            }
+            // Volume mounts.
+            for (guest_path, mount) in &opts.volumes {
+                builder = apply_volume(builder, guest_path, mount)?;
+            }
+
+            let sandbox = if opts.detached {
                 builder.create_detached().await?
             } else {
                 builder.create().await?

@@ -60,8 +60,8 @@ func TestModifyRequestJSONFullOptions(t *testing.T) {
 	}
 
 	patch := out["patch"].(map[string]any)
-	if patch["vcpus"] != float64(2) || patch["max_vcpus"] != float64(8) {
-		t.Fatalf("vcpu fields = %v / %v", patch["vcpus"], patch["max_vcpus"])
+	if patch["cpus"] != float64(2) || patch["max_cpus"] != float64(8) {
+		t.Fatalf("cpus fields = %v / %v", patch["cpus"], patch["max_cpus"])
 	}
 	if patch["memory_mib"] != float64(1024) || patch["max_memory_mib"] != float64(4096) {
 		t.Fatalf("memory fields = %v / %v", patch["memory_mib"], patch["max_memory_mib"])

@@ -262,7 +262,7 @@ impl SmoltcpNetwork {
         }
 
         // Auto-expose secret placeholders as environment variables.
-        for secret in &self.config.secrets.entries {
+        for secret in &self.config.secrets.secrets {
             vars.push((secret.env_var.clone(), secret.placeholder.clone()));
         }
 

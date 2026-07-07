@@ -505,7 +505,7 @@ pub(crate) fn resolve_config_secret_sources(
     }
     let mut network = config.local_network_config()?;
     let mut resolved_any = false;
-    for secret in &mut network.secrets.entries {
+    for secret in &mut network.secrets.secrets {
         let Some(source) = &secret.source else {
             continue;
         };
@@ -549,25 +549,14 @@ pub(crate) fn resolve_config_secret_sources(
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl From<SandboxSpec> for SandboxConfig {
-    /// Build a config from a full durable spec, defaulting all local
-    /// operational state (registry auth, replace flags, snapshot metadata).
-    fn from(spec: SandboxSpec) -> Self {
-        Self {
-            spec,
-            ..Default::default()
-        }
-    }
-}
-
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             spec: SandboxSpec {
                 resources: SandboxResources {
-                    vcpus: default_cpus(),
+                    cpus: default_cpus(),
                     memory_mib: default_memory_mib(),
-                    max_vcpus: default_cpus(),
+                    max_cpus: default_cpus(),
                     max_memory_mib: default_memory_mib(),
                 },
                 runtime: SandboxRuntimeOptions {
@@ -1236,9 +1225,9 @@ mod tests {
             name: "spec-test".into(),
             image: RootfsSource::oci("python:3.12"),
             resources: SandboxResources {
-                vcpus: 2,
+                cpus: 2,
                 memory_mib: 1024,
-                max_vcpus: 2,
+                max_cpus: 2,
                 max_memory_mib: 1024,
             },
             runtime: SandboxRuntimeOptions {
@@ -1282,7 +1271,7 @@ mod tests {
         assert!(
             matches!(config.spec.image, RootfsSource::Oci(ref oci) if oci.reference == "python:3.12")
         );
-        assert_eq!(config.spec.resources.vcpus, 2);
+        assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Trace));
         assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(750));
@@ -1309,8 +1298,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_config_deserializes_adjacent_tagged_mounts() {
-        let json = r#"{"name":"legacy","mounts":[{"tmpfs":{"guest":"/tmp","size_mib":512}}]}"#;
+    fn test_sandbox_config_deserializes_legacy_readonly_mounts() {
+        let json = r#"{"name":"legacy","mounts":[{"type":"Tmpfs","guest":"/tmp","size_mib":512,"readonly":false}]}"#;
 
         let decoded: SandboxConfig = serde_json::from_str(json).unwrap();
 
@@ -1491,7 +1480,7 @@ mod tests {
         let mut config = SandboxConfig::default();
         config.spec.network.enabled = true;
         let mut network = config.local_network_config().unwrap();
-        network.secrets.entries.push(SecretEntry {
+        network.secrets.secrets.push(SecretEntry {
             env_var: "API_KEY".into(),
             value: if source_var.is_some() {
                 zeroize::Zeroizing::new(String::new())
@@ -1550,10 +1539,10 @@ mod tests {
             .expect("a source entry must be resolved");
 
         let network = resolved.local_network_config().unwrap();
-        assert_eq!(network.secrets.entries[0].value.as_str(), SECRET_SENTINEL);
+        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
         // The durable input still stores only the reference.
         let durable = config.local_network_config().unwrap();
-        assert!(durable.secrets.entries[0].value.is_empty());
+        assert!(durable.secrets.secrets[0].value.is_empty());
 
         // SAFETY: variable name is unique to this test.
         unsafe { std::env::remove_var("MSB_TEST_RESOLVE_SOURCE") };
@@ -1574,6 +1563,6 @@ mod tests {
 
         // The legacy value is still usable directly from the durable config.
         let network = config.local_network_config().unwrap();
-        assert_eq!(network.secrets.entries[0].value.as_str(), SECRET_SENTINEL);
+        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
     }
 }

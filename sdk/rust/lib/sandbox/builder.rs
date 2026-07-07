@@ -13,7 +13,6 @@ use microsandbox_types::{EnvVar, PullPolicy};
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
 use super::{
-    SandboxSpec,
     config::{SandboxConfig, sandbox_log_level_from_runtime},
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
@@ -85,17 +84,6 @@ impl SandboxBuilder {
             build_error: None,
             pending_snapshot: None,
         }
-    }
-
-    /// Seed a builder from a full [`SandboxSpec`] JSON.
-    ///
-    /// Options chained afterwards override individual fields (last-wins), just as
-    /// on a builder from [`new`](Self::new). This is the Rust entry the FFI
-    /// `create_from_spec` path calls into, so both share one implementation.
-    pub fn from_spec_json(json: &str) -> MicrosandboxResult<Self> {
-        let spec: SandboxSpec = serde_json::from_str(json)
-            .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
-        Ok(Self::from(SandboxConfig::from(spec)))
     }
 
     /// Set the root filesystem image source.
@@ -173,9 +161,9 @@ impl SandboxBuilder {
 
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
-        self.config.spec.resources.vcpus = count;
-        if self.config.spec.resources.max_vcpus < count {
-            self.config.spec.resources.max_vcpus = count;
+        self.config.spec.resources.cpus = count;
+        if self.config.spec.resources.max_cpus < count {
+            self.config.spec.resources.max_cpus = count;
         }
         self
     }
@@ -186,7 +174,7 @@ impl SandboxBuilder {
     /// resize support lands. It does not increase the effective vCPU count by
     /// itself; use [`cpus`](Self::cpus) for the initial effective count.
     pub fn max_cpus(mut self, count: u8) -> Self {
-        self.config.spec.resources.max_vcpus = count;
+        self.config.spec.resources.max_cpus = count;
         self
     }
 
@@ -607,7 +595,7 @@ impl SandboxBuilder {
     ) -> Self {
         match self.config.local_network_config() {
             Ok(mut network) => {
-                network.secrets.entries.push(entry);
+                network.secrets.secrets.push(entry);
                 if !network.tls.enabled {
                     network.tls.enabled = true;
                 }
@@ -1029,7 +1017,7 @@ impl SandboxBuilder {
         }
         super::validate_sandbox_name(&self.config.spec.name)?;
         super::validate_hostname(self.config.spec.runtime.hostname.as_deref())?;
-        if self.config.spec.resources.vcpus == 0 {
+        if self.config.spec.resources.cpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "cpus must be greater than 0".into(),
             ));
@@ -1039,7 +1027,7 @@ impl SandboxBuilder {
                 "memory must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.max_vcpus == 0 {
+        if self.config.spec.resources.max_cpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "max_cpus must be greater than 0".into(),
             ));
@@ -1049,10 +1037,10 @@ impl SandboxBuilder {
                 "max_memory must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.max_vcpus < self.config.spec.resources.vcpus {
+        if self.config.spec.resources.max_cpus < self.config.spec.resources.cpus {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "max_cpus {} must be greater than or equal to cpus {}",
-                self.config.spec.resources.max_vcpus, self.config.spec.resources.vcpus
+                self.config.spec.resources.max_cpus, self.config.spec.resources.cpus
             )));
         }
         if self.config.spec.resources.max_memory_mib < self.config.spec.resources.memory_mib {
@@ -1202,8 +1190,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.name, "test");
-        assert_eq!(config.spec.resources.vcpus, 2);
-        assert_eq!(config.spec.resources.max_vcpus, 4);
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
@@ -1624,7 +1612,7 @@ mod tests {
         assert_eq!(config.spec.network.ports[0].guest_port, 80);
         assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
         let network = config.local_network_config().unwrap();
-        assert_eq!(network.secrets.entries.len(), 1);
+        assert_eq!(network.secrets.secrets.len(), 1);
         assert_eq!(network.max_connections, Some(128));
     }
 

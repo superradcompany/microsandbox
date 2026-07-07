@@ -301,8 +301,8 @@ describe("SandboxBuilder.build", () => {
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
     expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
-    expect((cfg.resources as { vcpus: number }).vcpus).toBe(2);
-    expect((cfg.resources as { maxVcpus: number }).maxVcpus).toBe(8);
+    expect((cfg.resources as { cpus: number }).cpus).toBe(2);
+    expect((cfg.resources as { maxCpus: number }).maxCpus).toBe(8);
   });
 
   it("collects volumes through the MountBuilder callback", async () => {
@@ -315,15 +315,13 @@ describe("SandboxBuilder.build", () => {
     // The Rust VolumeMount enum serializes externally-tagged with a shared
     // options object for mount behavior.
     expect(cfg.mounts[0]).toMatchObject({
-      named: {
-        name: "v1",
-        options: { readonly: true },
-      },
+      type: "Named",
+      name: "v1",
+      options: { readonly: true },
     });
     expect(cfg.mounts[1]).toMatchObject({
-      tmpfs: {
-        sizeMib: 64,
-      },
+      type: "Tmpfs",
+      sizeMib: 64,
     });
   });
 
@@ -447,13 +445,13 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
       .secretEnvSimple("API_KEY", "sk-abc", "api.example.com")
       .build() as {
       secrets: {
-        entries: ReadonlyArray<{ envVar: string; placeholder: string }>;
+        secrets: ReadonlyArray<{ envVar: string; placeholder: string }>;
       };
     };
-    expect(cfg.secrets.entries).toHaveLength(1);
-    expect(cfg.secrets.entries[0].envVar).toBe("API_KEY");
+    expect(cfg.secrets.secrets).toHaveLength(1);
+    expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
     // Placeholder defaults to the value when omitted.
-    expect(cfg.secrets.entries[0].placeholder).toBe("sk-abc");
+    expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
   });
 });
 

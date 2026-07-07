@@ -11,25 +11,22 @@ edition.workspace = true
 name = "microsandbox_types"
 path = "lib/lib.rs"
 
+[[bin]]
+name = "microsandbox-types-generate"
+path = "bin/main.rs"
+required-features = ["ts"]
+
 [features]
 default = []
-# Derive `utoipa::ToSchema` on the wire types an HTTP API (the cloud control
-# plane) exposes. Off by default so runtime/SDK builds never pull utoipa.
-utoipa = ["dep:utoipa"]
-# Derive `ts_rs::TS` on the spec sub-types so the TypeScript SDK bindings
-# (`@microsandbox/types`) can be generated via ts-rs. Off by default so normal
-# builds never pull the proc-macro.
 ts = ["dep:ts-rs", "ts-rs/chrono-impl", "ts-rs/serde-json-impl"]
 
 [dependencies]
 chrono.workspace = true
-ipnetwork.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
-utoipa = { version = "5", optional = true, features = ["chrono"] }
 zeroize.workspace = true
 
 [dev-dependencies]

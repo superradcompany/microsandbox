@@ -1300,7 +1300,7 @@ fn build_vm(
         // Only sandboxes that booted with secrets can be live-reconfigured:
         // new placeholders cannot be introduced into a running guest, so a
         // secret-free boot never needs the secrets side of the control socket.
-        if !vm.network.secrets.entries.is_empty() {
+        if !vm.network.secrets.secrets.is_empty() {
             network_secrets_handle = Some(network.secrets_handle());
         }
 

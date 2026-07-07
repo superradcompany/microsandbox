@@ -459,11 +459,11 @@ impl Sandbox {
         }
     }
 
-    /// Build an outer `Sandbox` from a [`CloudCreateSandboxResponse`](crate::backend::CloudCreateSandboxResponse)
+    /// Build an outer `Sandbox` from a [`CloudSandbox`](crate::backend::CloudSandbox)
     /// HTTP response plus the originating [`SandboxConfig`].
     pub(crate) fn from_cloud(
         backend: Arc<dyn crate::backend::Backend>,
-        cloud: crate::backend::CloudCreateSandboxResponse,
+        cloud: crate::backend::CloudSandbox,
         config: SandboxConfig,
     ) -> Self {
         Self {
@@ -499,7 +499,7 @@ pub(crate) async fn create_local(
         sandbox = %config.spec.name,
         image = ?config.spec.image,
         mode = ?mode,
-        cpus = config.spec.resources.vcpus,
+        cpus = config.spec.resources.cpus,
         memory_mib = config.spec.resources.memory_mib,
         "create_local: starting"
     );

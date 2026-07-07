@@ -135,12 +135,12 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         ui::detail_header("Resources");
         ui::detail_kv_indent(
             "CPUs",
-            &resource_value(&config.spec.resources.vcpus.to_string(), change_for("cpus")),
+            &resource_value(&config.spec.resources.cpus.to_string(), change_for("cpus")),
         );
         ui::detail_kv_indent(
             "Max CPUs",
             &resource_value(
-                &config.spec.resources.max_vcpus.to_string(),
+                &config.spec.resources.max_cpus.to_string(),
                 change_for("max_cpus"),
             ),
         );
@@ -268,19 +268,19 @@ fn pending_config_changes(
     };
 
     let mut changes = Vec::new();
-    if desired.spec.resources.vcpus != active.spec.resources.vcpus {
+    if desired.spec.resources.cpus != active.spec.resources.cpus {
         changes.push(PendingConfigChange {
             field: "cpus",
-            active: active.spec.resources.vcpus.to_string(),
-            desired: desired.spec.resources.vcpus.to_string(),
+            active: active.spec.resources.cpus.to_string(),
+            desired: desired.spec.resources.cpus.to_string(),
             effect: "requires restart",
         });
     }
-    if desired.spec.resources.max_vcpus != active.spec.resources.max_vcpus {
+    if desired.spec.resources.max_cpus != active.spec.resources.max_cpus {
         changes.push(PendingConfigChange {
             field: "max_cpus",
-            active: active.spec.resources.max_vcpus.to_string(),
-            desired: desired.spec.resources.max_vcpus.to_string(),
+            active: active.spec.resources.max_cpus.to_string(),
+            desired: desired.spec.resources.max_cpus.to_string(),
             effect: "requires restart",
         });
     }
@@ -343,9 +343,9 @@ mod tests {
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
-        config.spec.resources.vcpus = cpus;
+        config.spec.resources.cpus = cpus;
         config.spec.resources.memory_mib = memory_mib;
-        config.spec.resources.max_vcpus = cpus;
+        config.spec.resources.max_cpus = cpus;
         config.spec.resources.max_memory_mib = memory_mib;
         config
     }

@@ -963,8 +963,8 @@ pub(crate) fn build_modify_patch(
     label_pairs.sort();
 
     microsandbox::sandbox::SandboxModificationPatch {
-        vcpus: cpus,
-        max_vcpus: max_cpus,
+        cpus,
+        max_cpus,
         memory_mib: memory,
         max_memory_mib: max_memory,
         env: env_pairs

@@ -202,8 +202,8 @@ type modifyEnvVar struct {
 
 // modifyPatch mirrors the core SandboxModificationPatch serde shape.
 type modifyPatch struct {
-	CPUs          *uint8         `json:"vcpus,omitempty"`
-	MaxCPUs       *uint8         `json:"max_vcpus,omitempty"`
+	CPUs          *uint8         `json:"cpus,omitempty"`
+	MaxCPUs       *uint8         `json:"max_cpus,omitempty"`
 	MemoryMiB     *uint32        `json:"memory_mib,omitempty"`
 	MaxMemoryMiB  *uint32        `json:"max_memory_mib,omitempty"`
 	Env           []modifyEnvVar `json:"env,omitempty"`

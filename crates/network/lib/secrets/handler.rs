@@ -532,7 +532,7 @@ impl SecretsHandler {
     /// host-agnostic (`HostPattern::Any`) — only then is substitution safe.
     pub fn new_plain_http_invalid_host(config: &SecretsConfig) -> Self {
         let host_scoped = config
-            .entries
+            .secrets
             .iter()
             .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any));
 
@@ -562,7 +562,7 @@ impl SecretsHandler {
         let mut max_body_placeholder_len = 0;
         let mut placeholder_limit_exceeded = false;
 
-        for secret in &config.entries {
+        for secret in &config.secrets {
             if secret.placeholder.len() > MAX_SECRET_PLACEHOLDER_BYTES {
                 placeholder_limit_exceeded = true;
             }
@@ -2972,7 +2972,7 @@ mod tests {
 
     fn make_config(secrets: Vec<SecretEntry>) -> SecretsConfig {
         SecretsConfig {
-            entries: secrets,
+            secrets,
             on_violation: ViolationAction::Block,
         }
     }

@@ -876,8 +876,8 @@ pub(crate) fn configure_modify(
         .collect::<Result<Vec<_>>>()?;
 
     let patch = SandboxModificationPatch {
-        vcpus: options.cpus.map(cpu_count_u8).transpose()?,
-        max_vcpus: options.max_cpus.map(cpu_count_u8).transpose()?,
+        cpus: options.cpus.map(cpu_count_u8).transpose()?,
+        max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
         memory_mib: options.memory_mib,
         max_memory_mib: options.max_memory_mib,
         env: env_pairs
