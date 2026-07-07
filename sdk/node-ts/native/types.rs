@@ -48,8 +48,24 @@ pub struct SandboxModifyOptions {
     pub labels: Option<HashMap<String, String>>,
     pub labels_remove: Option<Vec<String>>,
     pub workdir: Option<String>,
+    pub secrets: Option<HashMap<String, SecretModifySpec>>,
+    pub secrets_remove: Option<Vec<String>>,
     pub policy: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+/// Desired state for one secret in `SandboxModifyOptions.secrets`, keyed by
+/// secret name. `env` / `value` / `store` are mutually exclusive ways to
+/// provide the secret material; setting more than one is rejected at the
+/// boundary. Only `value` may carry raw secret material.
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct SecretModifySpec {
+    pub env: Option<String>,
+    pub value: Option<String>,
+    pub store: Option<String>,
+    pub placeholder: Option<String>,
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 /// Exit status for an executed command.

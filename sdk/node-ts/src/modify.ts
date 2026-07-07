@@ -63,10 +63,42 @@ export interface ModifyOptions {
   labelsRemove?: string[];
   /** Desired working directory for future execs. */
   workdir?: string;
+  /**
+   * Desired secret specs, keyed by secret name. The planner diffs each spec
+   * against the existing config to infer what changes; omitting a name never
+   * means removal (see `secretsRemove`).
+   */
+  secrets?: Record<string, SecretModifySpec>;
+  /** Secret names to remove. */
+  secretsRemove?: string[];
   /** Apply policy. Defaults to `"no_restart"`. */
   policy?: ModificationPolicy;
   /** Compute the plan without applying anything. Defaults to `false`. */
   dryRun?: boolean;
+}
+
+/**
+ * Desired state for one secret in `ModifyOptions.secrets`.
+ *
+ * `env`, `value`, and `store` are mutually exclusive ways to provide the
+ * secret material; setting more than one is rejected at the native boundary.
+ * Only `value` may carry raw secret material, and it never appears in the
+ * returned plan.
+ */
+export interface SecretModifySpec {
+  /** Resolve the value from this host environment variable at apply time. */
+  env?: string;
+  /** Raw secret value supplied directly (e.g. from the caller's own vault). */
+  value?: string;
+  /** Resolve the value from this host-side secret store reference. */
+  store?: string;
+  /** Guest-visible placeholder/reference, if explicitly requested. */
+  placeholder?: string;
+  /**
+   * Desired allowed host patterns. Empty leaves an existing secret's hosts
+   * unchanged; a new secret needs at least one.
+   */
+  allowedHosts?: string[];
 }
 
 /** Ordinary config change planned by `modify()`. */
@@ -143,6 +175,8 @@ export function modifyOptionsToNapi(
     labels: opts.labels,
     labelsRemove: opts.labelsRemove,
     workdir: opts.workdir,
+    secrets: opts.secrets,
+    secretsRemove: opts.secretsRemove,
     policy: opts.policy,
     dryRun: opts.dryRun,
   };

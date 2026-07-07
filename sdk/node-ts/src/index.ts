@@ -53,6 +53,7 @@ export type {
   ResourceResizeStatus,
   SandboxModificationPlan,
   SecretChangeKind,
+  SecretModifySpec,
   SecretPlannedChange,
 } from "./modify.js";
 export { SandboxHandle } from "./sandbox-handle.js";

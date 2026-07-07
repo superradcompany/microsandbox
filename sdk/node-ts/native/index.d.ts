@@ -1989,6 +1989,8 @@ export interface SandboxModifyOptions {
   labels?: Record<string, string>
   labelsRemove?: Array<string>
   workdir?: string
+  secrets?: Record<string, SecretModifySpec>
+  secretsRemove?: Array<string>
   policy?: string
   dryRun?: boolean
 }
@@ -2053,6 +2055,20 @@ export interface SecretInjection {
   basicAuth: boolean
   queryParams: boolean
   body: boolean
+}
+
+/**
+ * Desired state for one secret in `SandboxModifyOptions.secrets`, keyed by
+ * secret name. `env` / `value` / `store` are mutually exclusive ways to
+ * provide the secret material; setting more than one is rejected at the
+ * boundary. Only `value` may carry raw secret material.
+ */
+export interface SecretModifySpec {
+  env?: string
+  value?: string
+  store?: string
+  placeholder?: string
+  allowedHosts?: Array<string>
 }
 
 /**

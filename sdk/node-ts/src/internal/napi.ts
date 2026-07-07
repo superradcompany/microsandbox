@@ -290,8 +290,19 @@ export interface NapiSandboxModifyOptions {
   labels?: Record<string, string>;
   labelsRemove?: string[];
   workdir?: string;
+  secrets?: Record<string, NapiSecretModifySpec>;
+  secretsRemove?: string[];
   policy?: string;
   dryRun?: boolean;
+}
+
+/** Native secret spec inside `NapiSandboxModifyOptions.secrets`. */
+export interface NapiSecretModifySpec {
+  env?: string;
+  value?: string;
+  store?: string;
+  placeholder?: string;
+  allowedHosts?: string[];
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
