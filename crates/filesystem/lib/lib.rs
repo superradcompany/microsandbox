@@ -42,6 +42,7 @@ pub use backends::{
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};
 #[cfg(any(unix, windows))]
 pub use msb_krun::backends::fs::{
-    Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
+    AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
+    GetxattrReply, ListxattrReply, OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader,
+    ZeroCopyWriter, stat64, statvfs64,
 };

@@ -14,7 +14,7 @@ use super::{
     types::{DirHandle, DirSnapshot, InodeContent, MemDirEntry, ROOT_INODE},
 };
 use crate::{
-    Context, DirEntry, Entry, OpenOptions,
+    AddDirEntry, AddDirEntryPlus, Context, DirEntry, Entry, OpenOptions,
     backends::shared::{
         dir_snapshot::{self, SnapshotEntry},
         init_binary, platform,
@@ -60,6 +60,19 @@ pub(crate) fn do_readdir(
     serve_snapshot_entries(fs, ino, handle, offset)
 }
 
+/// Stream directory entries from a snapshot.
+pub(crate) fn do_readdir_for_each(
+    fs: &MemFs,
+    _ctx: Context,
+    ino: u64,
+    handle: u64,
+    _size: u32,
+    offset: u64,
+    add_entry: &mut AddDirEntry<'_>,
+) -> io::Result<()> {
+    stream_snapshot_entries(fs, ino, handle, offset, add_entry)
+}
+
 /// Read directory entries with attributes (readdirplus).
 pub(crate) fn do_readdirplus(
     fs: &MemFs,
@@ -97,6 +110,72 @@ pub(crate) fn do_readdirplus(
     }
 
     Ok(result)
+}
+
+/// Stream directory entries with attributes.
+pub(crate) fn do_readdirplus_for_each(
+    fs: &MemFs,
+    _ctx: Context,
+    ino: u64,
+    handle: u64,
+    _size: u32,
+    offset: u64,
+    add_entry: &mut AddDirEntryPlus<'_>,
+) -> io::Result<()> {
+    let dh = dir_handle(fs, handle)?;
+    let mut snapshot_lock = dh.snapshot.lock().unwrap();
+    if snapshot_lock.is_none() {
+        *snapshot_lock = Some(build_snapshot(fs, ino, &dh.node)?);
+    }
+    let snapshot = snapshot_lock.as_ref().unwrap();
+    let mut emitted_lookup_refs = Vec::new();
+
+    for snapshot_entry in dir_snapshot::snapshot_entries_after(&snapshot.entries, offset) {
+        let name_bytes = snapshot_entry.name();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+
+        let dir_entry = DirEntry {
+            ino: snapshot_entry.inode(),
+            offset: snapshot_entry.offset(),
+            type_: snapshot_entry.file_type(),
+            name: name_bytes,
+        };
+
+        if name_bytes == init_binary::INIT_FILENAME {
+            let entry = init_binary::init_entry(fs.cfg.entry_timeout, fs.cfg.attr_timeout);
+            if add_entry(dir_entry, entry)? == 0 {
+                break;
+            }
+            continue;
+        }
+
+        let node = match inode::get_node(fs, dir_entry.ino) {
+            Ok(node) => node,
+            Err(_) => continue,
+        };
+        inode::inc_lookup(&node);
+        let entry = inode::build_entry(fs, &node);
+        let looked_up_inode = entry.inode;
+
+        match add_entry(dir_entry, entry) {
+            Ok(0) => {
+                inode::forget_one(fs, looked_up_inode, 1);
+                break;
+            }
+            Ok(_) => emitted_lookup_refs.push(looked_up_inode),
+            Err(err) => {
+                inode::forget_one(fs, looked_up_inode, 1);
+                for emitted_inode in emitted_lookup_refs {
+                    inode::forget_one(fs, emitted_inode, 1);
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Release an open directory handle.
@@ -158,6 +237,34 @@ fn serve_snapshot_entries(
         &snapshot.entries,
         offset,
     ))
+}
+
+/// Build or retrieve the snapshot and stream entries from the given offset.
+fn stream_snapshot_entries(
+    fs: &MemFs,
+    ino: u64,
+    handle: u64,
+    offset: u64,
+    add_entry: &mut AddDirEntry<'_>,
+) -> io::Result<()> {
+    let dh = dir_handle(fs, handle)?;
+    let mut snapshot_lock = dh.snapshot.lock().unwrap();
+    if snapshot_lock.is_none() {
+        *snapshot_lock = Some(build_snapshot(fs, ino, &dh.node)?);
+    }
+    let snapshot = snapshot_lock.as_ref().unwrap();
+
+    dir_snapshot::serve_snapshot_entries_for_each(&snapshot.entries, offset, add_entry)
+}
+
+/// Get a directory handle by handle ID.
+fn dir_handle(fs: &MemFs, handle: u64) -> io::Result<Arc<DirHandle>> {
+    fs.dir_handles
+        .read()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(platform::ebadf)
 }
 
 /// Build a point-in-time snapshot of a directory's entries.

@@ -425,6 +425,28 @@ impl DynFileSystem for PassthroughFs {
             .collect())
     }
 
+    fn readdir_for_each(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        handle: u64,
+        _size: u32,
+        offset: u64,
+        add_entry: &mut AddDirEntry<'_>,
+    ) -> io::Result<()> {
+        let dir_handle = self
+            .dir_handles
+            .read()
+            .unwrap()
+            .get(&handle)
+            .filter(|data| data.inode == inode)
+            .cloned()
+            .ok_or_else(|| linux_error(LINUX_EBADF))?;
+        let _ = dir_handle;
+
+        self.dir_entries_for_each(inode, offset, &mut |dir_entry, _entry| add_entry(dir_entry))
+    }
+
     fn readdirplus(
         &self,
         _ctx: Context,
@@ -448,6 +470,28 @@ impl DynFileSystem for PassthroughFs {
             .into_iter()
             .skip(offset as usize)
             .collect())
+    }
+
+    fn readdirplus_for_each(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        handle: u64,
+        _size: u32,
+        offset: u64,
+        add_entry: &mut AddDirEntryPlus<'_>,
+    ) -> io::Result<()> {
+        let dir_handle = self
+            .dir_handles
+            .read()
+            .unwrap()
+            .get(&handle)
+            .filter(|data| data.inode == inode)
+            .cloned()
+            .ok_or_else(|| linux_error(LINUX_EBADF))?;
+        let _ = dir_handle;
+
+        self.dir_entries_for_each(inode, offset, add_entry)
     }
 
     fn fsyncdir(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
