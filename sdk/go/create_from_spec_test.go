@@ -4,10 +4,11 @@
 // SandboxSpec JSON and verify the spec's fields take effect in the guest, plus
 // that chained options override the spec last-wins.
 //
-// These boot a microVM, so they need the runtime (same FFI-path gating as the
-// smoke tests). Run:
+// These boot a microVM, so they are opt-in via MSB_VM_SMOKE on top of the FFI
+// path — the Go twin of the Rust integration tests' #[ignore] (CI's smoke step
+// runs on hosts that can't boot VMs). Run on a KVM/HVF-capable machine:
 //
-//	MICROSANDBOX_FFI_PATH=/path/to/libmicrosandbox_go_ffi.{so,dylib} \
+//	MSB_VM_SMOKE=1 MICROSANDBOX_FFI_PATH=/path/to/libmicrosandbox_go_ffi.{so,dylib} \
 //	    go test -tags "smoke microsandbox_ffi_path" -run CreateFromSpec -count=1 ./...
 
 package microsandbox
@@ -40,6 +41,9 @@ func vmSmokeSetup(t *testing.T) context.Context {
 	t.Helper()
 	if os.Getenv(bundle.FFIPathEnv) == "" {
 		t.Skipf("%s not set; skipping FFI smoke test", bundle.FFIPathEnv)
+	}
+	if os.Getenv("MSB_VM_SMOKE") == "" {
+		t.Skip("MSB_VM_SMOKE not set; VM-booting tests are opt-in (see file header)")
 	}
 	// Anchor under /tmp so sandbox socket paths fit under sun_path (108 bytes).
 	vmHomeOnce.Do(func() { vmHomeDir, vmHomeErr = os.MkdirTemp("/tmp", "msb-vm") })
