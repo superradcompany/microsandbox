@@ -482,7 +482,14 @@ impl SandboxHandle {
 
         current.request_stop().await?;
         match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(_)) => {
+                // Windows: the DB can record the guest poweroff while the VM
+                // process never exits; a successful stop must mean "no
+                // process".
+                #[cfg(windows)]
+                current.reap_leaked_local_runtime().await?;
+                return Ok(());
+            }
             Ok(Err(error)) => return Err(error),
             Err(_) => {}
         }
@@ -633,6 +640,14 @@ impl SandboxHandle {
                         available_when: "wired via Cloud variant".into(),
                     }
                 })?;
+
+                // Windows: a terminal row can still be backed by a leaked VM
+                // process. Deleting the row and run records now would orphan
+                // it while it keeps serving this name's agent pipes, so kill
+                // it (identity-checked) or fail before touching any state.
+                #[cfg(windows)]
+                super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
+
                 let pools = local_backend.db().await?;
 
                 super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
@@ -649,6 +664,21 @@ impl SandboxHandle {
                     .await
             }
         }
+    }
+
+    /// Kill any leftover VM process still backing this local sandbox after
+    /// its DB row went terminal. No-op for cloud handles.
+    #[cfg(windows)]
+    async fn reap_leaked_local_runtime(&self) -> MicrosandboxResult<()> {
+        let Some(local) = self.local() else {
+            return Ok(());
+        };
+        let Some(local_backend) = self.backend.as_local() else {
+            return Ok(());
+        };
+        super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name)
+            .await
+            .map(|_| ())
     }
 
     fn is_local_ephemeral(&self) -> bool {

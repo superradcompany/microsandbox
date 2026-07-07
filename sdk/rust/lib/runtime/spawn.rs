@@ -15,6 +15,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
@@ -47,6 +49,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
@@ -301,6 +305,11 @@ pub async fn spawn_sandbox(
         tokio::fs::create_dir_all(&scripts_dir),
     )?;
 
+    // Stopped-safe preparation: a `--next-start` upper grow persists only the
+    // desired size, so the file itself grows here, before any virtio device
+    // attaches the image.
+    prepare_oci_upper(config, &sandbox_dir).await?;
+
     // Write scripts to the runtime scripts directory.
     for (name, content) in &config.spec.runtime.scripts {
         // Prevent path traversal: only use the filename component.
@@ -324,6 +333,12 @@ pub async fn spawn_sandbox(
     // Compute the agent relay socket path from the backend being used for
     // this spawn, not from the ambient default backend.
     let agent_sock_path = resolve_sandbox_agent_socket_path_for(local, &config.spec.name)?;
+
+    // The pipe name is derived from the sandbox NAME, so a leaked VM process
+    // from an earlier run would keep serving it and silently receive the new
+    // sandbox's agent traffic. Refuse to boot on top of a live server.
+    #[cfg(windows)]
+    ensure_agent_pipe_unclaimed(&agent_sock_path, &config.spec.name).await?;
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
@@ -676,6 +691,22 @@ pub async fn spawn_sandbox(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Pre-boot preparation for the OCI writable upper: grow `upper.ext4` when
+/// the persisted desired size exceeds the file's current size. This is where
+/// a `--next-start` upper grow lands; ordinary starts no-op because create
+/// formats the file at the desired size. A missing upper is not this hook's
+/// problem — non-OCI rootfs and not-yet-materialized sandboxes skip it.
+async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+    let Some(desired_mib) = config.spec.image.oci_upper_size_mib() else {
+        return Ok(());
+    };
+    let upper_path = sandbox_dir.join("upper.ext4");
+    if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    crate::sandbox::upper::grow_upper_to_mib(upper_path, desired_mib).await
+}
 
 fn reserve_metrics_slot(
     local: &LocalBackend,
@@ -1657,6 +1688,93 @@ fn agent_socket_hash(name: &str) -> String {
         let _ = Write::write_fmt(&mut hash, format_args!("{byte:02x}"));
     }
     hash
+}
+
+/// What a client-side open of the agent pipe name revealed.
+#[cfg(windows)]
+enum AgentPipeProbe {
+    /// No server instance exists — the name is free to bind.
+    Free,
+
+    /// A live server holds the name. The serving PID is best-effort.
+    Served { server_pid: Option<u32> },
+}
+
+/// Fail the spawn when another process already serves this sandbox's agent
+/// pipe, naming the stale PID so the operator can terminate it.
+///
+/// Unix sockets are files the new runtime simply unlinks and rebinds; Windows
+/// named pipes have no such steal path — the child's `first_pipe_instance`
+/// bind would fail deep in boot, and agent clients would keep silently
+/// reaching the stale server in the meantime.
+#[cfg(windows)]
+async fn ensure_agent_pipe_unclaimed(
+    pipe_path: &Path,
+    sandbox_name: &str,
+) -> MicrosandboxResult<()> {
+    // A just-stopped runtime closes its pipe within moments of its DB row
+    // going terminal; retry briefly so stop→start (restart) flows don't trip
+    // on ordinary teardown.
+    const PROBE_ATTEMPTS: u32 = 10;
+    const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+    let mut last_seen_pid = None;
+    for attempt in 0..PROBE_ATTEMPTS {
+        match probe_agent_pipe_server(pipe_path) {
+            Ok(AgentPipeProbe::Free) => return Ok(()),
+            Ok(AgentPipeProbe::Served { server_pid }) => last_seen_pid = server_pid,
+            Err(err) => {
+                // Unexpected probe failure must not block the spawn — if the
+                // name really is taken, the child's first-instance bind fails
+                // loudly on its own.
+                tracing::debug!(
+                    error = %err,
+                    pipe = %pipe_path.display(),
+                    "agent pipe probe failed; proceeding with spawn"
+                );
+                return Ok(());
+            }
+        }
+        if attempt + 1 < PROBE_ATTEMPTS {
+            tokio::time::sleep(PROBE_INTERVAL).await;
+        }
+    }
+
+    let pid_note = match last_seen_pid {
+        Some(pid) => format!(" (pid {pid})"),
+        None => String::new(),
+    };
+    Err(crate::MicrosandboxError::Runtime(format!(
+        "agent pipe {} for sandbox '{sandbox_name}' is already being served by a stale sandbox \
+         process{pid_note}; terminate that process and retry",
+        pipe_path.display()
+    )))
+}
+
+#[cfg(windows)]
+fn probe_agent_pipe_server(pipe_path: &Path) -> std::io::Result<AgentPipeProbe> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pipe_path)
+    {
+        Ok(client) => {
+            let mut pid = 0u32;
+            let ok =
+                unsafe { GetNamedPipeServerProcessId(client.as_raw_handle() as HANDLE, &mut pid) };
+            Ok(AgentPipeProbe::Served {
+                server_pid: (ok != 0).then_some(pid),
+            })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AgentPipeProbe::Free),
+        // Every instance being busy still proves a live server.
+        Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+            Ok(AgentPipeProbe::Served { server_pid: None })
+        }
+        Err(err) => Err(err),
+    }
 }
 
 // The legacy `<sandboxes>/<name>/runtime/agent.sock` fallback only exists for

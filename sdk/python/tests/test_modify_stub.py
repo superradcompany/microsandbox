@@ -17,6 +17,8 @@ EXPECTED_KWARGS = [
     "labels",
     "labels_rm",
     "workdir",
+    "secrets",
+    "secrets_rm",
     "policy",
     "dry_run",
 ]
@@ -34,6 +36,20 @@ def _class_method(tree: ast.Module, class_name: str, method_name: str) -> ast.As
 
 def _stub_tree() -> ast.Module:
     return ast.parse(STUB_PATH.read_text())
+
+
+def test_secret_modify_spec_stub_keys() -> None:
+    tree = _stub_tree()
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "SecretModifySpec":
+            keys = [
+                item.target.id
+                for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            ]
+            assert keys == ["env", "value", "store", "placeholder", "allowed_hosts"]
+            return
+    raise AssertionError("SecretModifySpec missing from stub")
 
 
 def test_sandbox_modify_stub_signature() -> None:

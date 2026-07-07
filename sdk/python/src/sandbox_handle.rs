@@ -146,6 +146,10 @@ impl PySandboxHandle {
     /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
     /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
     /// plan is computed without applying anything.
+    ///
+    /// `secrets` maps secret names to spec dicts with at most one of
+    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
+    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -157,6 +161,8 @@ impl PySandboxHandle {
         labels = None,
         labels_rm = None,
         workdir = None,
+        secrets = None,
+        secrets_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -173,12 +179,18 @@ impl PySandboxHandle {
         labels: Option<std::collections::HashMap<String, String>>,
         labels_rm: Option<Vec<String>>,
         workdir: Option<String>,
+        secrets: Option<
+            std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
+        >,
+        secrets_rm: Option<Vec<String>>,
         policy: Option<String>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
         let patch = crate::sandbox::build_modify_patch(
-            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir,
+            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
+            secrets_rm,
         );
         let policy = crate::sandbox::parse_modify_policy(policy.as_deref())?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

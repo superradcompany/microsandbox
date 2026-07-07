@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use microsandbox_types::EnvVar;
+use microsandbox_types::{EnvVar, RootfsSource};
 use sea_orm::{ActiveModelTrait, Set};
 
 use crate::MicrosandboxResult;
@@ -31,12 +31,17 @@ const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
     "affects future execs only after restart; live exec-default updates are not available yet";
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
     "live label updates are not available in this runtime yet";
+const UPPER_LIVE_RESIZE_UNAVAILABLE: &str =
+    "the mounted upper filesystem cannot be resized while the sandbox is running";
+const UPPER_GROWS_ON_NEXT_START: &str =
+    "the upper.ext4 file grows during the next start's pre-boot preparation";
 const FUTURE_EXECS_ONLY: &str =
     "applies to future execs only; running processes keep their current environment";
 #[cfg(not(feature = "net"))]
 const SECRETS_UNAVAILABLE_WITHOUT_NET: &str =
     "secret modification requires a build with the net feature";
 const SECRET_FIELD: &str = "secret";
+const UPPER_SIZE_FIELD: &str = "oci_upper_size";
 const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
 const WORKDIR_FIELD: &str = "workdir";
@@ -139,6 +144,20 @@ impl SandboxModificationBuilder {
     /// Set the desired boot-time maximum hotpluggable memory in MiB.
     pub fn max_memory_mib(mut self, max_memory_mib: u32) -> Self {
         self.patch.max_memory_mib = Some(max_memory_mib);
+        self
+    }
+
+    /// Set the desired OCI writable overlay upper size. Grow-only in v1:
+    /// shrinking an existing upper risks data loss and is rejected.
+    pub fn oci_upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.patch.oci_upper_size_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Set the desired OCI writable overlay upper size in MiB. Grow-only in
+    /// v1: shrinking an existing upper risks data loss and is rejected.
+    pub fn oci_upper_size_mib(mut self, size_mib: u32) -> Self {
+        self.patch.oci_upper_size_mib = Some(size_mib);
         self
     }
 
@@ -343,6 +362,15 @@ impl SandboxModificationBuilder {
                 }
             }
         }
+        // Grow the real upper.ext4 before persisting the new desired size:
+        // the persisted value may only ever claim capacity the file actually
+        // has. A running sandbox under `--next-start` keeps its mounted upper
+        // untouched; the pre-boot preparation step grows it on the next start.
+        if let Some(target_mib) = upper_grow_target(&plan, &self.patch)
+            && (stopped_status(status) || restart_required)
+        {
+            grow_upper_now(&self.backend, &self.name, target_mib).await?;
+        }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             apply_secret_patch_to_config(&mut config, &self.patch)?;
@@ -438,6 +466,7 @@ fn build_plan(
         &mut changes,
         &mut warnings,
     );
+    push_upper_size_change(status, config, &patch, policy, &mut changes);
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_secret_changes(
         status,
@@ -449,6 +478,7 @@ fn build_plan(
         &mut warnings,
     );
     push_resource_conflicts(config, &patch, &mut conflicts);
+    push_upper_size_conflicts(config, &patch, &mut conflicts);
     push_spec_conflicts(&patch, &mut conflicts);
     push_secret_conflicts(config, &patch, &mut conflicts);
 
@@ -491,6 +521,43 @@ fn live_memory_target(
         )
     });
     if live_memory { patch.memory_mib } else { None }
+}
+
+/// The upper grow target in MiB, when the plan carries an upper size change.
+fn upper_grow_target(
+    plan: &SandboxModificationPlan,
+    patch: &SandboxModificationPatch,
+) -> Option<u32> {
+    let planned = plan.changes.iter().any(|change| {
+        matches!(
+            change,
+            PlannedChange::Config(change) if change.field == UPPER_SIZE_FIELD
+        )
+    });
+    if planned {
+        patch.oci_upper_size_mib
+    } else {
+        None
+    }
+}
+
+/// Grow the sandbox's canonical `upper.ext4` to `target_mib`. Callers only
+/// invoke this while the sandbox is stopped; the caller persists the new
+/// desired size after this succeeds.
+async fn grow_upper_now(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+    target_mib: u32,
+) -> MicrosandboxResult<()> {
+    let local_backend =
+        backend
+            .as_local()
+            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                feature: "oci upper grow on cloud".into(),
+                available_when: "when cloud modify lands".into(),
+            })?;
+    let upper_path = local_backend.sandboxes_dir().join(name).join("upper.ext4");
+    super::upper::grow_upper_to_mib(upper_path, target_mib).await
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -735,6 +802,11 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
     }
     if config.spec.resources.max_memory_mib < config.spec.resources.memory_mib {
         config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
+    }
+    if let Some(upper_mib) = patch.oci_upper_size_mib
+        && let RootfsSource::Oci(oci) = &mut config.spec.image
+    {
+        oci.upper_size_mib = Some(upper_mib);
     }
     for var in &patch.env {
         if let Some(existing) = config
@@ -1182,6 +1254,103 @@ fn push_resource_changes(
             disposition: boot_capacity_disposition(status, policy),
             reason: boot_capacity_reason(status, policy, "max_memory"),
         }));
+    }
+}
+
+/// Plan the OCI upper grow. The persisted size is only the desired state; the
+/// real state is the `upper.ext4` file, so apply grows the file before
+/// persisting (stopped or restart-backed), and a running `--next-start`
+/// request defers the grow to the pre-boot preparation step. Never live: the
+/// upper is mounted by overlayfs while the sandbox runs.
+fn push_upper_size_change(
+    status: SandboxStatus,
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+    changes: &mut Vec<PlannedChange>,
+) {
+    let Some(target_mib) = patch.oci_upper_size_mib else {
+        return;
+    };
+    let Some(current_mib) = current_upper_size_mib(config) else {
+        // Non-OCI rootfs: surfaced as a conflict, not a change.
+        return;
+    };
+    if target_mib <= current_mib {
+        // Shrink and same-size requests are conflicts, pushed separately.
+        return;
+    }
+    changes.push(PlannedChange::Config(ConfigPlannedChange {
+        field: UPPER_SIZE_FIELD.to_string(),
+        change: ChangeKind::Updated,
+        before: Some(format_mib(current_mib)),
+        after: Some(format_mib(target_mib)),
+        disposition: boot_capacity_disposition(status, policy),
+        reason: upper_size_reason(status, policy),
+    }));
+}
+
+fn upper_size_reason(status: SandboxStatus, policy: ModificationPolicy) -> Option<String> {
+    match boot_capacity_disposition(status, policy) {
+        ModificationDisposition::RequiresRestart => Some(UPPER_LIVE_RESIZE_UNAVAILABLE.to_string()),
+        ModificationDisposition::NextStart if running_status(status) => {
+            Some(UPPER_GROWS_ON_NEXT_START.to_string())
+        }
+        ModificationDisposition::Unsupported => Some(format!(
+            "cannot modify while sandbox is {}",
+            status_name(status)
+        )),
+        _ => None,
+    }
+}
+
+/// Reject upper-size requests that can never apply: a non-OCI rootfs has no
+/// upper, and shrink (or same-size) is unsupported in v1 because the upper is
+/// a real filesystem image where shrinking risks data loss.
+fn push_upper_size_conflicts(
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    conflicts: &mut Vec<ModificationConflict>,
+) {
+    let Some(target_mib) = patch.oci_upper_size_mib else {
+        return;
+    };
+    let Some(current_mib) = current_upper_size_mib(config) else {
+        conflicts.push(ModificationConflict {
+            field: UPPER_SIZE_FIELD.to_string(),
+            message: "oci upper size requires an OCI rootfs".to_string(),
+        });
+        return;
+    };
+    if target_mib < current_mib {
+        conflicts.push(ModificationConflict {
+            field: UPPER_SIZE_FIELD.to_string(),
+            message: format!(
+                "oci upper size {} is smaller than the current {}; shrink is not supported (recreate the sandbox instead)",
+                format_mib(target_mib),
+                format_mib(current_mib)
+            ),
+        });
+    } else if target_mib == current_mib {
+        conflicts.push(ModificationConflict {
+            field: UPPER_SIZE_FIELD.to_string(),
+            message: format!(
+                "oci upper size is already {}; only grow is supported",
+                format_mib(current_mib)
+            ),
+        });
+    }
+}
+
+/// Effective current upper size for an OCI rootfs: the persisted value, or
+/// the create-time default for configs that predate materialized defaults.
+fn current_upper_size_mib(config: &SandboxConfig) -> Option<u32> {
+    match &config.spec.image {
+        RootfsSource::Oci(oci) => Some(
+            oci.upper_size_mib
+                .unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
+        ),
+        _ => None,
     }
 }
 
@@ -2291,6 +2460,217 @@ mod tests {
         assert_eq!(config.spec.resources.max_cpus, 4);
         assert_eq!(config.spec.resources.memory_mib, 4096);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
+    }
+
+    fn oci_config_with_upper(upper_mib: u32) -> SandboxConfig {
+        let mut config = config(2, 1024);
+        config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
+            reference: "python".to_string(),
+            upper_size_mib: Some(upper_mib),
+        });
+        config
+    }
+
+    #[test]
+    fn stopped_upper_grow_classifies_next_start() {
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &oci_config_with_upper(4096),
+            None,
+            LiveControl::default(),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.changes.len(), 1);
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.field, "oci_upper_size");
+        assert_eq!(change.change, ChangeKind::Updated);
+        assert_eq!(change.before.as_deref(), Some("4 GiB"));
+        assert_eq!(change.after.as_deref(), Some("8 GiB"));
+        assert_eq!(change.disposition, ModificationDisposition::NextStart);
+        assert!(change.reason.is_none());
+        assert!(validate_apply_supported(&plan).is_ok());
+        assert_eq!(upper_grow_target(&plan, &patch), Some(8192));
+    }
+
+    #[test]
+    fn running_upper_grow_is_restart_backed_never_live() {
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        // Even a resize-capable runtime cannot grow the mounted upper live.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &oci_config_with_upper(4096),
+            None,
+            LiveControl {
+                resize: true,
+                secrets: true,
+            },
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.field, "oci_upper_size");
+        assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        assert_eq!(
+            change.reason.as_deref(),
+            Some(UPPER_LIVE_RESIZE_UNAVAILABLE)
+        );
+        assert!(validate_apply_supported(&plan).is_err());
+
+        // The restart policy makes the same change applicable.
+        let restart_plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &oci_config_with_upper(4096),
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::Restart,
+        );
+        assert!(validate_apply_supported(&restart_plan).is_ok());
+        assert!(plan_requires_restart(&restart_plan));
+    }
+
+    #[test]
+    fn running_upper_grow_under_next_start_persists_desired_only() {
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &oci_config_with_upper(4096),
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NextStart,
+        );
+
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.disposition, ModificationDisposition::NextStart);
+        assert_eq!(change.reason.as_deref(), Some(UPPER_GROWS_ON_NEXT_START));
+        assert!(validate_apply_supported(&plan).is_ok());
+    }
+
+    #[test]
+    fn upper_shrink_and_same_size_requests_conflict() {
+        for (target_mib, expected) in [
+            (2048, "shrink is not supported"),
+            (4096, "only grow is supported"),
+        ] {
+            let patch = SandboxModificationPatch {
+                oci_upper_size_mib: Some(target_mib),
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = build_plan(
+                "api".to_string(),
+                SandboxStatus::Stopped,
+                &oci_config_with_upper(4096),
+                None,
+                LiveControl::default(),
+                patch,
+                ModificationPolicy::NoRestart,
+            );
+
+            assert!(plan.changes.is_empty());
+            assert_eq!(plan.conflicts.len(), 1);
+            assert_eq!(plan.conflicts[0].field, "oci_upper_size");
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "unexpected conflict for {target_mib}: {}",
+                plan.conflicts[0].message
+            );
+            assert!(validate_apply_supported(&plan).is_err());
+        }
+    }
+
+    #[test]
+    fn non_oci_rootfs_upper_change_conflicts() {
+        let mut current = config(2, 1024);
+        current.spec.image = RootfsSource::Bind("/srv/rootfs".into());
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            LiveControl::default(),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(plan.changes.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, "oci_upper_size");
+        assert!(plan.conflicts[0].message.contains("requires an OCI rootfs"));
+        assert_eq!(upper_grow_target(&plan, &patch), None);
+    }
+
+    #[test]
+    fn unmaterialized_upper_default_compares_against_create_default() {
+        // Configs that predate materialized defaults store no upper size; the
+        // effective current size is the create-time default (4 GiB).
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(2048),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config(2, 1024),
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(
+            plan.conflicts[0]
+                .message
+                .contains("shrink is not supported")
+        );
+    }
+
+    #[test]
+    fn applying_upper_patch_updates_oci_config() {
+        let mut config = oci_config_with_upper(4096);
+        let patch = SandboxModificationPatch {
+            oci_upper_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        apply_patch_to_config(&mut config, &patch);
+
+        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(8192));
     }
 
     #[test]

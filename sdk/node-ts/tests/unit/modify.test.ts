@@ -34,9 +34,37 @@ describe("modifyOptionsToNapi", () => {
       labels: { tier: "gold" },
       labelsRemove: ["stale"],
       workdir: "/srv",
+      secrets: undefined,
+      secretsRemove: undefined,
       policy: "next_start",
       dryRun: true,
     });
+  });
+
+  it("passes secret specs and removals through to the native layer", () => {
+    const napi = modifyOptionsToNapi({
+      secrets: {
+        API_KEY: {
+          env: "HOST_API_KEY",
+          placeholder: "$API_KEY",
+          allowedHosts: ["api.example.com"],
+        },
+        DB_PASS: { store: "vault://prod/db" },
+        STRIPE_KEY: { value: "sk_test_123" },
+      },
+      secretsRemove: ["OLD"],
+    });
+
+    expect(napi?.secrets).toEqual({
+      API_KEY: {
+        env: "HOST_API_KEY",
+        placeholder: "$API_KEY",
+        allowedHosts: ["api.example.com"],
+      },
+      DB_PASS: { store: "vault://prod/db" },
+      STRIPE_KEY: { value: "sk_test_123" },
+    });
+    expect(napi?.secretsRemove).toEqual(["OLD"]);
   });
 });
 

@@ -1,12 +1,12 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
 use std::collections::HashMap;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use std::{env, ptr};
 
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
@@ -1181,21 +1181,19 @@ fn write_to_fd(fd: i32, buf: &[u8]) -> std::io::Result<usize> {
 }
 
 fn request_guest_poweroff() -> AgentdResult<()> {
-    unsafe {
-        libc::sync();
-    }
-
     if crate::handoff::is_pid_1() {
-        // PID 1 mode (no handoff): remount root RO and reboot.
-        let _ = remount_root_readonly();
-        unsafe {
-            libc::sync();
-        }
+        // PID 1 mode (no handoff): tear down filesystems so block-backed
+        // mounts reach a clean terminal state, then power the kernel off.
+        crate::teardown::teardown_filesystems(true);
         let ret = unsafe { libc::reboot(libc::RB_POWER_OFF) };
         if ret != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         return Ok(());
+    }
+
+    unsafe {
+        libc::sync();
     }
 
     // Handoff mode: ask the new init (PID 1) to shut down.
@@ -1207,30 +1205,14 @@ fn request_guest_poweroff() -> AgentdResult<()> {
         std::thread::sleep(HANDOFF_POWEROFF_TIMEOUT);
     }
 
-    // SIGTERM fallback for inits that didn't act on SIGRTMIN+4. If
-    // both are ignored, we return Ok and let the host's outer
-    // VMM-process kill be the backstop — the VM still dies, just
-    // less gracefully.
+    // Reaching this point means the init ignored the poweroff request, so
+    // the guest is going down hard (SIGTERM fallback, then the host's
+    // VMM-process kill as backstop). Force filesystems toward a clean
+    // terminal state first — without the process sweep, since the foreign
+    // init's services are not ours to kill.
+    crate::teardown::teardown_filesystems(false);
+
     let _ = crate::handoff::signal_init_term();
-    Ok(())
-}
-
-fn remount_root_readonly() -> AgentdResult<()> {
-    let target = std::ffi::CString::new("/").expect("static path contains no NUL");
-    let ret = unsafe {
-        libc::mount(
-            ptr::null(),
-            target.as_ptr(),
-            ptr::null(),
-            (libc::MS_REMOUNT | libc::MS_RDONLY) as libc::c_ulong,
-            ptr::null(),
-        )
-    };
-
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
     Ok(())
 }
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -62,11 +63,42 @@ type ModifyOptions struct {
 	// Workdir sets the working directory for future execs.
 	Workdir string
 
+	// Secrets sets desired secret specs, keyed by secret name. The core
+	// planner diffs each spec against the existing config to infer what
+	// changes; omitting a name never means removal (see SecretsRemove).
+	Secrets map[string]SecretModifySpec
+
+	// SecretsRemove removes secrets by name.
+	SecretsRemove []string
+
 	// Policy selects the apply policy. Defaults to ModificationPolicyNoRestart.
 	Policy ModificationPolicy
 
 	// DryRun computes the plan without applying anything.
 	DryRun bool
+}
+
+// SecretModifySpec describes the desired state for one secret in a
+// modification. Env, Value, and Store are mutually exclusive ways to provide
+// the secret material; setting more than one is rejected before the request
+// crosses into the core.
+type SecretModifySpec struct {
+	// Env resolves the value from a host environment variable at apply time.
+	Env string
+
+	// Value supplies the raw secret material directly, for callers that hold
+	// only a value (e.g. from their own vault).
+	Value string
+
+	// Store resolves the value from a host-side secret store reference.
+	Store string
+
+	// Placeholder sets the guest-visible placeholder/reference explicitly.
+	Placeholder string
+
+	// AllowedHosts sets the desired allowed host patterns. Empty leaves an
+	// existing secret's hosts unchanged; a new secret needs at least one.
+	AllowedHosts []string
 }
 
 // SandboxModificationPlan is the dry-run or apply plan returned by Modify.
@@ -170,15 +202,36 @@ type modifyEnvVar struct {
 
 // modifyPatch mirrors the core SandboxModificationPatch serde shape.
 type modifyPatch struct {
-	CPUs         *uint8         `json:"cpus,omitempty"`
-	MaxCPUs      *uint8         `json:"max_cpus,omitempty"`
-	MemoryMiB    *uint32        `json:"memory_mib,omitempty"`
-	MaxMemoryMiB *uint32        `json:"max_memory_mib,omitempty"`
-	Env          []modifyEnvVar `json:"env,omitempty"`
-	EnvRemove    []string       `json:"env_remove,omitempty"`
-	Labels       [][2]string    `json:"labels,omitempty"`
-	LabelsRemove []string       `json:"labels_remove,omitempty"`
-	Workdir      *string        `json:"workdir,omitempty"`
+	CPUs          *uint8         `json:"cpus,omitempty"`
+	MaxCPUs       *uint8         `json:"max_cpus,omitempty"`
+	MemoryMiB     *uint32        `json:"memory_mib,omitempty"`
+	MaxMemoryMiB  *uint32        `json:"max_memory_mib,omitempty"`
+	Env           []modifyEnvVar `json:"env,omitempty"`
+	EnvRemove     []string       `json:"env_remove,omitempty"`
+	Labels        [][2]string    `json:"labels,omitempty"`
+	LabelsRemove  []string       `json:"labels_remove,omitempty"`
+	Workdir       *string        `json:"workdir,omitempty"`
+	Secrets       []modifySecret `json:"secrets,omitempty"`
+	SecretsRemove []string       `json:"secrets_remove,omitempty"`
+}
+
+// modifySecret mirrors the core SecretModificationPatch serde shape. Value is
+// the only field that may carry raw secret material; it is omitted when empty
+// and must never be echoed into errors or debug output.
+type modifySecret struct {
+	Name         string              `json:"name"`
+	Source       *modifySecretSource `json:"source,omitempty"`
+	Value        string              `json:"value,omitempty"`
+	Placeholder  *string             `json:"placeholder,omitempty"`
+	AllowedHosts []string            `json:"allowed_hosts,omitempty"`
+}
+
+// modifySecretSource mirrors the core SecretSource serde shape (internally
+// tagged on "kind": {"kind":"env","var":...} or {"kind":"store","reference":...}).
+type modifySecretSource struct {
+	Kind      string `json:"kind"`
+	Var       string `json:"var,omitempty"`
+	Reference string `json:"reference,omitempty"`
 }
 
 type modifyRequest struct {
@@ -192,8 +245,9 @@ type modifyRequest struct {
 // produce identical requests (and plan ordering).
 func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 	patch := modifyPatch{
-		EnvRemove:    opts.EnvRemove,
-		LabelsRemove: opts.LabelsRemove,
+		EnvRemove:     opts.EnvRemove,
+		LabelsRemove:  opts.LabelsRemove,
+		SecretsRemove: opts.SecretsRemove,
 	}
 	if opts.CPUs > 0 {
 		patch.CPUs = &opts.CPUs
@@ -216,6 +270,13 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 	if opts.Workdir != "" {
 		patch.Workdir = &opts.Workdir
 	}
+	for _, name := range sortedKeys(opts.Secrets) {
+		entry, err := buildModifySecret(name, opts.Secrets[name])
+		if err != nil {
+			return "", err
+		}
+		patch.Secrets = append(patch.Secrets, entry)
+	}
 
 	raw, err := json.Marshal(modifyRequest{
 		Patch:  patch,
@@ -228,6 +289,41 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 	return string(raw), nil
 }
 
+// buildModifySecret converts one SecretModifySpec into the wire shape,
+// rejecting specs that set more than one of Env/Value/Store. Error messages
+// name only the offending fields, never the secret material itself.
+func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error) {
+	set := make([]string, 0, 3)
+	if spec.Env != "" {
+		set = append(set, "Env")
+	}
+	if spec.Value != "" {
+		set = append(set, "Value")
+	}
+	if spec.Store != "" {
+		set = append(set, "Store")
+	}
+	if len(set) > 1 {
+		return modifySecret{}, fmt.Errorf(
+			"secret %q: %s are mutually exclusive; set at most one",
+			name, strings.Join(set, " and "),
+		)
+	}
+
+	entry := modifySecret{Name: name, Value: spec.Value, AllowedHosts: spec.AllowedHosts}
+	switch {
+	case spec.Env != "":
+		entry.Source = &modifySecretSource{Kind: "env", Var: spec.Env}
+	case spec.Store != "":
+		entry.Source = &modifySecretSource{Kind: "store", Reference: spec.Store}
+	}
+	if spec.Placeholder != "" {
+		placeholder := spec.Placeholder
+		entry.Placeholder = &placeholder
+	}
+	return entry, nil
+}
+
 func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {
 	var plan SandboxModificationPlan
 	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
@@ -236,7 +332,7 @@ func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {
 	return &plan, nil
 }
 
-func sortedKeys(m map[string]string) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
