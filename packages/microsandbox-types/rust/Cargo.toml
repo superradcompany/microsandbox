@@ -24,10 +24,16 @@ utoipa = ["dep:utoipa"]
 # Derive `ts_rs::TS` on the spec sub-types so the TypeScript SDK bindings
 # (`@microsandbox/types`) can be generated via ts-rs. Off by default so normal
 # builds never pull the proc-macro.
-ts = ["dep:ts-rs", "ts-rs/chrono-impl", "ts-rs/serde-json-impl"]
+ts = [
+    "dep:ts-rs",
+    "ts-rs/chrono-impl",
+    "ts-rs/serde-json-impl",
+    "dep:dprint-plugin-typescript",
+]
 
 [dependencies]
 chrono.workspace = true
+dprint-plugin-typescript = { version = "=0.95", optional = true }
 ipnetwork.workspace = true
 serde.workspace = true
 serde_json.workspace = true

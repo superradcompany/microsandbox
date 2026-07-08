@@ -59,7 +59,7 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
 
 /// Render `domain.ts` — the domain types the cloud contract transitively needs.
 pub fn render_domain() -> String {
-    format!("{HEADER}{}", body(&domain_declarations()))
+    format_ts(&format!("{HEADER}{}", body(&domain_declarations())))
 }
 
 /// Render `cloud.ts` — the cloud wire twins. Imports the domain types they use
@@ -80,7 +80,30 @@ pub fn render_cloud() -> String {
     ));
     output.push_str("export type * from \"./domain.js\";\n\n");
     output.push_str(&body(&decls));
-    output
+    format_ts(&output)
+}
+
+/// Format generated TypeScript with dprint's Deno style — the same formatter
+/// ts-rs uses under its `format` feature, applied here since we assemble the
+/// files from raw `decl()` output rather than ts-rs's own export path.
+fn format_ts(source: &str) -> String {
+    use dprint_plugin_typescript::configuration::ConfigurationBuilder;
+    use dprint_plugin_typescript::{FormatTextOptions, format_text};
+    use std::path::Path;
+
+    let config = ConfigurationBuilder::new().deno().build();
+    let options = FormatTextOptions {
+        config: &config,
+        path: Path::new("bindings.ts"),
+        text: source.to_string(),
+        extension: None,
+        external_formatter: None,
+    };
+    match format_text(options) {
+        Ok(Some(formatted)) => formatted,
+        Ok(None) => source.to_string(),
+        Err(err) => panic!("dprint failed to format generated bindings: {err}"),
+    }
 }
 
 /// Raw `ts-rs` declarations for the domain types the cloud contract references,
