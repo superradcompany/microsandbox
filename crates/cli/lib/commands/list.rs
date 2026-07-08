@@ -103,7 +103,9 @@ fn extract_image(config_json: &str) -> String {
         .ok()
         .map(|c| match c.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(ref oci) => oci.reference.clone(),
-            microsandbox::sandbox::RootfsSource::Bind(ref p) => p.display().to_string(),
+            microsandbox::sandbox::RootfsSource::Bind { ref path, .. } => {
+                path.display().to_string()
+            }
             microsandbox::sandbox::RootfsSource::DiskImage { ref path, .. } => {
                 path.display().to_string()
             }

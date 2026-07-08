@@ -622,6 +622,9 @@ impl From<CloudVolumeMount> for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                // The cloud wire type does not carry the opt-out yet; default to
+                // the protective no-follow behavior.
+                follow_root_symlinks: false,
                 quota_mib,
             },
             CloudVolumeMount::Named {
@@ -637,6 +640,7 @@ impl From<CloudVolumeMount> for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks: false,
             },
             CloudVolumeMount::Tmpfs {
                 guest,
@@ -673,6 +677,7 @@ impl From<VolumeMount> for CloudVolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks: _,
                 quota_mib,
             } => CloudVolumeMount::Bind {
                 host,
@@ -689,6 +694,7 @@ impl From<VolumeMount> for CloudVolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks: _,
             } => CloudVolumeMount::Named {
                 name,
                 guest,
@@ -926,7 +932,10 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
                     "resources.disk_size_mib is only valid for OCI rootfs",
                 ));
             }
-            CloudRootfsSource::Bind { path } => RootfsSource::Bind(path),
+            CloudRootfsSource::Bind { path } => RootfsSource::Bind {
+                path,
+                follow_root_symlinks: false,
+            },
             CloudRootfsSource::DiskImage {
                 path,
                 format,
@@ -1009,7 +1018,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
                 },
                 oci.upper_size_mib,
             ),
-            RootfsSource::Bind(path) => (CloudRootfsSource::Bind { path }, None),
+            RootfsSource::Bind { path, .. } => (CloudRootfsSource::Bind { path }, None),
             RootfsSource::DiskImage {
                 path,
                 format,

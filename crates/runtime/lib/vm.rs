@@ -261,6 +261,13 @@ pub struct VmConfig {
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
 
+    /// Whether to follow symlinks when resolving a bind (`rootfs_path`) rootfs.
+    ///
+    /// Defaults to `false`: the caller/tenant-provided rootfs path is resolved
+    /// following no symlink, matching the `--mount` protection. Set `true` to
+    /// opt out when the host rootfs path legitimately traverses a symlink.
+    pub rootfs_follow_root_symlinks: bool,
+
     /// Disk image path for virtio-blk rootfs (single disk, legacy).
     pub rootfs_disk: Option<PathBuf>,
 
@@ -1113,16 +1120,17 @@ fn build_vm(
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        let backend = bind_rootfs_backend(rootfs_path)?;
+        let backend = bind_rootfs_backend(rootfs_path, vm.rootfs_follow_root_symlinks)?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
         {
             let empty_trampoline = tempfile::tempdir()?;
-            let trampoline_path = empty_trampoline.path().to_path_buf();
+            let trampoline_path = canonicalize_owned_mount_root(empty_trampoline.path())?;
             let cfg = PassthroughConfig {
                 root_dir: trampoline_path,
+                no_symlink_root: true,
                 ..Default::default()
             };
             let backend = PassthroughFs::new(cfg)
@@ -1175,9 +1183,10 @@ fn build_vm(
         #[cfg(unix)]
         {
             let empty_trampoline = tempfile::tempdir()?;
-            let trampoline_path = empty_trampoline.path().to_path_buf();
+            let trampoline_path = canonicalize_owned_mount_root(empty_trampoline.path())?;
             let cfg = PassthroughConfig {
                 root_dir: trampoline_path,
+                no_symlink_root: true,
                 ..Default::default()
             };
             let backend = PassthroughFs::new(cfg)
@@ -1210,9 +1219,10 @@ fn build_vm(
     {
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
-            root_dir: config.runtime_dir.clone(),
+            root_dir: canonicalize_owned_mount_root(&config.runtime_dir)?,
             inject_init: false,
             quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
+            no_symlink_root: true,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -1235,6 +1245,9 @@ fn build_vm(
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
+            // Default-on protection: resolve the mount root following no symlink
+            // unless the mount opted out via `follow-root-symlinks`.
+            no_symlink_root: !parsed.follow_root_symlinks,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             quota_bytes: parsed.quota_bytes,
@@ -1393,13 +1406,35 @@ fn build_vm(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Build the host-directory rootfs backend used for `ImageSource::bind`.
-fn bind_rootfs_backend(rootfs_path: &Path) -> RuntimeResult<PassthroughFs> {
+/// Build the host-directory rootfs backend used for `RootfsSource::Bind`.
+///
+/// The path is caller/tenant-provided, so it gets the same default no-follow
+/// root protection as a `--mount`: a symlink at or under the rootfs path is
+/// refused rather than followed out of its intended target. `follow_root_symlinks`
+/// opts out when the host rootfs path legitimately traverses a symlink.
+fn bind_rootfs_backend(
+    rootfs_path: &Path,
+    follow_root_symlinks: bool,
+) -> RuntimeResult<PassthroughFs> {
     let cfg = PassthroughConfig {
         root_dir: rootfs_path.to_path_buf(),
+        no_symlink_root: !follow_root_symlinks,
         ..Default::default()
     };
     PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))
+}
+
+/// Canonicalize a microsandbox-owned mount root so it is symlink-free.
+///
+/// These roots are created and owned by the runtime (temp trampolines, the
+/// control-channel directory), never attacker-controlled, so resolving the one
+/// benign system symlink in their prefix (e.g. macOS `/var` -> `/private/var`)
+/// here is safe and lets them keep the default no-follow protection at mount
+/// time instead of following symlinks.
+fn canonicalize_owned_mount_root(path: &Path) -> RuntimeResult<PathBuf> {
+    std::fs::canonicalize(path).map_err(|e| {
+        RuntimeError::Custom(format!("canonicalize mount root {}: {e}", path.display()))
+    })
 }
 
 /// Open the shared-memory registry and promote the host-reserved slot to
@@ -1776,14 +1811,17 @@ struct ParsedMountSpec {
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     readonly: bool,
+    follow_root_symlinks: bool,
     quota_bytes: Option<u64>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
 ///
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
-/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`) and keyed policies
-/// (`stat-virt=...`, `host-perms=...`).
+/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
+/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`).
+/// The `follow-root-symlinks` flag opts the mount out of the default no-follow
+/// root resolution; its absence keeps the protective default on.
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
@@ -1806,6 +1844,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut stat_virtualization = StatVirtualization::Strict;
     let mut host_permissions = HostPermissions::Private;
     let mut readonly = false;
+    let mut follow_root_symlinks = false;
     let mut quota_bytes = None;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
@@ -1813,6 +1852,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
     let mut seen_nodev = false;
+    let mut seen_follow_root = false;
     let mut seen_quota = false;
 
     if let Some(opts) = options {
@@ -1846,6 +1886,16 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                         return Err("mount option `nodev` specified more than once".to_string());
                     }
                     seen_nodev = true;
+                }
+                "follow-root-symlinks" => {
+                    if seen_follow_root {
+                        return Err(
+                            "mount option `follow-root-symlinks` specified more than once"
+                                .to_string(),
+                        );
+                    }
+                    seen_follow_root = true;
+                    follow_root_symlinks = true;
                 }
                 "suid" | "exec" | "dev" => {
                     return Err(format!("unsupported mount option {opt:?}"));
@@ -1916,6 +1966,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         stat_virtualization,
         host_permissions,
         readonly,
+        follow_root_symlinks,
         quota_bytes,
     })
 }
@@ -2033,7 +2084,9 @@ mod tests {
         let rootfs = tempfile::tempdir().unwrap();
         std::fs::write(rootfs.path().join("host.txt"), b"from host").unwrap();
 
-        let fs = bind_rootfs_backend(rootfs.path()).unwrap();
+        // follow=true: the tempdir path may traverse a symlinked prefix (macOS
+        // `/var`); this test exercises backend behavior, not root protection.
+        let fs = bind_rootfs_backend(rootfs.path(), true).unwrap();
         fs.init(FsOptions::empty()).unwrap();
 
         let host = fs.lookup(fs_context(), 1, c"host.txt").unwrap();
@@ -2068,6 +2121,32 @@ mod tests {
         let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
         assert!(!p.readonly);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_follow_root_symlinks_default_protected() {
+        // Absent token: protected by default (follow_root_symlinks stays false,
+        // which the construction site inverts into no_symlink_root = true).
+        let p = parse_mount_spec("foo:/host/data").unwrap();
+        assert!(!p.follow_root_symlinks);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_follow_root_symlinks_opt_out() {
+        let p = parse_mount_spec("foo:/host/data:follow-root-symlinks").unwrap();
+        assert!(p.follow_root_symlinks);
+        // Coexists with other options.
+        let p = parse_mount_spec("foo:/host/data:ro,follow-root-symlinks,stat-virt=off").unwrap();
+        assert!(p.follow_root_symlinks);
+        assert!(p.readonly);
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_follow_root_symlinks() {
+        let err = parse_mount_spec("foo:/host/data:follow-root-symlinks,follow-root-symlinks")
+            .unwrap_err();
+        assert!(err.contains("follow-root-symlinks"), "got: {err}");
     }
 
     #[test]

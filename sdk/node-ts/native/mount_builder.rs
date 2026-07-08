@@ -305,6 +305,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             stat_virtualization,
             host_permissions,
             quota_mib,
+            // TODO: surface follow_root_symlinks in the Node opt-out API.
+            follow_root_symlinks: _,
         } => JsBuiltVolumeMount {
             kind: "bind".into(),
             guest,
@@ -330,6 +332,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             options,
             stat_virtualization,
             host_permissions,
+            follow_root_symlinks: _,
         } => {
             let named_mode = create.as_ref().map(|create| match create.mode() {
                 RustNamedVolumeMode::Existing => "existing".to_string(),

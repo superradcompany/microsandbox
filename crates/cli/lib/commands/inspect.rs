@@ -12,23 +12,30 @@ use crate::ui;
 
 /// Render a non-default mount policy suffix for `msb inspect` output.
 ///
-/// Returns an empty string when both policies are at their conservative
-/// defaults (`Strict` + `Private`), so common mounts stay terse.
-fn mount_policy_suffix(sv: StatVirtualization, hp: HostPermissions) -> String {
-    let sv_str = match sv {
-        StatVirtualization::Strict => None,
-        StatVirtualization::Relaxed => Some("stat-virt=relaxed"),
-        StatVirtualization::Off => Some("stat-virt=off"),
-    };
-    let hp_str = match hp {
-        HostPermissions::Private => None,
-        HostPermissions::Mirror => Some("host-perms=mirror"),
-    };
-    match (sv_str, hp_str) {
-        (None, None) => String::new(),
-        (Some(s), None) => format!(" [{s}]"),
-        (None, Some(h)) => format!(" [{h}]"),
-        (Some(s), Some(h)) => format!(" [{s},{h}]"),
+/// Returns an empty string when every policy is at its conservative default
+/// (`Strict` + `Private` + no-follow root), so common mounts stay terse.
+fn mount_policy_suffix(
+    sv: StatVirtualization,
+    hp: HostPermissions,
+    follow_root_symlinks: bool,
+) -> String {
+    let mut tokens = Vec::new();
+    match sv {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => tokens.push("stat-virt=relaxed"),
+        StatVirtualization::Off => tokens.push("stat-virt=off"),
+    }
+    match hp {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => tokens.push("host-perms=mirror"),
+    }
+    if follow_root_symlinks {
+        tokens.push("follow-root-symlinks");
+    }
+    if tokens.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tokens.join(","))
     }
 }
 
@@ -121,7 +128,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     if let Some(config) = desired_config {
         let image = match &config.spec.image {
             microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
-            microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
+            microsandbox::sandbox::RootfsSource::Bind { path, .. } => path.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => {
                 path.display().to_string()
             }
@@ -198,10 +205,15 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        follow_root_symlinks,
                         quota_mib,
                     } => {
                         let flags = mount_flags_suffix(*options);
-                        let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
+                        let suffix = mount_policy_suffix(
+                            *stat_virtualization,
+                            *host_permissions,
+                            *follow_root_symlinks,
+                        );
                         let quota = quota_mib
                             .map(|mib| format!(" [quota={mib}MiB]"))
                             .unwrap_or_default();
@@ -216,10 +228,15 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        follow_root_symlinks,
                         ..
                     } => {
                         let flags = mount_flags_suffix(*options);
-                        let suffix = mount_policy_suffix(*stat_virtualization, *host_permissions);
+                        let suffix = mount_policy_suffix(
+                            *stat_virtualization,
+                            *host_permissions,
+                            *follow_root_symlinks,
+                        );
                         println!("  {guest:<16}\u{2192} volume:{name}{flags}{suffix}");
                     }
                     VolumeMount::Tmpfs {

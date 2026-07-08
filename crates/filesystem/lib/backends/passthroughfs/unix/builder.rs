@@ -12,9 +12,8 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
     io,
-    os::fd::{AsRawFd, FromRawFd},
+    os::fd::AsRawFd,
     path::PathBuf,
     sync::{
         RwLock,
@@ -22,13 +21,15 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(target_os = "linux")]
+use std::{fs::File, os::fd::FromRawFd};
 
 use super::{
     BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughFs, StatVirtualization,
 };
-use crate::backends::shared::{
-    init_binary, inode_table::MultikeyBTreeMap, platform, stat_override,
-};
+#[cfg(target_os = "linux")]
+use crate::backends::shared::platform;
+use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap, stat_override};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -37,6 +38,7 @@ use crate::backends::shared::{
 /// Builder for constructing a [`PassthroughFs`] instance.
 pub struct PassthroughFsBuilder {
     root_dir: Option<PathBuf>,
+    no_symlink_root: bool,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     readonly: bool,
@@ -58,6 +60,7 @@ impl PassthroughFsBuilder {
     pub(crate) fn new() -> Self {
         Self {
             root_dir: None,
+            no_symlink_root: false,
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
             readonly: false,
@@ -74,6 +77,17 @@ impl PassthroughFsBuilder {
     /// Set the host directory to expose.
     pub fn root_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.root_dir = Some(path.into());
+        self
+    }
+
+    /// Resolve `root_dir` trusting no component of the path.
+    ///
+    /// When enabled, `root_dir` is resolved from the real filesystem root
+    /// following no symlink in any component and refusing `..`, so neither a
+    /// planted symlink nor an injected `..` can move the mount off its intended
+    /// target. The caller must pass an absolute, already-canonicalized path.
+    pub fn no_symlink_root(mut self, enabled: bool) -> Self {
+        self.no_symlink_root = enabled;
         self
     }
 
@@ -143,25 +157,9 @@ impl PassthroughFsBuilder {
             .root_dir
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root_dir not set"))?;
 
-        // Open the root directory.
-        let root_path =
-            std::ffi::CString::new(root_dir.to_str().ok_or_else(platform::einval)?.as_bytes())
-                .map_err(|_| platform::einval())?;
-
-        let root_fd_raw = unsafe {
-            libc::open(
-                root_path.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
-            )
-        };
-        if root_fd_raw < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        let root_fd = unsafe { File::from_raw_fd(root_fd_raw) };
-
-        // Probe xattr support if strict mode is enabled.
         let cfg_probe = super::PassthroughConfig {
             root_dir: root_dir.clone(),
+            no_symlink_root: self.no_symlink_root,
             stat_virtualization: self.stat_virtualization,
             host_permissions: self.host_permissions,
             readonly: self.readonly,
@@ -173,6 +171,11 @@ impl PassthroughFsBuilder {
             bind_identity_map: self.bind_identity_map,
             quota_bytes: self.quota_bytes,
         };
+
+        // Open the root directory, contained beneath the anchor when one is set.
+        let root_fd = super::open_root(&cfg_probe)?;
+
+        // Probe xattr support if strict mode is enabled.
         if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
             let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
             if !supported {

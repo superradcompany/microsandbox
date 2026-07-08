@@ -934,3 +934,160 @@ fn write_killpriv_clears_virtual_suid_sgid() {
     let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
     assert_eq!(st.st_mode & (S_ISUID | S_ISGID), 0);
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests: mount-root containment (no_symlink_root)
+//--------------------------------------------------------------------------------------------------
+
+/// Build a two-tenant layout under a canonical (reparse-free) base:
+/// `<base>/vol/tenant-a` and `<base>/vol/tenant-b`, with a secret in tenant-b.
+fn two_tenant_layout(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+    // Canonicalize so no redirected system folder trips the no-reparse walk;
+    // the control plane owns this step.
+    let base = std::fs::canonicalize(&temp.path).unwrap();
+    let tenant_a = base.join("vol").join("tenant-a");
+    let tenant_b = base.join("vol").join("tenant-b");
+    std::fs::create_dir_all(&tenant_a).unwrap();
+    std::fs::create_dir_all(&tenant_b).unwrap();
+    std::fs::write(tenant_b.join("secret.txt"), b"tenant-b private data").unwrap();
+    (base, tenant_a, tenant_b)
+}
+
+fn build_no_symlink(root_dir: PathBuf) -> io::Result<PassthroughFs> {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir,
+        no_symlink_root: true,
+        stat_virtualization: StatVirtualization::Off,
+        inject_init: false,
+        ..Default::default()
+    })?;
+    fs.init(FsOptions::empty())?;
+    Ok(fs)
+}
+
+/// Legacy behavior: `canonicalize` follows a junction/symlink root out to the
+/// sibling tenant, exposing its files. Documents the escape the flag closes.
+#[test]
+fn legacy_symlink_root_is_followed() {
+    let temp = TempDir::new();
+    let (_base, tenant_a, tenant_b) = two_tenant_layout(&temp);
+
+    let evil = tenant_a.join("evil");
+    if std::os::windows::fs::symlink_dir(&tenant_b, &evil).is_err() {
+        eprintln!("skip: cannot create directory symlink (privilege/Developer Mode)");
+        return;
+    }
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: evil,
+        no_symlink_root: false,
+        stat_virtualization: StatVirtualization::Off,
+        inject_init: false,
+        ..Default::default()
+    })
+    .expect("legacy path follows the symlink silently");
+    fs.init(FsOptions::empty()).unwrap();
+
+    assert!(
+        fs.lookup(context(), ROOT_INODE, c"secret.txt").is_ok(),
+        "guest reached tenant-b's secret.txt through the mount (escape)"
+    );
+}
+
+/// A junction/symlink as the mount root is refused — never followed.
+#[test]
+fn no_symlink_root_rejects_symlink_root() {
+    let temp = TempDir::new();
+    let (_base, tenant_a, tenant_b) = two_tenant_layout(&temp);
+
+    let evil = tenant_a.join("evil");
+    if std::os::windows::fs::symlink_dir(&tenant_b, &evil).is_err() {
+        eprintln!("skip: cannot create directory symlink (privilege/Developer Mode)");
+        return;
+    }
+
+    let result = build_no_symlink(evil);
+    assert!(result.is_err(), "symlink root must be refused");
+    assert_eq!(
+        result.err().and_then(|e| e.raw_os_error()),
+        Some(LINUX_ELOOP)
+    );
+}
+
+/// A reparse point in a NON-tenant prefix is refused too — nothing is trusted.
+#[test]
+fn no_symlink_root_rejects_symlinked_prefix() {
+    let temp = TempDir::new();
+    let (base, _tenant_a, _tenant_b) = two_tenant_layout(&temp);
+
+    let real = base.join("real-mnt");
+    std::fs::create_dir_all(real.join("work")).unwrap();
+    let linked_prefix = base.join("linked-mnt");
+    if std::os::windows::fs::symlink_dir(&real, &linked_prefix).is_err() {
+        eprintln!("skip: cannot create directory symlink (privilege/Developer Mode)");
+        return;
+    }
+
+    let result = build_no_symlink(linked_prefix.join("work"));
+    assert!(
+        result.is_err(),
+        "a symlinked prefix component must be refused"
+    );
+    assert_eq!(
+        result.err().and_then(|e| e.raw_os_error()),
+        Some(LINUX_ELOOP)
+    );
+
+    // The same real path with no reparse component mounts fine.
+    build_no_symlink(real.join("work")).expect("real path should mount");
+}
+
+/// A `..` segment is refused even though it crosses no reparse point.
+#[test]
+fn no_symlink_root_rejects_dotdot() {
+    let temp = TempDir::new();
+    let (_base, tenant_a, _tenant_b) = two_tenant_layout(&temp);
+
+    // Build the `..` path from a RAW STRING. `PathBuf::join("..")` collapses the
+    // `..` at construction on Windows (especially verbatim `\\?\` paths), so it
+    // would never reach the resolver; a string preserves the literal segment,
+    // which is exactly what a caller that concatenates an untrusted subpath
+    // would produce.
+    let escaping = PathBuf::from(format!("{}\\..\\tenant-b", tenant_a.display()));
+    let result = build_no_symlink(escaping);
+    assert_eq!(
+        result.err().and_then(|e| e.raw_os_error()),
+        Some(LINUX_EINVAL)
+    );
+}
+
+// Relative paths resolve from the working directory (still no reparse point
+// followed), so relative bind mounts keep working under the protective default.
+// Covered end-to-end at the app level rather than here to avoid a unit test
+// mutating the shared process working directory.
+
+/// A legitimate real subdirectory mounts and the guest sees its own files.
+#[test]
+fn no_symlink_root_allows_real_subdir() {
+    let temp = TempDir::new();
+    let (_base, tenant_a, _tenant_b) = two_tenant_layout(&temp);
+    let work = tenant_a.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("hello.txt"), b"tenant-a data").unwrap();
+
+    let fs = build_no_symlink(work).expect("real subdir should mount");
+    fs.lookup(context(), ROOT_INODE, c"hello.txt")
+        .expect("guest should see its own file");
+}
+
+/// A deep chain of real directories is allowed — the resolver rejects reparse
+/// points, not depth.
+#[test]
+fn no_symlink_root_allows_deep_real_path() {
+    let temp = TempDir::new();
+    let (_base, tenant_a, _tenant_b) = two_tenant_layout(&temp);
+    let deep = tenant_a.join("a").join("b").join("c");
+    std::fs::create_dir_all(&deep).unwrap();
+
+    build_no_symlink(deep).expect("deep real path should mount");
+}

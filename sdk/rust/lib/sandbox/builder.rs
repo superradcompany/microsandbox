@@ -911,7 +911,7 @@ impl SandboxBuilder {
     fn has_explicit_rootfs_source(&self) -> bool {
         match &self.config.spec.image {
             RootfsSource::Oci(oci) => !oci.reference.is_empty() || oci.upper_size_mib.is_some(),
-            RootfsSource::Bind(path) => !path.as_os_str().is_empty(),
+            RootfsSource::Bind { path, .. } => !path.as_os_str().is_empty(),
             RootfsSource::DiskImage { .. } => true,
         }
     }

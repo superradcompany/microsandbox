@@ -100,7 +100,7 @@ pub(crate) async fn apply_patches(
     }
 
     let target_dir = match image {
-        RootfsSource::Bind(host_dir) => host_dir.clone(),
+        RootfsSource::Bind { path, .. } => path.clone(),
         RootfsSource::Oci(_) => {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "OCI patches are baked into upper.ext4 before VM start".into(),
