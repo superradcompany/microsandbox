@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -18,13 +19,28 @@ GiB: int = 1024 * 1024 * 1024
 # Types: Enums
 #--------------------------------------------------------------------------------------------------
 
-class PullPolicy(enum.StrEnum):
+if sys.version_info >= (3, 11):
+    StrEnum = enum.StrEnum
+else:
+
+    class StrEnum(str, enum.Enum):
+        """Backport of `enum.StrEnum` for Python 3.10.
+
+        Matches `enum.StrEnum` semantics: `str()` and `format()` of a member
+        return the member value.
+        """
+
+        def __str__(self) -> str:
+            return str(self.value)
+
+
+class PullPolicy(StrEnum):
     ALWAYS = "always"
     IF_MISSING = "if-missing"
     NEVER = "never"
 
 
-class LogLevel(enum.StrEnum):
+class LogLevel(StrEnum):
     TRACE = "trace"
     DEBUG = "debug"
     INFO = "info"
@@ -32,12 +48,12 @@ class LogLevel(enum.StrEnum):
     ERROR = "error"
 
 
-class SecurityProfile(enum.StrEnum):
+class SecurityProfile(StrEnum):
     DEFAULT = "default"
     RESTRICTED = "restricted"
 
 
-class SandboxStatus(enum.StrEnum):
+class SandboxStatus(StrEnum):
     RUNNING = "running"
     STOPPED = "stopped"
     CRASHED = "crashed"
@@ -45,26 +61,26 @@ class SandboxStatus(enum.StrEnum):
     PAUSED = "paused"
 
 
-class Action(enum.StrEnum):
+class Action(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
 
-class Direction(enum.StrEnum):
+class Direction(StrEnum):
     EGRESS = "egress"
     INGRESS = "ingress"
     ANY = "any"
 
-class Protocol(enum.StrEnum):
+class Protocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
     ICMPV4 = "icmpv4"
     ICMPV6 = "icmpv6"
 
-class PortProtocol(enum.StrEnum):
+class PortProtocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
 
-class DestGroup(enum.StrEnum):
+class DestGroup(StrEnum):
     PUBLIC = "public"
     LOOPBACK = "loopback"
     PRIVATE = "private"
@@ -73,7 +89,7 @@ class DestGroup(enum.StrEnum):
     MULTICAST = "multicast"
     HOST = "host"
 
-class ViolationAction(enum.StrEnum):
+class ViolationAction(StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
@@ -130,35 +146,35 @@ class ViolationPolicy:
             passthrough["all_hosts"] = True
         return {"passthrough": passthrough}
 
-class MountKind(enum.StrEnum):
+class MountKind(StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
     DISK = "disk"
 
-class StatVirtualization(enum.StrEnum):
+class StatVirtualization(StrEnum):
     """Per-mount stat-virtualization policy for virtiofs-backed mounts."""
     STRICT = "strict"
     RELAXED = "relaxed"
     OFF = "off"
 
-class HostPermissions(enum.StrEnum):
+class HostPermissions(StrEnum):
     """Per-mount host-permission policy for virtiofs-backed mounts."""
     PRIVATE = "private"
     MIRROR = "mirror"
 
-class FsEntryKind(enum.StrEnum):
+class FsEntryKind(StrEnum):
     FILE = "file"
     DIRECTORY = "directory"
     SYMLINK = "symlink"
     OTHER = "other"
 
-class DiskImageFormat(enum.StrEnum):
+class DiskImageFormat(StrEnum):
     QCOW2 = "qcow2"
     RAW = "raw"
     VMDK = "vmdk"
 
-class RlimitResource(enum.StrEnum):
+class RlimitResource(StrEnum):
     CPU = "cpu"
     FSIZE = "fsize"
     DATA = "data"
