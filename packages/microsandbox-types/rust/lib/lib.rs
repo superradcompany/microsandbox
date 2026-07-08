@@ -16,8 +16,9 @@ pub mod typescript;
 //--------------------------------------------------------------------------------------------------
 
 pub use cloud::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudRootfsSource,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudDiskImageFormat, CloudErrorBody,
+    CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated,
+    CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource, CloudRootfsSource,
     CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
     CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
     CloudVolumeMount,

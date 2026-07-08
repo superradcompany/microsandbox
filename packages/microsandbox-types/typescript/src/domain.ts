@@ -11,157 +11,6 @@ export type EnvVar = {
   value: string;
 };
 
-export type Rlimit = {
-  /**
-   * Resource type.
-   */
-  resource: RlimitResource;
-  /**
-   * Soft limit (can be raised up to hard limit by the process).
-   */
-  soft: number;
-  /**
-   * Hard limit (ceiling, requires privileges to raise).
-   */
-  hard: number;
-};
-
-export type RlimitResource =
-  | "Cpu"
-  | "Fsize"
-  | "Data"
-  | "Stack"
-  | "Core"
-  | "Rss"
-  | "Nproc"
-  | "Nofile"
-  | "Memlock"
-  | "As"
-  | "Locks"
-  | "Sigpending"
-  | "Msgqueue"
-  | "Nice"
-  | "Rtprio"
-  | "Rttime";
-
-export type Patch = {
-  "Text": {
-    /**
-     * Absolute guest path, such as `/etc/app.conf`.
-     */
-    path: string;
-    /**
-     * Text content to write.
-     */
-    content: string;
-    /**
-     * File permissions, such as `0o644`. `None` uses the default.
-     */
-    mode: number | null;
-    /**
-     * Allow replacing a file that already exists in the rootfs.
-     */
-    replace: boolean;
-  };
-} | {
-  "File": {
-    /**
-     * Absolute guest path.
-     */
-    path: string;
-    /**
-     * Raw byte content to write.
-     */
-    content: Array<number>;
-    /**
-     * File permissions, such as `0o644`. `None` uses the default.
-     */
-    mode: number | null;
-    /**
-     * Allow replacing a file that already exists in the rootfs.
-     */
-    replace: boolean;
-  };
-} | {
-  "CopyFile": {
-    /**
-     * Host path to copy from.
-     */
-    src: string;
-    /**
-     * Absolute guest destination path.
-     */
-    dst: string;
-    /**
-     * File permissions. `None` preserves source permissions.
-     */
-    mode: number | null;
-    /**
-     * Allow replacing a file that already exists in the rootfs.
-     */
-    replace: boolean;
-  };
-} | {
-  "CopyDir": {
-    /**
-     * Host directory to copy from.
-     */
-    src: string;
-    /**
-     * Absolute guest destination path.
-     */
-    dst: string;
-    /**
-     * Allow replacing files that already exist in the rootfs.
-     */
-    replace: boolean;
-  };
-} | {
-  "Symlink": {
-    /**
-     * Symlink target path.
-     */
-    target: string;
-    /**
-     * Absolute guest path where the symlink is created.
-     */
-    link: string;
-    /**
-     * Allow replacing a path that already exists in the rootfs.
-     */
-    replace: boolean;
-  };
-} | {
-  "Mkdir": {
-    /**
-     * Absolute guest path.
-     */
-    path: string;
-    /**
-     * Directory permissions, such as `0o755`. `None` uses the default.
-     */
-    mode: number | null;
-  };
-} | {
-  "Remove": {
-    /**
-     * Absolute guest path to remove.
-     */
-    path: string;
-  };
-} | {
-  "Append": {
-    /**
-     * Absolute guest path of the file to append to.
-     */
-    path: string;
-    /**
-     * Content to append.
-     */
-    content: string;
-  };
-};
-
 export type HandoffInit = {
   /**
    * Init binary: absolute path inside the guest rootfs, or the literal `auto`.
@@ -176,8 +25,6 @@ export type HandoffInit = {
    */
   env: Array<[string, string]>;
 };
-
-export type PullPolicy = "IfMissing" | "Always" | "Never";
 
 export type SecurityProfile = "default" | "restricted";
 
@@ -204,8 +51,6 @@ export type SandboxPolicy = {
 };
 
 export type SandboxLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-
-export type DiskImageFormat = "Qcow2" | "Raw" | "Vmdk";
 
 export type MountOptions = {
   /**

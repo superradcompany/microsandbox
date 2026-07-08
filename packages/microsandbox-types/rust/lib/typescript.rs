@@ -9,14 +9,14 @@
 use ts_rs::TS;
 
 use crate::{
-    Action, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudRootfsSource,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, DiskImageFormat, EnvVar,
-    HandoffInit, HostPermissions, MountOptions, NetworkPolicy, Patch, PortRange, Protocol,
-    PullPolicy, Rlimit, RlimitResource, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection,
-    SecurityProfile, StatVirtualization,
+    Action, CloudCreateSandboxResponse, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
+    CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch,
+    CloudPullPolicy, CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxResources,
+    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSecretEntry,
+    CloudSecretSource, CloudSecretsConfig, CloudViolationAction, CloudVolumeMount, Destination,
+    DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions, MountOptions, NetworkPolicy,
+    PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection, SecurityProfile,
+    StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -33,18 +33,13 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "Destination",
     "DestinationGroup",
     "Direction",
-    "DiskImageFormat",
     "EnvVar",
     "HandoffInit",
     "HostPermissions",
     "MountOptions",
     "NetworkPolicy",
-    "Patch",
     "PortRange",
     "Protocol",
-    "PullPolicy",
-    "Rlimit",
-    "RlimitResource",
     "Rule",
     "SandboxLogLevel",
     "SandboxPolicy",
@@ -113,15 +108,10 @@ pub fn domain_declarations() -> Vec<String> {
 
     vec![
         EnvVar::decl(&cfg),
-        Rlimit::decl(&cfg),
-        RlimitResource::decl(&cfg),
-        Patch::decl(&cfg),
         HandoffInit::decl(&cfg),
-        PullPolicy::decl(&cfg),
         SecurityProfile::decl(&cfg),
         SandboxPolicy::decl(&cfg),
         SandboxLogLevel::decl(&cfg),
-        DiskImageFormat::decl(&cfg),
         MountOptions::decl(&cfg),
         StatVirtualization::decl(&cfg),
         HostPermissions::decl(&cfg),
@@ -147,6 +137,11 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudVolumeMount::decl(&cfg),
         CloudSandboxResources::decl(&cfg),
         CloudSandboxRuntimeOptions::decl(&cfg),
+        CloudPullPolicy::decl(&cfg),
+        CloudDiskImageFormat::decl(&cfg),
+        CloudRlimitResource::decl(&cfg),
+        CloudRlimit::decl(&cfg),
+        CloudPatch::decl(&cfg),
         CloudNetworkSpec::decl(&cfg),
         CloudSecretsConfig::decl(&cfg),
         CloudSecretEntry::decl(&cfg),
@@ -236,8 +231,8 @@ mod tests {
 
     #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
-        assert_eq!(domain_declarations().len(), 22);
-        assert_eq!(cloud_declarations().len(), 17);
+        assert_eq!(domain_declarations().len(), 17);
+        assert_eq!(cloud_declarations().len(), 22);
 
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.
