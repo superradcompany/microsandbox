@@ -13,7 +13,8 @@ use sea_orm::EntityTrait;
 use crate::{
     MicrosandboxResult,
     backend::{
-        Backend, CloudSandbox, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
+        Backend, CloudCreateSandboxResponse, SandboxHandleCloudState, SandboxHandleInner,
+        SandboxHandleLocalState,
     },
     db::entity::sandbox as sandbox_entity,
 };
@@ -78,7 +79,7 @@ impl SandboxHandle {
         }
     }
 
-    /// Build a handle from a [`CloudSandbox`] HTTP response.
+    /// Build a handle from a [`CloudCreateSandboxResponse`] HTTP response.
     ///
     /// Returns an error if `cloud.config` cannot be re-serialised to JSON for
     /// the `config_json()` view. Silent fallback to an empty string here would
@@ -86,10 +87,10 @@ impl SandboxHandle {
     /// out of [`config()`](Self::config) / [`config_json()`](Self::config_json).
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
-        cloud: CloudSandbox,
+        cloud: CloudCreateSandboxResponse,
     ) -> MicrosandboxResult<Self> {
         let status = crate::backend::sandbox::cloud_status_to_sandbox_status(cloud.status);
-        let config_json = serde_json::to_string(&cloud.config)?;
+        let config_json = serde_json::to_string(&cloud.spec)?;
         let name = cloud.name.clone();
         Ok(Self {
             backend,

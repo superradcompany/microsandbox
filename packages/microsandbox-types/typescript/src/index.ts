@@ -300,7 +300,7 @@ enabled: boolean,
 /**
  * Guest interface overrides for the local network engine.
  */
-interface: JsonValue | null,
+interface: InterfaceOverrides | null,
 /**
  * Host-to-guest port mappings.
  */
@@ -308,19 +308,19 @@ ports: Array<PublishedPortSpec>,
 /**
  * Egress and ingress policy subdocument.
  */
-policy: JsonValue | null,
+policy: NetworkPolicy | null,
 /**
  * DNS interception and filtering subdocument.
  */
-dns: JsonValue | null,
+dns: DnsConfig | null,
 /**
  * TLS interception subdocument.
  */
-tls: JsonValue | null,
+tls: TlsConfig | null,
 /**
  * Secret injection subdocument.
  */
-secrets: JsonValue | null,
+secrets: SecretsConfig | null,
 /**
  * Max concurrent guest connections.
  */
@@ -796,17 +796,441 @@ enforced: string,
  */
 state: ResourceConvergenceState, };
 
-export type CloudCreateSandboxRequest = {
+export type SecretsConfig = {
 /**
- * User-facing sandbox name.
+ * List of secrets to inject.
+ */
+secrets: Array<SecretEntry>,
+/**
+ * Default action when a placeholder leaks to a disallowed host.
+ */
+on_violation: ViolationAction, };
+
+export type SecretEntry = {
+/**
+ * Environment variable name exposed to the sandbox (holds the placeholder).
+ *
+ * Must be non-empty and must not contain `=` or NUL. microsandbox does
+ * not require shell-identifier syntax because Linux environment entries
+ * only require a `NAME=value` shape.
+ */
+env_var: string,
+/**
+ * The actual secret value (never enters the sandbox).
+ *
+ * Empty when the entry carries a [`source`](Self::source) reference
+ * instead: reference-model entries resolve the value host-side at spawn
+ * time so the durable sandbox config never stores raw secret material.
+ *
+ * Wrapped in [`Zeroizing`] so the owned plaintext copy is wiped when the
+ * entry drops.
+ */
+value: string,
+/**
+ * Host-side source reference resolved into [`value`](Self::value) at
+ * spawn time. `None` means `value` already carries the material (the
+ * inline model used by value-based secrets).
+ */
+source?: SecretSource | null,
+/**
+ * Placeholder string the sandbox sees instead of the real value.
+ *
+ * Must be non-empty, no longer than [`MAX_SECRET_PLACEHOLDER_BYTES`], and
+ * must not contain NUL, CR, or LF.
+ */
+placeholder: string,
+/**
+ * Hosts allowed to receive this secret.
+ */
+allowed_hosts: Array<HostPattern>,
+/**
+ * Where the secret can be injected.
+ */
+injection: SecretInjection,
+/**
+ * Action on a violation for this secret (overrides the config default).
+ */
+on_violation?: ViolationAction | null,
+/**
+ * Require verified TLS identity before substituting (default: true).
+ *
+ * When true, the secret is only substituted if the connection uses TLS
+ * interception (not bypass) and the SNI matches an allowed host.
+ */
+require_tls_identity: boolean, };
+
+export type SecretInjection = {
+/**
+ * Substitute in HTTP headers (default: true).
+ */
+headers: boolean,
+/**
+ * Substitute in HTTP Basic Auth (default: true).
+ */
+basic_auth: boolean,
+/**
+ * Substitute in URL query parameters (default: false).
+ */
+query_params: boolean,
+/**
+ * Substitute in request body (default: false).
+ *
+ * Fixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;
+ * larger fixed-length bodies are blocked. Chunked HTTP/1 bodies are
+ * decoded and re-encoded with fresh chunk sizes. Encoded bodies pass
+ * through unchanged. HTTP/2 DATA-frame body substitution is not
+ * supported; matching body placeholders are blocked.
+ */
+body: boolean, };
+
+export type HostPattern = { "exact": string } | { "wildcard": string } | "any";
+
+export type ViolationAction = "block" | "block-and-log" | "block-and-terminate" | { "passthrough": Array<HostPattern> };
+
+export type TlsConfig = {
+/**
+ * Whether TLS interception is enabled.
+ */
+enabled: boolean,
+/**
+ * TCP ports subject to TLS interception (default: `[443]`).
+ */
+intercepted_ports: Array<number>,
+/**
+ * Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards.
+ */
+bypass: Array<string>,
+/**
+ * Whether to verify the upstream server's TLS certificate.
+ */
+verify_upstream: boolean,
+/**
+ * Drop UDP to intercepted ports when TLS interception is active, forcing
+ * QUIC traffic to fall back to TCP/TLS.
+ */
+block_quic_on_intercept: boolean,
+/**
+ * CA certificate PEM files to trust for upstream server verification.
+ */
+upstream_ca_cert: Array<string>,
+/**
+ * Host-scoped CA certificate PEM files to trust for upstream server verification.
+ */
+scoped_upstream_ca_cert: Array<ScopedUpstreamCaCert>,
+/**
+ * Host-scoped upstream verification overrides.
+ */
+scoped_verify_upstream: Array<ScopedVerifyUpstream>,
+/**
+ * Interception CA configuration. The TLS proxy uses this CA to sign
+ * per-domain certs it presents to the guest during interception.
+ */
+intercept_ca: InterceptCaConfig,
+/**
+ * Per-domain certificate cache configuration.
+ */
+cache: CertCacheConfig, };
+
+export type InterceptCaConfig = {
+/**
+ * Path to an existing CA certificate PEM file. If `None`, a CA is
+ * auto-generated and persisted.
+ */
+cert_path: string | null,
+/**
+ * Path to an existing CA private key PEM file. If `None`, a key is
+ * auto-generated and persisted.
+ */
+key_path: string | null, };
+
+export type CertCacheConfig = {
+/**
+ * Maximum number of cached certificates. Default: 1000.
+ */
+capacity: number,
+/**
+ * Certificate validity duration in hours. Default: 24.
+ */
+validity_hours: number, };
+
+export type ScopedUpstreamCaCert = {
+/**
+ * Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards.
+ */
+pattern: string,
+/**
+ * Path to the CA certificate PEM file.
+ */
+path: string, };
+
+export type ScopedVerifyUpstream = {
+/**
+ * Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards.
+ */
+pattern: string,
+/**
+ * Whether to verify matching upstream server certificates.
+ */
+verify: boolean, };
+
+export type Action = "allow" | "deny";
+
+export type Direction = "egress" | "ingress" | "any";
+
+export type Protocol = "tcp" | "udp" | "icmpv4" | "icmpv6";
+
+export type DestinationGroup = "public" | "loopback" | "private" | "link_local" | "metadata" | "multicast" | "host";
+
+export type Destination = "any" | { "cidr": string } | { "domain": string } | { "domain_suffix": string } | { "group": DestinationGroup };
+
+export type PortRange = {
+/**
+ * Start port (inclusive).
+ */
+start: number,
+/**
+ * End port (inclusive).
+ */
+end: number, };
+
+export type Rule = {
+/**
+ * Direction this rule applies to.
+ */
+direction: Direction,
+/**
+ * Destination filter (direction-dependent interpretation).
+ */
+destination: Destination,
+/**
+ * Protocol set; empty matches any protocol.
+ */
+protocols: Array<Protocol>,
+/**
+ * Guest-side port-range set; empty matches any port.
+ */
+ports: Array<PortRange>,
+/**
+ * Action to take on a match.
+ */
+action: Action, };
+
+export type NetworkPolicy = {
+/**
+ * Default action for egress traffic matching no rule. Default: `Deny`.
+ */
+default_egress: Action,
+/**
+ * Default action for ingress traffic matching no rule. Default: `Deny`.
+ */
+default_ingress: Action,
+/**
+ * Ordered rules, evaluated first-match-wins per direction.
+ */
+rules: Array<Rule>, };
+
+export type DnsConfig = {
+/**
+ * Whether DNS-rebinding protection is enabled. Default: true.
+ */
+rebind_protection: boolean,
+/**
+ * Upstream nameservers as `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`
+ * strings. Empty falls back to the host's `/etc/resolv.conf`.
+ */
+nameservers: Array<string>,
+/**
+ * Per-query timeout in milliseconds. Default: 5000.
+ */
+query_timeout_ms: number, };
+
+export type InterfaceOverrides = {
+/**
+ * Guest MAC address as six octets. Default: derived from slot.
+ */
+mac: [number, number, number, number, number, number] | null,
+/**
+ * Interface MTU. Default: 1500.
+ */
+mtu: number | null,
+/**
+ * Guest IPv4 address (e.g. `172.16.0.2`). Default: derived from slot.
+ */
+ipv4_address: string | null,
+/**
+ * Guest IPv4 pool CIDR (e.g. `"172.16.0.0/12"`). Default: derived from slot.
+ */
+ipv4_pool: string | null,
+/**
+ * Guest IPv6 address. Default: derived from slot.
+ */
+ipv6_address: string | null,
+/**
+ * Guest IPv6 pool CIDR. Default: derived from slot.
+ */
+ipv6_pool: string | null, };
+
+export type CloudSandboxSpec = {
+/**
+ * Unique sandbox name.
  */
 name: string,
 /**
- * OCI image reference to run.
+ * Root filesystem source.
  */
-image: string,
+image: CloudRootfsSource,
 /**
- * Virtual CPU count.
+ * CPU, memory, and user-facing disk resources.
+ */
+resources: CloudSandboxResources,
+/**
+ * Guest runtime options (curated; platform-controlled fields omitted).
+ */
+runtime: CloudSandboxRuntimeOptions,
+/**
+ * Environment variables visible to commands in the sandbox.
+ */
+env: Array<EnvVar>,
+/**
+ * User-defined labels attached to the sandbox.
+ */
+labels: { [key in string]: string },
+/**
+ * Sandbox-wide resource limits inherited by guest processes.
+ */
+rlimits: Array<Rlimit>,
+/**
+ * Volume mounts.
+ */
+mounts: Array<CloudVolumeMount>,
+/**
+ * Rootfs patches applied before VM start.
+ */
+patches: Array<Patch>,
+/**
+ * Network specification (curated; platform-controlled fields omitted).
+ */
+network: CloudNetworkSpec,
+/**
+ * Hand off PID 1 to a guest init binary after agentd setup.
+ */
+init: HandoffInit | null,
+/**
+ * Pull policy for OCI images.
+ */
+pull_policy: PullPolicy,
+/**
+ * In-guest security profile.
+ */
+security_profile: SecurityProfile,
+/**
+ * Sandbox lifecycle policy.
+ */
+lifecycle: SandboxPolicy, };
+
+export type CloudRootfsSource = { "type": "bind",
+/**
+ * Host path to bind mount.
+ */
+path: string, } | { "type": "oci",
+/**
+ * OCI image reference (e.g. `python`).
+ */
+reference: string, } | { "type": "disk_image",
+/**
+ * Path to the disk image file on the host.
+ */
+path: string,
+/**
+ * Disk image format.
+ */
+format: DiskImageFormat,
+/**
+ * Inner filesystem type (optional; auto-detected if absent).
+ */
+fstype: string | null, };
+
+export type CloudVolumeMount = { "type": "bind",
+/**
+ * Host directory to bind into the guest.
+ */
+host: string,
+/**
+ * Guest path to mount at.
+ */
+guest: string,
+/**
+ * Mount options (read-only, no-exec, …).
+ */
+options: MountOptions,
+/**
+ * How guest `stat()` results are virtualized.
+ */
+stat_virtualization: StatVirtualization,
+/**
+ * Host permission policy applied to the mount.
+ */
+host_permissions: HostPermissions,
+/**
+ * Optional guest-write quota in MiB.
+ */
+quota_mib: number | null, } | { "type": "named",
+/**
+ * Named volume to mount.
+ */
+name: string,
+/**
+ * Guest path to mount at.
+ */
+guest: string,
+/**
+ * Mount options (read-only, no-exec, …).
+ */
+options: MountOptions,
+/**
+ * How guest `stat()` results are virtualized.
+ */
+stat_virtualization: StatVirtualization,
+/**
+ * Host permission policy applied to the mount.
+ */
+host_permissions: HostPermissions, } | { "type": "tmpfs",
+/**
+ * Guest path to mount at.
+ */
+guest: string,
+/**
+ * Optional size cap in MiB.
+ */
+size_mib: number | null,
+/**
+ * Mount options (read-only, no-exec, …).
+ */
+options: MountOptions, } | { "type": "disk_image",
+/**
+ * Host path to the disk image file.
+ */
+host: string,
+/**
+ * Guest path to mount at.
+ */
+guest: string,
+/**
+ * Disk image format.
+ */
+format: DiskImageFormat,
+/**
+ * Inner filesystem type (auto-detected if absent).
+ */
+fstype: string | null,
+/**
+ * Mount options (read-only, no-exec, …).
+ */
+options: MountOptions, };
+
+export type CloudSandboxResources = {
+/**
+ * Number of virtual CPUs.
  */
 vcpus: number,
 /**
@@ -814,51 +1238,130 @@ vcpus: number,
  */
 memory_mib: number,
 /**
- * Environment variables injected into the sandbox.
+ * Writable disk size in MiB. Applies only to OCI root filesystems.
  */
-env: { [key in string]: string },
-/**
- * Whether the sandbox should be removed when its allocation terminates.
- */
-ephemeral: boolean,
-/**
- * Working directory inside the guest.
- */
-workdir?: string | null,
-/**
- * Default shell inside the guest.
- */
-shell?: string | null,
-/**
- * OCI entrypoint override.
- */
-entrypoint?: Array<string> | null,
-/**
- * Guest hostname override.
- */
-hostname?: string | null,
-/**
- * Guest user identity.
- */
-user?: string | null,
-/**
- * Runtime log verbosity.
- */
-log_level?: string | null,
-/**
- * Named scripts mounted into the guest.
- */
-scripts?: { [key in string]: string },
-/**
- * Hard sandbox lifetime cap in seconds.
- */
-max_duration_secs?: number | null,
-/**
- * Idle timeout in seconds.
- */
-idle_timeout_secs?: number | null, };
+disk_size_mib?: number | null, };
 
-export type CloudSandbox = {
+export type CloudSandboxRuntimeOptions = {
+/**
+ * Working directory for guest commands.
+ */
+workdir: string | null,
+/**
+ * Default shell.
+ */
+shell: string | null,
+/**
+ * Named in-guest scripts.
+ */
+scripts: { [key in string]: string },
+/**
+ * Entrypoint override.
+ */
+entrypoint: Array<string> | null,
+/**
+ * Command override.
+ */
+cmd: Array<string> | null,
+/**
+ * Guest user.
+ */
+user: string | null,
+/**
+ * Runtime log level.
+ */
+log_level: SandboxLogLevel | null, };
+
+export type CloudNetworkSpec = {
+/**
+ * Whether networking is enabled for this sandbox.
+ */
+enabled: boolean,
+/**
+ * Egress/ingress policy. The cloud floors it (hard-denies the internal
+ * network) before boot; public egress stays the caller's to govern.
+ */
+policy: NetworkPolicy | null,
+/**
+ * Secret-injection config.
+ */
+secrets: CloudSecretsConfig | null,
+/**
+ * Max concurrent guest connections (the cloud clamps it to a ceiling).
+ */
+max_connections: number | null, };
+
+export type CloudSecretsConfig = {
+/**
+ * Secrets to inject.
+ */
+secrets: Array<CloudSecretEntry>,
+/**
+ * Default action when a placeholder leaks to a disallowed host.
+ */
+on_violation: CloudViolationAction, };
+
+export type CloudSecretEntry = {
+/**
+ * Environment variable name exposed to the sandbox.
+ */
+env_var: string,
+/**
+ * The secret value (empty when `source` carries a reference instead).
+ */
+value: string,
+/**
+ * Host-side source resolved into `value` at spawn time.
+ */
+source?: CloudSecretSource | null,
+/**
+ * Placeholder the sandbox sees instead of the real value.
+ */
+placeholder: string,
+/**
+ * Hosts allowed to receive this secret.
+ */
+allowed_hosts: Array<CloudHostPattern>,
+/**
+ * Where the secret may be injected.
+ */
+injection: SecretInjection,
+/**
+ * Per-secret violation action overriding the config default.
+ */
+on_violation?: CloudViolationAction | null,
+/**
+ * Require verified TLS identity before substituting (default: true).
+ */
+require_tls_identity: boolean, };
+
+export type CloudSecretSource = { "type": "env",
+/**
+ * Host environment variable name.
+ */
+var: string, } | { "type": "store",
+/**
+ * Store-specific secret reference.
+ */
+reference: string, };
+
+export type CloudHostPattern = { "type": "exact",
+/**
+ * Hostname to match exactly.
+ */
+value: string, } | { "type": "wildcard",
+/**
+ * Wildcard pattern.
+ */
+value: string, } | { "type": "any" };
+
+export type CloudViolationAction = { "type": "block" } | { "type": "block_and_log" } | { "type": "block_and_terminate" } | { "type": "passthrough",
+/**
+ * Hosts for which the placeholder passes through unchanged.
+ */
+hosts: Array<CloudHostPattern>, };
+
+export type CloudCreateSandboxResponse = {
 /**
  * Server-side UUID.
  */
@@ -868,17 +1371,21 @@ id: string,
  */
 org_id: string,
 /**
- * User-facing sandbox name.
+ * User-facing, per-org sandbox name.
  */
 name: string,
+/**
+ * Canonical, resolved SSH username token.
+ */
+slug: string,
 /**
  * Current lifecycle status.
  */
 status: CloudSandboxStatus,
 /**
- * Create request stored by the cloud control plane.
+ * The sandbox spec the cloud control plane stored for this sandbox.
  */
-config: CloudCreateSandboxRequest,
+spec: CloudSandboxSpec,
 /**
  * Whether the sandbox should be removed when its allocation terminates.
  */
@@ -890,15 +1397,15 @@ created_at: string,
 /**
  * Last start timestamp, when known.
  */
-started_at?: string | null,
+started_at: string | null,
 /**
  * Last stop timestamp, when known.
  */
-stopped_at?: string | null,
+stopped_at: string | null,
 /**
  * Last failure reason, when any.
  */
-last_error?: string | null, };
+last_error: string | null, };
 
 export type CloudSandboxStatus = "created" | "starting" | "running" | "stopping" | "stopped" | "failed";
 
@@ -910,7 +1417,7 @@ data: Array<T>,
 /**
  * Cursor for the next page, when one exists.
  */
-next_cursor?: string | null, };
+next_cursor: string | null, };
 
 export type CloudMessageResponse = {
 /**
@@ -922,22 +1429,22 @@ export type CloudErrorBody = {
 /**
  * Flat machine-readable error code, when returned in this shape.
  */
-code?: string | null,
+code: string | null,
 /**
  * Flat human-readable error message, when returned in this shape.
  */
-message?: string | null,
+message: string | null,
 /**
  * Nested error object returned by the API error responder.
  */
-error?: CloudErrorDetails | null, };
+error: CloudErrorDetails | null, };
 
 export type CloudErrorDetails = {
 /**
  * Machine-readable error code.
  */
-code?: string | null,
+code: string | null,
 /**
  * Human-readable error message.
  */
-message?: string | null, };
+message: string | null, };
