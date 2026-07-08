@@ -28,7 +28,7 @@ export type CloudSandboxSpec = {
    */
   resources: CloudSandboxResources;
   /**
-   * Guest runtime options (curated; platform-controlled fields omitted).
+   * Guest runtime options.
    */
   runtime: CloudSandboxRuntimeOptions;
   /**
@@ -52,7 +52,7 @@ export type CloudSandboxSpec = {
    */
   patches: Array<CloudPatch>;
   /**
-   * Network specification (curated; platform-controlled fields omitted).
+   * Network specification.
    */
   network: CloudNetworkSpec;
   /**
@@ -386,8 +386,7 @@ export type CloudNetworkSpec = {
    */
   enabled: boolean;
   /**
-   * Egress/ingress policy. The cloud floors it (hard-denies the internal
-   * network) before boot; public egress stays the caller's to govern.
+   * Egress/ingress policy.
    */
   policy: NetworkPolicy | null;
   /**
@@ -395,7 +394,7 @@ export type CloudNetworkSpec = {
    */
   secrets: CloudSecretsConfig | null;
   /**
-   * Max concurrent guest connections (the cloud clamps it to a ceiling).
+   * Max concurrent guest connections.
    */
   max_connections: number | null;
 };
