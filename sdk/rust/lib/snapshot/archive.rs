@@ -1,9 +1,14 @@
 //! Snapshot export / import via `.tar.zst` bundles.
 //!
-//! Default archive format is zstd-compressed tar — sparse files
-//! collapse cleanly under zstd, and the image tar ingest module already handles
-//! gzip/zstd detection on the read side. Plain `.tar` archives are
-//! also accepted on import.
+//! Default archive format is zstd-compressed tar. Regular files with
+//! holes — notably the sparse `upper.ext4`, whose logical size is the
+//! configured upper cap rather than the data written — are stored as
+//! old-GNU sparse entries (type `S`): only allocated extents are read
+//! and archived, so export cost scales with the data a sandbox
+//! actually wrote instead of the upper layer's logical size. Dense
+//! files keep plain regular entries, and the image tar ingest module
+//! already handles gzip/zstd detection on the read side. Plain `.tar`
+//! archives are also accepted on import.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -38,6 +43,32 @@ pub struct ExportOpts {
 
 struct UnpackedArchive {
     manifest_dirs: Vec<PathBuf>,
+}
+
+/// Allocation map of a sparse file, in tar-block granularity.
+#[cfg(unix)]
+struct SparseMap {
+    /// Logical (apparent) file size.
+    len: u64,
+    /// Sum of segment lengths = the tar header `size` field.
+    archived: u64,
+    /// Sorted `(offset, length)` data segments, 512-aligned except the
+    /// final one, which may end at an unaligned `len`.
+    segments: Vec<(u64, u64)>,
+}
+
+#[cfg(unix)]
+impl SparseMap {
+    /// Map entries for the GNU header: the data segments, plus the
+    /// zero-length terminator GNU tar uses to mark a trailing hole.
+    fn entries(&self) -> Vec<(u64, u64)> {
+        let mut entries = self.segments.clone();
+        let end = entries.last().map(|(off, sz)| off + sz).unwrap_or(0);
+        if end < self.len {
+            entries.push((self.len, 0));
+        }
+        entries
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -264,15 +295,231 @@ where
             if name_str == MANIFEST_FILENAME {
                 continue;
             }
-            builder
-                .append_path_with_name(&path, format!("{prefix}/{name_str}"))
-                .await?;
+            append_artifact_file(builder, &path, format!("{prefix}/{name_str}")).await?;
         }
     }
     for (path, archive_name) in cache_files {
-        builder.append_path_with_name(path, archive_name).await?;
+        append_artifact_file(builder, path, archive_name.clone()).await?;
     }
     Ok(())
+}
+
+/// Append one file, as an old-GNU sparse entry when it has holes so
+/// only allocated extents are read, dense otherwise.
+async fn append_artifact_file<W>(
+    builder: &mut Builder<W>,
+    path: &Path,
+    name: String,
+) -> MicrosandboxResult<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    #[cfg(unix)]
+    if try_append_sparse(builder, path, &name).await? {
+        return Ok(());
+    }
+    builder.append_path_with_name(path, name).await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+const TAR_BLOCK: u64 = 512;
+
+// Sparse-map slots inline in a GNU header / per extended sparse block.
+#[cfg(unix)]
+const GNU_HEADER_SPARSE_SLOTS: usize = 4;
+#[cfg(unix)]
+const GNU_EXT_SPARSE_SLOTS: usize = 21;
+
+/// Append `path` as an old-GNU sparse entry if it has holes. Returns
+/// `false` without writing anything when the file is better served by
+/// the dense path (no holes, empty, no `SEEK_DATA` support, or a name
+/// too long for the fixed GNU header path field).
+#[cfg(unix)]
+async fn try_append_sparse<W>(
+    builder: &mut Builder<W>,
+    path: &Path,
+    name: &str,
+) -> MicrosandboxResult<bool>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+    use tokio_tar::{GnuExtSparseHeader, Header, HeaderMode};
+
+    let meta = tokio::fs::metadata(path).await?;
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    let map = {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || scan_sparse_map(&path))
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("snapshot export scan task: {e}")))??
+    };
+    let Some(map) = map else {
+        return Ok(false);
+    };
+
+    let mut header = Header::new_gnu();
+    header.set_metadata_in_mode(&meta, HeaderMode::Complete);
+    if header.set_path(name).is_err() {
+        // Needs a GNU long-name entry; the dense path emits one.
+        return Ok(false);
+    }
+    header.set_entry_type(EntryType::GNUSparse);
+    header.set_size(map.archived);
+    let entries = map.entries();
+    {
+        let gnu = header
+            .as_gnu_mut()
+            .expect("Header::new_gnu produces a GNU header");
+        write_tar_numeric(&mut gnu.realsize, map.len);
+        for (slot, (offset, numbytes)) in gnu.sparse.iter_mut().zip(entries.iter()) {
+            write_tar_numeric(&mut slot.offset, *offset);
+            write_tar_numeric(&mut slot.numbytes, *numbytes);
+        }
+        if entries.len() > GNU_HEADER_SPARSE_SLOTS {
+            gnu.isextended[0] = 1;
+        }
+    }
+    header.set_cksum();
+
+    // Header, extended sparse blocks, data segments, block padding —
+    // all plain 512-byte tar records, written straight to the
+    // builder's inner writer between entries.
+    let dst = builder.get_mut();
+    dst.write_all(header.as_bytes()).await?;
+
+    let mut rest = &entries[entries.len().min(GNU_HEADER_SPARSE_SLOTS)..];
+    while !rest.is_empty() {
+        let mut ext = GnuExtSparseHeader::new();
+        let take = rest.len().min(GNU_EXT_SPARSE_SLOTS);
+        for (slot, (offset, numbytes)) in ext.sparse.iter_mut().zip(&rest[..take]) {
+            write_tar_numeric(&mut slot.offset, *offset);
+            write_tar_numeric(&mut slot.numbytes, *numbytes);
+        }
+        rest = &rest[take..];
+        if !rest.is_empty() {
+            ext.isextended[0] = 1;
+        }
+        dst.write_all(ext.as_bytes()).await?;
+    }
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut written: u64 = 0;
+    for (offset, numbytes) in &map.segments {
+        file.seek(std::io::SeekFrom::Start(*offset)).await?;
+        let mut segment = (&mut file).take(*numbytes);
+        let copied = tokio::io::copy(&mut segment, dst).await?;
+        if copied != *numbytes {
+            return Err(MicrosandboxError::Custom(format!(
+                "upper file truncated during export: extent at {offset} expected {numbytes} bytes, read {copied}"
+            )));
+        }
+        written += copied;
+    }
+    debug_assert_eq!(written, map.archived);
+
+    let pad = (TAR_BLOCK - written % TAR_BLOCK) % TAR_BLOCK;
+    if pad > 0 {
+        dst.write_all(&[0u8; TAR_BLOCK as usize][..pad as usize])
+            .await?;
+    }
+    Ok(true)
+}
+
+/// Walk `path`'s allocation map with `SEEK_DATA`/`SEEK_HOLE` (same
+/// idiom as `snapshot::verify`). `None` means "archive it dense".
+#[cfg(unix)]
+fn scan_sparse_map(path: &Path) -> std::io::Result<Option<SparseMap>> {
+    use std::os::unix::io::AsRawFd;
+
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(None);
+    }
+    let fd = file.as_raw_fd();
+
+    let mut segments: Vec<(u64, u64)> = Vec::new();
+    let mut off: i64 = 0;
+    while (off as u64) < len {
+        let data_start = unsafe { libc::lseek(fd, off, libc::SEEK_DATA) };
+        if data_start < 0 {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                // No more data past this offset: trailing hole.
+                Some(libc::ENXIO) => break,
+                // Filesystem doesn't implement the seek flags — treat
+                // the file as dense rather than failing the export.
+                // ENOTSUP and EOPNOTSUPP are distinct on macOS / BSDs.
+                Some(libc::EINVAL) | Some(libc::ENOTSUP) => return Ok(None),
+                #[cfg(not(target_os = "linux"))]
+                Some(libc::EOPNOTSUPP) => return Ok(None),
+                _ => return Err(err),
+            }
+        }
+        let data_end = unsafe { libc::lseek(fd, data_start, libc::SEEK_HOLE) };
+        if data_end < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let data_end = (data_end as u64).min(len);
+        let data_start = data_start as u64;
+        if data_end <= data_start {
+            break;
+        }
+
+        // Round to tar blocks and merge segments that touch: sparse
+        // readers require every data run before the last to be a
+        // multiple of 512.
+        let seg_start = data_start - data_start % TAR_BLOCK;
+        let seg_end = data_end
+            .div_ceil(TAR_BLOCK)
+            .saturating_mul(TAR_BLOCK)
+            .min(len);
+        match segments.last_mut() {
+            Some((prev_start, prev_len)) if seg_start <= *prev_start + *prev_len => {
+                let prev_end = *prev_start + *prev_len;
+                if seg_end > prev_end {
+                    *prev_len = seg_end - *prev_start;
+                }
+            }
+            _ => segments.push((seg_start, seg_end - seg_start)),
+        }
+
+        off = data_end as i64;
+    }
+
+    // No holes: a regular entry is equivalent and stays readable by
+    // older importers.
+    if segments.as_slice() == [(0, len)] {
+        return Ok(None);
+    }
+
+    let archived = segments.iter().map(|(_, sz)| sz).sum();
+    Ok(Some(SparseMap {
+        len,
+        archived,
+        segments,
+    }))
+}
+
+/// Encode `value` into a 12-byte tar numeric field: zero-padded octal
+/// with a NUL terminator when it fits (what GNU tar writes), otherwise
+/// GNU base-256 (high bit set, big-endian binary).
+#[cfg(unix)]
+fn write_tar_numeric(field: &mut [u8; 12], value: u64) {
+    const OCTAL_MAX: u64 = 0o77777777777; // 11 octal digits
+    if value <= OCTAL_MAX {
+        let octal = format!("{value:011o}");
+        field[..11].copy_from_slice(octal.as_bytes());
+        field[11] = 0;
+    } else {
+        field.fill(0);
+        field[0] = 0x80;
+        field[4..].copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 async fn unpack_archive<R>(
@@ -350,7 +597,10 @@ where
 
 fn validate_archive_entry_type(entry_type: EntryType, path: &Path) -> MicrosandboxResult<()> {
     match entry_type {
-        EntryType::Regular | EntryType::Continuous | EntryType::Directory => Ok(()),
+        EntryType::Regular
+        | EntryType::Continuous
+        | EntryType::GNUSparse
+        | EntryType::Directory => Ok(()),
         _ => Err(MicrosandboxError::Custom(format!(
             "archive contains unsupported entry type at {}",
             path.display()
@@ -362,7 +612,7 @@ fn validate_snapshot_archive_path(path: &Path, entry_type: EntryType) -> Microsa
     let components = normal_utf8_components(path)?;
     let valid = match entry_type {
         EntryType::Directory => components.len() == 1,
-        EntryType::Regular | EntryType::Continuous => components.len() == 2,
+        EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => components.len() == 2,
         _ => false,
     };
     if valid {
@@ -380,9 +630,10 @@ fn validate_cache_archive_path(path: &Path, entry_type: EntryType) -> Microsandb
     let valid = match (entry_type, components.as_slice()) {
         (EntryType::Directory, ["cache"]) => true,
         (EntryType::Directory, ["cache", kind]) => is_supported_cache_dir(kind),
-        (EntryType::Regular | EntryType::Continuous, ["cache", kind, file]) => {
-            is_supported_cache_file(kind, file)
-        }
+        (
+            EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse,
+            ["cache", kind, file],
+        ) => is_supported_cache_file(kind, file),
         _ => false,
     };
     if valid {
