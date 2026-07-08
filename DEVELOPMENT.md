@@ -219,8 +219,11 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 - `packages/agent-client/typescript/package.json`
 - `packages/microsandbox-types/typescript/package.json`
 - `sdk/go/setup.go` (`sdkVersion`)
+- `examples/typescript/*/package.json` (`microsandbox` dependency pins)
 
 The workflow then regenerates `Cargo.lock` and the npm lockfiles and opens a PR titled `chore: release vX.Y.Z`.
+
+`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
 
 ### 2. Tag and Release
 
